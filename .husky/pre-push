@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# filepath: .husky/pre-push
+# Harden script
+set -euo pipefail
+
+# If running under WSL, ensure we use Linux node, not Windows one mounted at /mnt/c/...
+case "$(uname -r)" in
+  *Microsoft*|*microsoft*|*WSL*)
+    # Remove Windows Node.js from PATH to avoid picking /mnt/c/Program Files/nodejs/npm
+    CLEANED_PATH=""
+    OLD_IFS="$IFS"; IFS=":"
+    for p in $PATH; do
+      if echo "$p" | grep -qi "/mnt/c/Program Files/nodejs"; then
+        continue
+      fi
+      if [ -z "$CLEANED_PATH" ]; then
+        CLEANED_PATH="$p"
+      else
+        CLEANED_PATH="$CLEANED_PATH:$p"
+      fi
+    done
+    IFS="$OLD_IFS"
+    export PATH="$CLEANED_PATH"
+  ;;
+ esac
+
+# Load nvm if available so the correct Node version is used
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  . "$HOME/.nvm/nvm.sh"
+  if [ -f .nvmrc ]; then
+    nvm use --silent >/dev/null 2>&1 || true
+  fi
+fi
+
+# Load asdf if used
+if command -v asdf >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$HOME/.asdf/asdf.sh" || true
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "❌ Pre-push hook: node not found in PATH (WSL). Install Node inside WSL or configure nvm." >&2
+  exit 1
+fi
+
+PKG_MGR="npm"
+if ! command -v npm >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1; then
+  PKG_MGR="pnpm"
+fi
+
+echo "▶ Running $PKG_MGR run check ..."
+$PKG_MGR run check || {
+  echo "\n❌ Pre-push hook: $PKG_MGR run check failed. Fix issues before pushing." >&2
+  exit 1
+}
+
+echo "✅ Pre-push hook: checks passed. Proceeding with git push."

@@ -1,0 +1,10 @@
+{
+  "differentFirst": true,
+  "differentOddEven": true,
+  "firstHeader": "Hello Excelts",
+  "firstFooter": "Hello World",
+  "oddHeader": "&C&KCCCCCC&\"Aril\"52 excelts oddHeader",
+  "oddFooter": "&C&KCCCCCC&\"Aril\"52 excelts oddFooter",
+  "evenHeader": "&C&KCCCCCC&\"Aril\"52 excelts evenHeader",
+  "evenFooter": "&C&KCCCCCC&\"Aril\"52 excelts evenFooter"
+}

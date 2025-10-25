@@ -1,0 +1,36 @@
+{
+  "name": "excelts-regression-test",
+  "version": "0.0.1",
+  "description": "Test pack to compare against older versions of excelts.",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "xlsx",
+    "json",
+    "csv",
+    "excel",
+    "font",
+    "border",
+    "fill",
+    "number",
+    "format",
+    "number format",
+    "alignment",
+    "office",
+    "spreadsheet",
+    "workbook",
+    "defined names",
+    "data validations",
+    "rich text",
+    "in-cell format"
+  ],
+  "dependencies": {
+    "@cj-tech-master/excelts": "^0.1.0"
+  },
+  "devDependencies": {
+    "jshint": "*",
+    "lodash": "*"
+  },
+  "scripts": {}
+}

@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Generated files
+dist
+
+# Test Output Folder
+out/*
+spec/out/*
+
+# Tmp folder
+tmp/*
+
+# IDE
+.idea
+.vscode/
+*.iml
+
+# Coverage
+coverage
+.nyc_output
+
+# Dependencies
+node_modules
+
+# NPM credentials
+.npmrc
+
+# Test internals
+spec/integration/data/gold
+.disable-test-*
+
+# Mac files
+.DS_Store
+
+# Test generated files
+*.xlsx
+test.xlsx

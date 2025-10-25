@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "./dist/cjs",
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules",
+    "**/*.d.ts",
+    "**/*.test.ts",
+    "src/__test__",
+    "src/index.browser.ts",
+    "src/examples",
+    "vitest.config.ts",
+    "vitest.browser.config.ts",
+    "rolldown.config.js",
+    "benchmark.js"
+  ]
+}

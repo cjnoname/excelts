@@ -1,0 +1,53 @@
+# Source files
+src/
+
+# Tests
+test/
+spec/
+*.test.ts
+*.test.js
+**/__test__/
+
+# Configuration files
+tsconfig*.json
+vitest*.config.ts
+rolldown.config.js
+eslint.config.js
+.oxlintrc.json
+.prettierrc
+.prettierignore
+cspell.json
+benchmark.js
+
+# Build scripts
+scripts/
+
+# Development files
+.github/
+.vscode/
+.git/
+.gitignore
+.DS_Store
+
+# Documentation
+TODO.txt
+MODEL.md
+
+# Lock files
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+coverage/
+.nyc_output/
+
+# Development dependencies
+node_modules/
+
+# Build output that shouldn't be published
+dist/**/*.map
+dist/stats-*.html

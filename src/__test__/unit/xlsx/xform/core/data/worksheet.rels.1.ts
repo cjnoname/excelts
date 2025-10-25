@@ -1,0 +1,13 @@
+export const worksheetRels1 = [
+  {
+    Id: "rId2",
+    Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/printerSettings",
+    Target: "../printerSettings/printerSettings1.bin"
+  },
+  {
+    Id: "rId1",
+    Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+    Target: "http://www.google.com/",
+    TargetMode: "External"
+  }
+];
