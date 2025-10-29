@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "outDir": "./dist/esm",
+    "declaration": true,
+    "declarationDir": "./dist/types",
+    "emitDeclarationOnly": false
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules",
+    "**/*.d.ts",
+    "**/*.test.ts",
+    "src/__test__",
+    "src/examples",
+    "vitest.config.ts",
+    "vitest.browser.config.ts",
+    "rolldown.config.js",
+    "benchmark.js"
+  ]
+}

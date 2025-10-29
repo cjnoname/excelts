@@ -1,0 +1,10 @@
+# Enforce LF line endings
+* text=auto eol=lf
+
+# Windows batch files require CRLF
+*.{cmd,[cC][mM][dD]} text eol=crlf
+*.{bat,[bB][aA][tT]} text eol=crlf
+
+# Binary files
+*.{png,jpg,jpeg,gif,ico,svg,woff,woff2,ttf,eot} binary
+*.{xlsx,xls,docx,doc,pdf,zip,gz} binary

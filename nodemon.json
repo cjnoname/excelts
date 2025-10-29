@@ -1,0 +1,12 @@
+{
+  "watch": ["src"],
+  "ignore": ["src/**/__tests__/*"],
+  "ext": "ts",
+  "quiet": true,
+  "execMap": {
+    "ts": "node --inspect --import @oxc-node/core/register"
+  },
+  "events": {
+    "start": "node scripts/check"
+  }
+}

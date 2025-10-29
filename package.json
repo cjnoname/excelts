@@ -1,0 +1,161 @@
+{
+  "name": "@cj-tech-master/excelts",
+  "version": "1.0.0",
+  "description": "TypeScript Excel Workbook Manager - Read and Write xlsx and csv Files.",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "cjnoname",
+    "email": "powerfulj87@gmail.com"
+  },
+  "contributors": [
+    {
+      "name": "Guyon Roche",
+      "email": "guyon@live.com",
+      "url": "https://github.com/guyonroche"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cjnoname/excelts.git"
+  },
+  "homepage": "https://github.com/cjnoname/excelts#readme",
+  "bugs": {
+    "url": "https://github.com/cjnoname/excelts/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "browserslist": [
+    "chrome >= 85",
+    "edge >= 85",
+    "firefox >= 79",
+    "safari >= 14",
+    "opera >= 71"
+  ],
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/types/index.browser.d.ts",
+        "default": "./dist/esm/index.browser.js"
+      },
+      "import": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      },
+      "default": "./dist/esm/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "README_zh.md"
+  ],
+  "scripts": {
+    "local": "nodemon src/local.ts",
+    "example": "nodemon scripts/run-examples.ts",
+    "check": "concurrently --raw \"npm run type\" \"npm run lint\"",
+    "test": "vitest run && npm run test:browser",
+    "test:browser": "rimraf dist && npm run build:browser && vitest run --config vitest.browser.config.ts",
+    "test:watch": "vitest",
+    "build": "rimraf dist && concurrently \"npm run build:esm\" \"npm run build:cjs\" \"npm run build:browser\"",
+    "clean": "pnpm dlx --reporter=silent rimraf \"**/node_modules\" pnpm-lock.yaml \"**/dist\" -g && pnpm i",
+    "lint": "eslint && oxlint",
+    "lint:fix": "eslint --fix && oxlint --fix",
+    "type": "tsgo --noEmit",
+    "format": "prettier --write \"**/*.{js,ts,json,md}\"",
+    "benchmark": "rimraf dist && npm run build:esm && node --expose-gc scripts/benchmark.js",
+    "build:esm": "tsc --project tsconfig.esm.json",
+    "build:cjs": "tsc --project tsconfig.cjs.json && node scripts/fix-cjs-imports.mjs",
+    "build:browser": "rolldown -c rolldown.config.js",
+    "analyze": "cross-env ANALYZE=1 rolldown -c rolldown.config.js",
+    "prepublishOnly": "npm run build",
+    "preversion": "npm run lint && npm run type && npm run build && npm run test",
+    "prepare": "husky"
+  },
+  "keywords": [
+    "excelts",
+    "typescript",
+    "excel",
+    "xlsx",
+    "json",
+    "csv",
+    "spreadsheet",
+    "workbook",
+    "exceljs",
+    "font",
+    "border",
+    "fill",
+    "number",
+    "format",
+    "number format",
+    "alignment",
+    "office",
+    "defined names",
+    "data validations",
+    "rich text",
+    "in-cell format",
+    "outlineLevel",
+    "views",
+    "frozen",
+    "split",
+    "pageSetup",
+    "modern",
+    "esm",
+    "xlsx"
+  ],
+  "dependencies": {
+    "dayjs": "^1.11.18",
+    "fast-csv": "^5.0.5",
+    "fflate": "^0.8.2",
+    "node-stdlib-browser": "^1.3.1",
+    "saxes": "^6.0.0",
+    "unzipper": "^0.12.3",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.38.0",
+    "@oxc-node/core": "^0.0.32",
+    "@types/node": "^24.9.2",
+    "@types/unzipper": "^0.10.11",
+    "@typescript-eslint/eslint-plugin": "8.46.2",
+    "@typescript-eslint/parser": "8.46.2",
+    "@typescript/native-preview": "^7.0.0-dev.20251029.1",
+    "@vitest/browser": "^4.0.5",
+    "@vitest/browser-playwright": "^4.0.5",
+    "@vitest/ui": "^4.0.5",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "eslint": "9.38.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-import-resolver-typescript": "4.4.4",
+    "eslint-plugin-import-x": "4.16.1",
+    "eslint-plugin-oxlint": "1.24.0",
+    "eslint-plugin-unused-imports": "4.3.0",
+    "express": "^5.1.0",
+    "fast-xml-parser": "^5.3.0",
+    "husky": "^9.1.7",
+    "nodemon": "^3.1.10",
+    "oxlint": "^1.24.0",
+    "playwright": "^1.56.1",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.0.1",
+    "rolldown": "^1.0.0-beta.45",
+    "rollup-plugin-visualizer": "^6.0.5",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.0.5"
+  }
+}
