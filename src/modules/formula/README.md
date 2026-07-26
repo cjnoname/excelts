@@ -6,18 +6,19 @@ Standalone Excel-compatible formula engine — tokenizer, parser, compiler, eval
 
 ## Two usage modes
 
-This module exposes a single functional entry — `Formula.calculate(wb)` —
-that works in two complementary ways. You never pay for the engine
-unless you import it.
+Which entry you call depends on what holds your data. You never pay for
+the engine unless you import it.
 
-| Mode                        | How                               | Use when                                                                                            |
-| --------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------- |
-| **Paired with `Workbook`**  | `Formula.calculate(wb)`           | You use the excel module's `Workbook` and want to recompute its formulas (and PDF export recalc).   |
-| **Standalone / functional** | `Formula.calculate(workbookLike)` | You operate on a `WorkbookLike` object (custom host, server-side recalc, tests) — no excel runtime. |
+| Mode                        | How                                                          | Use when                                                                                            |
+| --------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| **Paired with `Workbook`**  | `calculateFormulas(wb)` from `documonster/excel/formula`     | You use the excel module's `Workbook` and want to recompute its formulas (and PDF export recalc).   |
+| **Standalone / functional** | `Formula.calculate(workbookLike)` from `documonster/formula` | You operate on a `WorkbookLike` object (custom host, server-side recalc, tests) — no excel runtime. |
 
-The engine code itself is identical; only the data you hand it differs.
-There is **no install or registration step** — `Formula.calculate` is
-used directly. See [Why a separate subpath?](#why-a-separate-subpath)
+Both run the same engine. The split exists because an excel workbook
+handle is a plain-data record (`WorkbookData`) while the engine consumes
+the structural `WorkbookLike` contract — `documonster/excel/formula`
+holds the adapter between them. There is **no install or registration
+step** in either mode. See [Why separate subpaths?](#why-separate-subpaths)
 for the tree-shake numbers.
 
 ## Features
@@ -59,7 +60,7 @@ See `functions/` for the full list; `runtime/function-registry.ts` is the regist
 
 ```typescript
 import { Workbook, Cell } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
 const wb = Workbook.create();
 const ws = Workbook.addWorksheet(wb, "Sheet1");
@@ -68,7 +69,7 @@ Cell.setValue(ws, "A2", 20);
 Cell.setValue(ws, "A3", 30);
 Cell.setValue(ws, "A4", { formula: "SUM(A1:A3)" });
 
-Formula.calculate(wb);
+calculateFormulas(wb);
 console.log(Cell.getResult(ws, "A4")); // 60
 ```
 
@@ -76,13 +77,13 @@ console.log(Cell.getResult(ws, "A4")); // 60
 
 The engine runs on any object shaped like `WorkbookLike` — you do **not**
 have to use the excel module at all. A bundle that imports only
-`calculateFormulas` pulls zero excel runtime code.
+`Formula.calculate` pulls zero excel runtime code.
 
 ```typescript
 import { Formula, type WorkbookLike } from "documonster/formula";
 
 // Your own data — any object implementing WorkbookLike works.
-// No Workbook class required.
+// No Workbook required.
 const wb: WorkbookLike = buildMyWorkbookLike();
 
 Formula.calculate(wb); // pure function, zero global side effects
@@ -95,6 +96,12 @@ This mode is ideal for:
 - Tests and benchmarks that want deterministic, per-instance behaviour
 - Concurrent evaluation of multiple workbooks without touching process globals
 
+`Formula.calculate` does **not** accept an excel workbook handle: a
+`Workbook.Handle` (`WorkbookData`) is a plain-data record with no
+`worksheets` array and no `getWorksheet()` method, so passing one is a
+compile error (and would throw at runtime). Use
+`documonster/excel/formula` for those.
+
 ### Recalculating a loaded workbook
 
 Load an XLSX with the excel module, then recalculate its formulas
@@ -102,11 +109,11 @@ functionally. There is no install or registration step.
 
 ```typescript
 import { Workbook } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
 const wb = Workbook.create();
 await Workbook.read(wb, buffer);
-Formula.calculate(wb); // defined names classified and formulas recalculated
+calculateFormulas(wb); // defined names classified and formulas recalculated
 ```
 
 ### Tokenise / parse without evaluating
@@ -118,32 +125,42 @@ const tokens = Formula.tokenize("SUM(A1:B10) + VLOOKUP(key, table, 2, FALSE)");
 const ast = Formula.parse(tokens); // throws on syntax errors
 ```
 
-## Why a separate subpath?
+## Why separate subpaths?
 
 The formula engine is ~200 KB minified. Most callers of `documonster`
 only read and write XLSX files and let Excel recalculate on open — pulling
 the engine into those bundles unconditionally would be a large, invisible
 cost.
 
-The subpath gives you three tree-shaking outcomes:
+The subpaths give you these tree-shaking outcomes:
 
-| Imports                                          | Excel module | Formula engine |
-| ------------------------------------------------ | ------------ | -------------- |
-| `Workbook` from root only                        | ✓            | ✗              |
-| `Formula.calculate` from `/formula`              | ✗            | ✓              |
-| `Workbook` + `Formula.calculate` from `/formula` | ✓            | ✓              |
+| Imports                                   | Excel module | Formula engine |
+| ----------------------------------------- | ------------ | -------------- |
+| `Workbook` from `/excel` only             | ✓            | ✗              |
+| `Formula.calculate` from `/formula`       | ✗            | ✓              |
+| `calculateFormulas` from `/excel/formula` | ✓            | ✓              |
 
 The functional `Formula.calculate` API operates on the structural
 `WorkbookLike` interface and pulls **no** excel runtime code — you can
-hand it any object shaped like a workbook. Server-side recalculation of
-a cached XLSX loaded by the excel module works too; the excel import
-stays in the excel bundle.
+hand it any object shaped like a workbook. Recalculating a workbook the
+excel module loaded goes through `/excel/formula`, which is the only
+entry that links both.
 
-> **IIFE note:** The script-tag IIFE bundle
-> (`dist/iife/documonster.iife.min.js`) intentionally excludes the formula
-> engine so it stays lean. Script-tag users who need formula
-> calculation should switch to ESM and import `Formula` from this
-> subpath, then call `Formula.calculate(wb)`.
+Keeping recalculation on its own subpath — rather than as a member of the
+`Workbook` namespace — is what makes "no engine unless you ask for it"
+hold in **every** output format, not just the ones with member-level
+dead-code elimination. Measured: hanging it off `Workbook` added approximately
+200 KB to the script-tag excel IIFE for every CDN consumer, because an IIFE
+must keep all of an entry's exports.
+`scripts/verify-treeshake` asserts the current split on rolldown and
+rspack.
+
+> **IIFE note:** The script-tag IIFE bundles
+> (`dist/iife/documonster.excel.iife.min.js` and friends) intentionally
+> exclude the formula engine so they stay lean —
+> `dist/iife/documonster.formula.iife.min.js` ships it separately. Script-tag
+> users who need to recalculate an excel workbook should switch to ESM and
+> import `calculateFormulas` from `documonster/excel/formula`.
 
 ## Examples
 
@@ -196,30 +213,39 @@ that implements those interfaces can drive the engine.
 
 ### `Formula.calculate(workbook: WorkbookLike): void`
 
-The sole functional entry point for evaluation. Walks every formula cell
+The functional entry point for evaluation. Walks every formula cell
 in `workbook`, evaluates it with full dependency resolution, writes
 results back onto each cell's `result` property, and materialises
 dynamic-array spills onto ghost cells. Mutates the workbook in place.
 Zero global side effects; safe for concurrent calls on different
 workbooks. There is **no install or registration step** and **no
-`Workbook.calculateFormulas()` method** — call `Formula.calculate(wb)`
-directly. Works on any `WorkbookLike`; the excel module is not required,
-but a `Workbook` created by the excel module is structurally compatible
-and can be passed as-is.
+`Workbook.calculateFormulas()` method**.
+
+It takes a `WorkbookLike` — a host that exposes a `worksheets` array, a
+`getWorksheet()` method, and live worksheet/cell views. An excel
+`Workbook.Handle` is a plain-data record and does **not** satisfy that
+contract; pass those to `calculateFormulas` below instead.
+
+### `calculateFormulas(workbook: Workbook.Handle): void`
+
+From `documonster/excel/formula`. Adapts an excel workbook handle to
+`WorkbookLike` and runs the engine on it, writing results back into the
+real cells. This is the entry to use whenever the workbook came from
+`documonster/excel` — including workbooks loaded from XLSX.
 
 ### PDF export recalculation
 
 `Pdf.fromExcel` does not depend on the formula engine. To recompute
-formulas before rendering, inject `Formula.calculate` via the
+formulas before rendering, inject `calculateFormulas` via the
 `recalculate` option — only opt-in callers pull the ~200 KB engine into
 their bundle. Without it, the cached XLSX results are used (the safe
 default for files written by Excel itself).
 
 ```typescript
 import { Pdf } from "documonster/pdf";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
-const bytes = await Pdf.fromExcel(wb, { recalculate: Formula.calculate });
+const bytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 ```
 
 ### Defined-name syntax classification

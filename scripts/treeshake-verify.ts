@@ -39,6 +39,23 @@ const ALL_MODULES = [
 ];
 const NOT_EXCEL_PDF_CSV = ["modules/excel/", "modules/formula/", "modules/pdf/", "modules/csv/"];
 
+/**
+ * The formula-engine module trees that must never be dragged in by a
+ * `documonster/excel` consumer — the evaluator, the built-in function library,
+ * the calc integration layer, and the excel→engine adapter. Reaching them is
+ * what `documonster/excel/formula` is for.
+ * (`modules/formula/syntax/` is excluded from this list on purpose: the
+ * defined-name syntax probe legitimately pulls the tokenizer + parser.)
+ */
+const FORMULA_ENGINE_MODULES = [
+  "modules/formula/compile/",
+  "modules/formula/runtime/",
+  "modules/formula/functions/",
+  "modules/formula/integration/",
+  "modules/formula/materialize/",
+  "modules/excel/core/formula-adapter.js"
+];
+
 /** Exclude all modules except the listed ones */
 function allModulesExcept(...keep: string[]): string[] {
   return ALL_MODULES.filter(m => !keep.some(k => m.includes(k)));
@@ -238,6 +255,62 @@ const scenarios: Scenario[] = [
   },
 
   // ===========================================================================
+  // /excel member-level — formula recalculation is published as its own subpath
+  // (`documonster/excel/formula`, issue #193) precisely so it stays strictly
+  // opt-in: a consumer of `documonster/excel` must NOT pay for the evaluator,
+  // the 433 built-in functions, the calc integration layer, or the excel→engine
+  // adapter.
+  //
+  // `modules/formula/syntax/` is deliberately NOT excluded: `DefinedNames`
+  // classification pulls the tokenizer + parser regardless (already encoded in
+  // the `Workbook` namespace scenario above).
+  // ===========================================================================
+  {
+    name: "/excel: Workbook.create (no formula engine)",
+    importFrom: `${PKG_NAME}/excel`,
+    imports: ["Workbook"],
+    useExpr: "console.log(Workbook.create())",
+    mustNotInclude: FORMULA_ENGINE_MODULES,
+    lazySplit: true,
+    excludeBundlers: ["esbuild"]
+  },
+  {
+    name: "/excel: Workbook.toBuffer (no formula engine)",
+    importFrom: `${PKG_NAME}/excel`,
+    imports: ["Workbook"],
+    useExpr: "console.log(Workbook.toBuffer)",
+    mustNotInclude: FORMULA_ENGINE_MODULES,
+    lazySplit: true,
+    excludeBundlers: ["esbuild"]
+  },
+  {
+    name: "browser /excel: Workbook.create (no formula engine)",
+    importFrom: `${PKG_NAME}/excel`,
+    imports: ["Workbook"],
+    useExpr: "console.log(Workbook.create())",
+    mustNotInclude: FORMULA_ENGINE_MODULES,
+    platform: "browser",
+    lazySplit: true,
+    excludeBundlers: ["esbuild"]
+  },
+
+  // The recalculation subpath itself: pulls excel + the engine (that is the
+  // whole point) but must stay clear of every unrelated module tree.
+  s(
+    "/excel/formula: calculateFormulas",
+    `${PKG_NAME}/excel/formula`,
+    ["calculateFormulas"],
+    exclude("excel", ["modules/formula/", "modules/archive/", "modules/xml/", "modules/stream/"])
+  ),
+  s(
+    "browser /excel/formula: calculateFormulas",
+    `${PKG_NAME}/excel/formula`,
+    ["calculateFormulas"],
+    exclude("excel", ["modules/formula/", "modules/archive/", "modules/xml/", "modules/stream/"]),
+    "browser"
+  ),
+
+  // ===========================================================================
   // /pdf member-level — `Pdf.create` must NOT bundle the Type3 Unicode glyph
   // tables (~700 KB of math/arrow/dingbat vector glyphs). They are loaded
   // lazily via dynamic import() inside FontManager, only when a document
@@ -417,7 +490,7 @@ function normalizePath(filePath: string): string {
  * leaves in **un-minified** output:
  *
  *   esbuild   `// dist/esm/modules/excel/cell.js`
- *   rolldown  `//#region dist/esm/modules/excel/cell.js`
+ *   rolldown  `//#region dist/browser/modules/excel/cell.js`
  *   rspack    `// CONCATENATED MODULE: ./dist/esm/modules/excel/cell.js`
  *
  * This is the ground-truth tree-shaking signal: a module that the bundler
@@ -430,7 +503,7 @@ function normalizePath(filePath: string): string {
  * reporting only); presence/absence is what the contract checks.
  */
 const MODULE_MARKER_RE =
-  /(?:\/\/#region\s+|\/\/\s+CONCATENATED MODULE:\s+\.?\/?|\/\/\s+)(dist\/esm\/[^\s*]+\.js)/g;
+  /(?:\/\/#region\s+|\/\/\s+CONCATENATED MODULE:\s+\.?\/?|\/\/\s+)(dist\/(?:esm|browser)\/[^\s*]+\.js)/g;
 
 function extractContributingFromBundle(bundleText: string): ModuleEntry[] {
   const seen = new Map<string, number>();
@@ -486,6 +559,14 @@ function makeResult(
   parsedCount: number
 ): ScenarioResult {
   const violations = checkViolations(contributing, scenario.mustNotInclude);
+  if (bundleSize > 0 && contributing.length === 0) {
+    violations.push({
+      pattern: "NO_MODULE_MARKERS",
+      matchedModules: [
+        { path: "non-empty bundle contained no recognised dist module markers", bytes: 0 }
+      ]
+    });
+  }
   return {
     name: scenario.name,
     bundler,

@@ -12,8 +12,12 @@
  * pull the evaluator or function registry in; the evaluator is reached solely
  * through `Formula.calculate`, so consumers who never call it never pay for it.
  *
- * For PDF export recalculation, pass `Formula.calculate` to
- * `Pdf.fromExcel(wb, { recalculate: Formula.calculate })`.
+ * To recalculate a workbook from `documonster/excel`, use the adapter exported
+ * by `documonster/excel/formula`:
+ * ```ts
+ * import { calculateFormulas } from "documonster/excel/formula";
+ * calculateFormulas(workbook);
+ * ```
  */
 
 // Public value API — the `Formula` domain namespace. Tree-shaken per-member

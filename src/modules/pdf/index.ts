@@ -48,7 +48,7 @@
 export * as Pdf from "@pdf/surface/pdf";
 
 // Conversion option types (the converter functions live on `Pdf.*`).
-export type { ChartToPdfOptions } from "@pdf/excel-bridge";
+export type { ChartToPdfOptions, ExcelToPdfOptions } from "@pdf/excel-bridge";
 export type { DocxToPdfOptions } from "@pdf/word-bridge";
 
 // =============================================================================

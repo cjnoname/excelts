@@ -36,7 +36,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-Standalone 433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Ships as a separate subpath so it stays out of bundles that only need to read/write XLSX. A single pure function, `Formula.calculate()`, evaluates any `WorkbookLike` host in place (including a `Workbook` created by the excel module) — the engine itself has zero excel runtime dependencies.
+Standalone 433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Ships as a separate subpath so it stays out of bundles that only need to read/write XLSX. `Formula.calculate()` evaluates any `WorkbookLike` host in place; to recalculate a workbook from the excel module, call `calculateFormulas()` from `documonster/excel/formula`. Either way there is no install step, and the engine itself has zero excel runtime dependencies.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -164,13 +164,14 @@ const docxBytes = await Io.toBuffer(Document.build(wdoc));
 const parsedDocx = await Io.read(docxBytes); // round-trip read
 
 // Formula — opt-in calculation engine (kept out of the base bundle)
-// Pure function: populates cell results on any WorkbookLike object.
-import { Formula } from "documonster/formula";
+// Recalculate an excel workbook via the excel/formula subpath.
+import { calculateFormulas } from "documonster/excel/formula";
 import { Cell } from "documonster/excel";
 Cell.setValue(sheet, "A4", { formula: "SUM(A1:A3)" });
-Formula.calculate(workbook); // now populates cell results
+calculateFormulas(workbook); // now populates cell results
 
-// Also works standalone on any WorkbookLike object
+// Or run the engine standalone on any WorkbookLike object of your own
+import { Formula } from "documonster/formula";
 Formula.calculate(anyWorkbookLikeObject);
 ```
 
@@ -192,7 +193,8 @@ const buffer = await Workbook.toBuffer(wb);
 ```
 
 > The IIFE bundle does not include the formula calculation engine. Use
-> ESM + `documonster/formula` if you need `Formula.calculate()`.
+> ESM + `documonster/excel/formula` (or `documonster/formula` for your own
+> `WorkbookLike` host) if you need to recalculate formulas.
 
 For older browsers without native `CompressionStream` API, Documonster automatically uses a built-in pure JavaScript DEFLATE implementation — no polyfills needed.
 

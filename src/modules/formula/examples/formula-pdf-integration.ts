@@ -2,21 +2,20 @@
  * Example: Formula + PDF Integration
  *
  * Covers:
- * - Passing `{ recalculate: Formula.calculate }` to `Pdf.fromExcel()` so it
+ * - Passing `{ recalculate: calculateFormulas }` to `Pdf.fromExcel()` so it
  *   recalculates stale formula results before rendering.
  * - Without it, `Pdf.fromExcel()` silently falls back to the cached results
  *   saved in the XLSX (safe default for files last opened in Excel itself).
  *
- * No install / registration step — `Formula.calculate` is used directly.
+ * No install / registration step — `calculateFormulas` is used directly.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { calculateFormulas } from "@excel/bridge/formula";
 import { Cell, Workbook, Worksheet } from "@excel/index";
 import { Pdf } from "@pdf/index";
-
-import { Formula } from "../index";
 
 const outDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -47,12 +46,12 @@ for (let r = 2; r <= 4; r++) {
 Cell.setValue(ws, "D5", { formula: "SUM(D2:D4)" });
 Cell.setValue(ws, "C5", "Total");
 
-// Pass `recalculate: Formula.calculate` so subtotals and the grand total are
+// Pass `recalculate: calculateFormulas` so subtotals and the grand total are
 // computed fresh right before rendering (no install step involved).
 const pdf = await Pdf.fromExcel(wb, {
   title: "Invoice (live formula results)",
   showGridLines: true,
-  recalculate: Formula.calculate
+  recalculate: calculateFormulas
 });
 fs.writeFileSync(path.join(outDir, "formula-pdf-integration.pdf"), pdf);
 console.log("Wrote tmp/formula-examples/formula-pdf-integration.pdf");

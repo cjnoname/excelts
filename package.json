@@ -63,6 +63,9 @@
       "excel/markdown": [
         "dist/types/modules/excel/bridge/markdown.node.d.ts"
       ],
+      "excel/formula": [
+        "dist/types/modules/excel/bridge/formula.d.ts"
+      ],
       "stream": [
         "dist/types/modules/stream/index.d.ts"
       ],
@@ -236,6 +239,20 @@
         "default": "./dist/cjs/modules/excel/bridge/markdown.node.js"
       }
     },
+    "./excel/formula": {
+      "browser": {
+        "types": "./dist/browser/modules/excel/bridge/formula.d.ts",
+        "default": "./dist/browser/modules/excel/bridge/formula.js"
+      },
+      "import": {
+        "types": "./dist/types/modules/excel/bridge/formula.d.ts",
+        "default": "./dist/esm/modules/excel/bridge/formula.js"
+      },
+      "require": {
+        "types": "./dist/types/modules/excel/bridge/formula.d.ts",
+        "default": "./dist/cjs/modules/excel/bridge/formula.js"
+      }
+    },
     "./xml": {
       "browser": {
         "types": "./dist/browser/modules/xml/index.d.ts",
@@ -330,10 +347,10 @@
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
     "check": "concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\"",
     "test": "vitest run && pnpm test:browser --",
-    "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
+    "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
     "build": "pnpm generate:csv-worker && rimraf dist && concurrently \"pnpm build:esm\" \"pnpm build:cjs\" \"pnpm build:browser\" \"pnpm build:browser:bundle\" && pnpm build:verify && pnpm verify:treeshake",
-    "build:verify": "tsc --noEmit --ignoreConfig --module NodeNext --moduleResolution NodeNext --lib ESNext --types node dist/types/modules/archive/index.d.ts dist/types/modules/csv/index.d.ts dist/types/modules/formula/index.d.ts dist/types/modules/markdown/index.d.ts dist/types/modules/pdf/index.d.ts dist/types/modules/stream/index.d.ts dist/types/modules/xml/index.d.ts dist/types/modules/word/index.d.ts dist/types/modules/word/html.d.ts dist/types/modules/word/crypto.d.ts dist/types/modules/word/markdown.d.ts dist/types/modules/word/excel.d.ts",
+    "build:verify": "tsc --noEmit --ignoreConfig --module NodeNext --moduleResolution NodeNext --lib ESNext --types node dist/types/modules/archive/index.d.ts dist/types/modules/csv/index.d.ts dist/types/modules/excel/bridge/formula.d.ts dist/types/modules/formula/index.d.ts dist/types/modules/markdown/index.d.ts dist/types/modules/pdf/index.d.ts dist/types/modules/stream/index.d.ts dist/types/modules/xml/index.d.ts dist/types/modules/word/index.d.ts dist/types/modules/word/html.d.ts dist/types/modules/word/crypto.d.ts dist/types/modules/word/markdown.d.ts dist/types/modules/word/excel.d.ts",
     "verify:treeshake": "node scripts/treeshake-verify.ts",
     "verify:layers": "node scripts/verify-layers.ts",
     "analyze:browser": "rimraf dist && node --input-type=module -e \"import { execSync } from 'node:child_process'; process.env.ANALYZE='true'; execSync('rolldown -c rolldown.config.ts', { stdio: 'inherit' });\"",

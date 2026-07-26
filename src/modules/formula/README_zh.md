@@ -6,14 +6,14 @@
 
 ## 两种使用方式
 
-本模块只暴露一个函数式入口 — `Formula.calculate(wb)` — 它能以两种互补的方式工作。不 import 引擎就不会为它付出任何代价。
+调用哪个入口,取决于你的数据放在哪里。不 import 引擎就不会为它付出任何代价。
 
-| 模式                   | 用法                              | 适用场景                                                                                  |
-| ---------------------- | --------------------------------- | ----------------------------------------------------------------------------------------- |
-| **配合 `Workbook` 用** | `Formula.calculate(wb)`           | 你使用 excel 模块的 `Workbook`,想重算它的公式(以及 PDF 导出时重算)。                      |
-| **单独使用 / 函数式**  | `Formula.calculate(workbookLike)` | 你操作的是 `WorkbookLike` 对象(自定义宿主、服务端重算、测试)— **完全不用 excel 运行时**。 |
+| 模式                   | 用法                                                       | 适用场景                                                                                  |
+| ---------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **配合 `Workbook` 用** | `documonster/excel/formula` 的 `calculateFormulas(wb)`     | 你使用 excel 模块的 `Workbook`,想重算它的公式(以及 PDF 导出时重算)。                      |
+| **单独使用 / 函数式**  | `documonster/formula` 的 `Formula.calculate(workbookLike)` | 你操作的是 `WorkbookLike` 对象(自定义宿主、服务端重算、测试)— **完全不用 excel 运行时**。 |
 
-两种模式跑的是同一套引擎代码,只是传进去的数据不同。**没有任何安装或注册步骤** — 直接调用 `Formula.calculate`。tree-shake 数字见[为什么单独一个 subpath?](#为什么单独一个-subpath)。
+两种模式跑的是同一套引擎。之所以分开:excel 的 workbook 句柄是纯数据记录(`WorkbookData`),而引擎消费的是结构化的 `WorkbookLike` 契约 — 两者之间的适配器就放在 `documonster/excel/formula` 里。两种模式都**没有任何安装或注册步骤**。tree-shake 数字见[为什么分成多个 subpath?](#为什么分成多个-subpath)。
 
 ## 特性
 
@@ -54,7 +54,7 @@
 
 ```typescript
 import { Workbook, Cell } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
 const wb = Workbook.create();
 const ws = Workbook.addWorksheet(wb, "Sheet1");
@@ -63,7 +63,7 @@ Cell.setValue(ws, "A2", 20);
 Cell.setValue(ws, "A3", 30);
 Cell.setValue(ws, "A4", { formula: "SUM(A1:A3)" });
 
-Formula.calculate(wb);
+calculateFormulas(wb);
 console.log(Cell.getResult(ws, "A4")); // 60
 ```
 
@@ -75,7 +75,7 @@ console.log(Cell.getResult(ws, "A4")); // 60
 import { Formula, type WorkbookLike } from "documonster/formula";
 
 // 你自己的数据结构 — 只要实现 WorkbookLike 就行。
-// 不需要 Workbook 类。
+// 不需要 Workbook。
 const wb: WorkbookLike = buildMyWorkbookLike();
 
 Formula.calculate(wb); // 纯函数,零全局副作用
@@ -88,17 +88,19 @@ Formula.calculate(wb); // 纯函数,零全局副作用
 - 需要每实例独立行为的测试和 benchmark
 - 并发求值多个 workbook,不污染进程全局状态
 
+`Formula.calculate` **不接受** excel 的 workbook 句柄:`Workbook.Handle`(`WorkbookData`)是纯数据记录,既没有 `worksheets` 数组也没有 `getWorksheet()` 方法,传进去会直接编译报错(运行时也会抛异常)。这种情况请用 `documonster/excel/formula`。
+
 ### 重算已加载的工作簿
 
 用 excel 模块加载 XLSX,然后函数式地重算它的公式。没有任何安装或注册步骤。
 
 ```typescript
 import { Workbook } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
 const wb = Workbook.create();
 await Workbook.read(wb, buffer);
-Formula.calculate(wb); // defined names 完成分类,公式被重算
+calculateFormulas(wb); // defined names 完成分类,公式被重算
 ```
 
 ### 不求值,只 tokenize / parse
@@ -110,24 +112,27 @@ const tokens = Formula.tokenize("SUM(A1:B10) + VLOOKUP(key, table, 2, FALSE)");
 const ast = Formula.parse(tokens); // 语法错误时抛异常
 ```
 
-## 为什么单独一个 subpath?
+## 为什么分成多个 subpath?
 
 公式引擎 minified 后约 200 KB。大多数 `documonster` 用户只读写 XLSX、让 Excel 自己重算 — 无条件把引擎打进这些 bundle 是一笔看不见的巨大成本。
 
-subpath 给你三种 tree-shaking 结果:
+这些 subpath 给你如下 tree-shaking 结果:
 
-| 导入方式                                              | Excel 模块 | Formula 引擎 |
-| ----------------------------------------------------- | ---------- | ------------ |
-| 只从根路径 import `Workbook`                          | ✓          | ✗            |
-| 从 `/formula` import `Formula.calculate`              | ✗          | ✓            |
-| import `Workbook` + `/formula` 的 `Formula.calculate` | ✓          | ✓            |
+| 导入方式                                       | Excel 模块 | Formula 引擎 |
+| ---------------------------------------------- | ---------- | ------------ |
+| 只从 `/excel` import `Workbook`                | ✓          | ✗            |
+| 从 `/formula` import `Formula.calculate`       | ✗          | ✓            |
+| 从 `/excel/formula` import `calculateFormulas` | ✓          | ✓            |
 
-函数式 `Formula.calculate` API 通过 `WorkbookLike` 结构化接口工作,**不引入任何 excel 运行时代码** — 只要对象形状符合 workbook 接口就能传进去。服务端对已缓存的 XLSX 做重算也可以:excel 的 import 留在 excel bundle 里。
+函数式 `Formula.calculate` API 通过 `WorkbookLike` 结构化接口工作,**不引入任何 excel 运行时代码** — 只要对象形状符合 workbook 接口就能传进去。重算 excel 模块加载出来的 workbook 走 `/excel/formula`,这是唯一同时链接两边的入口。
+
+把重算功能放在独立 subpath(而不是做成 `Workbook` 命名空间的一个成员),才能让"不主动要就不含引擎"在**所有**产物格式下都成立,而不只是在支持成员级 DCE 的打包器下成立。实测:挂到 `Workbook` 上会让 `<script>` 版 excel IIFE 增加约 200 KB,所有 CDN 用户都要付这笔钱 — 因为 IIFE 必须保留入口的全部导出。当前拆分方式由 `scripts/verify-treeshake` 在 rolldown 和 rspack 上断言。
 
 > **IIFE 说明:** `<script>` 标签的 IIFE 产物
-> (`dist/iife/documonster.iife.min.js`) 刻意不包含公式引擎,保持精简。
-> 如果通过 `<script>` 标签使用时需要公式计算,请改用 ESM,从本 subpath
-> import `Formula`,然后调用 `Formula.calculate(wb)`。
+> (`dist/iife/documonster.excel.iife.min.js` 等)刻意不包含公式引擎,保持精简 —
+> 引擎单独打在 `dist/iife/documonster.formula.iife.min.js`。如果通过
+> `<script>` 标签使用时需要重算 excel workbook,请改用 ESM,从
+> `documonster/excel/formula` import `calculateFormulas`。
 
 ## 示例
 
@@ -176,17 +181,23 @@ npx tsx src/modules/formula/examples/formula-pdf-integration.ts
 
 ### `Formula.calculate(workbook: WorkbookLike): void`
 
-唯一的函数式求值入口。遍历 workbook 所有公式单元格,完整解析依赖后求值,把结果写回每个单元格的 `result` 属性,并将动态数组 spill 物化到幽灵单元格。就地修改 workbook。零全局副作用;对不同 workbook 的并发调用是安全的。**没有安装或注册步骤**,也**没有 `Workbook.calculateFormulas()` 方法** — 直接调用 `Formula.calculate(wb)`。接受任何 `WorkbookLike`;不需要 excel 模块,但 excel 模块创建的 `Workbook` 在结构上是兼容的,可直接传入。
+函数式求值入口。遍历 workbook 所有公式单元格,完整解析依赖后求值,把结果写回每个单元格的 `result` 属性,并将动态数组 spill 物化到幽灵单元格。就地修改 workbook。零全局副作用;对不同 workbook 的并发调用是安全的。**没有安装或注册步骤**,也**没有 `Workbook.calculateFormulas()` 方法**。
+
+它接受的是 `WorkbookLike` — 即暴露 `worksheets` 数组、`getWorksheet()` 方法以及活的 worksheet/cell 视图的宿主。excel 的 `Workbook.Handle` 是纯数据记录,**不满足**该契约;这种情况请用下面的 `calculateFormulas`。
+
+### `calculateFormulas(workbook: Workbook.Handle): void`
+
+来自 `documonster/excel/formula`。把 excel workbook 句柄适配成 `WorkbookLike` 并在其上运行引擎,结果写回真实单元格。只要 workbook 来自 `documonster/excel`(包括从 XLSX 加载的),就用这个入口。
 
 ### PDF 导出重算
 
-`Pdf.fromExcel` 不依赖公式引擎。要在渲染前重算公式,通过 `recalculate` 选项注入 `Formula.calculate` — 只有主动选用的调用方才会把约 200 KB 的引擎打进 bundle。不传时使用缓存在 XLSX 里的结果(对 Excel 自己写出的文件而言是安全的默认行为)。
+`Pdf.fromExcel` 不依赖公式引擎。要在渲染前重算公式,通过 `recalculate` 选项注入 `calculateFormulas` — 只有主动选用的调用方才会把约 200 KB 的引擎打进 bundle。不传时使用缓存在 XLSX 里的结果(对 Excel 自己写出的文件而言是安全的默认行为)。
 
 ```typescript
 import { Pdf } from "documonster/pdf";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
-const bytes = await Pdf.fromExcel(wb, { recalculate: Formula.calculate });
+const bytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 ```
 
 ### 定义名称的语法分类

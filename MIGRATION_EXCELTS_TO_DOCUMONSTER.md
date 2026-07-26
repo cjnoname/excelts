@@ -17,9 +17,10 @@ written to be followed mechanically: an AI or a developer can rewrite an existin
 >    (`Workbook.create()`, `Cell.setValue(ws, "A1", 42)`, …). You never call
 >    `new` and never hold instances with methods; you pass opaque handles into
 >    functions.
-> 4. **CSV, Markdown and PDF integrations moved off `Workbook`.** They now live
->    at `documonster/excel/csv`, `documonster/excel/markdown`, and
->    `documonster/pdf` as free functions taking the workbook as the first arg.
+> 4. **CSV, Markdown, formula and PDF integrations moved off `Workbook`.** They
+>    now live at `documonster/excel/csv`, `documonster/excel/markdown`,
+>    `documonster/excel/formula`, and `documonster/pdf` as free functions taking
+>    the workbook as the first arg.
 
 ---
 
@@ -72,6 +73,7 @@ subpath. Update all import specifiers:
 | `@cj-tech-master/excelts/archive`       | `documonster/archive`        |                                                                |
 | _(CSV on Workbook)_                     | `documonster/excel/csv`      | **New** — Workbook CSV I/O (see §5)                            |
 | _(Markdown on Workbook)_                | `documonster/excel/markdown` | **New** — Workbook Markdown I/O (see §5)                       |
+| _(`wb.calculateFormulas()`)_            | `documonster/excel/formula`  | **New** — Workbook formula recalculation (see §7)              |
 
 Browser vs Node is chosen automatically by the bundler/runtime through the
 package `exports` `"browser"` condition — you no longer import a `/browser`
@@ -180,37 +182,37 @@ where noted.
 
 ### 4.1 `Workbook`
 
-| Old (`Workbook` class)                                    | New (`Workbook.*` function)                                                               |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `new Workbook()` / `new Workbook({ formulaSyntaxProbe })` | `Workbook.create()` / `Workbook.create({ formulaSyntaxProbe })`                           |
-| `wb.addWorksheet(name, opts)`                             | `Workbook.addWorksheet(wb, name, opts)`                                                   |
-| `wb.getWorksheet(id?)`                                    | `Workbook.getWorksheet(wb, id?)`                                                          |
-| `wb.worksheets`                                           | `Workbook.getWorksheets(wb)`                                                              |
-| `wb.removeWorksheet(id)`                                  | `Workbook.removeWorksheet(wb, id)`                                                        |
-| `wb.eachSheet(cb)`                                        | `Workbook.eachSheet(wb, cb)`                                                              |
-| `wb.importSheet(source, name?)`                           | `Workbook.importSheet(wb, source, name?)`                                                 |
-| `await wb.protect(pw?, opts?)`                            | `Workbook.protect(wb, pw?, opts?)`                                                        |
-| `wb.unprotect()`                                          | `Workbook.unprotect(wb)`                                                                  |
-| `wb.addChartsheet(name, opts)`                            | `Workbook.addChartsheet(wb, name, opts)`                                                  |
-| `wb.addPivotChartsheet(name, pt, opts)`                   | `Workbook.addPivotChartsheet(wb, name, pt, opts)`                                         |
-| `wb.chartsheets`                                          | `Workbook.getChartsheets(wb)`                                                             |
-| `wb.getChartsheet(x)`                                     | `Workbook.getChartsheet(wb, x)`                                                           |
-| `wb.removeChartsheet(x)`                                  | `Workbook.removeChartsheet(wb, x)`                                                        |
-| `wb.renameChartsheet(x, name)`                            | `Workbook.renameChartsheet(wb, x, name)`                                                  |
-| `wb.copyChartsheet(x, name?)`                             | `Workbook.copyChartsheet(wb, x, name?)`                                                   |
-| `wb.replaceChartsheetChart(x, chart)`                     | `Workbook.replaceChartsheetChart(wb, x, chart)`                                           |
-| `wb.definedNames`                                         | `Workbook.getDefinedNames(wb)`                                                            |
-| `wb.registerPerson(name, userId?, provId?)`               | `Workbook.registerPerson(wb, name, userId?, provId?)`                                     |
-| `wb.registerFunction(name, fn, opts?)`                    | `Workbook.registerFunction(wb, name, fn, opts?)`                                          |
-| `wb.unregisterFunction(name)`                             | `Workbook.unregisterFunction(wb, name)`                                                   |
-| `wb.addExternalLink(input)`                               | `Workbook.addExternalLink(wb, input)`                                                     |
-| `wb.getExternalLink(x)`                                   | `Workbook.getExternalLink(wb, x)`                                                         |
-| `wb.model` (get)                                          | `Workbook.getModel(wb)`                                                                   |
-| `wb.model = m` (set)                                      | `Workbook.setModel(wb, m)`                                                                |
-| `wb.addImage(image)`                                      | `Image.add(wb, image)` _(see §4.7)_                                                       |
-| `Workbook.createStreamWriter(opts)`                       | `Workbook.createStreamWriter(wb, opts)` / `new Stream.WorkbookWriter(opts)`               |
-| `Workbook.createStreamReader(input, opts)`                | `Workbook.createStreamReader(wb, input, opts)` / `new Stream.WorkbookReader(input, opts)` |
-| `wb.calculateFormulas()`                                  | _removed from Workbook_ — use `Formula.calculate(wb)` (see §7)                            |
+| Old (`Workbook` class)                                    | New (`Workbook.*` function)                                                                     |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `new Workbook()` / `new Workbook({ formulaSyntaxProbe })` | `Workbook.create()` / `Workbook.create({ formulaSyntaxProbe })`                                 |
+| `wb.addWorksheet(name, opts)`                             | `Workbook.addWorksheet(wb, name, opts)`                                                         |
+| `wb.getWorksheet(id?)`                                    | `Workbook.getWorksheet(wb, id?)`                                                                |
+| `wb.worksheets`                                           | `Workbook.getWorksheets(wb)`                                                                    |
+| `wb.removeWorksheet(id)`                                  | `Workbook.removeWorksheet(wb, id)`                                                              |
+| `wb.eachSheet(cb)`                                        | `Workbook.eachSheet(wb, cb)`                                                                    |
+| `wb.importSheet(source, name?)`                           | `Workbook.importSheet(wb, source, name?)`                                                       |
+| `await wb.protect(pw?, opts?)`                            | `Workbook.protect(wb, pw?, opts?)`                                                              |
+| `wb.unprotect()`                                          | `Workbook.unprotect(wb)`                                                                        |
+| `wb.addChartsheet(name, opts)`                            | `Workbook.addChartsheet(wb, name, opts)`                                                        |
+| `wb.addPivotChartsheet(name, pt, opts)`                   | `Workbook.addPivotChartsheet(wb, name, pt, opts)`                                               |
+| `wb.chartsheets`                                          | `Workbook.getChartsheets(wb)`                                                                   |
+| `wb.getChartsheet(x)`                                     | `Workbook.getChartsheet(wb, x)`                                                                 |
+| `wb.removeChartsheet(x)`                                  | `Workbook.removeChartsheet(wb, x)`                                                              |
+| `wb.renameChartsheet(x, name)`                            | `Workbook.renameChartsheet(wb, x, name)`                                                        |
+| `wb.copyChartsheet(x, name?)`                             | `Workbook.copyChartsheet(wb, x, name?)`                                                         |
+| `wb.replaceChartsheetChart(x, chart)`                     | `Workbook.replaceChartsheetChart(wb, x, chart)`                                                 |
+| `wb.definedNames`                                         | `Workbook.getDefinedNames(wb)`                                                                  |
+| `wb.registerPerson(name, userId?, provId?)`               | `Workbook.registerPerson(wb, name, userId?, provId?)`                                           |
+| `wb.registerFunction(name, fn, opts?)`                    | `Workbook.registerFunction(wb, name, fn, opts?)`                                                |
+| `wb.unregisterFunction(name)`                             | `Workbook.unregisterFunction(wb, name)`                                                         |
+| `wb.addExternalLink(input)`                               | `Workbook.addExternalLink(wb, input)`                                                           |
+| `wb.getExternalLink(x)`                                   | `Workbook.getExternalLink(wb, x)`                                                               |
+| `wb.model` (get)                                          | `Workbook.getModel(wb)`                                                                         |
+| `wb.model = m` (set)                                      | `Workbook.setModel(wb, m)`                                                                      |
+| `wb.addImage(image)`                                      | `Image.add(wb, image)` _(see §4.7)_                                                             |
+| `Workbook.createStreamWriter(opts)`                       | `Workbook.createStreamWriter(wb, opts)` / `new Stream.WorkbookWriter(opts)`                     |
+| `Workbook.createStreamReader(input, opts)`                | `Workbook.createStreamReader(wb, input, opts)` / `new Stream.WorkbookReader(input, opts)`       |
+| `wb.calculateFormulas()`                                  | _removed from Workbook_ — use `calculateFormulas(wb)` from `documonster/excel/formula` (see §7) |
 
 **Document-property fields** (`wb.title`, `wb.creator`, `wb.created`,
 `wb.company`, `wb.properties`, `wb.views`, `wb.calcProperties`,
@@ -625,15 +627,30 @@ remain named exports of `documonster/pdf`.
 ### Recalculation with PDF export
 
 The old `excelToPdf` auto-recalculated when the formula engine was installed.
-Now recalculation is explicit — pass `Formula.calculate`:
+Now recalculation is explicit — pass `calculateFormulas`:
 
 ```ts
 import { Workbook } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 import { Pdf } from "documonster/pdf";
 
-const bytes = await Pdf.fromExcel(wb, { recalculate: Formula.calculate });
+const bytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 ```
+
+The Excel-specific callback is declared on `ExcelToPdfOptions`, not on the
+generic `PdfExportOptions`. If you explicitly typed an options object, update
+the annotation:
+
+```ts
+import type { ExcelToPdfOptions } from "documonster/pdf";
+
+const options: ExcelToPdfOptions = { recalculate: calculateFormulas };
+```
+
+The old `PdfExportOptions.recalculate` parameter used `never`, which accepted
+incompatible callbacks such as `Formula.calculate` and deferred the failure to
+runtime. That unsafe declaration was removed rather than preserved as a
+compatibility alias.
 
 ---
 
@@ -649,14 +666,16 @@ modules were deleted.
 
 | Old (`documonster/formula`)                                                            | New                                                                                              |
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `import { installFormulaEngine } ...; installFormulaEngine(); wb.calculateFormulas();` | `import { Formula } from "documonster/formula"; Formula.calculate(wb);`                          |
-| `import { calculateFormulas } ...`                                                     | `Formula.calculate` (via namespace)                                                              |
+| `import { installFormulaEngine } ...; installFormulaEngine(); wb.calculateFormulas();` | `import { calculateFormulas } from "documonster/excel/formula"; calculateFormulas(wb);`          |
+| `import { calculateFormulas } ...`                                                     | `calculateFormulas` from `documonster/excel/formula` (workbook) / `Formula.calculate` (host)     |
 | `import { tokenize } ...`                                                              | `Formula.tokenize`                                                                               |
 | `import { parse } ...`                                                                 | `Formula.parse`                                                                                  |
 | `new Workbook({ formulaSyntaxProbe })`                                                 | `Workbook.create({ formulaSyntaxProbe })` (probe factory removed; pass your own if you have one) |
 
 `wb.calculateFormulas()` (the Workbook method) is removed. Call
-`Formula.calculate(wb)` instead. Structural host types
+`calculateFormulas(wb)` from `documonster/excel/formula` instead — the engine
+entry `Formula.calculate` only accepts a structural `WorkbookLike` host, not an
+excel workbook handle. Structural host types
 (`WorkbookLike`, `WorksheetLike`, `CellLike`, …) and errors
 (`FormulaError`, `FormulaParseError`, `isFormulaError`) are still exported.
 
@@ -676,11 +695,11 @@ wb.calculateFormulas();
 
 ```ts
 import { Workbook } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 
 const wb = Workbook.create();
 // ... build formulas ...
-Formula.calculate(wb);
+calculateFormulas(wb);
 ```
 
 ---
@@ -697,7 +716,7 @@ modules — not only the Excel/Word integrations.
 | `documonster/xml`      | `Xml`                                  | `Xml.parse(...)`, `Xml.encode(...)`           |
 | `documonster/markdown` | `Markdown`                             | `Markdown.parse(...)`, `Markdown.format(...)` |
 | `documonster/csv`      | `Csv`                                  | `Csv.parse(...)`, `Csv.format(...)`           |
-| `documonster/formula`  | `Formula`                              | `Formula.calculate(wb)`                       |
+| `documonster/formula`  | `Formula`                              | `Formula.calculate(workbookLike)`             |
 | `documonster/pdf`      | `Pdf`                                  | `Pdf.create(...)`, `Pdf.read(...)`            |
 | `documonster/word`     | `Build`, `Query`, `Io`, … (many, §8.5) | `Io.read(...)`, `Query.replaceText(...)`      |
 
@@ -909,7 +928,7 @@ Apply in order:
 7. **Replace `excelToPdf(wb, opts)`** with `await Pdf.fromExcel(wb, opts)` and
    drop any `pdf`/`excelToPdf` import in favor of `Pdf.*` (§6).
 8. **Remove `installFormulaEngine()`** and replace `wb.calculateFormulas()`
-   with `Formula.calculate(wb)` (§7).
+   with `calculateFormulas(wb)` from `documonster/excel/formula` (§7).
 9. **Update document-property mutations** (`wb.title = …`, `wb.creator = …`,
    etc.) to go through `Workbook.getModel(wb)` / `Workbook.setModel(wb, model)`
    (§4.1).
@@ -962,7 +981,7 @@ const csv = wb.writeCsv();
 
 ```ts
 import { Workbook, Worksheet, Cell } from "documonster/excel";
-import { Formula } from "documonster/formula";
+import { calculateFormulas } from "documonster/excel/formula";
 import { Pdf } from "documonster/pdf";
 import { writeCsv } from "documonster/excel/csv";
 
@@ -983,10 +1002,10 @@ Cell.setFont(ws, "B4", { bold: true });
 Cell.setValue(ws, "C1", { formula: "SUM(B2:B3)" });
 Worksheet.merge(ws, "A6:B6");
 
-Formula.calculate(wb);
+calculateFormulas(wb);
 
 await Workbook.writeFile(wb, "sales.xlsx");
-const pdfBytes = await Pdf.fromExcel(wb, { recalculate: Formula.calculate });
+const pdfBytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 
 const csv = writeCsv(wb);
 ```

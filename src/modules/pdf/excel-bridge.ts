@@ -136,6 +136,25 @@ export type { Workbook } from "@excel/core/workbook.browser";
 export type { ChartHandle } from "@excel/core/worksheet-core";
 
 /**
+ * Options for {@link excelToPdf} — the PDF export options plus the Excel-only
+ * `recalculate` hook.
+ *
+ * `recalculate` is declared here rather than on `PdfExportOptions` because it
+ * is typed against the Excel workbook, which only bridge files may reference.
+ */
+export interface ExcelToPdfOptions extends PdfExportOptions {
+  /**
+   * Optional formula recalculator, injected to avoid a static dependency on
+   * the ~200 KB formula engine. Pass `calculateFormulas` from
+   * `documonster/excel/formula` to recompute formula results before export;
+   * omit it to use the workbook's existing cached results. Explicit
+   * replacement for the old formula host-registry — only opt-in callers pull
+   * the engine into their bundle.
+   */
+  recalculate?: (workbook: Workbook) => void;
+}
+
+/**
  * Export an Excel Workbook directly to PDF.
  *
  * This is a convenience function that converts the Workbook to the PDF module's
@@ -148,17 +167,17 @@ export type { ChartHandle } from "@excel/core/worksheet-core";
  */
 export async function excelToPdf(
   workbook: Workbook,
-  options?: PdfExportOptions
+  options?: ExcelToPdfOptions
 ): Promise<Uint8Array> {
   // Recalculate all formulas before conversion so that formula results
   // reflect the latest cell values (fixes stale cached results from XLSX).
   //
   // The formula engine is opt-in via explicit injection: callers pass
-  // `{ recalculate: calculateFormulas }` (from `documonster/formula`)
-  // to recompute; callers who don't fall back to the cached results the XLSX
+  // `{ recalculate: calculateFormulas }` (from `documonster/excel/formula`) to
+  // recompute; callers who don't fall back to the cached results the XLSX
   // shipped with. This keeps the ~200 KB engine out of bundles that only
   // export already-computed workbooks — no host-registry needed.
-  (options as { recalculate?: (wb: Workbook) => void } | undefined)?.recalculate?.(workbook);
+  options?.recalculate?.(workbook);
 
   const pdfWorkbook = await excelWorkbookToPdf(workbook);
   return exportPdf(pdfWorkbook, options);

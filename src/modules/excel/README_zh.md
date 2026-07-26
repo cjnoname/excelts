@@ -155,6 +155,22 @@ Cell.setValue(sheet, "A1", { formula: "B1*2", shareType: "shared", ref: "A1:A10"
 DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRange");
 ```
 
+设置公式只是存下公式,并不会求值。要计算结果,从 `documonster/excel/formula`
+subpath 导入计算引擎(单独拆开,好让约 200 KB 的引擎不进入只读写 XLSX 的
+bundle — 无需任何安装或注册步骤):
+
+```typescript
+import { Workbook, Cell } from "documonster/excel";
+import { calculateFormulas } from "documonster/excel/formula";
+
+Cell.setValue(worksheet, "A4", { formula: "SUM(A1:A3)" });
+calculateFormulas(workbook); // 结果就地写回
+console.log(Cell.getResult(worksheet, "A4"));
+```
+
+433 个支持的函数、以及如何在非 excel 宿主上驱动引擎,见
+[formula 模块文档](../formula/README_zh.md)。
+
 ### 数据验证
 
 ```typescript

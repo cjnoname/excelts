@@ -476,6 +476,23 @@ src/modules/pdf/
 
 ## 写入选项
 
+`Pdf.create()` 接受 `PdfExportOptions`。`Pdf.fromExcel()` 接受
+`ExcelToPdfOptions`,它继承相同的写入选项,并额外提供类型严格的可选公式重算回调:
+
+```typescript
+import { calculateFormulas } from "documonster/excel/formula";
+import { Pdf, type ExcelToPdfOptions } from "documonster/pdf";
+
+const options: ExcelToPdfOptions = {
+  recalculate: calculateFormulas,
+  fitToPage: true
+};
+const bytes = await Pdf.fromExcel(workbook, options);
+```
+
+不传 `recalculate` 时使用 workbook 现有的公式缓存结果。回调保持独立,可避免未主动
+使用重算功能的 bundle 引入公式引擎。
+
 ```typescript
 interface PdfExportOptions {
   // 页面布局

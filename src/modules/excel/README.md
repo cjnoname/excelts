@@ -156,6 +156,23 @@ Cell.setValue(sheet, "A1", { formula: "B1*2", shareType: "shared", ref: "A1:A10"
 DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRange");
 ```
 
+Setting a formula stores it; it does not evaluate it. To compute results,
+import the calculation engine from the `documonster/excel/formula` subpath
+(kept separate so the ~200 KB engine stays out of bundles that only read and
+write XLSX — there is no install or registration step):
+
+```typescript
+import { Workbook, Cell } from "documonster/excel";
+import { calculateFormulas } from "documonster/excel/formula";
+
+Cell.setValue(worksheet, "A4", { formula: "SUM(A1:A3)" });
+calculateFormulas(workbook); // results written back in place
+console.log(Cell.getResult(worksheet, "A4"));
+```
+
+See the [formula module docs](../formula/README.md) for the 433 supported
+functions and for driving the engine against a non-excel host.
+
 ### Data Validation
 
 ```typescript

@@ -1,5 +1,5 @@
+import { calculateFormulas } from "@excel/bridge/formula";
 import { cellFormula, cellGetValue, cellResult } from "@excel/core/cell";
-import { calculateFormulas } from "@excel/core/formula-adapter";
 import { findCell, getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 

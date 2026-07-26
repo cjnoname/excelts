@@ -476,6 +476,25 @@ The entire PDF engine (core, font, render, reader) has **zero imports from the E
 
 ## Writer Options
 
+`Pdf.create()` accepts `PdfExportOptions`. `Pdf.fromExcel()` accepts
+`ExcelToPdfOptions`, which extends the same writer options with an optional,
+strongly typed formula recalculation hook:
+
+```typescript
+import { calculateFormulas } from "documonster/excel/formula";
+import { Pdf, type ExcelToPdfOptions } from "documonster/pdf";
+
+const options: ExcelToPdfOptions = {
+  recalculate: calculateFormulas,
+  fitToPage: true
+};
+const bytes = await Pdf.fromExcel(workbook, options);
+```
+
+Omit `recalculate` to render the workbook's existing cached formula results.
+The separate callback keeps the formula engine out of bundles that do not opt
+in.
+
 ```typescript
 interface PdfExportOptions {
   // Page layout

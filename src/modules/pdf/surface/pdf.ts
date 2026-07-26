@@ -16,8 +16,12 @@
  * source module. (Verified by scripts/treeshake-verify.ts.)
  */
 import { PdfDocumentBuilder, PdfPageBuilder, parseSvgPath } from "@pdf/builder/document-builder";
-import type { ChartHandle, ChartToPdfOptions, Workbook } from "@pdf/excel-bridge";
-import type { PdfExportOptions } from "@pdf/types";
+import type {
+  ChartHandle,
+  ChartToPdfOptions,
+  ExcelToPdfOptions,
+  Workbook
+} from "@pdf/excel-bridge";
 import type { DocxDocument, DocxToPdfOptions } from "@pdf/word-bridge";
 import type { WordChart } from "@pdf/word-chart-bridge";
 
@@ -49,7 +53,7 @@ export { PageSizes } from "@pdf/types";
 /** Convert an Excel workbook to a PDF. Dynamically loads the excel bridge. */
 export async function fromExcel(
   workbook: Workbook,
-  options?: PdfExportOptions
+  options?: ExcelToPdfOptions
 ): Promise<Uint8Array> {
   const { excelToPdf } = await import("@pdf/excel-bridge");
   return excelToPdf(workbook, options);

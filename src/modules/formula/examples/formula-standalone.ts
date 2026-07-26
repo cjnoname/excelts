@@ -1,13 +1,14 @@
-import { calculateFormulas } from "@excel/core/formula-adapter";
+import { calculateFormulas } from "@excel/bridge/formula";
 import { Cell, Workbook } from "@excel/index";
 
 /**
  * Example: Functional / Standalone API
  *
  * Covers:
- * - `calculateFormulas(workbook)` — the formula engine, used directly with no
- *   install / registration step. Fully tree-shakeable: bundlers ship only the
- *   code paths reachable from the exports you reference.
+ * - `calculateFormulas(wb)` from `documonster/excel/formula` — the formula
+ *   engine driven from a real workbook, with no install / registration step.
+ *   Its own subpath, so a consumer who never imports it never bundles the
+ *   engine.
  *
  * - `tokenize` / `parse` — pure syntax inspection. Use these for linters,
  *   formula migration tools, or static analysis that does not evaluate
