@@ -30,7 +30,7 @@ import type {
 // excel `*-core` data layer, so excel→PDF conversion pulls in chart rendering
 // only when the bundler can reach it (i.e. when `excelToPdf` is used). No
 // install step is required.
-import { fillChartExCaches } from "@excel/chart/build/cache-populator";
+import { fillChartExCachesForRendering } from "@excel/chart/bridge/excel-chart-host";
 import { chartChartExModel, chartChartModel } from "@excel/chart/chart-handle";
 import {
   canRenderChartExAsVectorPdf,
@@ -1245,28 +1245,10 @@ function ensureChartExCachesFilled(model: ChartExModel, ws: Worksheet): void {
   if (!needsFill) {
     return;
   }
-  // Temporarily lift _skipCache flags
-  const skipped: Array<Record<string, unknown>> = [];
-  for (const entry of data) {
-    const str = entry.strDim as Record<string, unknown> | undefined;
-    if (str?.["_skipCache"]) {
-      skipped.push(str);
-      delete str["_skipCache"];
-    }
-    const num = entry.numDim as Record<string, unknown> | undefined;
-    if (num?.["_skipCache"]) {
-      skipped.push(num);
-      delete num["_skipCache"];
-    }
-  }
   try {
-    fillChartExCaches(model, getSheetWorkbook(ws), ws);
+    fillChartExCachesForRendering(model, getSheetWorkbook(ws), ws);
   } catch {
     // Best-effort — rendering will proceed with whatever data is available.
-  }
-  // Restore _skipCache
-  for (const dim of skipped) {
-    dim["_skipCache"] = true;
   }
 }
 

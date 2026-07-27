@@ -105,7 +105,7 @@ describe("captureFormulaSnapshot: cell capture", () => {
     const cell = snap.worksheets[0].cells.get(snapshotCellKey(1, 1));
     expect(cell?.formulaKind).toBe("normal");
     expect(cell?.formula).toBe("1+1");
-    expect(cell?.cachedResult).toBe(2);
+    expect(cell?.value).toBe(2);
   });
 
   it("captures a formula cell's cached result", () => {
@@ -114,7 +114,7 @@ describe("captureFormulaSnapshot: cell capture", () => {
     Cell.setValue(ws, "A1", { formula: "SUM(1,2,3)", result: 6 });
     const snap = captureFormulaSnapshot(wb);
     const cell = snap.worksheets[0].cells.get(snapshotCellKey(1, 1));
-    expect(cell?.cachedResult).toBe(6);
+    expect(cell?.value).toBe(6);
   });
 });
 

@@ -70,7 +70,7 @@ function captureWritebackJournal(wb: WorkbookData, plan: WritebackPlan): Journal
       "sheetId" in operation
         ? worksheetById(wb, operation.sheetId)
         : worksheetByName(wb, operation.sheetName);
-    if (!ws || operation.type === "preserve") {
+    if (!ws) {
       continue;
     }
     if (operation.type === "cse") {
@@ -136,8 +136,7 @@ function validateWriteback(
   }
   for (const operation of plan.operations) {
     switch (operation.type) {
-      case "scalar":
-      case "preserve": {
+      case "scalar": {
         const ws = worksheetByName(wb, operation.sheetName);
         if (!ws || !findCell(ws, operation.row, operation.col)) {
           throw new Error(`Formula writeback target disappeared: ${operation.sheetName}`);
@@ -298,8 +297,7 @@ function cellsEqual(a: CellSnapshot | undefined, b: CellSnapshot | undefined): b
     a.ref === b.ref &&
     a.isDynamicArray === b.isDynamicArray &&
     a.ghostOwner === b.ghostOwner &&
-    valuesEqual(a.value, b.value) &&
-    valuesEqual(a.cachedResult ?? null, b.cachedResult ?? null)
+    valuesEqual(a.value, b.value)
   );
 }
 
@@ -342,8 +340,6 @@ function applyOperation(wb: WorkbookData, operation: WriteOperation): void {
       break;
     case "cleanup":
       applyCleanup(wb, operation);
-      break;
-    case "preserve":
       break;
   }
 }

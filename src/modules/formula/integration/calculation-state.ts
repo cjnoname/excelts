@@ -18,14 +18,12 @@ export type CachedAst = AstNode | typeof PARSE_FAILED;
 export interface FormulaCalculationState {
   readonly astCache: Map<string, CachedAst>;
   readonly spillRegions: ReadonlyMap<string, SpillRegion>;
-  readonly ghostSnapshots: ReadonlyMap<string, SnapshotCellValue>;
 }
 
 export function createFormulaCalculationState(): FormulaCalculationState {
   return {
     astCache: new Map(),
-    spillRegions: new Map(),
-    ghostSnapshots: new Map()
+    spillRegions: new Map()
   };
 }
 
@@ -33,7 +31,7 @@ export function createFormulaCalculationState(): FormulaCalculationState {
  * Derive the next committed state from a plan's spill state.
  *
  * The plan always carries the complete next spill state (not a delta), so the
- * maps are adopted wholesale — stale regions and ghost snapshots disappear
+ * maps are adopted wholesale — stale regions disappear
  * without any explicit removal bookkeeping.
  */
 export function nextFormulaCalculationState(
@@ -42,8 +40,6 @@ export function nextFormulaCalculationState(
 ): FormulaCalculationState {
   return {
     astCache: state.astCache,
-    spillRegions: spillState.spillRegions,
-    ghostSnapshots: spillState.ghostSnapshots
+    spillRegions: spillState.spillRegions
   };
 }
-import type { SnapshotCellValue } from "@formula/integration/workbook-snapshot";

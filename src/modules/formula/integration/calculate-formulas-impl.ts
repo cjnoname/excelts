@@ -111,15 +111,9 @@ export function calculateFormulasImpl(
     return buildStaleSpillCleanupPlan(state, snapshot);
   }
 
-  // ── Step 3: Parse ──
-  // Use persistent AST cache — formula text → AST is a pure function,
-  // so parsed ASTs can be safely reused across calculation cycles.
+  // ── Steps 3–4: Parse + Compile ──
+  // Formula text → AST is pure, so parsed ASTs persist across cycles.
   const astCache = state.astCache;
-  for (const inst of instances) {
-    parseFormulaText(inst.sourceText, astCache);
-  }
-
-  // ── Step 4: Compile (Bind) ──
   const compiledMap = new Map<string, CompiledFormula>();
   const volatileHostFunctions = new Set<string>();
   for (const [name, descriptor] of hostFunctions ?? []) {
@@ -130,7 +124,8 @@ export function calculateFormulasImpl(
   const failedInstances: FormulaInstance[] = [];
   const results = new Map<string, RuntimeValue>();
   for (const inst of instances) {
-    const compiled = compileFormula(inst, astCache, snapshot, volatileHostFunctions);
+    const ast = parseFormulaText(inst.sourceText, astCache);
+    const compiled = compileFormula(inst, ast, snapshot, volatileHostFunctions);
     const key = formulaCellKey(inst.sheetName, inst.row, inst.col);
     if ("reason" in compiled) {
       failedInstances.push(inst);
@@ -245,7 +240,7 @@ export function calculateFormulasImpl(
     }
     const cached = snapshot.worksheetsByName
       .get(inst.sheetName.toLowerCase())
-      ?.cells.get(snapshotCellKey(inst.row, inst.col))?.cachedResult;
+      ?.cells.get(snapshotCellKey(inst.row, inst.col))?.value;
     const seeded =
       value.kind === RVKind.Error &&
       shouldPreserveCompileFailure(value, inst, snapshot) &&
@@ -322,15 +317,12 @@ export function calculateFormulasImpl(
 
   // ── Step 7: Materialize (Build Writeback Plan) ──
   const previousSpills = state.spillRegions;
-  const previousGhosts = state.ghostSnapshots;
-
   const plan = buildWritebackPlan(
     snapshot,
     [...compiledMap.values()],
     failedInstances,
     results,
-    previousSpills,
-    previousGhosts
+    previousSpills
   );
 
   return plan;
@@ -642,12 +634,11 @@ type CompileFailure =
 
 function compileFormula(
   inst: FormulaInstance,
-  astCache: Map<string, CachedAst>,
+  ast: AstNode | null,
   snapshot: WorkbookSnapshot,
   volatileHostFunctions: ReadonlySet<string>
 ): CompiledFormula | CompileFailure {
-  const ast = astCache.get(inst.sourceText);
-  if (!ast || ast === PARSE_FAILED) {
+  if (!ast) {
     return { reason: "parse", formula: inst.sourceText };
   }
 
@@ -732,12 +723,12 @@ function buildStaleSpillCleanupPlan(
   if (previousSpills.size === 0) {
     return {
       operations: [],
-      spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+      spillState: { spillRegions: new Map() }
     };
   }
 
   // No formula cells → all spills are stale
-  return buildWritebackPlan(snapshot, [], [], new Map(), previousSpills, state.ghostSnapshots);
+  return buildWritebackPlan(snapshot, [], [], new Map(), previousSpills);
 }
 
 // ============================================================================

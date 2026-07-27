@@ -117,12 +117,6 @@ export interface CellSnapshot {
    * from the XLSX model, or inferred from the top-level function name).
    */
   readonly isDynamicArray?: boolean;
-  /**
-   * The cached result from the XLSX file (before engine evaluation).
-   * Used by `shouldPreserveCachedResult` to avoid overwriting usable data
-   * when the engine returns #NAME? for an unsupported function.
-   */
-  readonly cachedResult?: SnapshotCellValue;
 }
 
 // ============================================================================

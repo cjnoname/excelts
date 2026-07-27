@@ -40,8 +40,7 @@ import type {
   SpillErrorWrite,
   CleanupWrite,
   CSEWrite,
-  ScalarWrite,
-  PreserveWrite
+  ScalarWrite
 } from "@formula/materialize/writeback-plan";
 import type { RuntimeValue, ScalarValue, ArrayValue } from "@formula/runtime/values";
 import { RVKind } from "@formula/runtime/values";
@@ -67,20 +66,17 @@ type GhostMap = Map<string, string>;
  * @param compiled - All compiled formulas in evaluation order
  * @param results - Raw evaluation results, keyed by formula cell key
  * @param previousSpills - Persistent spill regions from previous calculation
- * @param previousGhosts - Persistent ghost snapshots from previous calculation
  */
 export function buildWritebackPlan(
   snapshot: WorkbookSnapshot,
   compiled: readonly CompiledFormula[],
   failedInstances: readonly FormulaInstance[],
   results: ReadonlyMap<string, RuntimeValue>,
-  previousSpills: ReadonlyMap<string, SpillRegion>,
-  previousGhosts: ReadonlyMap<string, unknown>
+  previousSpills: ReadonlyMap<string, SpillRegion>
 ): WritebackPlan {
   const cleanupOperations: WriteOperation[] = [];
   const writeOperations: WriteOperation[] = [];
   const spillRegions = new Map<string, SpillRegion>();
-  const ghostSnapshots = new Map<string, SnapshotCellValue>();
   // Target cells already claimed by a spill produced EARLIER in this
   // calc pass. Without this set, two dynamic-array formulas whose spill
   // regions overlap would each pass the availability check against the
@@ -110,7 +106,6 @@ export function buildWritebackPlan(
     if (previousRegion) {
       emitPreviousSpillCleanup(
         previousRegion,
-        previousGhosts,
         snapshot,
         cleanupOperations,
         inst.sheetName,
@@ -118,14 +113,7 @@ export function buildWritebackPlan(
       );
     }
     const scalar = scalarFromResult(result);
-    if (shouldPreserveCompileFailure(scalar, inst, snapshot)) {
-      writeOperations.push({
-        type: "preserve",
-        sheetName: inst.sheetName,
-        row: inst.row,
-        col: inst.col
-      });
-    } else {
+    if (!shouldPreserveCompileFailure(scalar, inst, snapshot)) {
       writeOperations.push({
         type: "scalar",
         sheetName: inst.sheetName,
@@ -168,14 +156,7 @@ export function buildWritebackPlan(
     if (!formulaKeys.has(srcKey)) {
       const ws = snapshot.worksheetsById.get(region.worksheetId);
       if (ws) {
-        emitPreviousSpillCleanup(
-          region,
-          previousGhosts,
-          snapshot,
-          cleanupOperations,
-          ws.name,
-          region.worksheetId
-        );
+        emitPreviousSpillCleanup(region, snapshot, cleanupOperations, ws.name, region.worksheetId);
       }
     }
   }
@@ -198,7 +179,6 @@ export function buildWritebackPlan(
       if (previousRegion) {
         emitPreviousSpillCleanup(
           previousRegion,
-          previousGhosts,
           snapshot,
           cleanupOperations,
           inst.sheetName,
@@ -225,10 +205,8 @@ export function buildWritebackPlan(
         srcKey,
         ghostMap,
         previousSpills.get(srcKey),
-        previousGhosts,
         snapshot,
         spillRegions,
-        ghostSnapshots,
         cleanupOperations,
         writeOperations,
         activeSpillTargets
@@ -239,7 +217,6 @@ export function buildWritebackPlan(
         if (previousRegion) {
           emitPreviousSpillCleanup(
             previousRegion,
-            previousGhosts,
             snapshot,
             cleanupOperations,
             inst.sheetName,
@@ -264,7 +241,6 @@ export function buildWritebackPlan(
       if (prevRegion) {
         emitPreviousSpillCleanup(
           prevRegion,
-          previousGhosts,
           snapshot,
           cleanupOperations,
           inst.sheetName,
@@ -272,14 +248,7 @@ export function buildWritebackPlan(
         );
       }
 
-      if (shouldPreserveUnsupportedFunction(scalar, inst, snapshot)) {
-        writeOperations.push({
-          type: "preserve",
-          sheetName: inst.sheetName,
-          row: inst.row,
-          col: inst.col
-        } satisfies PreserveWrite);
-      } else {
+      if (!shouldPreserveUnsupportedFunction(scalar, inst, snapshot)) {
         writeOperations.push({
           type: "scalar",
           sheetName: inst.sheetName,
@@ -293,10 +262,7 @@ export function buildWritebackPlan(
 
   return {
     operations: [...cleanupOperations, ...writeOperations],
-    spillState: {
-      spillRegions,
-      ghostSnapshots
-    }
+    spillState: { spillRegions }
   };
 }
 
@@ -369,10 +335,8 @@ function buildSpillWrite(
   srcKey: string,
   ghostMap: GhostMap,
   previousRegion: SpillRegion | undefined,
-  previousGhosts: ReadonlyMap<string, unknown>,
   snapshot: WorkbookSnapshot,
   spillRegions: Map<string, SpillRegion>,
-  ghostSnapshotsOut: Map<string, SnapshotCellValue>,
   cleanupOperations: WriteOperation[],
   writeOperations: WriteOperation[],
   /**
@@ -404,7 +368,6 @@ function buildSpillWrite(
     if (previousRegion) {
       emitPreviousSpillCleanup(
         previousRegion,
-        previousGhosts,
         snapshot,
         cleanupOperations,
         inst.sheetName,
@@ -452,7 +415,6 @@ function buildSpillWrite(
   if (previousRegion) {
     emitPreviousSpillCleanup(
       previousRegion,
-      previousGhosts,
       snapshot,
       cleanupOperations,
       inst.sheetName,
@@ -468,12 +430,6 @@ function buildSpillWrite(
       const val = arr.rows[r]?.[c] ?? ({ kind: RVKind.Blank } as ScalarValue);
       const sv = runtimeToSnapshotValue(val);
       row.push(sv);
-
-      // Record ghost snapshot
-      if (r !== 0 || c !== 0) {
-        const targetKey = spillCellKeyFromId(inst.sheetId, inst.row + r, inst.col + c);
-        ghostSnapshotsOut.set(targetKey, sv);
-      }
     }
     results.push(row);
   }
@@ -505,7 +461,6 @@ function buildSpillWrite(
 
 function collectStaleGhosts(
   region: SpillRegion,
-  previousGhosts: ReadonlyMap<string, unknown>,
   snapshot: WorkbookSnapshot
 ): { row: number; col: number }[] {
   const cells: { row: number; col: number }[] = [];
@@ -554,13 +509,12 @@ function collectStaleGhosts(
  */
 function emitPreviousSpillCleanup(
   previousRegion: SpillRegion,
-  previousGhosts: ReadonlyMap<string, unknown>,
   snapshot: WorkbookSnapshot,
   operations: WriteOperation[],
   sheetName: string,
   sheetId: number
 ): void {
-  const cleanupCells = collectStaleGhosts(previousRegion, previousGhosts, snapshot);
+  const cleanupCells = collectStaleGhosts(previousRegion, snapshot);
   if (cleanupCells.length === 0) {
     return;
   }
@@ -591,8 +545,7 @@ function isInMergedRegion(ws: WorksheetSnapshot, row: number, col: number): bool
 
 export function isGhostUnmodified(
   cell: { formulaKind: string; ghostOwner?: string } | undefined,
-  sourceKey: string,
-  _previousGhosts?: ReadonlyMap<string, unknown>
+  sourceKey: string
 ): boolean {
   return cell?.formulaKind === "none" && cell.ghostOwner === sourceKey;
 }
@@ -665,7 +618,7 @@ export function shouldPreserveCompileFailure(
     return false;
   }
   const cell = ws.cells.get(snapshotCellKey(inst.row, inst.col));
-  return cell?.cachedResult !== undefined && cell.cachedResult !== null;
+  return cell?.value !== undefined && cell.value !== null;
 }
 
 function shouldPreserveUnsupportedFunction(

@@ -18,18 +18,23 @@ export function isSpillAvailable(options: SpillAvailabilityOptions): boolean {
   if (!ws || sourceRow + rows - 1 > 1048576 || sourceCol + cols - 1 > 16384) {
     return false;
   }
+  const bottom = sourceRow + rows - 1;
+  const right = sourceCol + cols - 1;
+  if (
+    ws.mergedRegions.some(
+      region =>
+        sourceRow <= region.bottom &&
+        bottom >= region.top &&
+        sourceCol <= region.right &&
+        right >= region.left
+    )
+  ) {
+    return false;
+  }
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const row = sourceRow + r;
       const col = sourceCol + c;
-      if (
-        ws.mergedRegions.some(
-          region =>
-            row >= region.top && row <= region.bottom && col >= region.left && col <= region.right
-        )
-      ) {
-        return false;
-      }
       if (r === 0 && c === 0) {
         continue;
       }

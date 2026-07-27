@@ -16,7 +16,7 @@ import type { WriteOperation } from "@formula/materialize/writeback-plan";
 import { describe, it, expect } from "vitest";
 
 describe("formula writeback transaction", () => {
-  it.each(["scalar", "cse", "spill", "spill-error", "cleanup", "preserve"] as const)(
+  it.each(["scalar", "cse", "spill", "spill-error", "cleanup"] as const)(
     "rolls back the complete workbook when %s application throws",
     operationType => {
       const wb = Workbook.create();
@@ -60,8 +60,6 @@ describe("formula writeback transaction", () => {
               sheetId: ws.id,
               cells: [{ row: 1, col: 3 }]
             };
-          case "preserve":
-            return { type: "preserve", sheetName: "S", row: 1, col: 6 };
         }
       })();
       const before = JSON.stringify(getSheetModel(ws));
@@ -72,7 +70,7 @@ describe("formula writeback transaction", () => {
           wb,
           {
             operations: [{ type: "scalar", sheetName: "S", row: 1, col: 1, value: 42 }, operation],
-            spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+            spillState: { spillRegions: new Map() }
           },
           snapshot,
           captureFormulaSnapshot(wb),
@@ -129,7 +127,7 @@ describe("formula writeback transaction", () => {
             { type: "scalar", sheetName: "S", row: 1, col: 1, value: 42 },
             { type: "scalar", sheetName: "Deleted", row: 1, col: 1, value: 99 }
           ],
-          spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+          spillState: { spillRegions: new Map() }
         },
         snapshot,
         captureFormulaSnapshot(wb)
@@ -189,7 +187,7 @@ describe("formula writeback transaction", () => {
               results: []
             }
           ],
-          spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+          spillState: { spillRegions: new Map() }
         },
         snapshot,
         captureFormulaSnapshot(wb)
@@ -220,7 +218,7 @@ describe("formula writeback transaction", () => {
               results: [[1, 2]]
             }
           ],
-          spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+          spillState: { spillRegions: new Map() }
         },
         snapshot,
         captureFormulaSnapshot(wb)
@@ -243,7 +241,7 @@ describe("formula writeback transaction", () => {
             { type: "scalar", sheetName: "S", row: 1, col: 1, value: 42 },
             { type: "cleanup", sheetName: "S", sheetId: ws.id, cells: [{ row: 1, col: 0 }] }
           ],
-          spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+          spillState: { spillRegions: new Map() }
         },
         snapshot,
         captureFormulaSnapshot(wb)

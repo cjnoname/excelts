@@ -22,7 +22,6 @@
  * - `SpillWrite` — write a dynamic array result to adjacent cells (spill).
  * - `SpillErrorWrite` — write #SPILL! to the source cell (conflict detected).
  * - `CleanupWrite` — clear stale ghost cells from a previous spill.
- * - `PreserveWrite` — keep the cell's existing cached result (unsupported fn).
  */
 
 import type { SnapshotCellValue } from "@formula/integration/workbook-snapshot";
@@ -128,13 +127,6 @@ export interface CleanupWrite {
  * Used when the engine returns #NAME? (unsupported function) but the cell
  * has a usable cached result from the XLSX file.
  */
-export interface PreserveWrite {
-  readonly type: "preserve";
-  readonly sheetName: string;
-  readonly row: number;
-  readonly col: number;
-}
-
 // ============================================================================
 // WritebackPlan
 // ============================================================================
@@ -142,13 +134,7 @@ export interface PreserveWrite {
 /**
  * A single write operation in the plan.
  */
-export type WriteOperation =
-  | ScalarWrite
-  | CSEWrite
-  | SpillWrite
-  | SpillErrorWrite
-  | CleanupWrite
-  | PreserveWrite;
+export type WriteOperation = ScalarWrite | CSEWrite | SpillWrite | SpillErrorWrite | CleanupWrite;
 
 /**
  * The complete writeback plan produced by the engine.
@@ -185,11 +171,4 @@ export interface SpillState {
    * Value: the spill region dimensions.
    */
   readonly spillRegions: ReadonlyMap<string, SpillRegion>;
-
-  /**
-   * Ghost cell value snapshots for modification detection.
-   * Key: ghost cell key `"ws:<id>!row:col"`.
-   * Value: the raw value written to that ghost cell.
-   */
-  readonly ghostSnapshots: ReadonlyMap<string, SnapshotCellValue>;
 }

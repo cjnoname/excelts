@@ -6,7 +6,11 @@
  * standalone chart XML part.
  */
 
-import { fillChartCaches, fillChartExCaches } from "@excel/chart/build/cache-populator";
+import {
+  fillChartCaches,
+  fillChartExCaches,
+  fillChartExCachesForRendering
+} from "@excel/chart/bridge/excel-chart-host";
 import {
   applyChartSeriesOptionsPatch,
   buildChartModel,
@@ -793,7 +797,10 @@ export function chartMutate(
       "Cannot mutate a classic chart model because this chart is ChartEx or missing."
     );
   }
-  mutator(model);
+  const draft = structuredClone(model);
+  mutator(draft);
+  const committed = structuredClone(draft);
+  syncObjectContents(model, committed);
   _chartMarkDirty(c, options.preferRawPatch ?? false, options.requireRawPatch ?? false);
   return c;
 }
@@ -809,7 +816,13 @@ export function chartMutateChartEx(
       "Cannot mutate a ChartEx model because this chart is classic or missing."
     );
   }
-  mutator(model);
+  const draft = structuredClone(model);
+  mutator(draft);
+  if (!draft.chartSpace?.chart || !draft.chartSpace.chartData) {
+    throw new ChartOptionsError(
+      "Chart.mutateChartEx produced an invalid model: chartSpace.chart and chartSpace.chartData are required."
+    );
+  }
   // Invalidate the model-level rawXml cache so subsequent calls to
   // `renderChartEx(model)` (e.g. standalone preview, tests) honour the
   // mutation instead of short-circuiting to the bytes captured at parse
@@ -821,20 +834,54 @@ export function chartMutateChartEx(
   // patching — they keep the rawXml so the patcher in xlsx.browser.ts
   // can reuse it.
   if (!options.preferRawPatch && !options.requireRawPatch) {
-    model.rawXml = undefined;
+    draft.rawXml = undefined;
     // Also clear title-level rawTx when the structured `text` was
     // updated. Otherwise the writer's "structured path wins over
     // raw" rule correctly routes the new text, but downstream
     // snapshotters (change-detection / test helpers) still see the
     // stale rawTx bytes and conclude the model hasn't been mutated.
     // Clearing here unifies the invalidation model.
-    const title = model.chartSpace.chart.title;
+    const title = draft.chartSpace?.chart?.title;
     if (title?.text && title.rawTx !== undefined) {
       title.rawTx = undefined;
     }
   }
+  const committed = structuredClone(draft);
+  syncObjectContents(model, committed);
   _chartMarkDirty(c, options.preferRawPatch ?? false, options.requireRawPatch ?? false);
   return c;
+}
+
+function syncObjectContents<T extends object>(target: T, source: T): void {
+  const targetRecord = target as Record<string, unknown>;
+  const sourceRecord = source as Record<string, unknown>;
+  for (const key of Object.keys(targetRecord)) {
+    if (!(key in sourceRecord)) {
+      delete targetRecord[key];
+    }
+  }
+  for (const [key, value] of Object.entries(sourceRecord)) {
+    const current = targetRecord[key];
+    if (Array.isArray(current) && Array.isArray(value)) {
+      const shared = Math.min(current.length, value.length);
+      for (let index = 0; index < shared; index++) {
+        if (isPlainObject(current[index]) && isPlainObject(value[index])) {
+          syncObjectContents(current[index], value[index]);
+        } else {
+          current[index] = structuredClone(value[index]);
+        }
+      }
+      current.splice(shared, current.length - shared, ...structuredClone(value.slice(shared)));
+    } else if (isPlainObject(current) && isPlainObject(value)) {
+      syncObjectContents(current, value);
+    } else {
+      targetRecord[key] = structuredClone(value);
+    }
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -1384,31 +1431,10 @@ export function _chartRefreshChartExCaches(c: ChartHandle): void {
   if (!model) {
     return;
   }
-  // Temporarily lift _skipCache so fillChartExCaches actually populates
-  const skipped: Array<{ dim: Record<string, unknown>; field: "_skipCache" }> = [];
-  for (const entry of model.chartSpace.chartData.data) {
-    const str = entry.strDim as Record<string, unknown> | undefined;
-    if (str?.["_skipCache"]) {
-      skipped.push({ dim: str, field: "_skipCache" });
-      delete str["_skipCache"];
-    }
-    const num = entry.numDim as Record<string, unknown> | undefined;
-    if (num?.["_skipCache"]) {
-      skipped.push({ dim: num, field: "_skipCache" });
-      delete num["_skipCache"];
-    }
-  }
-
   try {
-    fillChartExCaches(model, getSheetWorkbook(c.worksheet), c.worksheet);
+    fillChartExCachesForRendering(model, getSheetWorkbook(c.worksheet), c.worksheet);
   } catch {
     // Best-effort — same rationale as _refreshCaches.
-  } finally {
-    // Restore _skipCache so the writer still suppresses cache output,
-    // even if fillChartExCaches threw an error.
-    for (const { dim } of skipped) {
-      dim["_skipCache"] = true;
-    }
   }
 }
 

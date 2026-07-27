@@ -26,7 +26,7 @@ export {
   fillChartExCaches,
   fillNumRef,
   fillStrRef
-} from "@excel/chart/build/cache-populator";
+} from "@excel/chart/bridge/excel-chart-host";
 export {
   parseChartColors,
   buildChartColors,

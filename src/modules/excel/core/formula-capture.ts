@@ -215,8 +215,7 @@ function buildFormulaCellSnapshot(
       row,
       col,
       value: cachedResult,
-      formulaKind: "none",
-      cachedResult
+      formulaKind: "none"
     };
   }
 
@@ -233,8 +232,7 @@ function buildFormulaCellSnapshot(
     formulaKind: kind,
     formula,
     ref: model.ref,
-    isDynamicArray: model.isDynamicArray ?? undefined,
-    cachedResult
+    isDynamicArray: model.isDynamicArray ?? undefined
   };
 }
 

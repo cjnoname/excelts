@@ -14,7 +14,7 @@
 // `*-core` data layer (never on this file), so there is no import cycle, and
 // the bundler tree-shakes the whole chart tree out of consumer bundles that
 // never create or serialise a chart.
-import { fillChartCaches, fillChartExCaches } from "@excel/chart/build/cache-populator";
+import { fillChartCaches, fillChartExCaches } from "@excel/chart/bridge/excel-chart-host";
 import { buildChartModel, buildComboChartModel } from "@excel/chart/build/chart-builder";
 import { buildChartExModel } from "@excel/chart/build/chart-ex-builder";
 import type {

@@ -1,4 +1,13 @@
-import type { ChartExModel } from "@excel/chart/model/chart-ex-types";
+import type {
+  ChartDataSnapshot,
+  ChartWorksheetSnapshot
+} from "@excel/chart/core/chart-data-snapshot";
+import { chartSnapshotCellKey } from "@excel/chart/core/chart-data-snapshot";
+import type {
+  ChartExModel,
+  ChartExNumericDimension,
+  ChartExStringDimension
+} from "@excel/chart/model/chart-ex-types";
 /**
  * Chart cache populator.
  *
@@ -18,6 +27,7 @@ import type {
   ChartTitle,
   ChartTypeGroup,
   DataLabelsRange,
+  MultiLevelStringCache,
   NumberCache,
   NumberReference,
   SeriesBase,
@@ -25,13 +35,6 @@ import type {
   StringReference,
   MultiLevelStringReference
 } from "@excel/chart/model/types";
-import { cellGetValue } from "@excel/core/cell";
-import { definedNamesGetRangesScoped } from "@excel/core/defined-names";
-import { tableDisplayName, tableModel, tableName } from "@excel/core/table";
-import type { WorkbookData } from "@excel/core/workbook-core";
-import { getDefinedNames, getWorksheet, getWorksheets } from "@excel/core/workbook-core";
-import type { WorksheetData } from "@excel/core/worksheet-core";
-import { getCell, getSheetName, getTables } from "@excel/core/worksheet-core";
 import { colCache } from "@excel/utils/col-cache";
 import { dateToExcel } from "@utils/utils.base";
 
@@ -48,17 +51,85 @@ import { dateToExcel } from "@utils/utils.base";
  *   to correctly resolve sheet-scoped names; omitting it falls back to
  *   workbook-scoped names only.
  */
-export function fillChartCaches(
+export interface ChartCachePlan {
+  readonly writes: readonly ChartCacheWrite[];
+  readonly diagnostics: readonly { code: "unresolved-reference"; formula: string }[];
+}
+
+export type ChartCacheWrite =
+  | {
+      readonly kind: "number-cache";
+      readonly target: NumberReference;
+      readonly expectedFormula: string;
+      readonly value: NumberCache;
+    }
+  | {
+      readonly kind: "string-cache";
+      readonly target: StringReference | DataLabelsRange;
+      readonly expectedFormula: string;
+      readonly value: StringCache;
+    }
+  | {
+      readonly kind: "multi-level-cache";
+      readonly target: MultiLevelStringReference;
+      readonly expectedFormula: string;
+      readonly value: MultiLevelStringCache;
+    }
+  | {
+      readonly kind: "chart-ex-string-levels";
+      readonly target: ChartExStringDimension;
+      readonly expectedFormula: string;
+      readonly value: NonNullable<ChartExStringDimension["levels"]>;
+    }
+  | {
+      readonly kind: "chart-ex-number-levels";
+      readonly target: ChartExNumericDimension;
+      readonly expectedFormula: string;
+      readonly value: NonNullable<ChartExNumericDimension["levels"]>;
+    };
+
+export interface ChartCachePlanningOptions {
+  readonly includeSkippedDimensions?: boolean;
+}
+
+export function collectChartReferencedCells(
+  formulas: readonly string[],
+  snapshot: ChartDataSnapshot
+): Map<string, Set<string>> | undefined {
+  const requested = new Map<string, Set<string>>();
+  const ctx = buildResolverContext(snapshot, [], requested);
+  for (const formula of formulas) {
+    if (!resolveReference(formula, ctx) && !resolveReferenceMatrix(formula, ctx)) {
+      return undefined;
+    }
+  }
+  return requested;
+}
+
+export function buildChartCachePlan(
+  model: Readonly<ChartModel>,
+  snapshot: ChartDataSnapshot
+): ChartCachePlan {
+  const writes: ChartCacheWrite[] = [];
+  populateChartCaches(model as ChartModel, snapshot, writes);
+  return { writes, diagnostics: [] };
+}
+
+export function applyChartCachePlan(plan: ChartCachePlan): void {
+  applyCacheWrites(plan.writes);
+}
+
+function populateChartCaches(
   model: ChartModel,
-  workbook: WorkbookData,
-  contextWorksheet?: WorksheetData
+  snapshot: ChartDataSnapshot,
+  writes: ChartCacheWrite[]
 ): void {
   const plotArea = model.chart?.plotArea;
   if (!plotArea) {
     return;
   }
-  const date1904 = workbook.properties?.date1904;
-  const ctx = buildResolverContext(workbook, contextWorksheet);
+  const date1904 = snapshot.date1904;
+  const ctx = buildResolverContext(snapshot, writes);
   // Fill the classic chart title's `<c:strRef>` cache when the title
   // was authored as `{ formula: "..." }`. The writer already emits
   // `<c:strCache>` for any `strRef.cache.points` it finds; without
@@ -120,21 +191,36 @@ function fillClassicTitleCache(title: ChartTitle | undefined, ctx: ResolverConte
   // no cache — exactly the failure mode the fill was written to
   // prevent.
   if (resolved.cells.length > 0) {
-    strRef.cache = { pointCount: idx, points };
+    setCache(strRef, { pointCount: idx, points }, ctx);
   }
 }
 
-export function fillChartExCaches(
+export function buildChartExCachePlan(
+  model: Readonly<ChartExModel>,
+  snapshot: ChartDataSnapshot,
+  options: ChartCachePlanningOptions = {}
+): ChartCachePlan {
+  const writes: ChartCacheWrite[] = [];
+  populateChartExCaches(model as ChartExModel, snapshot, writes, options);
+  return { writes, diagnostics: [] };
+}
+
+export function applyChartExCachePlan(plan: ChartCachePlan): void {
+  applyCacheWrites(plan.writes);
+}
+
+function populateChartExCaches(
   model: ChartExModel,
-  workbook: WorkbookData,
-  contextWorksheet?: WorksheetData
+  snapshot: ChartDataSnapshot,
+  writes: ChartCacheWrite[],
+  options: ChartCachePlanningOptions
 ): void {
   // Defensive guard — parseChartEx emits `chartData.data = []` even for
   // malformed documents, but downstream callers (and unit fixtures) can
   // construct partial models. Match the classic `fillChartCaches` which
   // no-ops when `plotArea` is missing.
   const data = model.chartSpace?.chartData?.data;
-  const ctx = buildResolverContext(workbook, contextWorksheet);
+  const ctx = buildResolverContext(snapshot, writes);
   // Fill the ChartEx title's `<cx:txData>` cache. The builder accepts a
   // `{ formula: string }` title and parks `strRef: { formula, cache:
   // { points: [] } }` on the model; the writer emits `<cx:v>` from the
@@ -160,7 +246,7 @@ export function fillChartExCaches(
       if (first) {
         const value = toString(first.value);
         if (value !== undefined) {
-          titleStrRef.cache = { points: [{ index: 0, value }] };
+          setCache(titleStrRef as StringReference, { points: [{ index: 0, value }] }, ctx);
         }
       }
     }
@@ -169,7 +255,10 @@ export function fillChartExCaches(
     return;
   }
   for (const entry of data) {
-    if (entry.strDim?.formula && !hasChartExStringPoints(entry.strDim)) {
+    if (
+      entry.strDim?.formula &&
+      (options.includeSkippedDimensions || !hasChartExStringPoints(entry.strDim))
+    ) {
       const resolved = resolveReference(entry.strDim.formula, ctx);
       if (resolved && resolved.cells.length > 0) {
         const points: Array<{ index: number; value: string }> = [];
@@ -186,16 +275,19 @@ export function fillChartExCaches(
         // sizes the sparse array correctly. This matches the classic
         // `fillNumRefInternal` / `fillStrRefInternal` behaviour which
         // the null-value-cell test explicitly depends on.
-        entry.strDim.levels = [{ ptCount: idx, points }];
+        setLevels(entry.strDim, [{ ptCount: idx, points }], "chart-ex-string-levels", ctx);
       }
     }
-    if (entry.numDim?.formula && !hasChartExNumberPoints(entry.numDim)) {
+    if (
+      entry.numDim?.formula &&
+      (options.includeSkippedDimensions || !hasChartExNumberPoints(entry.numDim))
+    ) {
       const resolved = resolveReference(entry.numDim.formula, ctx);
       if (resolved && resolved.cells.length > 0) {
         const points: Array<{ index: number; value: number }> = [];
         let idx = 0;
         for (const cell of resolved.cells) {
-          const value = toNumber(cell.value, workbook.properties?.date1904);
+          const value = toNumber(cell.value, snapshot.date1904);
           if (value !== undefined) {
             points.push({ index: idx, value });
           }
@@ -207,13 +299,18 @@ export function fillChartExCaches(
         // with a freshly-built object and silently dropped the
         // attribute on every save.
         const existingLvl = entry.numDim.levels?.[0];
-        entry.numDim.levels = [
-          {
-            ptCount: idx,
-            points,
-            ...(existingLvl?.formatCode ? { formatCode: existingLvl.formatCode } : {})
-          }
-        ];
+        setLevels(
+          entry.numDim,
+          [
+            {
+              ptCount: idx,
+              points,
+              ...(existingLvl?.formatCode ? { formatCode: existingLvl.formatCode } : {})
+            }
+          ],
+          "chart-ex-number-levels",
+          ctx
+        );
       }
     }
   }
@@ -350,7 +447,7 @@ function fillDataLabelsRange(range: DataLabelsRange, ctx: ResolverContext): void
   // label array correctly; dropping the cache entirely under-counted
   // the label index and desynchronised labels from their data points.
   if (idx > 0) {
-    range.cache = { pointCount: idx, points };
+    setCache(range, { pointCount: idx, points }, ctx);
   }
 }
 
@@ -373,15 +470,6 @@ function fillAxisDataSource(src: AxisDataSource, ctx: ResolverContext, date1904?
  * @param contextWorksheet - Optional worksheet whose sheet-scoped defined
  *   names take precedence over workbook-scoped ones.
  */
-export function fillNumRef(
-  ref: NumberReference,
-  workbook: WorkbookData,
-  date1904?: boolean,
-  contextWorksheet?: WorksheetData
-): void {
-  fillNumRefInternal(ref, buildResolverContext(workbook, contextWorksheet), date1904);
-}
-
 function fillNumRefInternal(ref: NumberReference, ctx: ResolverContext, date1904?: boolean): void {
   if (!ref.formula) {
     return;
@@ -411,11 +499,7 @@ function fillNumRefInternal(ref: NumberReference, ctx: ResolverContext, date1904
   if (idx === 0) {
     return;
   }
-  if (!ref.cache) {
-    ref.cache = { points: [] };
-  }
-  ref.cache.points = points;
-  ref.cache.pointCount = idx; // total slots (including empty)
+  setCache(ref, { points, pointCount: idx }, ctx);
 }
 
 /**
@@ -425,14 +509,6 @@ function fillNumRefInternal(ref: NumberReference, ctx: ResolverContext, date1904
  * @param contextWorksheet - Optional worksheet whose sheet-scoped defined
  *   names take precedence over workbook-scoped ones.
  */
-export function fillStrRef(
-  ref: StringReference,
-  workbook: WorkbookData,
-  contextWorksheet?: WorksheetData
-): void {
-  fillStrRefInternal(ref, buildResolverContext(workbook, contextWorksheet));
-}
-
 function fillStrRefInternal(ref: StringReference, ctx: ResolverContext): void {
   if (!ref.formula) {
     return;
@@ -459,19 +535,7 @@ function fillStrRefInternal(ref: StringReference, ctx: ResolverContext): void {
   if (idx === 0) {
     return;
   }
-  if (!ref.cache) {
-    ref.cache = { points: [] };
-  }
-  ref.cache.points = points;
-  ref.cache.pointCount = idx;
-}
-
-export function fillMultiLvlStrRef(
-  ref: MultiLevelStringReference,
-  workbook: WorkbookData,
-  contextWorksheet?: WorksheetData
-): void {
-  fillMultiLvlStrRefInternal(ref, buildResolverContext(workbook, contextWorksheet));
+  setCache(ref, { points, pointCount: idx }, ctx);
 }
 
 function fillMultiLvlStrRefInternal(ref: MultiLevelStringReference, ctx: ResolverContext): void {
@@ -497,7 +561,110 @@ function fillMultiLvlStrRefInternal(ref: MultiLevelStringReference, ctx: Resolve
     }
     levels.push({ pointCount: resolved.rowCount, points });
   }
-  ref.cache = { pointCount: resolved.rowCount, levels };
+  setCache(ref, { pointCount: resolved.rowCount, levels }, ctx);
+}
+
+export function buildChartCachePlanForReferences(
+  refs: {
+    readonly number?: Readonly<NumberReference>;
+    readonly string?: Readonly<StringReference>;
+    readonly multiLevelString?: Readonly<MultiLevelStringReference>;
+  },
+  snapshot: ChartDataSnapshot
+): ChartCachePlan {
+  const writes: ChartCacheWrite[] = [];
+  const ctx = buildResolverContext(snapshot, writes);
+  const number = refs.number as NumberReference | undefined;
+  const string = refs.string as StringReference | undefined;
+  const multiLevelString = refs.multiLevelString as MultiLevelStringReference | undefined;
+  if (number) {
+    fillNumRefInternal(number, ctx, snapshot.date1904);
+  }
+  if (string) {
+    fillStrRefInternal(string, ctx);
+  }
+  if (multiLevelString) {
+    fillMultiLvlStrRefInternal(multiLevelString, ctx);
+  }
+  return { writes, diagnostics: [] };
+}
+
+function replaceObjectValue(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>
+): void {
+  if (Array.isArray(target) && Array.isArray(source)) {
+    target.splice(0, target.length, ...structuredClone(source));
+    return;
+  }
+  for (const key of Object.keys(target)) {
+    if (!(key in source)) {
+      delete target[key];
+    }
+  }
+  for (const [key, value] of Object.entries(source)) {
+    const current = target[key];
+    if (isObject(current) && isObject(value) && Array.isArray(current) === Array.isArray(value)) {
+      replaceObjectValue(current, value);
+    } else {
+      target[key] = structuredClone(value);
+    }
+  }
+}
+
+function applyCacheWrites(writes: readonly ChartCacheWrite[]): void {
+  for (const write of writes) {
+    if (write.target.formula !== write.expectedFormula) {
+      throw new Error("Chart reference changed after cache planning");
+    }
+  }
+  for (const write of writes) {
+    const key = write.kind.endsWith("levels") ? "levels" : "cache";
+    const target = write.target as unknown as Record<string, unknown>;
+    const current = target[key];
+    if (isObject(current) && isObject(write.value)) {
+      replaceObjectValue(current, write.value as Record<string, unknown>);
+    } else {
+      target[key] = structuredClone(write.value);
+    }
+  }
+}
+
+function setCache<
+  T extends NumberReference | StringReference | MultiLevelStringReference | DataLabelsRange
+>(
+  target: T,
+  value: T extends NumberReference
+    ? NumberCache
+    : T extends MultiLevelStringReference
+      ? MultiLevelStringCache
+      : StringCache,
+  ctx: ResolverContext
+): void {
+  if (target.formula) {
+    const kind =
+      "levels" in value
+        ? "multi-level-cache"
+        : typeof value.points[0]?.value === "number"
+          ? "number-cache"
+          : "string-cache";
+    ctx.writes.push({ kind, target, expectedFormula: target.formula, value } as ChartCacheWrite);
+  }
+}
+
+function setLevels<T extends ChartExStringDimension | ChartExNumericDimension>(
+  target: T,
+  value: NonNullable<T["levels"]>,
+  kind: "chart-ex-string-levels" | "chart-ex-number-levels",
+  ctx: ResolverContext
+): void {
+  if (target.formula) {
+    ctx.writes.push({ kind, target, expectedFormula: target.formula, value } as ChartCacheWrite);
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 // ---------------------------------------------------------------------------
@@ -505,12 +672,12 @@ function fillMultiLvlStrRefInternal(ref: MultiLevelStringReference, ctx: Resolve
 // ---------------------------------------------------------------------------
 
 interface ResolvedReference {
-  worksheet: WorksheetData;
+  worksheet: ChartWorksheetSnapshot;
   cells: Array<{ value: unknown }>;
 }
 
 interface ResolvedReferenceMatrix {
-  worksheet: WorksheetData;
+  worksheet: ChartWorksheetSnapshot;
   values: unknown[][];
   rowCount: number;
   columnCount: number;
@@ -540,8 +707,9 @@ interface ResolvedReferenceMatrix {
  * expansion ceiling.
  */
 interface ResolverContext {
-  workbook: WorkbookData;
-  contextWorksheet?: WorksheetData;
+  snapshot: ChartDataSnapshot;
+  writes: ChartCacheWrite[];
+  requestedCells?: Map<string, Set<string>>;
   localSheetId?: number;
   visitedDefinedNames: Set<string>;
   definedNameDepth: number;
@@ -555,39 +723,15 @@ interface ResolverContext {
 const MAX_DEFINED_NAME_DEPTH = 128;
 
 function buildResolverContext(
-  workbook: WorkbookData,
-  contextWorksheet?: WorksheetData
+  snapshot: ChartDataSnapshot,
+  writes: ChartCacheWrite[],
+  requestedCells?: Map<string, Set<string>>
 ): ResolverContext {
-  let localSheetId: number | undefined;
-  if (contextWorksheet) {
-    // OOXML `definedName/@localSheetId` is a 0-based index into the
-    // workbook-level `<sheets>` element, which INTERLEAVES worksheets
-    // and chartsheets. Previously this helper used
-    // `workbook.worksheets.indexOf(contextWorksheet)` — the compressed
-    // worksheets-only position — so an interleaved
-    // `[WS1, CS, WS2]` workbook resolved WS2's `localSheetId` to `1`,
-    // colliding with the chartsheet's real tab position and making
-    // every sheet-scoped defined name on WS2 miss.
-    //
-    // `worksheet.orderNo` is set at BOTH save time (addWorksheet /
-    // addChartsheet use a unified counter) and load time
-    // (workbook-xform assigns `sheetPosition` across the mixed
-    // `<sheets>` list), so it is the authoritative mixed-tab index.
-    // Fall back to the compressed lookup for test worksheets that
-    // bypass the allocator and never receive an `orderNo`.
-    if (typeof contextWorksheet.orderNo === "number") {
-      localSheetId = contextWorksheet.orderNo;
-    } else {
-      const idx = getWorksheets(workbook).indexOf(contextWorksheet);
-      if (idx >= 0) {
-        localSheetId = idx;
-      }
-    }
-  }
   return {
-    workbook,
-    contextWorksheet,
-    localSheetId,
+    snapshot,
+    writes,
+    requestedCells,
+    localSheetId: snapshot.contextLocalSheetId,
     visitedDefinedNames: new Set(),
     definedNameDepth: 0
   };
@@ -606,7 +750,7 @@ function buildResolverContext(
  *   3. Direct A1 cell/range references (possibly comma-separated union)
  */
 function resolveReference(formula: string, ctx: ResolverContext): ResolvedReference | undefined {
-  const structured = resolveStructuredReference(formula, ctx.workbook);
+  const structured = resolveStructuredReference(formula, ctx);
   if (structured) {
     return structured;
   }
@@ -619,7 +763,7 @@ function resolveReference(formula: string, ctx: ResolverContext): ResolvedRefere
   // Multi-range support: Excel uses commas or semicolons between sub-refs.
   // Inside quoted sheet names, commas don't count — do a safe split.
   const parts = splitFormulaRanges(formula);
-  let worksheet: WorksheetData | undefined;
+  let worksheet: ChartWorksheetSnapshot | undefined;
   const cells: Array<{ value: unknown }> = [];
 
   for (const part of parts) {
@@ -645,7 +789,7 @@ function resolveReference(formula: string, ctx: ResolverContext): ResolvedRefere
     if (!sheetName) {
       return undefined;
     }
-    const ws = getWorksheet(ctx.workbook, sheetName);
+    const ws = getSnapshotWorksheet(ctx.snapshot, sheetName);
     if (!ws) {
       return undefined;
     }
@@ -665,13 +809,13 @@ function resolveReference(formula: string, ctx: ResolverContext): ResolvedRefere
       const right = decoded.right as number;
       for (let r = top; r <= bottom; r++) {
         for (let c = left; c <= right; c++) {
-          cells.push({ value: extractCellValue(ws, r, c) });
+          cells.push({ value: readCell(ws, r, c, ctx) });
         }
       }
     } else if ("row" in decoded && "col" in decoded) {
       const r = decoded.row as number;
       const c = decoded.col as number;
-      cells.push({ value: extractCellValue(ws, r, c) });
+      cells.push({ value: readCell(ws, r, c, ctx) });
     }
   }
 
@@ -737,7 +881,7 @@ function resolveDefinedNameReference(
     // We recursively resolve each part through the full reference pipeline
     // so that nested names, structured refs, and A1 refs all work.
     const aggregated: Array<{ value: unknown }> = [];
-    let firstWorksheet: WorksheetData | undefined;
+    let firstWorksheet: ChartWorksheetSnapshot | undefined;
     for (const rangeStr of resolution.ranges) {
       if (!rangeStr) {
         continue;
@@ -782,7 +926,7 @@ function findDefinedName(
   if (qualified) {
     // Sheet-scoped entry on the qualifying sheet wins; fall back to
     // workbook-scoped if the sheet has no matching entry.
-    const qualifyingSheet = getWorksheet(ctx.workbook, qualified.sheetName);
+    const qualifyingSheet = getSnapshotWorksheet(ctx.snapshot, qualified.sheetName);
     if (qualifyingSheet) {
       // Match the scoping key used in `buildResolverContext` — always
       // prefer `orderNo` (the mixed-tab workbook position, counting
@@ -797,15 +941,15 @@ function findDefinedName(
       const sheetIdx =
         typeof qualifyingSheet.orderNo === "number"
           ? qualifyingSheet.orderNo
-          : getWorksheets(ctx.workbook).indexOf(qualifyingSheet);
+          : ctx.snapshot.worksheets.indexOf(qualifyingSheet);
       if (sheetIdx >= 0) {
-        const scoped = getDefinedNameRanges(ctx.workbook, qualified.name, sheetIdx);
+        const scoped = getDefinedNameRanges(ctx.snapshot, qualified.name, sheetIdx);
         if (scoped) {
           return { name: qualified.name, localSheetId: sheetIdx, ranges: scoped };
         }
       }
     }
-    const global = getDefinedNameRanges(ctx.workbook, qualified.name, undefined);
+    const global = getDefinedNameRanges(ctx.snapshot, qualified.name, undefined);
     if (global) {
       return { name: qualified.name, ranges: global };
     }
@@ -819,12 +963,12 @@ function findDefinedName(
   }
   // Sheet-scoped on the context worksheet wins, then workbook-scoped.
   if (ctx.localSheetId !== undefined) {
-    const scoped = getDefinedNameRanges(ctx.workbook, trimmed, ctx.localSheetId);
+    const scoped = getDefinedNameRanges(ctx.snapshot, trimmed, ctx.localSheetId);
     if (scoped) {
       return { name: trimmed, localSheetId: ctx.localSheetId, ranges: scoped };
     }
   }
-  const global = getDefinedNameRanges(ctx.workbook, trimmed, undefined);
+  const global = getDefinedNameRanges(ctx.snapshot, trimmed, undefined);
   if (global) {
     return { name: trimmed, ranges: global };
   }
@@ -836,28 +980,15 @@ function findDefinedName(
  * a specific scope. Returns `undefined` when no entry exists at that scope.
  */
 function getDefinedNameRanges(
-  workbook: WorkbookData,
+  snapshot: ChartDataSnapshot,
   name: string,
   localSheetId: number | undefined
 ): string[] | undefined {
-  const definedNames = getDefinedNames(workbook);
-  if (!definedNames) {
-    return undefined;
-  }
-  const model = definedNamesGetRangesScoped(definedNames, name, localSheetId);
-  if (!model.ranges || model.ranges.length === 0) {
-    return undefined;
-  }
-  // Verify the entry actually exists at the requested scope — getRangesScoped
-  // falls back to the bare name when the scoped key is missing, and we must
-  // not return workbook-scoped results from a sheet-scoped lookup.
-  const matrixMap = definedNames.matrixMap;
-  const formulaMap = definedNames.formulaMap;
-  const sKey = localSheetId !== undefined ? `${name}\0${localSheetId}` : name;
-  if (!matrixMap[sKey] && formulaMap[sKey] === undefined) {
-    return undefined;
-  }
-  return model.ranges;
+  const entry = snapshot.definedNames.find(
+    candidate =>
+      candidate.name.toLowerCase() === name.toLowerCase() && candidate.localSheetId === localSheetId
+  );
+  return entry?.ranges.length ? [...entry.ranges] : undefined;
 }
 
 function storageKey(name: string, localSheetId: number | undefined): string {
@@ -954,7 +1085,7 @@ function splitSheetPrefix(formula: string): { sheetName: string; remainder: stri
 
 function resolveStructuredReference(
   formula: string,
-  workbook: WorkbookData
+  ctx: ResolverContext
 ): ResolvedReference | undefined {
   // Excel accepts both bare (`Table1[Col]`) and sheet-qualified
   // (`Sheet1!Table1[Col]`) structured references. Strip the optional sheet
@@ -976,37 +1107,36 @@ function resolveStructuredReference(
   if (!parsed) {
     return undefined;
   }
-  const worksheets = [...getWorksheets(workbook)];
+  const worksheets = [...ctx.snapshot.worksheets];
   if (preferredSheetName) {
     // Move the preferred sheet to the front of the search (case-insensitive).
     const target = preferredSheetName.toLowerCase();
-    const idx = worksheets.findIndex(ws => getSheetName(ws).toLowerCase() === target);
+    const idx = worksheets.findIndex(ws => ws.name.toLowerCase() === target);
     if (idx > 0) {
       worksheets.unshift(...worksheets.splice(idx, 1));
     }
   }
   for (const worksheet of worksheets) {
-    const table = getTables(worksheet).find(
-      t => tableName(t) === parsed.tableName || tableDisplayName(t) === parsed.tableName
+    const table = worksheet.tables.find(
+      candidate => candidate.name === parsed.tableName || candidate.displayName === parsed.tableName
     );
     if (!table) {
       continue;
     }
-    const model = tableModel(table);
-    const columnIndex = model.columns.findIndex(column => column.name === parsed.columnName);
+    const columnIndex = table.columns.findIndex(column => column === parsed.columnName);
     if (columnIndex < 0) {
       return undefined;
     }
-    const tableRef = colCache.decode(model.tableRef ?? model.ref);
+    const tableRef = colCache.decode(table.ref);
     if (!("top" in tableRef)) {
       return undefined;
     }
-    const dataStartRow = tableRef.top + (model.headerRow === false ? 0 : 1);
-    const dataEndRow = tableRef.bottom - (model.totalsRow ? 1 : 0);
+    const dataStartRow = tableRef.top + (table.headerRow ? 1 : 0);
+    const dataEndRow = tableRef.bottom - (table.totalsRow ? 1 : 0);
     const col = tableRef.left + columnIndex;
     const cells: Array<{ value: unknown }> = [];
     for (let row = dataStartRow; row <= dataEndRow; row++) {
-      cells.push({ value: extractCellValue(worksheet, row, col) });
+      cells.push({ value: readCell(worksheet, row, col, ctx) });
     }
     return { worksheet, cells };
   }
@@ -1115,7 +1245,7 @@ function resolveReferenceMatrix(
     ctx.visitedDefinedNames.add(visitKey);
     ctx.definedNameDepth += 1;
     try {
-      let firstWorksheet: WorksheetData | undefined;
+      let firstWorksheet: ChartWorksheetSnapshot | undefined;
       const mergedValues: unknown[][] = [];
       let mergedColumnCount = 0;
       for (const rangeStr of named.ranges) {
@@ -1145,7 +1275,7 @@ function resolveReferenceMatrix(
   }
 
   const parts = splitFormulaRanges(formula);
-  let worksheet: WorksheetData | undefined;
+  let worksheet: ChartWorksheetSnapshot | undefined;
   const rows: unknown[][] = [];
   let columnCount = 0;
 
@@ -1169,7 +1299,7 @@ function resolveReferenceMatrix(
     if (!sheetName) {
       return undefined;
     }
-    const ws = getWorksheet(ctx.workbook, sheetName);
+    const ws = getSnapshotWorksheet(ctx.snapshot, sheetName);
     if (!ws) {
       return undefined;
     }
@@ -1186,13 +1316,13 @@ function resolveReferenceMatrix(
       for (let r = top; r <= bottom; r++) {
         const row: unknown[] = [];
         for (let c = left; c <= right; c++) {
-          row.push(extractCellValue(ws, r, c));
+          row.push(readCell(ws, r, c, ctx));
         }
         rows.push(row);
       }
     } else if ("row" in decoded && "col" in decoded) {
       columnCount = Math.max(columnCount, 1);
-      rows.push([extractCellValue(ws, decoded.row as number, decoded.col as number)]);
+      rows.push([readCell(ws, decoded.row as number, decoded.col as number, ctx)]);
     }
   }
 
@@ -1238,36 +1368,29 @@ function splitFormulaRanges(formula: string): string[] {
  * Extract a raw value from a worksheet cell.
  * Avoids forcing creation of empty cells by using the row-level accessor.
  */
-function extractCellValue(ws: WorksheetData, row: number, col: number): unknown {
-  // Worksheet.getCell creates sparse cell slots but does not mutate existing
-  // values — safe to call.
-  const cell = getCell(ws, row, col);
-  const v = cellGetValue(cell);
-  if (v === null || v === undefined) {
-    return undefined;
-  }
-  // Formula values are wrapped: { formula, result }
-  if (typeof v === "object" && "result" in (v as object)) {
-    const result = (v as { result?: unknown }).result;
-    return result;
-  }
-  // Rich text
-  if (typeof v === "object" && "richText" in (v as object)) {
-    const rt = (v as { richText?: Array<{ text?: string }> }).richText;
-    if (rt) {
-      return rt.map(r => r.text ?? "").join("");
+function readCell(
+  ws: ChartWorksheetSnapshot,
+  row: number,
+  col: number,
+  ctx: ResolverContext
+): unknown {
+  if (ctx.requestedCells) {
+    const sheetKey = ws.name.toLowerCase();
+    let cells = ctx.requestedCells.get(sheetKey);
+    if (!cells) {
+      cells = new Set();
+      ctx.requestedCells.set(sheetKey, cells);
     }
+    cells.add(chartSnapshotCellKey(row, col));
   }
-  // Hyperlink / error
-  if (typeof v === "object") {
-    if ("error" in (v as object)) {
-      return undefined;
-    }
-    if ("text" in (v as object) && "hyperlink" in (v as object)) {
-      return (v as { text?: unknown }).text;
-    }
-  }
-  return v;
+  return ws.cells.get(chartSnapshotCellKey(row, col));
+}
+
+function getSnapshotWorksheet(
+  snapshot: ChartDataSnapshot,
+  name: string
+): ChartWorksheetSnapshot | undefined {
+  return snapshot.worksheetsByName.get(name.toLowerCase());
 }
 
 function toNumber(v: unknown, date1904?: boolean): number | undefined {
