@@ -37,7 +37,7 @@ function fn(name: string): (args: RuntimeValue[]) => RuntimeValue {
   if (!desc) {
     throw new Error(`Function ${name} not registered`);
   }
-  return desc.invoke;
+  return args => desc.invoke(args, { date1904: false });
 }
 
 function asBool(v: RuntimeValue): boolean {

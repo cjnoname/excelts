@@ -12,11 +12,10 @@
  * NOW/RAND across iterations.
  */
 
-import { toWorkbookLike } from "@excel/core/formula-adapter";
+import { captureFormulaSnapshot } from "@excel/core/formula-capture";
 import { Workbook } from "@excel/index";
 import { describe, expect, it } from "vitest";
 
-import { buildWorkbookSnapshot } from "../../integration/workbook-adapter";
 import { parse } from "../../syntax/parser";
 import { tokenize } from "../../syntax/tokenizer";
 import { bind } from "../binder";
@@ -30,7 +29,7 @@ import {
 function compile(source: string, currentSheet = "Sheet1") {
   const wb = Workbook.create();
   Workbook.addWorksheet(wb, currentSheet);
-  const snap = buildWorkbookSnapshot(toWorkbookLike(wb));
+  const snap = captureFormulaSnapshot(wb);
   const ast = parse(tokenize(source));
   const bound = bind(ast, { snapshot: snap, currentSheet });
   return { ast, bound, snap };
@@ -96,7 +95,7 @@ describe("extractStaticDeps", () => {
     const wb = Workbook.create();
     Workbook.addWorksheet(wb, "Data");
     Workbook.addWorksheet(wb, "Report");
-    const snap = buildWorkbookSnapshot(toWorkbookLike(wb));
+    const snap = captureFormulaSnapshot(wb);
     const ast = parse(tokenize("Data!A1*2"));
     const bound = bind(ast, { snapshot: snap, currentSheet: "Report" });
     const deps = extractStaticDeps(bound);

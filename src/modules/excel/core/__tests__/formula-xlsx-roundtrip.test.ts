@@ -1,6 +1,7 @@
 import { definedNamesAdd } from "@excel/core/defined-names";
 import { calculateFormulas } from "@excel/core/formula-adapter";
 import { getDefinedNames } from "@excel/core/workbook";
+import { getCell, getSheetModel } from "@excel/core/worksheet";
 import { Cell, Workbook, Worksheet } from "@excel/index";
 import { describe, it, expect } from "vitest";
 
@@ -18,6 +19,30 @@ import { describe, it, expect } from "vitest";
  * serialization → deserialization → formula evaluation.
  */
 describe("Formula XLSX Round-Trip", () => {
+  it("reconstructs calculated dynamic-array ghosts after round-trip", async () => {
+    const wb1 = Workbook.create();
+    const ws1 = Workbook.addWorksheet(wb1, "Sheet1");
+    Cell.setValue(ws1, "A1", { formula: "SEQUENCE(3)", result: 0 });
+    calculateFormulas(wb1);
+    expect(Cell.getValue(ws1, "A3")).toBe(3);
+    expect(getCell(ws1, "A2")._formulaGhostOwner).toBeDefined();
+    const ghostModel = getSheetModel(ws1)
+      .rows?.flatMap(row => row.cells)
+      .find(cell => cell.address === "A2");
+    expect(ghostModel?.type).toBe(0);
+    expect(ghostModel?.value).toBeUndefined();
+
+    const buffer = await Workbook.toBuffer(wb1);
+    const wb2 = Workbook.create();
+    await Workbook.read(wb2, buffer);
+    const ws2 = Workbook.getWorksheet(wb2, "Sheet1")!;
+
+    calculateFormulas(wb2);
+    expect(Cell.getResult(ws2, "A1")).toBe(1);
+    expect(Cell.getValue(ws2, "A2")).toBe(2);
+    expect(Cell.getValue(ws2, "A3")).toBe(3);
+  });
+
   // ==========================================================================
   // Test 1: Complex workbook with mixed data types and diverse formulas
   // ==========================================================================

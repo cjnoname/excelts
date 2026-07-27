@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { TableLike } from "../structured-ref-utils";
+import type { TableGeometryInput } from "../structured-ref-utils";
 import {
   buildTableGeometry,
   resolveStructuredRefColumns,
@@ -20,7 +20,7 @@ function mkTable(opts: {
   hasHeaderRow?: boolean;
   hasTotalsRow?: boolean;
   columnNames?: string[];
-}): TableLike {
+}): TableGeometryInput {
   return {
     topLeft: { row: opts.topLeftRow ?? 1, col: opts.topLeftCol ?? 1 },
     dataRowCount: opts.dataRowCount ?? 5,

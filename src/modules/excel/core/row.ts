@@ -262,8 +262,20 @@ export function rowGetModel(r: RowData): RowModel | null {
   let min = 0;
   let max = 0;
   r.cells.forEach(cell => {
+    // Spill ghosts are derived values, not independent worksheet cells. Do
+    // not persist their derived value; the dynamic-array master reconstructs
+    // it after load. Preserve style/comment metadata as an empty cell model.
     if (cell) {
-      const cellModel = cellGetModel(cell);
+      const original = cellGetModel(cell);
+      const cellModel =
+        cell._formulaGhostOwner === undefined
+          ? original
+          : ({
+              address: original.address,
+              type: Enums.ValueType.Null,
+              style: original.style,
+              comment: original.comment
+            } satisfies CellModel);
       if (cellModel) {
         if (!min || min > cellCol(cell)) {
           min = cellCol(cell);

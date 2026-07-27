@@ -9,7 +9,7 @@
 // Token Type Enum
 // ============================================================================
 
-export const enum TokenType {
+export enum TokenType {
   Number = 1,
   String = 2,
   Boolean = 3,

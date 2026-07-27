@@ -12,10 +12,10 @@ describe("Documonster.Formula IIFE bundle", () => {
     ({ Formula } = await loadIife<{ Formula: any }>("formula", "Formula"));
   }, 60000);
 
-  it("exposes the Formula namespace with tokenize/parse/calculate", () => {
+  it("exposes the Formula syntax namespace", () => {
     expect(typeof Formula.tokenize).toBe("function");
     expect(typeof Formula.parse).toBe("function");
-    expect(typeof Formula.calculate).toBe("function");
+    expect(Formula.calculate).toBeUndefined();
   });
 
   it("tokenizes an arithmetic expression", () => {

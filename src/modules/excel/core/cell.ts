@@ -193,6 +193,8 @@ export interface CellData {
   style: Partial<Style>;
   _mergeCount: number;
   _comment?: NoteData;
+  /** Internal ownership marker for a formula spill ghost. */
+  _formulaGhostOwner?: string;
 }
 
 function mergeStyle(
@@ -420,6 +422,7 @@ export function cellSetValue(c: CellData, v: CellValueInputType): void {
     cellSetValue(c._value.master!, v);
     return;
   }
+  c._formulaGhostOwner = undefined;
   c._value.release();
   c._value = Value.create(Value.getType(v), c, v);
 }
@@ -437,6 +440,7 @@ export function cellIsMerged(c: CellData): boolean {
 }
 
 export function cellMerge(c: CellData, master: CellData, ignoreStyle?: boolean): void {
+  c._formulaGhostOwner = undefined;
   c._value.release();
   c._value = Value.create(Types.Merge, c, master);
   if (!ignoreStyle) {
@@ -445,6 +449,7 @@ export function cellMerge(c: CellData, master: CellData, ignoreStyle?: boolean):
 }
 
 export function cellUnmerge(c: CellData): void {
+  c._formulaGhostOwner = undefined;
   if (cellType(c) === Types.Merge) {
     c._value.release();
     c._value = Value.create(Types.Null, c);
@@ -659,6 +664,7 @@ export function cellGetModel(c: CellData): CellModel {
 }
 
 export function cellSetModel(c: CellData, value: CellModel): void {
+  c._formulaGhostOwner = undefined;
   c._value.release();
   c._value = Value.create(value.type, c);
   c._value.model = value;

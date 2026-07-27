@@ -2773,9 +2773,8 @@ describe("calculateFormulas", () => {
       expect(allNames.length).toBe(2);
 
       // Check snapshot construction
-      const { buildWorkbookSnapshot } = await import("@formula/integration/workbook-adapter");
-      const { toWorkbookLike } = await import("@excel/core/formula-adapter");
-      const snapshot = buildWorkbookSnapshot(toWorkbookLike(wb));
+      const { captureFormulaSnapshot } = await import("@excel/core/formula-capture");
+      const snapshot = captureFormulaSnapshot(wb);
 
       // Verify we have both entries in the snapshot
       expect(snapshot.definedNames.size).toBe(2);
@@ -2840,10 +2839,8 @@ describe("calculateFormulas", () => {
           localSheetId: 1
         }
       ]);
-
-      const { buildWorkbookSnapshot } = await import("@formula/integration/workbook-adapter");
-      const { toWorkbookLike } = await import("@excel/core/formula-adapter");
-      const snapshot = buildWorkbookSnapshot(toWorkbookLike(wb));
+      const { captureFormulaSnapshot } = await import("@excel/core/formula-capture");
+      const snapshot = captureFormulaSnapshot(wb);
 
       // Verify distinct entries exist and don't cross-contaminate
       const globalEntry = snapshot.definedNames.get("X");

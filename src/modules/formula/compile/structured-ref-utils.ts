@@ -17,7 +17,7 @@
  * this module stays dependency-free and can serve both compile- and
  * runtime-side callers that carry their own table-shape types.
  */
-export interface TableLike {
+export interface TableGeometryInput {
   readonly topLeft: { readonly row: number; readonly col: number };
   readonly dataRowCount: number;
   readonly hasHeaderRow: boolean;
@@ -47,7 +47,7 @@ export interface TableGeometry {
  * The data row range excludes the header (if any) but also excludes the
  * totals row — totals, when present, occupy `dataRowEnd + 1`.
  */
-export function buildTableGeometry(table: TableLike): TableGeometry {
+export function buildTableGeometry(table: TableGeometryInput): TableGeometry {
   const topLeftRow = table.topLeft.row;
   const dataRowStart = topLeftRow + (table.hasHeaderRow ? 1 : 0);
   const dataRowEnd = dataRowStart + table.dataRowCount - 1;
@@ -78,7 +78,7 @@ export function buildTableGeometry(table: TableLike): TableGeometry {
  */
 export function resolveStructuredRefColumns(
   columns: readonly string[],
-  table: TableLike,
+  table: TableGeometryInput,
   mode: "strict" | "permissive"
 ): { colLeft: number; colRight: number } | "error" {
   const tl = table.topLeft;

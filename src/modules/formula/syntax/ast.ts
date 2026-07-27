@@ -9,7 +9,7 @@
 // Node Type Enum
 // ============================================================================
 
-export const enum NodeType {
+export enum NodeType {
   Number = 1,
   String = 2,
   Boolean = 3,

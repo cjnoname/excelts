@@ -37,27 +37,44 @@ import {
   topologicalSort,
   mergeDynamicDeps
 } from "@formula/compile/dependency-analysis";
-import { setDate1904 } from "@formula/functions/_date-context";
-import { applyWritebackPlan } from "@formula/integration/apply-writeback-plan";
+import type { FormulaFunction } from "@formula/integration/calculate-formulas";
+import { PARSE_FAILED } from "@formula/integration/calculation-state";
+import type { CachedAst, FormulaCalculationState } from "@formula/integration/calculation-state";
 import { collectFormulaInstances } from "@formula/integration/formula-instance";
 import type { FormulaInstance } from "@formula/integration/formula-instance";
-import { buildWorkbookSnapshot } from "@formula/integration/workbook-adapter";
 import type { WorkbookSnapshot } from "@formula/integration/workbook-snapshot";
-import { formulaCellKey, resolveDefinedName } from "@formula/integration/workbook-snapshot";
-import { buildWritebackPlan } from "@formula/materialize/build-writeback-plan";
-import { getPersistentSpillMap, getGhostSnapshots } from "@formula/materialize/spill-engine";
-import type { WorkbookLike } from "@formula/materialize/types";
+import {
+  formulaCellKey,
+  resolveDefinedName,
+  snapshotCellKey,
+  spillCellKeyFromId
+} from "@formula/integration/workbook-snapshot";
+import {
+  buildWritebackPlan,
+  isGhostUnmodified,
+  shouldPreserveCompileFailure
+} from "@formula/materialize/build-writeback-plan";
+import type { WritebackPlan } from "@formula/materialize/writeback-plan";
 import type { EvalContext } from "@formula/runtime/evaluator";
 import { EvalSession, evaluateFormula, evaluateFormulaRaw } from "@formula/runtime/evaluator";
 import type { FunctionDescriptor } from "@formula/runtime/function-registry";
 import type { RuntimeValue } from "@formula/runtime/values";
-import { RVKind, rvNumber, BLANK, ERRORS } from "@formula/runtime/values";
+import {
+  RVKind,
+  rvNumber,
+  BLANK,
+  ERRORS,
+  fromSnapshotValue,
+  isScalar,
+  scalarEquals,
+  topLeft
+} from "@formula/runtime/values";
 import type { AstNode } from "@formula/syntax/ast";
 import { parse } from "@formula/syntax/parser";
 import { tokenize } from "@formula/syntax/tokenizer";
 
 // ============================================================================
-// Persistent Caches (keyed by workbook — survive across invocations)
+// AST Cache
 // ============================================================================
 
 /**
@@ -72,17 +89,6 @@ import { tokenize } from "@formula/syntax/tokenizer";
  * without bound. See `parseFormulaText` for the hit-path bookkeeping.
  */
 const AST_CACHE_MAX_ENTRIES = 10000;
-const persistentAstCache = new WeakMap<WeakKey, Map<string, AstNode>>();
-
-function getPersistentAstCache(workbook: WorkbookLike): Map<string, AstNode> {
-  let cache = persistentAstCache.get(workbook);
-  if (!cache) {
-    cache = new Map();
-    persistentAstCache.set(workbook, cache);
-  }
-  return cache;
-}
-
 // ============================================================================
 // Main: Formula Calculation Implementation
 // ============================================================================
@@ -93,41 +99,41 @@ function getPersistentAstCache(workbook: WorkbookLike): Map<string, AstNode> {
  * This implements the full snapshot → compile → evaluate → materialize → apply
  * architecture. The workbook is mutated only at the final apply step.
  */
-export function calculateFormulasImpl(workbook: WorkbookLike): void {
-  // ── Step 1: Snapshot ──
-  const snapshot = buildWorkbookSnapshot(workbook);
-
-  // Propagate the workbook-wide `date1904` mode to the module-local date
-  // context used by date/time/financial/text formula functions. Those
-  // functions have a context-free `NativeFn` signature and cannot receive
-  // the flag through an argument, so we thread it via a setter instead.
-  // See functions/_date-context.ts for the threading rationale and the
-  // concurrency caveat.
-  setDate1904(snapshot.properties.date1904 ?? false);
-
+export function calculateFormulasImpl(
+  snapshot: WorkbookSnapshot,
+  state: FormulaCalculationState,
+  hostFunctions?: ReadonlyMap<string, FormulaFunction>
+): WritebackPlan {
   // ── Step 2: Normalize ──
   const instances = collectFormulaInstances(snapshot);
   if (instances.length === 0) {
     // Clean up stale spills even when there are no formulas
-    cleanupStaleSpillsIfNeeded(workbook, snapshot);
-    return;
+    return buildStaleSpillCleanupPlan(state, snapshot);
   }
 
   // ── Step 3: Parse ──
   // Use persistent AST cache — formula text → AST is a pure function,
   // so parsed ASTs can be safely reused across calculation cycles.
-  const astCache = getPersistentAstCache(workbook);
+  const astCache = state.astCache;
   for (const inst of instances) {
     parseFormulaText(inst.sourceText, astCache);
   }
 
   // ── Step 4: Compile (Bind) ──
   const compiledMap = new Map<string, CompiledFormula>();
+  const volatileHostFunctions = new Set<string>();
+  for (const [name, descriptor] of hostFunctions ?? []) {
+    if (descriptor.volatile) {
+      volatileHostFunctions.add(name.toUpperCase());
+    }
+  }
+  const failedInstances: FormulaInstance[] = [];
   const results = new Map<string, RuntimeValue>();
   for (const inst of instances) {
-    const compiled = compileFormula(inst, astCache, snapshot);
+    const compiled = compileFormula(inst, astCache, snapshot, volatileHostFunctions);
     const key = formulaCellKey(inst.sheetName, inst.row, inst.col);
     if ("reason" in compiled) {
+      failedInstances.push(inst);
       // Parse or bind failure — produce an explicit error result.
       // #CALC! for engine-level failures, #NAME? for parse errors that
       // may indicate an unsupported construct.
@@ -166,7 +172,7 @@ export function calculateFormulasImpl(workbook: WorkbookLike): void {
   // for dependency ordering. The actual spill may differ this cycle — if the
   // master formula is no longer a dynamic-array producer, skip it so stale
   // ghost cells don't introduce false edges.
-  const persistentSpills = getPersistentSpillMap(workbook);
+  const persistentSpills = state.spillRegions;
   for (const [, region] of persistentSpills) {
     const ws = snapshot.worksheetsById.get(region.worksheetId);
     if (!ws) {
@@ -201,110 +207,294 @@ export function calculateFormulasImpl(workbook: WorkbookLike): void {
 
   // ── Step 6: Evaluate ──
   const session = new EvalSession();
-  // Convert user-registered functions (keyed opaquely on WorkbookLike)
+  // Previous ghosts that still match the engine-owned value are logically
+  // absent during this pass. A new spill may overwrite them; if its footprint
+  // shrinks, downstream formulas must see blank rather than stale snapshot data.
+  for (const region of state.spillRegions.values()) {
+    const ws = snapshot.worksheetsById.get(region.worksheetId);
+    if (!ws) {
+      continue;
+    }
+    for (let r = 0; r < region.rows; r++) {
+      for (let c = 0; c < region.cols; c++) {
+        if (r === 0 && c === 0) {
+          continue;
+        }
+        const row = region.sourceRow + r;
+        const col = region.sourceCol + c;
+        const cell = ws.cells.get(snapshotCellKey(row, col));
+        const sourceKey = spillCellKeyFromId(
+          region.worksheetId,
+          region.sourceRow,
+          region.sourceCol
+        );
+        if (isGhostUnmodified(cell, sourceKey)) {
+          session.staleGhosts.add(formulaCellKey(ws.name, row, col));
+        }
+      }
+    }
+  }
+  // Compile failures are still formula producers. Seed the evaluator cache so
+  // dependents observe exactly what this cell will end up holding: the
+  // preserved cached result when the plan keeps it, otherwise the error.
+  for (const inst of failedInstances) {
+    const key = formulaCellKey(inst.sheetName, inst.row, inst.col);
+    const value = results.get(key);
+    if (value === undefined) {
+      continue;
+    }
+    const cached = snapshot.worksheetsByName
+      .get(inst.sheetName.toLowerCase())
+      ?.cells.get(snapshotCellKey(inst.row, inst.col))?.cachedResult;
+    const seeded =
+      value.kind === RVKind.Error &&
+      shouldPreserveCompileFailure(value, inst, snapshot) &&
+      cached !== undefined
+        ? fromSnapshotValue(cached)
+        : value;
+    session.resultCache.set(key, { scalar: seeded, raw: seeded });
+  }
+  // Convert user-registered functions from the host capture
   // into the evaluator's typed `FunctionDescriptor` shape. We take a
   // snapshot up front so later mutations to the workbook's map during
   // evaluation can't observe a half-built state.
   let userFunctions: ReadonlyMap<string, FunctionDescriptor> | undefined;
-  if (workbook.userFunctions && workbook.userFunctions.size > 0) {
+  if (hostFunctions && hostFunctions.size > 0) {
     const adapted = new Map<string, FunctionDescriptor>();
-    for (const [name, desc] of workbook.userFunctions) {
+    for (const [name, desc] of hostFunctions) {
       const upperName = name.toUpperCase();
       adapted.set(upperName, {
         name: upperName,
         minArity: desc.minArity,
         maxArity: desc.maxArity,
-        invoke: desc.invoke as FunctionDescriptor["invoke"]
+        volatile: desc.volatile,
+        invoke: desc.invoke
       });
     }
     userFunctions = adapted;
   }
+  const date1904 = snapshot.properties.date1904 ?? false;
   const ctx: EvalContext = {
     snapshot,
     compiledFormulas: compiledMap,
     currentSheet: snapshot.worksheets[0]?.name ?? "",
-    userFunctions
+    userFunctions,
+    date1904,
+    functionContext: { date1904 }
   };
 
   // Evaluate in topological order
   evaluateInOrder(evalOrder, compiledMap, results, ctx, session);
 
-  // ── Step 6b: Merge dynamic dependencies and re-evaluate if needed ──
-  // After the first pass, formulas with INDIRECT/OFFSET have recorded their
-  // actual runtime cell accesses in session.dynamicDeps. Merge these edges
-  // into the graph and re-evaluate any formulas whose dependencies changed.
-  if (session.dynamicDeps.size > 0) {
-    const mergeResult = mergeDynamicDeps(graph, session.dynamicDeps);
-    if (mergeResult.changed) {
-      const prevCircularKeys = graph.circularKeys;
-      graph = mergeResult.graph;
-      evalOrder = topologicalSort(graph);
-
-      // Collect formulas that gained new deps AND their transitive dependents.
-      // Without clearing dependents, downstream cells could see stale values.
-      const toClear = new Set<string>();
-      const queue: string[] = [];
-      for (const [formulaKey] of session.dynamicDeps) {
-        if (!toClear.has(formulaKey)) {
-          toClear.add(formulaKey);
-          queue.push(formulaKey);
-        }
-      }
-      // If the merge introduced new circular refs, include all new members too
-      for (const key of graph.circularKeys) {
-        if (!prevCircularKeys.has(key) && !toClear.has(key)) {
-          toClear.add(key);
-          queue.push(key);
-        }
-      }
-      // BFS through reverse edges to find all transitive dependents
-      let head = 0;
-      while (head < queue.length) {
-        const key = queue[head++];
-        const deps = graph.dependedBy.get(key);
-        if (deps) {
-          for (const depKey of deps) {
-            if (!toClear.has(depKey)) {
-              toClear.add(depKey);
-              queue.push(depKey);
-            }
-          }
-        }
-      }
-      // Clear all affected formulas
-      for (const key of toClear) {
-        session.resultCache.delete(key);
-        results.delete(key);
-      }
-      // Formula-based name results may depend on cell values that just changed
-      session.nameCache.clear();
-
-      // Re-evaluate the full order (evaluateInOrder skips already-computed cells)
-      evaluateInOrder(evalOrder, compiledMap, results, ctx, session);
-    }
-  }
+  ({ graph, evalOrder } = stabilizeDependencyGraph(
+    graph,
+    evalOrder,
+    producerMap,
+    compiledMap,
+    results,
+    ctx,
+    session
+  ));
 
   // ── Iterative Calculation for Circular References ──
   const iterateEnabled = snapshot.calcProperties.iterate === true;
   if (iterateEnabled && graph.circularKeys.size > 0) {
-    runIterativeCalc(evalOrder, graph, compiledMap, results, ctx, session, snapshot);
+    const maxGraphPasses = compiledMap.size + 1;
+    for (let pass = 0; pass < maxGraphPasses; pass++) {
+      runIterativeCalc(evalOrder, graph, compiledMap, results, ctx, session, snapshot);
+      const stabilized = stabilizeDependencyGraph(
+        graph,
+        evalOrder,
+        producerMap,
+        compiledMap,
+        results,
+        ctx,
+        session
+      );
+      graph = stabilized.graph;
+      evalOrder = stabilized.evalOrder;
+      if (!stabilized.changed) {
+        break;
+      }
+    }
     reevaluateDownstreamOfCircular(evalOrder, graph, compiledMap, results, ctx, session);
   }
 
   // ── Step 7: Materialize (Build Writeback Plan) ──
-  const previousSpills = getPersistentSpillMap(workbook);
-  const previousGhosts = getGhostSnapshots(workbook);
+  const previousSpills = state.spillRegions;
+  const previousGhosts = state.ghostSnapshots;
 
   const plan = buildWritebackPlan(
     snapshot,
     [...compiledMap.values()],
+    failedInstances,
     results,
     previousSpills,
     previousGhosts
   );
 
-  // ── Step 8: Apply ──
-  applyWritebackPlan(workbook, plan);
+  return plan;
+}
+
+function syncProducerFootprints(
+  producerMap: Map<string, string>,
+  compiledMap: ReadonlyMap<string, CompiledFormula>,
+  results: ReadonlyMap<string, RuntimeValue>
+): boolean {
+  const before = new Map(producerMap);
+  const dynamicMasters = new Set<string>();
+  for (const [key, compiled] of compiledMap) {
+    if (compiled.instance.isDynamicArray || compiled.isDynamicArrayFunction) {
+      dynamicMasters.add(key);
+    }
+  }
+  for (const [key, producer] of producerMap) {
+    if (dynamicMasters.has(producer)) {
+      producerMap.delete(key);
+    }
+  }
+  for (const [masterKey, result] of results) {
+    const compiled = compiledMap.get(masterKey);
+    if (
+      !compiled ||
+      result.kind !== RVKind.Array ||
+      (!compiled.instance.isDynamicArray && !compiled.isDynamicArrayFunction)
+    ) {
+      continue;
+    }
+    const inst = compiled.instance;
+    for (let r = 0; r < result.height; r++) {
+      for (let c = 0; c < result.width; c++) {
+        if (r === 0 && c === 0) {
+          continue;
+        }
+        const ghostKey = formulaCellKey(inst.sheetName, inst.row + r, inst.col + c);
+        if (producerMap.get(ghostKey) !== masterKey) {
+          producerMap.set(ghostKey, masterKey);
+        }
+      }
+    }
+  }
+  return !mapsEqual(before, producerMap);
+}
+
+function stabilizeDependencyGraph(
+  initialGraph: DependencyGraph,
+  initialOrder: readonly string[],
+  producerMap: Map<string, string>,
+  compiledMap: Map<string, CompiledFormula>,
+  results: Map<string, RuntimeValue>,
+  ctx: EvalContext,
+  session: EvalSession
+): { graph: DependencyGraph; evalOrder: string[]; changed: boolean } {
+  let graph = initialGraph;
+  let evalOrder = [...initialOrder];
+  let changedAny = false;
+  const maxPasses = compiledMap.size + 1;
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const footprintChanged = syncProducerFootprints(producerMap, compiledMap, results);
+    const staticGraph = buildDependencyGraphFromDeps(compiledMap, producerMap);
+    const merged = mergeDynamicDeps(staticGraph, session.dynamicDeps, producerMap);
+    const nextGraph = merged.graph;
+    if (!footprintChanged && dependencyGraphsEqual(graph, nextGraph)) {
+      break;
+    }
+
+    changedAny = true;
+    const affected = collectChangedDependencies(graph, nextGraph, compiledMap);
+    graph = nextGraph;
+    evalOrder = topologicalSort(graph);
+    for (const key of affected) {
+      // A newly discovered SCC must retain its current values as the seed for
+      // runIterativeCalc. Ordinary evaluation here would collapse circular
+      // spills back to the zero fallback before the iterative driver can use
+      // their previous raw arrays.
+      if (graph.circularKeys.has(key) && !compiledMap.get(key)?.hasDynamicRefs) {
+        continue;
+      }
+      results.delete(key);
+      session.resultCache.delete(key);
+      session.dynamicDeps.delete(key);
+    }
+    session.nameCache.clear();
+    evaluateInOrder(evalOrder, compiledMap, results, ctx, session);
+  }
+
+  return { graph, evalOrder, changed: changedAny };
+}
+
+function collectChangedDependencies(
+  previous: DependencyGraph,
+  current: DependencyGraph,
+  compiledMap: ReadonlyMap<string, CompiledFormula>
+): Set<string> {
+  const affected = new Set<string>();
+  const queue: string[] = [];
+  for (const key of current.formulaKeys) {
+    const before = previous.dependsOn.get(key);
+    const after = current.dependsOn.get(key);
+    const producerChanged =
+      !setsEqual(before, after) &&
+      [...(after ?? [])].some(dep => compiledMap.has(dep) && !before?.has(dep));
+    if (producerChanged || current.circularKeys.has(key) !== previous.circularKeys.has(key)) {
+      affected.add(key);
+      queue.push(key);
+    }
+  }
+  let head = 0;
+  while (head < queue.length) {
+    const key = queue[head++];
+    for (const dependent of current.dependedBy.get(key) ?? []) {
+      if (!affected.has(dependent)) {
+        affected.add(dependent);
+        queue.push(dependent);
+      }
+    }
+  }
+  return affected;
+}
+
+function dependencyGraphsEqual(a: DependencyGraph, b: DependencyGraph): boolean {
+  if (!setsEqual(a.circularKeys, b.circularKeys)) {
+    return false;
+  }
+  for (const key of b.formulaKeys) {
+    if (!setsEqual(a.dependsOn.get(key), b.dependsOn.get(key))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function setsEqual(
+  a: ReadonlySet<string> | undefined,
+  b: ReadonlySet<string> | undefined
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b || a.size !== b.size) {
+    return false;
+  }
+  for (const value of a) {
+    if (!b.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function mapsEqual(a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): boolean {
+  if (a.size !== b.size) {
+    return false;
+  }
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ============================================================================
@@ -379,19 +569,17 @@ function evaluateInOrder(
 // Helper: Parse Formula Text
 // ============================================================================
 
-// Sentinel cached in the AST map to record a failed parse. Using a distinct
-// object means callers that do an explicit identity check against this value
-// can short-circuit before any truthy branch; it is never exposed outside the
-// cache so cannot be mistaken for a real AST by downstream consumers.
-const PARSE_FAILED_SENTINEL = {} as AstNode;
-
 /**
  * Touch a cache entry to move it to the MRU (most-recently-used) position.
  * Relies on `Map`'s guaranteed insertion-order iteration: delete + re-set
  * pushes the entry to the end of the iteration order without changing its
  * value identity. Only called on cache hits.
  */
-function touchAstCacheEntry(astCache: Map<string, AstNode>, formula: string, ast: AstNode): void {
+function touchAstCacheEntry(
+  astCache: Map<string, CachedAst>,
+  formula: string,
+  ast: CachedAst
+): void {
   astCache.delete(formula);
   astCache.set(formula, ast);
 }
@@ -401,7 +589,11 @@ function touchAstCacheEntry(astCache: Map<string, AstNode>, formula: string, ast
  * entry if the cache is at capacity. The LRU entry is the first key returned
  * by `Map.keys()` iteration, which corresponds to the oldest insertion/touch.
  */
-function insertAstCacheEntry(astCache: Map<string, AstNode>, formula: string, ast: AstNode): void {
+function insertAstCacheEntry(
+  astCache: Map<string, CachedAst>,
+  formula: string,
+  ast: CachedAst
+): void {
   if (astCache.size >= AST_CACHE_MAX_ENTRIES) {
     // Evict one entry before adding the new one. `Map.keys().next().value`
     // is the least-recently-inserted (or -touched) key — O(1) access.
@@ -413,12 +605,12 @@ function insertAstCacheEntry(astCache: Map<string, AstNode>, formula: string, as
   astCache.set(formula, ast);
 }
 
-function parseFormulaText(formula: string, astCache: Map<string, AstNode>): AstNode | null {
+function parseFormulaText(formula: string, astCache: Map<string, CachedAst>): AstNode | null {
   const cached = astCache.get(formula);
-  if (cached === PARSE_FAILED_SENTINEL) {
+  if (cached === PARSE_FAILED) {
     // Touch so that a repeatedly-evaluated failing formula doesn't get
     // evicted and re-parsed (and re-failed) every cycle.
-    touchAstCacheEntry(astCache, formula, PARSE_FAILED_SENTINEL);
+    touchAstCacheEntry(astCache, formula, PARSE_FAILED);
     return null;
   }
   if (cached) {
@@ -431,7 +623,7 @@ function parseFormulaText(formula: string, astCache: Map<string, AstNode>): AstN
     insertAstCacheEntry(astCache, formula, ast);
     return ast;
   } catch {
-    insertAstCacheEntry(astCache, formula, PARSE_FAILED_SENTINEL);
+    insertAstCacheEntry(astCache, formula, PARSE_FAILED);
     return null;
   }
 }
@@ -450,11 +642,12 @@ type CompileFailure =
 
 function compileFormula(
   inst: FormulaInstance,
-  astCache: Map<string, AstNode>,
-  snapshot: WorkbookSnapshot
+  astCache: Map<string, CachedAst>,
+  snapshot: WorkbookSnapshot,
+  volatileHostFunctions: ReadonlySet<string>
 ): CompiledFormula | CompileFailure {
   const ast = astCache.get(inst.sourceText);
-  if (!ast) {
+  if (!ast || ast === PARSE_FAILED) {
     return { reason: "parse", formula: inst.sourceText };
   }
 
@@ -493,7 +686,7 @@ function compileFormula(
         const nameAst = parse(nameTokens);
         const nameBound = bind(nameAst, { snapshot, currentSheet: inst.sheetName });
         const nameDeps = extractStaticDeps(nameBound, snapshot, nameResolver);
-        const nameAnalysis = analyzeExpr(nameBound, nameResolver);
+        const nameAnalysis = analyzeExpr(nameBound, nameResolver, volatileHostFunctions);
         const result = {
           deps: nameDeps,
           hasDynamicRefs: nameAnalysis.hasDynamicRefs,
@@ -510,7 +703,7 @@ function compileFormula(
     };
 
     const staticDeps = extractStaticDeps(bound, snapshot, nameResolver);
-    const analysis = analyzeExpr(bound, nameResolver);
+    const analysis = analyzeExpr(bound, nameResolver, volatileHostFunctions);
 
     return {
       instance: inst,
@@ -531,22 +724,20 @@ function compileFormula(
 // Helper: Cleanup Stale Spills
 // ============================================================================
 
-function cleanupStaleSpillsIfNeeded(workbook: WorkbookLike, snapshot: WorkbookSnapshot): void {
-  const previousSpills = getPersistentSpillMap(workbook);
+function buildStaleSpillCleanupPlan(
+  state: FormulaCalculationState,
+  snapshot: WorkbookSnapshot
+): WritebackPlan {
+  const previousSpills = state.spillRegions;
   if (previousSpills.size === 0) {
-    return;
+    return {
+      operations: [],
+      spillState: { spillRegions: new Map(), ghostSnapshots: new Map() }
+    };
   }
 
   // No formula cells → all spills are stale
-  const plan = buildWritebackPlan(
-    snapshot,
-    [],
-    new Map(),
-    previousSpills,
-    getGhostSnapshots(workbook)
-  );
-
-  applyWritebackPlan(workbook, plan);
+  return buildWritebackPlan(snapshot, [], [], new Map(), previousSpills, state.ghostSnapshots);
 }
 
 // ============================================================================
@@ -657,6 +848,11 @@ function runIterativeCalc(
 
   for (let iter = 0; iter < maxIter; iter++) {
     let maxChange = 0;
+    // A numeric delta alone cannot decide convergence: if a circular cell is
+    // still non-numeric (e.g. `#CALC!` on the first pass) or flips kind between
+    // iterations, `maxChange` would stay 0 and the loop would exit after a
+    // single pass. Track those cases explicitly.
+    let allStable = true;
 
     // Clear only circular cells and their transitive downstream.
     for (const key of circularAndDownstream) {
@@ -675,9 +871,11 @@ function runIterativeCalc(
       }
       const prev = results.get(key);
       if (prev !== undefined && prev.kind !== RVKind.Error) {
-        session.circularFallback.set(key, prev);
+        session.circularFallback.set(key, topLeft(prev));
+        session.circularRawFallback.set(key, prev);
       } else {
         session.circularFallback.set(key, rvNumber(0));
+        session.circularRawFallback.delete(key);
       }
     }
 
@@ -688,25 +886,78 @@ function runIterativeCalc(
       }
       try {
         const oldResult = results.get(key);
-        const newResult = evaluateFormula(compiled, ctx, session);
+        // Preserve array semantics inside a cycle: evaluating a CSE or
+        // dynamic-array formula through the scalar path would collapse its
+        // result, and the materialize step would then tear down the spill.
+        const inst = compiled.instance;
+        const isCSE = inst.kind === "cse" && inst.targetRef !== undefined;
+        const isDynamic = inst.isDynamicArray || compiled.isDynamicArrayFunction;
+        const newResult =
+          isCSE || isDynamic
+            ? evaluateFormulaRaw(compiled, ctx, session)
+            : evaluateFormula(compiled, ctx, session);
         results.set(key, newResult);
-        session.circularFallback.set(key, newResult);
+        // The fallback feeds re-entrant scalar lookups, so seed it with the
+        // scalar view even when this cell produced an array.
+        session.circularFallback.set(key, topLeft(newResult));
+        session.circularRawFallback.set(key, newResult);
 
-        if (oldResult && oldResult.kind === RVKind.Number && newResult.kind === RVKind.Number) {
-          maxChange = Math.max(maxChange, Math.abs(newResult.value - oldResult.value));
+        const change = compareIterationResults(oldResult, newResult);
+        maxChange = Math.max(maxChange, change.maxChange);
+        if (!change.stable) {
+          allStable = false;
+        }
+        if (isCSE) {
+          populateCSECache(inst, newResult, session);
         }
       } catch {
         // Iterative evaluation threw — set error and continue convergence.
         results.set(key, ERRORS.CALC);
+        allStable = false;
       }
     }
 
-    if (maxChange <= delta) {
+    if (allStable && maxChange <= delta) {
       break;
     }
   }
 
   session.circularFallback.clear();
+  session.circularRawFallback.clear();
+}
+
+function compareIterationResults(
+  previous: RuntimeValue | undefined,
+  current: RuntimeValue
+): { stable: boolean; maxChange: number } {
+  if (!previous || previous.kind !== current.kind) {
+    return { stable: false, maxChange: 0 };
+  }
+  if (previous.kind === RVKind.Array && current.kind === RVKind.Array) {
+    if (previous.height !== current.height || previous.width !== current.width) {
+      return { stable: false, maxChange: 0 };
+    }
+    let stable = true;
+    let maxChange = 0;
+    for (let r = 0; r < current.height; r++) {
+      for (let c = 0; c < current.width; c++) {
+        const change = compareIterationResults(previous.rows[r][c], current.rows[r][c]);
+        stable = stable && change.stable;
+        maxChange = Math.max(maxChange, change.maxChange);
+      }
+    }
+    return { stable, maxChange };
+  }
+  if (previous.kind === RVKind.Number && current.kind === RVKind.Number) {
+    return { stable: true, maxChange: Math.abs(current.value - previous.value) };
+  }
+  if (previous.kind === RVKind.Error && current.kind === RVKind.Error) {
+    return { stable: previous.code === current.code, maxChange: 0 };
+  }
+  if (isScalar(previous) && isScalar(current)) {
+    return { stable: scalarEquals(previous, current), maxChange: 0 };
+  }
+  return { stable: previous === current, maxChange: 0 };
 }
 
 /**

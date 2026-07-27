@@ -53,7 +53,9 @@ const FORMULA_ENGINE_MODULES = [
   "modules/formula/functions/",
   "modules/formula/integration/",
   "modules/formula/materialize/",
-  "modules/excel/core/formula-adapter.js"
+  "modules/excel/core/formula-adapter.js",
+  "modules/excel/core/formula-capture.js",
+  "modules/excel/core/formula-writeback.js"
 ];
 
 /** Exclude all modules except the listed ones */
@@ -224,6 +226,16 @@ const scenarios: Scenario[] = [
   ns("xml", "Xml", []),
   ns("markdown", "Markdown", []),
   ns("formula", "Formula", []),
+  {
+    // No `excludeBundlers`: `/formula` no longer references the engine at all,
+    // so even esbuild (which cannot drop members off a namespace object) must
+    // keep the calculation modules out.
+    name: "/formula: syntax namespace has no calculation engine",
+    importFrom: `${PKG_NAME}/formula`,
+    imports: ["Formula"],
+    mustNotInclude: FORMULA_ENGINE_MODULES,
+    lazySplit: true
+  },
   ns("pdf", "Pdf", ["modules/archive/", "modules/xml/"]), // zlib + PDF metadata XML
 
   // ===========================================================================
@@ -417,6 +429,14 @@ const scenarios: Scenario[] = [
   ns("xml", "Xml", [], "browser"),
   ns("markdown", "Markdown", [], "browser"),
   ns("formula", "Formula", [], "browser"),
+  {
+    name: "browser /formula: syntax namespace has no calculation engine",
+    importFrom: `${PKG_NAME}/formula`,
+    imports: ["Formula"],
+    mustNotInclude: FORMULA_ENGINE_MODULES,
+    platform: "browser",
+    lazySplit: true
+  },
   ns("pdf", "Pdf", ["modules/archive/", "modules/xml/"], "browser"),
 
   // ===========================================================================

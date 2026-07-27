@@ -3,7 +3,7 @@
  *
  * This module takes the evaluation results from the evaluator and
  * produces a declarative `WritebackPlan` that describes all cell mutations.
- * The plan is then applied by `apply-writeback-plan.ts`.
+ * The host adapter applies the completed plan after calculation succeeds.
  *
  * ## Responsibilities
  *
@@ -31,8 +31,9 @@ import {
   spillCellKeyFromId,
   formulaCellKey
 } from "@formula/integration/workbook-snapshot";
-import type { SpillRegion } from "@formula/materialize/types";
+import { isSpillAvailable } from "@formula/materialize/spill-availability";
 import type {
+  SpillRegion,
   WritebackPlan,
   WriteOperation,
   SpillWrite,
@@ -71,14 +72,15 @@ type GhostMap = Map<string, string>;
 export function buildWritebackPlan(
   snapshot: WorkbookSnapshot,
   compiled: readonly CompiledFormula[],
+  failedInstances: readonly FormulaInstance[],
   results: ReadonlyMap<string, RuntimeValue>,
   previousSpills: ReadonlyMap<string, SpillRegion>,
   previousGhosts: ReadonlyMap<string, unknown>
 ): WritebackPlan {
-  const operations: WriteOperation[] = [];
+  const cleanupOperations: WriteOperation[] = [];
+  const writeOperations: WriteOperation[] = [];
   const spillRegions = new Map<string, SpillRegion>();
   const ghostSnapshots = new Map<string, SnapshotCellValue>();
-  const removedSpillKeys: string[] = [];
   // Target cells already claimed by a spill produced EARLIER in this
   // calc pass. Without this set, two dynamic-array formulas whose spill
   // regions overlap would each pass the availability check against the
@@ -89,7 +91,49 @@ export function buildWritebackPlan(
   // Build a set of current formula cell keys (using worksheet-id-based keys)
   const formulaKeys = new Set<string>();
   for (const cf of compiled) {
-    formulaKeys.add(spillCellKeyFromId(cf.instance.sheetId, cf.instance.row, cf.instance.col));
+    const inst = cf.instance;
+    formulaKeys.add(spillCellKeyFromId(inst.sheetId, inst.row, inst.col));
+  }
+  for (const inst of failedInstances) {
+    formulaKeys.add(spillCellKeyFromId(inst.sheetId, inst.row, inst.col));
+  }
+
+  // Parse/bind failures have no CompiledFormula, but still require a scalar
+  // error write (or cached-result preservation) and prior-spill cleanup.
+  for (const inst of failedInstances) {
+    const result = results.get(formulaCellKey(inst.sheetName, inst.row, inst.col));
+    if (result === undefined) {
+      continue;
+    }
+    const srcKey = spillCellKeyFromId(inst.sheetId, inst.row, inst.col);
+    const previousRegion = previousSpills.get(srcKey);
+    if (previousRegion) {
+      emitPreviousSpillCleanup(
+        previousRegion,
+        previousGhosts,
+        snapshot,
+        cleanupOperations,
+        inst.sheetName,
+        inst.sheetId
+      );
+    }
+    const scalar = scalarFromResult(result);
+    if (shouldPreserveCompileFailure(scalar, inst, snapshot)) {
+      writeOperations.push({
+        type: "preserve",
+        sheetName: inst.sheetName,
+        row: inst.row,
+        col: inst.col
+      });
+    } else {
+      writeOperations.push({
+        type: "scalar",
+        sheetName: inst.sheetName,
+        row: inst.row,
+        col: inst.col,
+        value: runtimeToSnapshotValue(scalar)
+      });
+    }
   }
 
   // Build ghost map from previous spills (validated against snapshot)
@@ -112,7 +156,7 @@ export function buildWritebackPlan(
         const targetKey = spillCellKeyFromId(region.worksheetId, targetRow, targetCol);
         // Validate ghost cell is still unmodified
         const cell = ws.cells.get(snapshotCellKey(targetRow, targetCol));
-        if (isGhostUnmodified(cell, targetKey, previousGhosts)) {
+        if (isGhostUnmodified(cell, srcKey)) {
           ghostMap.set(targetKey, srcKey);
         }
       }
@@ -128,12 +172,11 @@ export function buildWritebackPlan(
           region,
           previousGhosts,
           snapshot,
-          operations,
+          cleanupOperations,
           ws.name,
           region.worksheetId
         );
       }
-      removedSpillKeys.push(srcKey);
     }
   }
 
@@ -150,10 +193,22 @@ export function buildWritebackPlan(
     const isDynamic = inst.isDynamicArray || cf.isDynamicArrayFunction;
 
     if (isCSE) {
+      const srcKey = spillCellKeyFromId(inst.sheetId, inst.row, inst.col);
+      const previousRegion = previousSpills.get(srcKey);
+      if (previousRegion) {
+        emitPreviousSpillCleanup(
+          previousRegion,
+          previousGhosts,
+          snapshot,
+          cleanupOperations,
+          inst.sheetName,
+          inst.sheetId
+        );
+      }
       // CSE array formula
       const op = buildCSEWrite(inst, result);
       if (op) {
-        operations.push(op);
+        writeOperations.push(op);
       }
     } else if (
       isDynamic &&
@@ -174,12 +229,24 @@ export function buildWritebackPlan(
         snapshot,
         spillRegions,
         ghostSnapshots,
-        operations,
+        cleanupOperations,
+        writeOperations,
         activeSpillTargets
       );
 
       if (spillResult === "error") {
-        operations.push({
+        const previousRegion = previousSpills.get(srcKey);
+        if (previousRegion) {
+          emitPreviousSpillCleanup(
+            previousRegion,
+            previousGhosts,
+            snapshot,
+            cleanupOperations,
+            inst.sheetName,
+            inst.sheetId
+          );
+        }
+        writeOperations.push({
           type: "spill-error",
           sheetName: inst.sheetName,
           sheetId: inst.sheetId,
@@ -199,22 +266,21 @@ export function buildWritebackPlan(
           prevRegion,
           previousGhosts,
           snapshot,
-          operations,
+          cleanupOperations,
           inst.sheetName,
           inst.sheetId
         );
-        removedSpillKeys.push(srcKey);
       }
 
-      if (shouldPreserve(scalar, inst, snapshot)) {
-        operations.push({
+      if (shouldPreserveUnsupportedFunction(scalar, inst, snapshot)) {
+        writeOperations.push({
           type: "preserve",
           sheetName: inst.sheetName,
           row: inst.row,
           col: inst.col
         } satisfies PreserveWrite);
       } else {
-        operations.push({
+        writeOperations.push({
           type: "scalar",
           sheetName: inst.sheetName,
           row: inst.row,
@@ -226,11 +292,10 @@ export function buildWritebackPlan(
   }
 
   return {
-    operations,
+    operations: [...cleanupOperations, ...writeOperations],
     spillState: {
       spillRegions,
-      ghostSnapshots,
-      removedSpillKeys
+      ghostSnapshots
     }
   };
 }
@@ -308,7 +373,8 @@ function buildSpillWrite(
   snapshot: WorkbookSnapshot,
   spillRegions: Map<string, SpillRegion>,
   ghostSnapshotsOut: Map<string, SnapshotCellValue>,
-  operations: WriteOperation[],
+  cleanupOperations: WriteOperation[],
+  writeOperations: WriteOperation[],
   /**
    * Target cell keys claimed by spill regions produced EARLIER in this
    * same calc pass. The snapshot is immutable during a pass, so without
@@ -327,7 +393,7 @@ function buildSpillWrite(
   if (arr.height <= 1 && arr.width <= 1) {
     const val =
       arr.height > 0 && arr.width > 0 ? arr.rows[0][0] : ({ kind: RVKind.Blank } as ScalarValue);
-    operations.push({
+    writeOperations.push({
       type: "scalar",
       sheetName: inst.sheetName,
       row: inst.row,
@@ -340,7 +406,7 @@ function buildSpillWrite(
         previousRegion,
         previousGhosts,
         snapshot,
-        operations,
+        cleanupOperations,
         inst.sheetName,
         inst.sheetId
       );
@@ -348,70 +414,25 @@ function buildSpillWrite(
     return "ok";
   }
 
-  // Reject if the spill region would extend past the sheet's maximum
-  // dimensions (1048576 rows x 16384 columns) — Excel reports #SPILL! here.
-  if (inst.row + arr.height - 1 > 1048576 || inst.col + arr.width - 1 > 16384) {
+  if (
+    !isSpillAvailable({
+      snapshot,
+      sheetName: inst.sheetName,
+      sourceRow: inst.row,
+      sourceCol: inst.col,
+      rows: arr.height,
+      cols: arr.width,
+      isReusableGhost: (row, col) => {
+        const key = spillCellKeyFromId(inst.sheetId, row, col);
+        const owner = ghostMap.get(key);
+        return (
+          owner !== undefined && isGhostUnmodified(ws.cells.get(snapshotCellKey(row, col)), owner)
+        );
+      },
+      isClaimed: (row, col) => activeSpillTargets.has(spillCellKeyFromId(inst.sheetId, row, col))
+    })
+  ) {
     return "error";
-  }
-
-  // Reject if the source cell itself sits inside a merged region.
-  // Excel reports #SPILL! whenever a dynamic-array formula is placed
-  // in a merged cell, even when the ghosts land outside the merge.
-  // The ghost loop below skips `(r=0, c=0)` and the master's value is
-  // already in `cells`, so it would not catch this case.
-  if (isInMergedRegion(ws, inst.row, inst.col)) {
-    return "error";
-  }
-
-  // Check spill availability: verify all target ghost cells are unoccupied
-  for (let r = 0; r < arr.height; r++) {
-    for (let c = 0; c < arr.width; c++) {
-      if (r === 0 && c === 0) {
-        continue; // Source cell is always available
-      }
-      const targetRow = inst.row + r;
-      const targetCol = inst.col + c;
-      const targetKey = spillCellKeyFromId(inst.sheetId, targetRow, targetCol);
-
-      // Another spill in this calc pass already claimed this cell —
-      // report #SPILL! rather than silently overwrite.
-      if (activeSpillTargets.has(targetKey)) {
-        return "error";
-      }
-
-      // Refuse to spill onto any cell that belongs to a merged region.
-      // The cell itself may be a merge slave — which the snapshot
-      // builder filters out of `ws.cells`, so the value/formula checks
-      // below would treat it as empty — but writing there would mutate
-      // the master via `MergeValue`'s setter in `@excel/cell` and
-      // silently corrupt the merge. Excel reports `#SPILL!` whenever a
-      // dynamic-array result tries to land in a merge.
-      if (isInMergedRegion(ws, targetRow, targetCol)) {
-        return "error";
-      }
-
-      // Check if the cell is a ghost from ANY previous spill.
-      // If the user hasn't modified it, it's safe to overwrite — the
-      // originating formula will clean it up (or we'll overwrite it).
-      if (ghostMap.has(targetKey)) {
-        const cell = ws.cells.get(snapshotCellKey(targetRow, targetCol));
-        if (!isGhostUnmodified(cell, targetKey, previousGhosts)) {
-          return "error"; // User wrote into a ghost → #SPILL!
-        }
-        continue;
-      }
-
-      // Check if the cell is occupied by another formula or has a value
-      const cell = ws.cells.get(snapshotCellKey(targetRow, targetCol));
-      if (cell && cell.value !== null && cell.formulaKind === "none") {
-        // Non-empty, non-formula cell → blocked
-        return "error";
-      }
-      if (cell && cell.formulaKind !== "none") {
-        // Formula cell → blocked (not our ghost)
-        return "error";
-      }
-    }
   }
 
   // Now that availability is confirmed, claim the target cells so the
@@ -433,7 +454,7 @@ function buildSpillWrite(
       previousRegion,
       previousGhosts,
       snapshot,
-      operations,
+      cleanupOperations,
       inst.sheetName,
       inst.sheetId
     );
@@ -457,7 +478,7 @@ function buildSpillWrite(
     results.push(row);
   }
 
-  operations.push({
+  writeOperations.push({
     type: "spill",
     sheetName: inst.sheetName,
     sheetId: inst.sheetId,
@@ -512,9 +533,9 @@ function collectStaleGhosts(
       if (isInMergedRegion(ws, targetRow, targetCol)) {
         continue;
       }
-      const targetKey = spillCellKeyFromId(region.worksheetId, targetRow, targetCol);
       const cell = ws.cells.get(snapshotCellKey(targetRow, targetCol));
-      if (isGhostUnmodified(cell, targetKey, previousGhosts)) {
+      const sourceKey = spillCellKeyFromId(region.worksheetId, region.sourceRow, region.sourceCol);
+      if (isGhostUnmodified(cell, sourceKey)) {
         cells.push({ row: targetRow, col: targetCol });
       }
     }
@@ -527,10 +548,9 @@ function collectStaleGhosts(
  * still unmodified.
  *
  * Collects the stale ghost cells and, if any remain, pushes a single
- * `CleanupWrite` onto `operations`. The caller is responsible for
- * updating `removedSpillKeys` / `spillRegions` as appropriate for its
- * situation (this helper deliberately does not touch them since the
- * three callsites have slightly different follow-up actions).
+ * `CleanupWrite` onto `operations`. The next spill state is rebuilt from
+ * successful spills in the current pass, so stale metadata is omitted
+ * automatically.
  */
 function emitPreviousSpillCleanup(
   previousRegion: SpillRegion,
@@ -569,48 +589,12 @@ function isInMergedRegion(ws: WorksheetSnapshot, row: number, col: number): bool
   return false;
 }
 
-function isGhostUnmodified(
-  cell: { value: SnapshotCellValue; formulaKind: string } | undefined,
-  ghostKey: string,
-  previousGhosts: ReadonlyMap<string, unknown>
+export function isGhostUnmodified(
+  cell: { formulaKind: string; ghostOwner?: string } | undefined,
+  sourceKey: string,
+  _previousGhosts?: ReadonlyMap<string, unknown>
 ): boolean {
-  if (!cell) {
-    return true;
-  }
-  if (cell.value === null) {
-    return true;
-  }
-  if (cell.formulaKind !== "none") {
-    return false;
-  }
-  const snapshot = previousGhosts.get(ghostKey);
-  if (snapshot === undefined) {
-    return true; // No snapshot — assume unmodified (conservative)
-  }
-  return snapshotValuesEqual(cell.value, snapshot);
-}
-
-/**
- * Structural comparison for snapshot values.
- * Handles error objects (which are reference types and fail `===` comparison)
- * as well as primitives.
- */
-function snapshotValuesEqual(a: SnapshotCellValue, b: unknown): boolean {
-  if (a === b) {
-    return true;
-  }
-  // Both are error objects — compare by error code
-  if (
-    a !== null &&
-    typeof a === "object" &&
-    "error" in a &&
-    b !== null &&
-    typeof b === "object" &&
-    "error" in (b as Record<string, unknown>)
-  ) {
-    return a.error === (b as { error: string }).error;
-  }
-  return false;
+  return cell?.formulaKind === "none" && cell.ghostOwner === sourceKey;
 }
 
 function scalarFromResult(v: RuntimeValue): ScalarValue {
@@ -664,12 +648,15 @@ function runtimeToSnapshotValue(v: ScalarValue | RuntimeValue): SnapshotCellValu
   }
 }
 
-function shouldPreserve(
+export function shouldPreserveCompileFailure(
   computed: ScalarValue,
   inst: FormulaInstance,
   snapshot: WorkbookSnapshot
 ): boolean {
-  if (computed.kind !== RVKind.Error || computed.code !== "#NAME?") {
+  if (computed.kind !== RVKind.Error) {
+    return false;
+  }
+  if (computed.code !== "#NAME?" && computed.code !== "#CALC!") {
     return false;
   }
   // Check if cell has a cached result in the snapshot
@@ -679,4 +666,14 @@ function shouldPreserve(
   }
   const cell = ws.cells.get(snapshotCellKey(inst.row, inst.col));
   return cell?.cachedResult !== undefined && cell.cachedResult !== null;
+}
+
+function shouldPreserveUnsupportedFunction(
+  computed: ScalarValue,
+  inst: FormulaInstance,
+  snapshot: WorkbookSnapshot
+): boolean {
+  return computed.kind === RVKind.Error && computed.code === "#NAME?"
+    ? shouldPreserveCompileFailure(computed, inst, snapshot)
+    : false;
 }

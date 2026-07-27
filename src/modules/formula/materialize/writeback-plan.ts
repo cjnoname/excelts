@@ -26,7 +26,14 @@
  */
 
 import type { SnapshotCellValue } from "@formula/integration/workbook-snapshot";
-import type { SpillRegion } from "@formula/materialize/types";
+
+export interface SpillRegion {
+  readonly worksheetId: number;
+  readonly sourceRow: number;
+  readonly sourceCol: number;
+  readonly rows: number;
+  readonly cols: number;
+}
 
 // ============================================================================
 // Individual Write Operations
@@ -160,7 +167,7 @@ export interface WritebackPlan {
    * Spill persistent state changes — spill regions and ghost cell snapshots
    * that the adapter must update in the persistent tracking maps.
    */
-  readonly spillState: SpillStateDelta;
+  readonly spillState: SpillState;
 }
 
 // ============================================================================
@@ -171,7 +178,7 @@ export interface WritebackPlan {
  * Describes changes to the persistent spill tracking state.
  * The adapter updates the persistent maps accordingly.
  */
-export interface SpillStateDelta {
+export interface SpillState {
   /**
    * New or updated spill region metadata.
    * Key: `"ws:<id>!row:col"` of the source formula cell.
@@ -185,11 +192,4 @@ export interface SpillStateDelta {
    * Value: the raw value written to that ghost cell.
    */
   readonly ghostSnapshots: ReadonlyMap<string, SnapshotCellValue>;
-
-  /**
-   * Spill region entries to remove from the persistent map.
-   * These are source cell keys whose formulas no longer exist or whose
-   * spill was replaced.
-   */
-  readonly removedSpillKeys: readonly string[];
 }

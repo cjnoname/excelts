@@ -1,9 +1,9 @@
 /**
  * Formula Calculation Engine
  *
- * Provides `calculateFormulas()` as the sole function-style entry point
- * for formula evaluation. Call it directly with a workbook — there is no
- * `Workbook.calculateFormulas()` method and no host-registry indirection.
+ * Pure internal calculation boundary. It consumes immutable snapshot/state and
+ * returns a writeback plan plus isolated next state; it never imports, models,
+ * or mutates a live workbook.
  *
  * ## Architecture
  *
@@ -14,20 +14,33 @@
  * 5. **Dependency Analysis** — topological sort
  * 6. **Evaluate** — execute BoundExpr with RuntimeValue system
  * 7. **Materialize** — build declarative WritebackPlan
- * 8. **Apply** — write plan to live workbook
+ * 8. **Return** — emit plan + next state for the host to commit atomically
  */
 
 import { calculateFormulasImpl } from "@formula/integration/calculate-formulas-impl";
-import type { WorkbookLike } from "@formula/materialize/types";
+import { nextFormulaCalculationState } from "@formula/integration/calculation-state";
+import type { FormulaCalculationState } from "@formula/integration/calculation-state";
+import type { WorkbookSnapshot } from "@formula/integration/workbook-snapshot";
+import type { WritebackPlan } from "@formula/materialize/writeback-plan";
+import type { RuntimeValue } from "@formula/runtime/values";
 
-// Re-export shared types for external consumers
-export type { DefinedNamesLike, WorkbookLike } from "@formula/materialize/types";
+export interface FormulaFunction {
+  readonly minArity: number;
+  readonly maxArity: number;
+  readonly volatile?: boolean;
+  readonly invoke: (args: RuntimeValue[]) => RuntimeValue;
+}
+
+export interface FormulaCalculationResult {
+  readonly plan: WritebackPlan;
+  readonly state: FormulaCalculationState;
+}
 
 /**
- * Recalculate all formula cells in a workbook.
+ * Calculate all formula cells in a captured workbook snapshot.
  *
  * Evaluates every formula cell using the built-in calculation engine
- * and updates each cell's `result` value. Formulas are evaluated lazily
+ * and describes result updates in a plan. Formulas are evaluated lazily
  * with recursive dependency resolution, memoization, and circular
  * reference detection.
  *
@@ -60,14 +73,20 @@ export type { DefinedNamesLike, WorkbookLike } from "@formula/materialize/types"
  * - `RAND`, `RANDBETWEEN`, `NOW`, `TODAY` are re-evaluated on every call.
  *   This is intentional — these functions are expected to produce fresh values.
  *
- * **Side effects:**
- * - This function **mutates** the workbook by updating formula cells' `result`
- *   property in-place. For dynamic array formulas, adjacent cells are also
- *   written with spill results. If you need the original cached results
- *   preserved, clone the workbook before calling this function.
+ * **Side effects:** the snapshot and the committed spill state are never
+ * mutated. The returned `state` carries the next spill state, which the host
+ * commits only after a successful writeback. The shared AST memo may gain
+ * entries, which is safe regardless of the outcome.
  *
- * @param workbook - The workbook whose formulas should be recalculated
+ * @param snapshot - Immutable workbook data captured by the host adapter
+ * @param state - Explicit persistent state for this workbook
+ * @param userFunctions - Optional per-workbook custom functions
  */
-export function calculateFormulas(workbook: WorkbookLike): void {
-  calculateFormulasImpl(workbook);
+export function calculateFormulas(
+  snapshot: WorkbookSnapshot,
+  state: FormulaCalculationState,
+  userFunctions?: ReadonlyMap<string, FormulaFunction>
+): FormulaCalculationResult {
+  const plan = calculateFormulasImpl(snapshot, state, userFunctions);
+  return { plan, state: nextFormulaCalculationState(state, plan.spillState) };
 }

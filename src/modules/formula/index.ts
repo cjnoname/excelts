@@ -1,16 +1,9 @@
 /**
  * Public entry for the documonster formula engine.
  *
- * **Functional, zero-side-effect** is the only evaluation style:
- * ```ts
- * import { Formula } from "documonster/formula";
- * Formula.calculate(workbook);
- * ```
- * Perfect tree-shaking: unused exports are dropped, no module initialisation
- * runs, and there is **no install / registration step** — every export is used
- * directly. Bundles that import only `Formula.tokenize` / `Formula.parse` never
- * pull the evaluator or function registry in; the evaluator is reached solely
- * through `Formula.calculate`, so consumers who never call it never pay for it.
+ * This entry exposes syntax inspection only. Workbook recalculation lives at
+ * `documonster/excel/formula`, where the Excel host adapter and the calculation
+ * engine are linked without adding either to `documonster/excel` itself.
  *
  * To recalculate a workbook from `documonster/excel`, use the adapter exported
  * by `documonster/excel/formula`:
@@ -28,16 +21,9 @@ export * as Formula from "@formula/surface/formula";
 // Errors — extend BaseError, consistent with every other module's errors.ts.
 export { FormulaError, FormulaParseError, isFormulaError } from "@formula/errors";
 
-// Structural types callers may need to describe their host workbook.
-export type {
-  CellErrorValueLike,
-  CellLike,
-  DefinedNameEntry,
-  DefinedNamesLike,
-  DimensionsLike,
-  FormulaResultLike,
-  RowLike,
-  SpillRegion,
-  WorkbookLike,
-  WorksheetLike
-} from "@formula/materialize/types";
+// Syntax types, so callers can name what `tokenize` / `parse` return and switch
+// exhaustively over token / node kinds.
+export { TokenType } from "@formula/syntax/token-types";
+export type { Token } from "@formula/syntax/token-types";
+export { NodeType } from "@formula/syntax/ast";
+export type { AstNode } from "@formula/syntax/ast";

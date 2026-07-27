@@ -45,6 +45,8 @@ import { RelType } from "@excel/xlsx/rel-type";
 import type { RelationshipModel } from "@excel/xlsx/xform/core/relationship-xform";
 import type { ChartsheetModel } from "@excel/xlsx/xform/sheet/chartsheet-xform";
 import type { XLSX } from "@excel/xlsx/xlsx.browser";
+import type { FormulaFunction as WorkbookFunctionDescriptor } from "@formula/integration/calculate-formulas";
+export type { WorkbookFunctionDescriptor };
 
 /**
  * A named cell style stored on the workbook: a {@link NamedStyle} plus its name.
@@ -111,15 +113,7 @@ export interface WorkbookData {
   _timelineParts: Record<string, Uint8Array>;
   _timelineCacheParts: Record<string, Uint8Array>;
   _xlsx?: XLSX;
-  userFunctions?: Map<
-    string,
-    {
-      minArity: number;
-      maxArity: number;
-      invoke: (args: unknown[]) => unknown;
-      volatile?: boolean;
-    }
-  >;
+  userFunctions?: Map<string, WorkbookFunctionDescriptor>;
 }
 
 /**

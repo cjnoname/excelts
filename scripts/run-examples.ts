@@ -133,8 +133,18 @@ const examples: ExampleTest[] = [
     outputFiles: []
   },
   {
+    file: "src/modules/formula/examples/formula-information.ts",
+    description: "Formula: information functions",
+    outputFiles: []
+  },
+  {
+    file: "src/modules/formula/examples/formula-custom-functions.ts",
+    description: "Formula: custom function registration",
+    outputFiles: []
+  },
+  {
     file: "src/modules/formula/examples/formula-standalone.ts",
-    description: "Formula: functional API + tokenize/parse",
+    description: "Formula: recalculation + tokenize/parse",
     outputFiles: []
   },
   {

@@ -211,9 +211,11 @@ export function buildDependencyGraphFromDeps(
 
     // Convert StaticDependencySet to DepRef[]
     const refs: DepRef[] = [];
-    // Direct cell deps always pass through verbatim.
+    // Keep direct cell coordinates until producer remapping. A direct ref may
+    // point at a dynamic-array ghost that is not itself a formula cell.
+    const directCellKeys: string[] = [];
     for (const cell of deps.cells) {
-      refs.push({ sheet: cell.sheet, row: cell.row, col: cell.col });
+      directCellKeys.push(makeKey(cell.sheet, cell.row, cell.col));
     }
     // Area deps normally expand into every cell in the range. For areas
     // that start at a dynamic-array master (e.g. the `A1:A5` in
@@ -232,7 +234,6 @@ export function buildDependencyGraphFromDeps(
         (masterCf.instance.isDynamicArray || masterCf.isDynamicArrayFunction);
       if (isDynMaster) {
         dynMasterDeps.push(topLeftKey);
-        continue;
       }
       refs.push({
         sheet: area.sheet,
@@ -245,6 +246,9 @@ export function buildDependencyGraphFromDeps(
 
     // Expand to concrete cell keys
     const depKeys = expandRefsToKeys(refs, formulaKeySet, formulaCellCoordsBySheet);
+    for (const directKey of directCellKeys) {
+      depKeys.add(directKey);
+    }
     for (const mk of dynMasterDeps) {
       depKeys.add(mk);
     }
@@ -316,7 +320,8 @@ export function buildDependencyGraphFromDeps(
  */
 export function mergeDynamicDeps(
   graph: DependencyGraph,
-  dynamicDeps: ReadonlyMap<string, ReadonlySet<string>>
+  dynamicDeps: ReadonlyMap<string, ReadonlySet<string>>,
+  producerMap?: ReadonlyMap<string, string>
 ): { graph: DependencyGraph; changed: boolean } {
   if (dynamicDeps.size === 0) {
     return { graph, changed: false };
@@ -329,7 +334,8 @@ export function mergeDynamicDeps(
   for (const [formulaKey, accessedKeys] of dynamicDeps) {
     const existing = graph.dependsOn.get(formulaKey);
     for (const k of accessedKeys) {
-      if (!existing || !existing.has(k)) {
+      const depKey = producerMap?.get(k) ?? k;
+      if (!existing || !existing.has(depKey)) {
         needsClone = true;
         break;
       }
@@ -360,13 +366,14 @@ export function mergeDynamicDeps(
       newDependsOn.set(formulaKey, deps);
     }
     for (const accessedKey of accessedKeys) {
-      if (!deps.has(accessedKey)) {
-        deps.add(accessedKey);
+      const depKey = producerMap?.get(accessedKey) ?? accessedKey;
+      if (!deps.has(depKey)) {
+        deps.add(depKey);
         // Update reverse edge
-        let rev = newDependedBy.get(accessedKey);
+        let rev = newDependedBy.get(depKey);
         if (!rev) {
           rev = new Set();
-          newDependedBy.set(accessedKey, rev);
+          newDependedBy.set(depKey, rev);
         }
         rev.add(formulaKey);
       }

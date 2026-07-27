@@ -2,8 +2,9 @@
  * Text Functions — Native RuntimeValue implementations.
  */
 
-import { isDate1904 } from "@formula/functions/_date-context";
 import { argToNumber, checkError, excelWildcardToRegex } from "@formula/functions/_shared";
+import type { FunctionRuntimeContext } from "@formula/runtime/function-context";
+import { DEFAULT_FUNCTION_CONTEXT } from "@formula/runtime/function-context";
 import type { RuntimeValue, ScalarValue, ErrorValue } from "@formula/runtime/values";
 import {
   RVKind,
@@ -450,7 +451,10 @@ export function fnREPT(args: RuntimeValue[]): RuntimeValue {
 // TEXT (complex number/date formatting)
 // ============================================================================
 
-export function fnTEXT(args: RuntimeValue[]): RuntimeValue {
+export function fnTEXT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rawVal = topLeft(args[0]);
   if (isError(rawVal)) {
     return rawVal;
@@ -495,7 +499,7 @@ export function fnTEXT(args: RuntimeValue[]): RuntimeValue {
   // For negative section, use absolute value (sign is in the format)
   const useVal = sections.length >= 2 && val < 0 ? Math.abs(val) : val;
 
-  return rvString(formatWithCode(useVal, activeFmt, rawVal));
+  return rvString(formatWithCode(useVal, activeFmt, rawVal, context.date1904));
 }
 
 /**
@@ -523,7 +527,7 @@ function splitFormatSections(fmt: string): string[] {
 /**
  * Format a number using a single format code section.
  */
-function formatWithCode(val: number, fmt: string, rawVal: ScalarValue): string {
+function formatWithCode(val: number, fmt: string, rawVal: ScalarValue, date1904: boolean): string {
   const upper = fmt.toUpperCase();
 
   // Date/time formats — detect by presence of date/time tokens
@@ -543,7 +547,7 @@ function formatWithCode(val: number, fmt: string, rawVal: ScalarValue): string {
     upper.includes("AM/PM") ||
     upper.includes("A/P")
   ) {
-    return formatDate(val, fmt);
+    return formatDate(val, fmt, date1904);
   }
 
   // Percentage format
@@ -993,8 +997,8 @@ const MONTH_NAMES_SHORT = [
  * the time's minutes as months (both tokens fire the same regex), giving
  * garbage like `"2023-06-15 14:06:45"` for a timestamp at 14:30:45.
  */
-function formatDate(val: number, fmt: string): string {
-  const d = excelToDate(val, isDate1904());
+function formatDate(val: number, fmt: string, date1904: boolean): string {
+  const d = excelToDate(val, date1904);
 
   const year = d.getUTCFullYear();
   const month0 = d.getUTCMonth();

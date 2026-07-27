@@ -32,6 +32,8 @@ import {
   formulaCellKey,
   resolveDefinedName as resolveDefinedNameFromSnapshot
 } from "@formula/integration/workbook-snapshot";
+import { isSpillAvailable } from "@formula/materialize/spill-availability";
+import type { FunctionRuntimeContext } from "@formula/runtime/function-context";
 import { lookupFunction } from "@formula/runtime/function-registry";
 import type { FunctionDescriptor } from "@formula/runtime/function-registry";
 import type {
@@ -103,6 +105,8 @@ export class EvalSession {
   readonly nameCache = new Map<string, RuntimeValue>();
   /** Fallback values for circular references during iterative calculation. */
   readonly circularFallback = new Map<string, RuntimeValue>();
+  /** Full previous-iteration results used when reading circular spill elements. */
+  readonly circularRawFallback = new Map<string, RuntimeValue>();
 
   /**
    * Live spill map: cell key → (masterKey, row-offset, col-offset).
@@ -121,6 +125,8 @@ export class EvalSession {
     string,
     { masterKey: string; rowOffset: number; colOffset: number }
   >();
+  /** Previous unmodified ghost cells, keyed like formula cells. */
+  readonly staleGhosts = new Set<string>();
 
   /**
    * Runtime dependency recorder — tracks cell accesses made during evaluation.
@@ -206,6 +212,13 @@ export interface EvalContext {
    * canonical uppercase names (prefix-stripped on register).
    */
   readonly userFunctions?: ReadonlyMap<string, FunctionDescriptor>;
+  /** Workbook date system passed explicitly to native functions. */
+  readonly date1904: boolean;
+  /**
+   * Pre-built native-function context for this calculation. Reused across every
+   * `invoke` call so hot paths do not allocate one object per function call.
+   */
+  readonly functionContext: FunctionRuntimeContext;
 }
 
 // ============================================================================
@@ -515,6 +528,10 @@ function buildRangeArray(
         row[ci] = topLeft(live);
         continue;
       }
+      if (session.staleGhosts.has(formulaCellKey(canonicalSheet, r, c))) {
+        row[ci] = BLANK;
+        continue;
+      }
       row[ci] = topLeft(fromSnapshotValue(cell.value));
     }
     rows[ri] = row;
@@ -697,6 +714,9 @@ function getCellValue(
   if (spill) {
     return spill;
   }
+  if (session.staleGhosts.has(formulaCellKey(canonicalSheet, row, col))) {
+    return BLANK;
+  }
   return fromSnapshotValue(cell.value);
 }
 
@@ -717,11 +737,12 @@ function readLiveSpill(
   if (!spill) {
     return undefined;
   }
-  const master = session.resultCache.get(spill.masterKey);
-  if (!master || master.raw.kind !== RVKind.Array) {
+  const current = session.resultCache.get(spill.masterKey)?.raw;
+  const raw = current ?? session.circularRawFallback.get(spill.masterKey);
+  if (!raw || raw.kind !== RVKind.Array) {
     return undefined;
   }
-  const arr = master.raw;
+  const arr = raw;
   if (spill.rowOffset >= arr.height || spill.colOffset >= arr.width) {
     return undefined;
   }
@@ -776,6 +797,7 @@ function evaluateFormulaInner(
   // Enable runtime dependency recording for formulas with dynamic refs
   if (compiled.hasDynamicRefs) {
     session.recordingKey = key;
+    session.dynamicDeps.set(key, new Set());
   }
 
   try {
@@ -783,15 +805,23 @@ function evaluateFormulaInner(
     const intersected = implicitIntersect(result, ctx);
     const scalar = dereferenceValue(intersected, ctx, session);
     const raw = dereferenceValue(result, ctx, session);
-    const entry: CachedResult = { scalar, raw };
+    const isDyn = compiled.instance.isDynamicArray || compiled.isDynamicArrayFunction;
+    removeLiveSpillMappings(key, session);
+    const spillBlocked =
+      isDyn &&
+      raw.kind === RVKind.Array &&
+      (raw.height > 1 || raw.width > 1) &&
+      !canExposeLiveSpill(compiled, raw, ctx, session);
+    const entry: CachedResult = spillBlocked
+      ? { scalar: ERRORS.SPILL, raw: ERRORS.SPILL }
+      : { scalar, raw };
     session.resultCache.set(key, entry);
     // Register the spill region if this is a dynamic-array formula
     // whose result is a multi-cell array. Downstream formulas that
     // read into the spill range (e.g. `=SUM(A1:A5)` over a
     // `=SEQUENCE(5)` master) can now pick up the ghost-cell values
     // before materialize writes them back to the snapshot.
-    const isDyn = compiled.instance.isDynamicArray || compiled.isDynamicArrayFunction;
-    if (isDyn && raw.kind === RVKind.Array && (raw.height > 1 || raw.width > 1)) {
+    if (!spillBlocked && isDyn && raw.kind === RVKind.Array && (raw.height > 1 || raw.width > 1)) {
       for (let r = 0; r < raw.height; r++) {
         for (let c = 0; c < raw.width; c++) {
           if (r === 0 && c === 0) {
@@ -820,6 +850,34 @@ function evaluateFormulaInner(
     ctx.currentAddress = prevAddress;
     ctx.currentSheet = prevSheet;
     session.recordingKey = prevRecording;
+  }
+}
+
+function canExposeLiveSpill(
+  compiled: CompiledFormula,
+  raw: ArrayValue,
+  ctx: EvalContext,
+  session: EvalSession
+): boolean {
+  const inst = compiled.instance;
+  return isSpillAvailable({
+    snapshot: ctx.snapshot,
+    sheetName: inst.sheetName,
+    sourceRow: inst.row,
+    sourceCol: inst.col,
+    rows: raw.height,
+    cols: raw.width,
+    isReusableGhost: (row, col) =>
+      session.staleGhosts.has(formulaCellKey(inst.sheetName, row, col)),
+    isClaimed: (row, col) => session.liveSpills.has(formulaCellKey(inst.sheetName, row, col))
+  });
+}
+
+function removeLiveSpillMappings(masterKey: string, session: EvalSession): void {
+  for (const [key, spill] of session.liveSpills) {
+    if (spill.masterKey === masterKey) {
+      session.liveSpills.delete(key);
+    }
   }
 }
 
@@ -1448,7 +1506,7 @@ function evaluateCall(expr: BoundCall, ctx: EvalContext, session: EvalSession): 
     // the whole calculation pass. Any RuntimeValue return (including
     // error values the user constructed intentionally) passes through.
     try {
-      return userDesc.invoke(args);
+      return userDesc.invoke(args, ctx.functionContext);
     } catch {
       return ERRORS.VALUE;
     }
@@ -1469,21 +1527,21 @@ function evaluateCall(expr: BoundCall, ctx: EvalContext, session: EvalSession): 
           );
           return rvNumber(idx >= 0 ? idx + 1 : 1);
         }
-        return desc.invoke(args);
+        return desc.invoke(args, ctx.functionContext);
       }
       case "SHEETS": {
         // SHEETS() → total sheet count
         if (args.length === 0) {
           return rvNumber(ctx.snapshot.worksheets.length);
         }
-        return desc.invoke(args);
+        return desc.invoke(args, ctx.functionContext);
       }
       case "ISFORMULA":
         return evaluateISFORMULA(expr.args, ctx, session);
       case "FORMULATEXT":
         return evaluateFORMULATEXT(expr.args, ctx, session);
       default:
-        return desc.invoke(args);
+        return desc.invoke(args, ctx.functionContext);
     }
   }
 
@@ -2580,7 +2638,7 @@ function tryEvaluateINDEX(
   if (!indexFn) {
     return ERRORS.VALUE;
   }
-  return indexFn.invoke(indexArgs);
+  return indexFn.invoke(indexArgs, ctx.functionContext);
 }
 
 /**

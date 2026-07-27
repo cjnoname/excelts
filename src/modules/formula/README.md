@@ -2,24 +2,18 @@
 
 [中文](README_zh.md)
 
-Standalone Excel-compatible formula engine — tokenizer, parser, compiler, evaluator, dependency graph, dynamic-array spill materialiser, and 433 built-in functions. Zero runtime dependencies.
+Excel-compatible formula tokenizer, parser, compiler, evaluator, dependency graph, dynamic-array spill materialiser, and 433 built-in functions. Zero runtime dependencies.
 
-## Two usage modes
+## Usage
 
-Which entry you call depends on what holds your data. You never pay for
-the engine unless you import it.
+Workbook recalculation is exposed by `documonster/excel/formula`. Syntax
+inspection is exposed by `documonster/formula`. Both are direct calls with
+**no install or registration step**.
 
-| Mode                        | How                                                          | Use when                                                                                            |
-| --------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| **Paired with `Workbook`**  | `calculateFormulas(wb)` from `documonster/excel/formula`     | You use the excel module's `Workbook` and want to recompute its formulas (and PDF export recalc).   |
-| **Standalone / functional** | `Formula.calculate(workbookLike)` from `documonster/formula` | You operate on a `WorkbookLike` object (custom host, server-side recalc, tests) — no excel runtime. |
-
-Both run the same engine. The split exists because an excel workbook
-handle is a plain-data record (`WorkbookData`) while the engine consumes
-the structural `WorkbookLike` contract — `documonster/excel/formula`
-holds the adapter between them. There is **no install or registration
-step** in either mode. See [Why separate subpaths?](#why-separate-subpaths)
-for the tree-shake numbers.
+| Task                          | Entry point                                              |
+| ----------------------------- | -------------------------------------------------------- |
+| Recalculate an Excel workbook | `calculateFormulas(wb)` from `documonster/excel/formula` |
+| Tokenize / parse syntax       | `Formula.tokenize` / `Formula.parse` from `/formula`     |
 
 ## Features
 
@@ -73,35 +67,6 @@ calculateFormulas(wb);
 console.log(Cell.getResult(ws, "A4")); // 60
 ```
 
-### Standalone / functional
-
-The engine runs on any object shaped like `WorkbookLike` — you do **not**
-have to use the excel module at all. A bundle that imports only
-`Formula.calculate` pulls zero excel runtime code.
-
-```typescript
-import { Formula, type WorkbookLike } from "documonster/formula";
-
-// Your own data — any object implementing WorkbookLike works.
-// No Workbook required.
-const wb: WorkbookLike = buildMyWorkbookLike();
-
-Formula.calculate(wb); // pure function, zero global side effects
-```
-
-This mode is ideal for:
-
-- Server-side recalculation of cached XLSX files
-- Custom spreadsheet hosts that already have their own data model
-- Tests and benchmarks that want deterministic, per-instance behaviour
-- Concurrent evaluation of multiple workbooks without touching process globals
-
-`Formula.calculate` does **not** accept an excel workbook handle: a
-`Workbook.Handle` (`WorkbookData`) is a plain-data record with no
-`worksheets` array and no `getWorksheet()` method, so passing one is a
-compile error (and would throw at runtime). Use
-`documonster/excel/formula` for those.
-
 ### Recalculating a loaded workbook
 
 Load an XLSX with the excel module, then recalculate its formulas
@@ -137,14 +102,8 @@ The subpaths give you these tree-shaking outcomes:
 | Imports                                   | Excel module | Formula engine |
 | ----------------------------------------- | ------------ | -------------- |
 | `Workbook` from `/excel` only             | ✓            | ✗              |
-| `Formula.calculate` from `/formula`       | ✗            | ✓              |
+| `Formula.tokenize` from `/formula`        | ✗            | syntax only    |
 | `calculateFormulas` from `/excel/formula` | ✓            | ✓              |
-
-The functional `Formula.calculate` API operates on the structural
-`WorkbookLike` interface and pulls **no** excel runtime code — you can
-hand it any object shaped like a workbook. Recalculating a workbook the
-excel module loaded goes through `/excel/formula`, which is the only
-entry that links both.
 
 Keeping recalculation on its own subpath — rather than as a member of the
 `Workbook` namespace — is what makes "no engine unless you ask for it"
@@ -152,34 +111,35 @@ hold in **every** output format, not just the ones with member-level
 dead-code elimination. Measured: hanging it off `Workbook` added approximately
 200 KB to the script-tag excel IIFE for every CDN consumer, because an IIFE
 must keep all of an entry's exports.
-`scripts/verify-treeshake` asserts the current split on rolldown and
-rspack.
+`pnpm verify:treeshake` (`scripts/treeshake-verify.ts`) asserts the current
+split on rolldown and rspack.
 
-> **IIFE note:** The script-tag IIFE bundles
-> (`dist/iife/documonster.excel.iife.min.js` and friends) intentionally
-> exclude the formula engine so they stay lean —
-> `dist/iife/documonster.formula.iife.min.js` ships it separately. Script-tag
-> users who need to recalculate an excel workbook should switch to ESM and
-> import `calculateFormulas` from `documonster/excel/formula`.
+> **IIFE note:** No script-tag IIFE bundle ships the calculation engine.
+> `dist/iife/documonster.formula.iife.min.js` contains the tokenizer and parser
+> only, and `dist/iife/documonster.excel.iife.min.js` is unchanged by this
+> subpath. Script-tag users who need to recalculate a workbook must switch to
+> ESM/CJS and import `calculateFormulas` from `documonster/excel/formula`.
 
 ## Examples
 
 Runnable examples live in `src/modules/formula/examples/`:
 
-| File                         | What it demonstrates                                           |
-| ---------------------------- | -------------------------------------------------------------- |
-| `formula-math.ts`            | Arithmetic, rounding, trig, matrix, power & log                |
-| `formula-text.ts`            | Slicing, search/replace, concat, formatting, regex             |
-| `formula-logical.ts`         | `IF`/`IFS`, boolean ops, `IFERROR`, `SWITCH`, `CHOOSE`         |
-| `formula-date.ts`            | Date construction, extract, duration, business days, format    |
-| `formula-lookup.ts`          | `VLOOKUP`, `XLOOKUP`, `INDEX/MATCH`, `OFFSET`, `INDIRECT`      |
-| `formula-statistical.ts`     | Descriptive stats, conditional aggregates, regression, dists   |
-| `formula-financial.ts`       | Loans, TVM, NPV/IRR, depreciation                              |
-| `formula-dynamic-array.ts`   | `FILTER`/`SORT`/`UNIQUE`, spill, `SEQUENCE`, `LAMBDA`/`REDUCE` |
-| `formula-database.ts`        | `DSUM`/`DCOUNT`/`DAVERAGE` with criteria ranges                |
-| `formula-engineering.ts`     | Base conversions, bitwise, complex numbers, ERF/BESSELJ        |
-| `formula-standalone.ts`      | Functional API + `tokenize`/`parse` without evaluation         |
-| `formula-pdf-integration.ts` | Automatic recalc during `Pdf.fromExcel()`                      |
+| File                          | What it demonstrates                                           |
+| ----------------------------- | -------------------------------------------------------------- |
+| `formula-math.ts`             | Arithmetic, rounding, trig, matrix, power & log                |
+| `formula-text.ts`             | Slicing, search/replace, concat, formatting, regex             |
+| `formula-logical.ts`          | `IF`/`IFS`, boolean ops, `IFERROR`, `SWITCH`, `CHOOSE`         |
+| `formula-date.ts`             | Date construction, extract, duration, business days, format    |
+| `formula-lookup.ts`           | `VLOOKUP`, `XLOOKUP`, `INDEX/MATCH`, `OFFSET`, `INDIRECT`      |
+| `formula-statistical.ts`      | Descriptive stats, conditional aggregates, regression, dists   |
+| `formula-financial.ts`        | Loans, TVM, NPV/IRR, depreciation                              |
+| `formula-dynamic-array.ts`    | `FILTER`/`SORT`/`UNIQUE`, spill, `SEQUENCE`, `LAMBDA`/`REDUCE` |
+| `formula-database.ts`         | `DSUM`/`DCOUNT`/`DAVERAGE` with criteria ranges                |
+| `formula-engineering.ts`      | Base conversions, bitwise, complex numbers, ERF/BESSELJ        |
+| `formula-information.ts`      | `ISNUMBER`/`ISBLANK`/`CELL`/`TYPE` and friends                 |
+| `formula-custom-functions.ts` | Registering, shadowing and unregistering custom functions      |
+| `formula-standalone.ts`       | Recalculation + `tokenize`/`parse` without evaluation          |
+| `formula-pdf-integration.ts`  | Automatic recalc during `Pdf.fromExcel()`                      |
 
 Run any example:
 
@@ -201,37 +161,22 @@ it sits in the overall module graph):
 ├─ runtime/       evaluator, function registry, RuntimeValue
 ├─ functions/     433 function implementations (11 category files)
 ├─ materialize/   spill engine, ghost-cell tracking, writeback plan
-└─ integration/   workbook adapter, snapshot, calculate-formulas entry
+└─ integration/   immutable snapshot, calculate pipeline
 ```
 
-All layers depend on structural interfaces from `materialize/types.ts`
-(`WorkbookLike`, `WorksheetLike`, `CellLike`, …) — not on the concrete
-`Workbook`/`Worksheet`/`Cell` classes in the excel module. Any host
-that implements those interfaces can drive the engine.
+The calculation core is a pure `WorkbookSnapshot + FormulaCalculationState →
+WritebackPlan` transform and never imports Excel. The Excel-side adapter owns
+both effects: it captures `Workbook.Handle` before calculation and applies the
+plan afterward. Persistent AST/spill state is explicit and is committed only
+after every write operation succeeds.
 
 ## API Surface
 
-### `Formula.calculate(workbook: WorkbookLike): void`
-
-The functional entry point for evaluation. Walks every formula cell
-in `workbook`, evaluates it with full dependency resolution, writes
-results back onto each cell's `result` property, and materialises
-dynamic-array spills onto ghost cells. Mutates the workbook in place.
-Zero global side effects; safe for concurrent calls on different
-workbooks. There is **no install or registration step** and **no
-`Workbook.calculateFormulas()` method**.
-
-It takes a `WorkbookLike` — a host that exposes a `worksheets` array, a
-`getWorksheet()` method, and live worksheet/cell views. An excel
-`Workbook.Handle` is a plain-data record and does **not** satisfy that
-contract; pass those to `calculateFormulas` below instead.
-
 ### `calculateFormulas(workbook: Workbook.Handle): void`
 
-From `documonster/excel/formula`. Adapts an excel workbook handle to
-`WorkbookLike` and runs the engine on it, writing results back into the
-real cells. This is the entry to use whenever the workbook came from
-`documonster/excel` — including workbooks loaded from XLSX.
+From `documonster/excel/formula`. Captures an immutable snapshot, runs the
+engine, and writes results back into the real cells. This is the sole public
+evaluation entry, including for workbooks loaded from XLSX.
 
 ### PDF export recalculation
 
@@ -247,6 +192,35 @@ import { calculateFormulas } from "documonster/excel/formula";
 
 const bytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 ```
+
+### Custom functions
+
+Custom functions receive and return tagged `FormulaValue`s. Both the types and
+the tag map are published by the same bridge entry:
+
+```typescript
+import { Workbook } from "documonster/excel";
+import { FormulaValueKind } from "documonster/excel/formula";
+import type { FormulaValue } from "documonster/excel/formula";
+
+const wb = Workbook.create();
+
+Workbook.registerFunction(
+  wb,
+  "TAX",
+  (args: FormulaValue[]): FormulaValue => {
+    const [amount, rate] = args;
+    if (amount?.kind !== FormulaValueKind.Number || rate?.kind !== FormulaValueKind.Number) {
+      return { kind: FormulaValueKind.Error, code: "#VALUE!" };
+    }
+    return { kind: FormulaValueKind.Number, value: amount.value * rate.value };
+  },
+  { minArity: 2, maxArity: 2 }
+);
+```
+
+A thrown error surfaces as `#VALUE!`. `Workbook.unregisterFunction(wb, name)`
+removes the override and restores any shadowed built-in.
 
 ### Defined-name syntax classification
 
@@ -289,11 +263,12 @@ structural errors.
 `FormulaError` (base), `FormulaParseError` (carries an optional 0-based
 `position`), and the `isFormulaError` type guard.
 
-### Structural types
+### Exported types
 
-`WorkbookLike`, `WorksheetLike`, `CellLike`, `RowLike`, `CellErrorValueLike`,
-`FormulaResultLike`, `DefinedNameEntry`, `DefinedNamesLike`,
-`DimensionsLike`, `SpillRegion`.
+From `documonster/formula`: `Token`, `TokenType`, `AstNode`, `NodeType`.
+
+From `documonster/excel/formula`: `FormulaFunction`, `FormulaValue`, and the
+`FormulaValueKind` tag map used to build custom-function values.
 
 ## Compatibility Notes
 

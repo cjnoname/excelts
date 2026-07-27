@@ -9,6 +9,7 @@
  * are handled directly by the evaluator's special-form dispatch.
  */
 
+import type { FunctionRuntimeContext } from "@formula/runtime/function-context";
 import type { RuntimeValue, ScalarValue } from "@formula/runtime/values";
 import {
   RVKind,
@@ -37,12 +38,13 @@ export interface FunctionDescriptor {
   readonly minArity: number;
   /** Maximum number of arguments. Infinity for variadic. */
   readonly maxArity: number;
+  readonly volatile?: boolean;
   /**
    * The function implementation.
    * Receives eagerly evaluated arguments as `RuntimeValue[]`.
    * Returns a `RuntimeValue`.
    */
-  readonly invoke: (args: RuntimeValue[]) => RuntimeValue;
+  readonly invoke: (args: RuntimeValue[], context: FunctionRuntimeContext) => RuntimeValue;
 }
 
 // ============================================================================
@@ -63,7 +65,7 @@ const registryMap = new Map<string, FunctionDescriptor>();
  * variants are resolved dynamically in `lookupFunction`. This keeps the
  * registry small and avoids triple-entry bookkeeping for 200+ functions.
  */
-export function registerFunction(desc: FunctionDescriptor): void {
+function registerFunction(desc: FunctionDescriptor): void {
   registryMap.set(desc.name, desc);
 }
 
@@ -100,7 +102,7 @@ export function defineEager(
   name: string,
   minArity: number,
   maxArity: number,
-  invoke: (args: RuntimeValue[]) => RuntimeValue
+  invoke: (args: RuntimeValue[], context: FunctionRuntimeContext) => RuntimeValue
 ): FunctionDescriptor {
   const desc: FunctionDescriptor = {
     name,
@@ -122,7 +124,7 @@ export function defineEager(
  * Internal + lazy: invoked by `lookupFunction` on first use, never at module
  * load. This keeps `function-registry` free of top-level side effects so the
  * native function table is only pulled into bundles that actually evaluate
- * formulas (the `Formula.calculate` path), not those that merely tokenize/parse.
+ * formulas (the `documonster/excel/formula` path), not syntax-only consumers.
  */
 let initialized = false;
 

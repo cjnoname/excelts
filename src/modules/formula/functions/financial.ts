@@ -2,8 +2,9 @@
  * Financial Functions — Native RuntimeValue implementation.
  */
 
-import { isDate1904 } from "@formula/functions/_date-context";
 import { flattenNumbers, firstError } from "@formula/functions/_shared";
+import type { FunctionRuntimeContext } from "@formula/runtime/function-context";
+import { DEFAULT_FUNCTION_CONTEXT } from "@formula/runtime/function-context";
 import type { RuntimeValue, NumberValue, ErrorValue } from "@formula/runtime/values";
 import {
   RVKind,
@@ -26,8 +27,8 @@ import { excelToDate } from "@utils/utils.base";
  * to the Excel serial. Using local-time accessors would make bond maths
  * drift by a day whenever the host lives west of UTC.
  */
-function toDate(serial: number): Date {
-  return excelToDate(serial, isDate1904());
+function toDate(serial: number, context: FunctionRuntimeContext): Date {
+  return excelToDate(serial, context.date1904);
 }
 
 // ============================================================================
@@ -38,7 +39,10 @@ function toDate(serial: number): Date {
 // Financial Functions
 // ============================================================================
 
-export function fnPMT(args: RuntimeValue[]): RuntimeValue {
+export function fnPMT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -83,7 +87,10 @@ export function fnPMT(args: RuntimeValue[]): RuntimeValue {
   );
 }
 
-export function fnFV(args: RuntimeValue[]): RuntimeValue {
+export function fnFV(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -121,7 +128,10 @@ export function fnFV(args: RuntimeValue[]): RuntimeValue {
   );
 }
 
-export function fnPV(args: RuntimeValue[]): RuntimeValue {
+export function fnPV(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -158,7 +168,10 @@ export function fnPV(args: RuntimeValue[]): RuntimeValue {
   );
 }
 
-export function fnNPV(args: RuntimeValue[]): RuntimeValue {
+export function fnNPV(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -208,7 +221,10 @@ export function fnNPV(args: RuntimeValue[]): RuntimeValue {
   return isFinite(npv) ? rvNumber(npv) : ERRORS.NUM;
 }
 
-export function fnIRR(args: RuntimeValue[]): RuntimeValue {
+export function fnIRR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   if (!isArray(args[0])) {
     return ERRORS.VALUE;
   }
@@ -323,7 +339,10 @@ export function fnIRR(args: RuntimeValue[]): RuntimeValue {
   return ERRORS.NUM;
 }
 
-export function fnNPER(args: RuntimeValue[]): RuntimeValue {
+export function fnNPER(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -370,7 +389,10 @@ export function fnNPER(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(result);
 }
 
-export function fnRATE(args: RuntimeValue[]): RuntimeValue {
+export function fnRATE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const nper = toNumberRV(topLeft(args[0]));
   if (isError(nper)) {
     return nper;
@@ -459,7 +481,10 @@ export function fnRATE(args: RuntimeValue[]): RuntimeValue {
   return ERRORS.NUM;
 }
 
-export function fnSLN(args: RuntimeValue[]): RuntimeValue {
+export function fnSLN(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const cost = toNumberRV(topLeft(args[0]));
   if (isError(cost)) {
     return cost;
@@ -487,7 +512,10 @@ export function fnSLN(args: RuntimeValue[]): RuntimeValue {
  * method: `(cost - salvage) * (life - per + 1) * 2 / (life * (life + 1))`.
  * Excel rejects `life = 0` and period outside [1, life] with #NUM!.
  */
-export function fnSYD(args: RuntimeValue[]): RuntimeValue {
+export function fnSYD(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const cost = toNumberRV(topLeft(args[0]));
   if (isError(cost)) {
     return cost;
@@ -525,7 +553,10 @@ export function fnSYD(args: RuntimeValue[]): RuntimeValue {
  * behaviour. `no_switch = TRUE` forces declining-balance for all
  * periods.
  */
-export function fnVDB(args: RuntimeValue[]): RuntimeValue {
+export function fnVDB(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const cost = toNumberRV(topLeft(args[0]));
   if (isError(cost)) {
     return cost;
@@ -615,7 +646,10 @@ export function fnVDB(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(total);
 }
 
-export function fnDB(args: RuntimeValue[]): RuntimeValue {
+export function fnDB(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const cost = toNumberRV(topLeft(args[0]));
   if (isError(cost)) {
     return cost;
@@ -681,7 +715,10 @@ export function fnDB(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(depn);
 }
 
-export function fnDDB(args: RuntimeValue[]): RuntimeValue {
+export function fnDDB(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const cost = toNumberRV(topLeft(args[0]));
   if (isError(cost)) {
     return cost;
@@ -770,7 +807,10 @@ function ipmtRaw(
   return type === 1 ? ipmt / (1 + rate) : ipmt;
 }
 
-export function fnIPMT(args: RuntimeValue[]): RuntimeValue {
+export function fnIPMT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -798,7 +838,10 @@ export function fnIPMT(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(ipmtRaw(rate.value, per.value, nper.value, pv.value, fv.value, type.value));
 }
 
-export function fnPPMT(args: RuntimeValue[]): RuntimeValue {
+export function fnPPMT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -839,7 +882,10 @@ export function fnPPMT(args: RuntimeValue[]): RuntimeValue {
  * Excel treats blanks in the schedule as zero (no-op compounding) and
  * propagates any error it encounters. Text values produce #VALUE!.
  */
-export function fnFVSCHEDULE(args: RuntimeValue[]): RuntimeValue {
+export function fnFVSCHEDULE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const principal = toNumberRV(topLeft(args[0]));
   if (isError(principal)) {
     return principal;
@@ -890,7 +936,10 @@ export function fnFVSCHEDULE(args: RuntimeValue[]): RuntimeValue {
  *
  * Excel requires `rate > 0` and `pv, fv > 0`.
  */
-export function fnPDURATION(args: RuntimeValue[]): RuntimeValue {
+export function fnPDURATION(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -916,7 +965,10 @@ export function fnPDURATION(args: RuntimeValue[]): RuntimeValue {
  *
  * Excel requires `nper > 0`, `pv > 0`, `fv >= 0`.
  */
-export function fnRRI(args: RuntimeValue[]): RuntimeValue {
+export function fnRRI(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const nper = toNumberRV(topLeft(args[0]));
   if (isError(nper)) {
     return nper;
@@ -935,7 +987,10 @@ export function fnRRI(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.pow(fv.value / pv.value, 1 / nper.value) - 1);
 }
 
-export function fnEFFECT(args: RuntimeValue[]): RuntimeValue {
+export function fnEFFECT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const nomRate = toNumberRV(topLeft(args[0]));
   if (isError(nomRate)) {
     return nomRate;
@@ -952,7 +1007,10 @@ export function fnEFFECT(args: RuntimeValue[]): RuntimeValue {
   );
 }
 
-export function fnNOMINAL(args: RuntimeValue[]): RuntimeValue {
+export function fnNOMINAL(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const effRate = toNumberRV(topLeft(args[0]));
   if (isError(effRate)) {
     return effRate;
@@ -968,7 +1026,10 @@ export function fnNOMINAL(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(np * (Math.pow(effRate.value + 1, 1 / np) - 1));
 }
 
-export function fnXNPV(args: RuntimeValue[]): RuntimeValue {
+export function fnXNPV(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -1005,7 +1066,10 @@ export function fnXNPV(args: RuntimeValue[]): RuntimeValue {
   return isFinite(npv) ? rvNumber(npv) : ERRORS.NUM;
 }
 
-export function fnXIRR(args: RuntimeValue[]): RuntimeValue {
+export function fnXIRR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   if (!isArray(args[0]) || !isArray(args[1])) {
     return ERRORS.VALUE;
   }
@@ -1118,7 +1182,10 @@ export function fnXIRR(args: RuntimeValue[]): RuntimeValue {
   return ERRORS.NUM;
 }
 
-export function fnMIRR(args: RuntimeValue[]): RuntimeValue {
+export function fnMIRR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   if (!isArray(args[0])) {
     return ERRORS.VALUE;
   }
@@ -1160,7 +1227,10 @@ export function fnMIRR(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.pow(-npvPos / npvNeg, 1 / (n - 1)) - 1);
 }
 
-export function fnISPMT(args: RuntimeValue[]): RuntimeValue {
+export function fnISPMT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -1185,7 +1255,10 @@ export function fnISPMT(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(pv.value * rate.value * (per.value / nper.value - 1));
 }
 
-export function fnCUMPRINC(args: RuntimeValue[]): RuntimeValue {
+export function fnCUMPRINC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -1234,7 +1307,10 @@ export function fnCUMPRINC(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(cumPrinc);
 }
 
-export function fnCUMIPMT(args: RuntimeValue[]): RuntimeValue {
+export function fnCUMIPMT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const rate = toNumberRV(topLeft(args[0]));
   if (isError(rate)) {
     return rate;
@@ -1278,7 +1354,10 @@ export function fnCUMIPMT(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(cumIpmt);
 }
 
-export function fnDOLLARDE(args: RuntimeValue[]): RuntimeValue {
+export function fnDOLLARDE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const fractionalDollar = toNumberRV(topLeft(args[0]));
   if (isError(fractionalDollar)) {
     return fractionalDollar;
@@ -1306,7 +1385,10 @@ export function fnDOLLARDE(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(sign * (Math.abs(intPart) + numerator / f));
 }
 
-export function fnDOLLARFR(args: RuntimeValue[]): RuntimeValue {
+export function fnDOLLARFR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const decimalDollar = toNumberRV(topLeft(args[0]));
   if (isError(decimalDollar)) {
     return decimalDollar;
@@ -1348,7 +1430,10 @@ function validateBasis(basis: number): ErrorValue | null {
   return null;
 }
 
-export function fnDISC(args: RuntimeValue[]): RuntimeValue {
+export function fnDISC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlement = toNumberRV(topLeft(args[0]));
   if (isError(settlement)) {
     return settlement;
@@ -1379,14 +1464,17 @@ export function fnDISC(args: RuntimeValue[]): RuntimeValue {
   // Use the same day-count fraction engine the other bond functions rely
   // on so DISC with basis 0 (30/360) and basis 4 (European 30/360)
   // actually differ instead of both collapsing to Actual/360.
-  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value));
+  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value), context);
   if (dcf <= 0) {
     return ERRORS.NUM;
   }
   return rvNumber((redemption.value - pr.value) / redemption.value / dcf);
 }
 
-export function fnPRICEDISC(args: RuntimeValue[]): RuntimeValue {
+export function fnPRICEDISC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlement = toNumberRV(topLeft(args[0]));
   if (isError(settlement)) {
     return settlement;
@@ -1414,11 +1502,14 @@ export function fnPRICEDISC(args: RuntimeValue[]): RuntimeValue {
   if (maturity.value <= settlement.value || disc.value <= 0 || redemption.value <= 0) {
     return ERRORS.NUM;
   }
-  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value));
+  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value), context);
   return rvNumber(redemption.value - disc.value * redemption.value * dcf);
 }
 
-export function fnYIELDDISC(args: RuntimeValue[]): RuntimeValue {
+export function fnYIELDDISC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlement = toNumberRV(topLeft(args[0]));
   if (isError(settlement)) {
     return settlement;
@@ -1446,14 +1537,17 @@ export function fnYIELDDISC(args: RuntimeValue[]): RuntimeValue {
   if (maturity.value <= settlement.value || pr.value <= 0 || redemption.value <= 0) {
     return ERRORS.NUM;
   }
-  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value));
+  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value), context);
   if (dcf <= 0) {
     return ERRORS.NUM;
   }
   return rvNumber((redemption.value - pr.value) / pr.value / dcf);
 }
 
-export function fnRECEIVED(args: RuntimeValue[]): RuntimeValue {
+export function fnRECEIVED(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlement = toNumberRV(topLeft(args[0]));
   if (isError(settlement)) {
     return settlement;
@@ -1481,7 +1575,7 @@ export function fnRECEIVED(args: RuntimeValue[]): RuntimeValue {
   if (maturity.value <= settlement.value || investment.value <= 0 || disc.value <= 0) {
     return ERRORS.NUM;
   }
-  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value));
+  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value), context);
   const denom = 1 - disc.value * dcf;
   if (denom === 0) {
     return ERRORS.NUM;
@@ -1489,7 +1583,10 @@ export function fnRECEIVED(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(investment.value / denom);
 }
 
-export function fnINTRATE(args: RuntimeValue[]): RuntimeValue {
+export function fnINTRATE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlement = toNumberRV(topLeft(args[0]));
   if (isError(settlement)) {
     return settlement;
@@ -1517,7 +1614,7 @@ export function fnINTRATE(args: RuntimeValue[]): RuntimeValue {
   if (maturity.value <= settlement.value || investment.value <= 0 || redemption.value <= 0) {
     return ERRORS.NUM;
   }
-  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value));
+  const dcf = dayCountFraction(settlement.value, maturity.value, Math.floor(basis.value), context);
   if (dcf <= 0) {
     return ERRORS.NUM;
   }
@@ -1558,9 +1655,14 @@ function yearBasisDays(basis: number): number {
   }
 }
 
-function dayCountFraction(startSerial: number, endSerial: number, basis: number): number {
-  const startD = toDate(startSerial);
-  const endD = toDate(endSerial);
+function dayCountFraction(
+  startSerial: number,
+  endSerial: number,
+  basis: number,
+  context: FunctionRuntimeContext
+): number {
+  const startD = toDate(startSerial, context);
+  const endD = toDate(endSerial, context);
   const diffDays = Math.floor(endSerial) - Math.floor(startSerial);
 
   switch (basis) {
@@ -1637,8 +1739,12 @@ function dayCountFraction(startSerial: number, endSerial: number, basis: number)
  * 1904-01-01 otherwise). Doing this in local time would produce off-by-one
  * errors in any timezone offset from UTC.
  */
-function addMonthsToSerial(serial: number, months: number): number {
-  const d = toDate(serial);
+function addMonthsToSerial(
+  serial: number,
+  months: number,
+  context: FunctionRuntimeContext
+): number {
+  const d = toDate(serial, context);
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth();
   const day = d.getUTCDate();
@@ -1649,7 +1755,7 @@ function addMonthsToSerial(serial: number, months: number): number {
   const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
   const targetMs = Date.UTC(targetYear, targetMonth, Math.min(day, lastDay));
   // Excel serial 0 = 1899-12-30 (1900 epoch) or 1904-01-01 when date1904.
-  const epochMs = isDate1904() ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
+  const epochMs = context.date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
   return Math.round((targetMs - epochMs) / 86400000);
 }
 
@@ -1660,12 +1766,17 @@ function addMonthsToSerial(serial: number, months: number): number {
  * Computed by stepping backward from maturity by (12/frequency) months
  * until the resulting date is ≤ settlement, then stepping one coupon forward.
  */
-function nextCouponAfter(settlement: number, maturity: number, frequency: number): number {
+function nextCouponAfter(
+  settlement: number,
+  maturity: number,
+  frequency: number,
+  context: FunctionRuntimeContext
+): number {
   const stepMonths = Math.round(12 / frequency);
   let cur = maturity;
   // Step backward until just before or at settlement.
   while (cur > settlement) {
-    const prev = addMonthsToSerial(cur, -stepMonths);
+    const prev = addMonthsToSerial(cur, -stepMonths, context);
     if (prev <= settlement) {
       return cur;
     }
@@ -1677,11 +1788,16 @@ function nextCouponAfter(settlement: number, maturity: number, frequency: number
 /**
  * Find the previous coupon date (on or before settlement).
  */
-function prevCouponOnOrBefore(settlement: number, maturity: number, frequency: number): number {
+function prevCouponOnOrBefore(
+  settlement: number,
+  maturity: number,
+  frequency: number,
+  context: FunctionRuntimeContext
+): number {
   const stepMonths = Math.round(12 / frequency);
   let cur = maturity;
   while (cur > settlement) {
-    cur = addMonthsToSerial(cur, -stepMonths);
+    cur = addMonthsToSerial(cur, -stepMonths, context);
   }
   return cur;
 }
@@ -1689,12 +1805,17 @@ function prevCouponOnOrBefore(settlement: number, maturity: number, frequency: n
 /**
  * Count coupon periods between settlement and maturity (rounded up).
  */
-function couponsBetween(settlement: number, maturity: number, frequency: number): number {
+function couponsBetween(
+  settlement: number,
+  maturity: number,
+  frequency: number,
+  context: FunctionRuntimeContext
+): number {
   const stepMonths = Math.round(12 / frequency);
   let count = 0;
   let cur = maturity;
   while (cur > settlement) {
-    cur = addMonthsToSerial(cur, -stepMonths);
+    cur = addMonthsToSerial(cur, -stepMonths, context);
     count++;
   }
   return count;
@@ -1731,7 +1852,10 @@ function validateBondBasis(frequency: number, basis: number): ErrorValue | null 
  *   E   = days in coupon period containing settlement
  *   A   = days from beginning of coupon period to settlement
  */
-export function fnPRICE(args: RuntimeValue[]): RuntimeValue {
+export function fnPRICE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -1777,8 +1901,8 @@ export function fnPRICE(args: RuntimeValue[]): RuntimeValue {
     return basisErr;
   }
 
-  const nextCoupon = nextCouponAfter(settlement, maturity, frequency);
-  const prevCoupon = prevCouponOnOrBefore(settlement, maturity, frequency);
+  const nextCoupon = nextCouponAfter(settlement, maturity, frequency, context);
+  const prevCoupon = prevCouponOnOrBefore(settlement, maturity, frequency, context);
   // Period length E, accrued A, and days-to-next-coupon DSC must all
   // honour the selected basis. The previous implementation used raw
   // `floor(next) - floor(prev)` day counts, which is correct for basis
@@ -1786,13 +1910,13 @@ export function fnPRICE(args: RuntimeValue[]): RuntimeValue {
   // (30/360). Using `dayCountFraction` — which already implements every
   // basis — keeps PRICE consistent with YIELD and the rest of the bond
   // family.
-  const e = dayCountFraction(prevCoupon, nextCoupon, basis) * yearBasisDays(basis);
-  const a = dayCountFraction(prevCoupon, settlement, basis) * yearBasisDays(basis);
+  const e = dayCountFraction(prevCoupon, nextCoupon, basis, context) * yearBasisDays(basis);
+  const a = dayCountFraction(prevCoupon, settlement, basis, context) * yearBasisDays(basis);
   const dscDays = e - a;
   // Fractional position in period (DSC/E).
   const dscE = e === 0 ? 0 : dscDays / e;
 
-  const N = couponsBetween(settlement, maturity, frequency);
+  const N = couponsBetween(settlement, maturity, frequency, context);
   const couponAmt = (100 * rate) / frequency;
   const discountBase = 1 + yld / frequency;
 
@@ -1811,7 +1935,10 @@ export function fnPRICE(args: RuntimeValue[]): RuntimeValue {
  * Uses bracketed bisection in [0, 1] (100% yield upper bound covers all
  * realistic bond scenarios) followed by a light Newton polish.
  */
-export function fnYIELD(args: RuntimeValue[]): RuntimeValue {
+export function fnYIELD(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -1846,15 +1973,10 @@ export function fnYIELD(args: RuntimeValue[]): RuntimeValue {
   }
 
   const priceAt = (y: number): number => {
-    const result = fnPRICE([
-      settlementRV,
-      maturityRV,
-      rateRV,
-      rvNumber(y),
-      redemptionRV,
-      frequencyRV,
-      basisRV
-    ]);
+    const result = fnPRICE(
+      [settlementRV, maturityRV, rateRV, rvNumber(y), redemptionRV, frequencyRV, basisRV],
+      context
+    );
     if (result.kind !== RVKind.Number) {
       return NaN;
     }
@@ -1901,7 +2023,10 @@ export function fnYIELD(args: RuntimeValue[]): RuntimeValue {
  * Macaulay duration of a bond: the weighted average time to cash flows,
  * weighted by present value. Expressed in years.
  */
-export function fnDURATION(args: RuntimeValue[]): RuntimeValue {
+export function fnDURATION(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -1942,12 +2067,12 @@ export function fnDURATION(args: RuntimeValue[]): RuntimeValue {
     return basisErr;
   }
 
-  const nextCoupon = nextCouponAfter(settlement, maturity, frequency);
-  const prevCoupon = prevCouponOnOrBefore(settlement, maturity, frequency);
+  const nextCoupon = nextCouponAfter(settlement, maturity, frequency, context);
+  const prevCoupon = prevCouponOnOrBefore(settlement, maturity, frequency, context);
   const periodDays = Math.floor(nextCoupon) - Math.floor(prevCoupon);
   const dscDays = Math.floor(nextCoupon) - settlement;
   const dscE = periodDays === 0 ? 0 : dscDays / periodDays;
-  const N = couponsBetween(settlement, maturity, frequency);
+  const N = couponsBetween(settlement, maturity, frequency, context);
   const couponPerPeriod = (100 * coupon) / frequency;
   const discountBase = 1 + yld / frequency;
 
@@ -1969,8 +2094,11 @@ export function fnDURATION(args: RuntimeValue[]): RuntimeValue {
 /**
  * MDURATION — modified duration = DURATION / (1 + yield/frequency).
  */
-export function fnMDURATION(args: RuntimeValue[]): RuntimeValue {
-  const dur = fnDURATION(args);
+export function fnMDURATION(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
+  const dur = fnDURATION(args, context);
   if (dur.kind !== RVKind.Number) {
     return dur;
   }
@@ -1992,7 +2120,10 @@ export function fnMDURATION(args: RuntimeValue[]): RuntimeValue {
  * The simplified implementation (calc_method TRUE, the default) treats
  * accrued interest from issue to settlement as par * rate * dcf(issue, settlement, basis).
  */
-export function fnACCRINT(args: RuntimeValue[]): RuntimeValue {
+export function fnACCRINT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const issueRV = toNumberRV(topLeft(args[0]));
   if (isError(issueRV)) {
     return issueRV;
@@ -2034,16 +2165,19 @@ export function fnACCRINT(args: RuntimeValue[]): RuntimeValue {
     return basisErr;
   }
 
-  const dcf = dayCountFraction(issue, settlement, basis);
+  const dcf = dayCountFraction(issue, settlement, basis, context);
   return rvNumber(parRV.value * rateRV.value * dcf);
 }
 
 /**
  * ACCRINTM(issue, settlement, rate, par, [basis]) — accrued interest
  * for a security that pays interest at maturity.
- *   result = par × rate × dayCountFraction(issue, settlement, basis)
+ *   result = par × rate × dayCountFraction(issue, settlement, basis, context)
  */
-export function fnACCRINTM(args: RuntimeValue[]): RuntimeValue {
+export function fnACCRINTM(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const issueRV = toNumberRV(topLeft(args[0]));
   if (isError(issueRV)) {
     return issueRV;
@@ -2075,7 +2209,7 @@ export function fnACCRINTM(args: RuntimeValue[]): RuntimeValue {
     return ERRORS.NUM;
   }
 
-  const dcf = dayCountFraction(issue, settlement, basis);
+  const dcf = dayCountFraction(issue, settlement, basis, context);
   return rvNumber(parRV.value * rateRV.value * dcf);
 }
 
@@ -2084,7 +2218,10 @@ export function fnACCRINTM(args: RuntimeValue[]): RuntimeValue {
  *   price = 100 × (1 - discount × DSM / 360)
  * where DSM is days from settlement to maturity.
  */
-export function fnTBILLPRICE(args: RuntimeValue[]): RuntimeValue {
+export function fnTBILLPRICE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -2121,7 +2258,10 @@ export function fnTBILLPRICE(args: RuntimeValue[]): RuntimeValue {
  * TBILLYIELD(settlement, maturity, pr) — bond-equivalent yield.
  *   yield = (100 - pr) / pr × (360 / DSM)
  */
-export function fnTBILLYIELD(args: RuntimeValue[]): RuntimeValue {
+export function fnTBILLYIELD(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -2153,7 +2293,10 @@ export function fnTBILLYIELD(args: RuntimeValue[]): RuntimeValue {
  * TBILLEQ(settlement, maturity, discount) — bond equivalent yield.
  *   TBILLEQ = (365 × discount) / (360 - discount × DSM)
  */
-export function fnTBILLEQ(args: RuntimeValue[]): RuntimeValue {
+export function fnTBILLEQ(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -2194,7 +2337,10 @@ export function fnTBILLEQ(args: RuntimeValue[]): RuntimeValue {
  *   DIM = DCF(issue, maturity, basis)
  *   price = (100 + DIM × rate × 100) / (1 + DSM × yld) - A × rate × 100
  */
-export function fnPRICEMAT(args: RuntimeValue[]): RuntimeValue {
+export function fnPRICEMAT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -2236,9 +2382,9 @@ export function fnPRICEMAT(args: RuntimeValue[]): RuntimeValue {
     return ERRORS.NUM;
   }
 
-  const a = dayCountFraction(issue, settlement, basis);
-  const dsm = dayCountFraction(settlement, maturity, basis);
-  const dim = dayCountFraction(issue, maturity, basis);
+  const a = dayCountFraction(issue, settlement, basis, context);
+  const dsm = dayCountFraction(settlement, maturity, basis, context);
+  const dim = dayCountFraction(issue, maturity, basis, context);
   const numerator = 100 + dim * rate * 100;
   const denominator = 1 + dsm * yld;
   return rvNumber(numerator / denominator - a * rate * 100);
@@ -2253,7 +2399,10 @@ export function fnPRICEMAT(args: RuntimeValue[]): RuntimeValue {
  *   DIM = DCF(issue, maturity, basis)
  *   yield = ((1 + DIM × rate) / (pr/100 + A × rate) - 1) / DSM
  */
-export function fnYIELDMAT(args: RuntimeValue[]): RuntimeValue {
+export function fnYIELDMAT(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const settlementRV = toNumberRV(topLeft(args[0]));
   if (isError(settlementRV)) {
     return settlementRV;
@@ -2295,9 +2444,9 @@ export function fnYIELDMAT(args: RuntimeValue[]): RuntimeValue {
     return ERRORS.NUM;
   }
 
-  const a = dayCountFraction(issue, settlement, basis);
-  const dsm = dayCountFraction(settlement, maturity, basis);
-  const dim = dayCountFraction(issue, maturity, basis);
+  const a = dayCountFraction(issue, settlement, basis, context);
+  const dsm = dayCountFraction(settlement, maturity, basis, context);
+  const dim = dayCountFraction(issue, maturity, basis, context);
   if (dsm <= 0) {
     return ERRORS.NUM;
   }
@@ -2357,53 +2506,65 @@ function parseCoupArgs(
  * COUPNCD(settlement, maturity, frequency, [basis]) — next coupon date
  * after settlement, as an Excel serial.
  */
-export function fnCOUPNCD(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPNCD(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  return rvNumber(nextCouponAfter(p.settlement, p.maturity, p.frequency));
+  return rvNumber(nextCouponAfter(p.settlement, p.maturity, p.frequency, context));
 }
 
 /**
  * COUPPCD(settlement, maturity, frequency, [basis]) — previous coupon
  * date on or before settlement, as an Excel serial.
  */
-export function fnCOUPPCD(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPPCD(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  return rvNumber(prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency));
+  return rvNumber(prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency, context));
 }
 
 /**
  * COUPNUM(settlement, maturity, frequency, [basis]) — number of
  * coupons payable between settlement and maturity, rounded up.
  */
-export function fnCOUPNUM(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPNUM(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  return rvNumber(couponsBetween(p.settlement, p.maturity, p.frequency));
+  return rvNumber(couponsBetween(p.settlement, p.maturity, p.frequency, context));
 }
 
 /**
  * COUPDAYSNC(settlement, maturity, frequency, [basis]) — days from
  * settlement to the next coupon date.
  */
-export function fnCOUPDAYSNC(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPDAYSNC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  const next = nextCouponAfter(p.settlement, p.maturity, p.frequency);
+  const next = nextCouponAfter(p.settlement, p.maturity, p.frequency, context);
   if (p.basis === 0 || p.basis === 4) {
     // 30/360 methods — Excel treats the period day-count via NASD-style
     // adjustment; dayCountFraction already handles this. Multiply by
     // 360 (days in 30/360 "year") to get days.
-    return rvNumber(dayCountFraction(p.settlement, next, p.basis) * 360);
+    return rvNumber(dayCountFraction(p.settlement, next, p.basis, context) * 360);
   }
   // Actual day count: plain serial difference works for basis 1/2/3.
   return rvNumber(next - p.settlement);
@@ -2413,14 +2574,17 @@ export function fnCOUPDAYSNC(args: RuntimeValue[]): RuntimeValue {
  * COUPDAYBS(settlement, maturity, frequency, [basis]) — days from the
  * beginning of the coupon period to settlement.
  */
-export function fnCOUPDAYBS(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPDAYBS(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  const prev = prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency);
+  const prev = prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency, context);
   if (p.basis === 0 || p.basis === 4) {
-    return rvNumber(dayCountFraction(prev, p.settlement, p.basis) * 360);
+    return rvNumber(dayCountFraction(prev, p.settlement, p.basis, context) * 360);
   }
   return rvNumber(p.settlement - prev);
 }
@@ -2429,13 +2593,16 @@ export function fnCOUPDAYBS(args: RuntimeValue[]): RuntimeValue {
  * COUPDAYS(settlement, maturity, frequency, [basis]) — days in the
  * coupon period that contains settlement.
  */
-export function fnCOUPDAYS(args: RuntimeValue[]): RuntimeValue {
+export function fnCOUPDAYS(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const p = parseCoupArgs(args);
   if ("kind" in p) {
     return p;
   }
-  const prev = prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency);
-  const next = nextCouponAfter(p.settlement, p.maturity, p.frequency);
+  const prev = prevCouponOnOrBefore(p.settlement, p.maturity, p.frequency, context);
+  const next = nextCouponAfter(p.settlement, p.maturity, p.frequency, context);
   if (p.basis === 1) {
     // Actual/actual — actual days between the two coupon dates.
     return rvNumber(next - prev);

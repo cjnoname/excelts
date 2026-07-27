@@ -36,7 +36,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-Standalone 433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Ships as a separate subpath so it stays out of bundles that only need to read/write XLSX. `Formula.calculate()` evaluates any `WorkbookLike` host in place; to recalculate a workbook from the excel module, call `calculateFormulas()` from `documonster/excel/formula`. Either way there is no install step, and the engine itself has zero excel runtime dependencies.
+433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write XLSX.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -170,9 +170,9 @@ import { Cell } from "documonster/excel";
 Cell.setValue(sheet, "A4", { formula: "SUM(A1:A3)" });
 calculateFormulas(workbook); // now populates cell results
 
-// Or run the engine standalone on any WorkbookLike object of your own
+// Syntax inspection is available separately
 import { Formula } from "documonster/formula";
-Formula.calculate(anyWorkbookLikeObject);
+const ast = Formula.parse(Formula.tokenize("SUM(A1:A3)"));
 ```
 
 ## Browser Support
@@ -193,8 +193,7 @@ const buffer = await Workbook.toBuffer(wb);
 ```
 
 > The IIFE bundle does not include the formula calculation engine. Use
-> ESM + `documonster/excel/formula` (or `documonster/formula` for your own
-> `WorkbookLike` host) if you need to recalculate formulas.
+> ESM + `documonster/excel/formula` if you need to recalculate formulas.
 
 For older browsers without native `CompressionStream` API, Documonster automatically uses a built-in pure JavaScript DEFLATE implementation — no polyfills needed.
 

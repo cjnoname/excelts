@@ -16,8 +16,9 @@
  *   correctly through `excelToDate()`.
  */
 
-import { isDate1904 } from "@formula/functions/_date-context";
 import { argToNumber, checkError } from "@formula/functions/_shared";
+import type { FunctionRuntimeContext } from "@formula/runtime/function-context";
+import { DEFAULT_FUNCTION_CONTEXT } from "@formula/runtime/function-context";
 import type { RuntimeValue, ErrorValue } from "@formula/runtime/values";
 import {
   RVKind,
@@ -42,13 +43,13 @@ import { dateToExcel, excelToDate } from "@utils/utils.base";
 // ============================================================================
 
 /** Convert an Excel serial to a UTC `Date`, honouring the active date1904 mode. */
-function toDate(serial: number): Date {
-  return excelToDate(serial, isDate1904());
+function toDate(serial: number, context: FunctionRuntimeContext): Date {
+  return excelToDate(serial, context.date1904);
 }
 
 /** Convert a UTC `Date` back to an Excel serial, honouring the active date1904 mode. */
-function fromDate(d: Date): number {
-  return dateToExcel(d, isDate1904());
+function fromDate(d: Date, context: FunctionRuntimeContext): number {
+  return dateToExcel(d, context.date1904);
 }
 
 /** Collect holiday serial numbers from a RuntimeValue argument (array or scalar). */
@@ -90,9 +91,14 @@ function collectHolidays(arg: RuntimeValue): Set<number> | ErrorValue {
  * local-time fields from `new Date()`. The resulting y/m/d components are
  * then packed into a UTC serial so downstream date arithmetic is consistent.
  */
-export function fnTODAY(_args: RuntimeValue[]): RuntimeValue {
+export function fnTODAY(
+  _args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const now = new Date();
-  return rvNumber(fromDate(new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))));
+  return rvNumber(
+    fromDate(new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())), context)
+  );
 }
 
 /**
@@ -104,36 +110,51 @@ export function fnTODAY(_args: RuntimeValue[]): RuntimeValue {
  * would require tz metadata we do not have. We therefore keep the current
  * UTC-ms based conversion, matching historical behaviour.
  */
-export function fnNOW(_args: RuntimeValue[]): RuntimeValue {
+export function fnNOW(
+  _args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const now = new Date();
-  return rvNumber(fromDate(now));
+  return rvNumber(fromDate(now, context));
 }
 
-export function fnYEAR(args: RuntimeValue[]): RuntimeValue {
+export function fnYEAR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value).getUTCFullYear());
+  return rvNumber(toDate(n.value, context).getUTCFullYear());
 }
 
-export function fnMONTH(args: RuntimeValue[]): RuntimeValue {
+export function fnMONTH(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value).getUTCMonth() + 1);
+  return rvNumber(toDate(n.value, context).getUTCMonth() + 1);
 }
 
-export function fnDAY(args: RuntimeValue[]): RuntimeValue {
+export function fnDAY(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value).getUTCDate());
+  return rvNumber(toDate(n.value, context).getUTCDate());
 }
 
-export function fnDATE(args: RuntimeValue[]): RuntimeValue {
+export function fnDATE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const year = argToNumber(args[0]);
   if (isError(year)) {
     return year;
@@ -179,10 +200,13 @@ export function fnDATE(args: RuntimeValue[]): RuntimeValue {
   if (y < 100) {
     d.setUTCFullYear(y);
   }
-  return rvNumber(fromDate(d));
+  return rvNumber(fromDate(d, context));
 }
 
-export function fnTIME(args: RuntimeValue[]): RuntimeValue {
+export function fnTIME(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const hour = argToNumber(args[0]);
   if (isError(hour)) {
     return hour;
@@ -207,7 +231,10 @@ export function fnTIME(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(total - Math.floor(total));
 }
 
-export function fnHOUR(args: RuntimeValue[]): RuntimeValue {
+export function fnHOUR(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
@@ -219,7 +246,10 @@ export function fnHOUR(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.floor(totalSeconds / 3600) % 24);
 }
 
-export function fnMINUTE(args: RuntimeValue[]): RuntimeValue {
+export function fnMINUTE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
@@ -231,7 +261,10 @@ export function fnMINUTE(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.floor(totalSeconds / 60) % 60);
 }
 
-export function fnSECOND(args: RuntimeValue[]): RuntimeValue {
+export function fnSECOND(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
@@ -243,12 +276,15 @@ export function fnSECOND(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(totalSeconds % 60);
 }
 
-export function fnWEEKDAY(args: RuntimeValue[]): RuntimeValue {
+export function fnWEEKDAY(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  const d = toDate(n.value);
+  const d = toDate(n.value, context);
   // Blank `return_type` → Excel default 1 (Sun=1..Sat=7). Without the
   // blank guard, `argToNumber(BLANK)` coerces to 0 which falls to the
   // default branch and yields a spurious #NUM! for `WEEKDAY(date, )`.
@@ -278,7 +314,10 @@ export function fnWEEKDAY(args: RuntimeValue[]): RuntimeValue {
   }
 }
 
-export function fnEOMONTH(args: RuntimeValue[]): RuntimeValue {
+export function fnEOMONTH(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startDate = argToNumber(args[0]);
   if (isError(startDate)) {
     return startDate;
@@ -293,12 +332,15 @@ export function fnEOMONTH(args: RuntimeValue[]): RuntimeValue {
   // not (or against a future refactor that routes through a different
   // date constructor).
   const m = Math.trunc(months.value);
-  const d = toDate(startDate.value);
+  const d = toDate(startDate.value, context);
   const result = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + m + 1, 0));
-  return rvNumber(fromDate(result));
+  return rvNumber(fromDate(result, context));
 }
 
-export function fnEDATE(args: RuntimeValue[]): RuntimeValue {
+export function fnEDATE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startDate = argToNumber(args[0]);
   if (isError(startDate)) {
     return startDate;
@@ -308,7 +350,7 @@ export function fnEDATE(args: RuntimeValue[]): RuntimeValue {
     return months;
   }
   const m = Math.trunc(months.value);
-  const d = toDate(startDate.value);
+  const d = toDate(startDate.value, context);
   // Excel clamps to the last day of the target month when the source day
   // would overflow (e.g. `EDATE(2024-01-31, 1)` → 2024-02-29, not rolling
   // forward into March). JS Date.UTC rolls over by default, so we detect
@@ -324,10 +366,13 @@ export function fnEDATE(args: RuntimeValue[]): RuntimeValue {
   const result = new Date(
     Date.UTC(firstOfTarget.getUTCFullYear(), firstOfTarget.getUTCMonth(), clampedDay)
   );
-  return rvNumber(fromDate(result));
+  return rvNumber(fromDate(result, context));
 }
 
-export function fnDATEDIF(args: RuntimeValue[]): RuntimeValue {
+export function fnDATEDIF(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -341,8 +386,8 @@ export function fnDATEDIF(args: RuntimeValue[]): RuntimeValue {
     return ERRORS.NUM;
   }
   const unit = toStringRV(topLeft(args[2])).toUpperCase();
-  const startD = toDate(startN.value);
-  const endD = toDate(endN.value);
+  const startD = toDate(startN.value, context);
+  const endD = toDate(endN.value, context);
   const sy = startD.getUTCFullYear();
   const sm = startD.getUTCMonth();
   const sd = startD.getUTCDate();
@@ -396,7 +441,10 @@ export function fnDATEDIF(args: RuntimeValue[]): RuntimeValue {
   }
 }
 
-export function fnDAYS(args: RuntimeValue[]): RuntimeValue {
+export function fnDAYS(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const end = argToNumber(args[0]);
   if (isError(end)) {
     return end;
@@ -408,12 +456,15 @@ export function fnDAYS(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.floor(end.value) - Math.floor(start.value));
 }
 
-export function fnISOWEEKNUM(args: RuntimeValue[]): RuntimeValue {
+export function fnISOWEEKNUM(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  const d = toDate(n.value);
+  const d = toDate(n.value, context);
   const temp = new Date(d.getTime());
   temp.setUTCDate(temp.getUTCDate() + 3 - ((temp.getUTCDay() + 6) % 7));
   const week1 = new Date(Date.UTC(temp.getUTCFullYear(), 0, 4));
@@ -425,12 +476,15 @@ export function fnISOWEEKNUM(args: RuntimeValue[]): RuntimeValue {
   );
 }
 
-export function fnWEEKNUM(args: RuntimeValue[]): RuntimeValue {
+export function fnWEEKNUM(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const n = argToNumber(args[0]);
   if (isError(n)) {
     return n;
   }
-  const d = toDate(n.value);
+  const d = toDate(n.value, context);
   // Blank `return_type` → Excel default 1 (Sunday start). See WEEKDAY
   // for the same rationale.
   const returnType =
@@ -441,7 +495,7 @@ export function fnWEEKNUM(args: RuntimeValue[]): RuntimeValue {
   const rt = returnType.value;
   // Type 21 is ISO 8601 week.
   if (rt === 21) {
-    return fnISOWEEKNUM(args);
+    return fnISOWEEKNUM(args, context);
   }
   // Excel maps `return_type` to the day-of-week that starts the week:
   //   1  (default) → Sunday
@@ -485,7 +539,12 @@ export function fnWEEKNUM(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(Math.floor((dayOfYear + ((jan1Day - startDay + 7) % 7)) / 7) + 1);
 }
 
-function networkdaysHelper(startN: number, endN: number, holidays: Set<number>): number {
+function networkdaysHelper(
+  startN: number,
+  endN: number,
+  holidays: Set<number>,
+  context: FunctionRuntimeContext
+): number {
   const s = Math.floor(Math.min(startN, endN));
   const e = Math.floor(Math.max(startN, endN));
   const sign = startN <= endN ? 1 : -1;
@@ -502,7 +561,7 @@ function networkdaysHelper(startN: number, endN: number, holidays: Set<number>):
   const tail = totalDays % 7;
   let weekdays = weeks * 5;
   if (tail > 0) {
-    const startDow = toDate(s).getUTCDay();
+    const startDow = toDate(s, context).getUTCDay();
     for (let i = 0; i < tail; i++) {
       const dow = (startDow + i) % 7;
       if (dow !== 0 && dow !== 6) {
@@ -518,7 +577,7 @@ function networkdaysHelper(startN: number, endN: number, holidays: Set<number>):
   if (holidays.size > 0) {
     for (const h of holidays) {
       if (h >= s && h <= e) {
-        const dow = toDate(h).getUTCDay();
+        const dow = toDate(h, context).getUTCDay();
         if (dow !== 0 && dow !== 6) {
           weekdays--;
         }
@@ -528,7 +587,10 @@ function networkdaysHelper(startN: number, endN: number, holidays: Set<number>):
   return weekdays * sign;
 }
 
-export function fnNETWORKDAYS(args: RuntimeValue[]): RuntimeValue {
+export function fnNETWORKDAYS(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -539,12 +601,15 @@ export function fnNETWORKDAYS(args: RuntimeValue[]): RuntimeValue {
   }
   const holidays = args.length > 2 ? collectHolidays(args[2]) : new Set<number>();
   if (holidays instanceof Set) {
-    return rvNumber(networkdaysHelper(startN.value, endN.value, holidays));
+    return rvNumber(networkdaysHelper(startN.value, endN.value, holidays, context));
   }
   return holidays;
 }
 
-export function fnWORKDAY(args: RuntimeValue[]): RuntimeValue {
+export function fnWORKDAY(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -566,7 +631,7 @@ export function fnWORKDAY(args: RuntimeValue[]): RuntimeValue {
   let remaining = Math.abs(daysInt);
   while (remaining > 0) {
     current += step;
-    const dt = toDate(current);
+    const dt = toDate(current, context);
     const dow = dt.getUTCDay();
     if (dow !== 0 && dow !== 6 && !holidays.has(current)) {
       remaining--;
@@ -575,7 +640,10 @@ export function fnWORKDAY(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(current);
 }
 
-export function fnYEARFRAC(args: RuntimeValue[]): RuntimeValue {
+export function fnYEARFRAC(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -588,8 +656,8 @@ export function fnYEARFRAC(args: RuntimeValue[]): RuntimeValue {
   if (isError(basis)) {
     return basis;
   }
-  const sd = toDate(Math.min(startN.value, endN.value));
-  const ed = toDate(Math.max(startN.value, endN.value));
+  const sd = toDate(Math.min(startN.value, endN.value), context);
+  const ed = toDate(Math.max(startN.value, endN.value), context);
   const diffDays = Math.abs(Math.floor(endN.value) - Math.floor(startN.value));
 
   switch (basis.value) {
@@ -678,7 +746,10 @@ export function fnYEARFRAC(args: RuntimeValue[]): RuntimeValue {
   }
 }
 
-export function fnDATEVALUE(args: RuntimeValue[]): RuntimeValue {
+export function fnDATEVALUE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const err = checkError(args[0]);
   if (err) {
     return err;
@@ -696,10 +767,13 @@ export function fnDATEVALUE(args: RuntimeValue[]): RuntimeValue {
   if (!parsed) {
     return ERRORS.VALUE;
   }
-  return rvNumber(fromDate(new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d))));
+  return rvNumber(fromDate(new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d)), context));
 }
 
-export function fnTIMEVALUE(args: RuntimeValue[]): RuntimeValue {
+export function fnTIMEVALUE(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const err = checkError(args[0]);
   if (err) {
     return err;
@@ -858,7 +932,10 @@ function parseTimeOnly(raw: string): number | null {
 // More Date/Time Functions
 // ============================================================================
 
-export function fnDAYS360(args: RuntimeValue[]): RuntimeValue {
+export function fnDAYS360(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -872,8 +949,8 @@ export function fnDAYS360(args: RuntimeValue[]): RuntimeValue {
     return methodRV;
   }
   const method = methodRV.value;
-  const sd = toDate(startN.value);
-  const ed = toDate(endN.value);
+  const sd = toDate(startN.value, context);
+  const ed = toDate(endN.value, context);
   let d1 = sd.getUTCDate();
   let d2 = ed.getUTCDate();
   const m1 = sd.getUTCMonth() + 1;
@@ -934,7 +1011,10 @@ function getWeekendDays(weekendType: number): Set<number> {
   }
 }
 
-export function fnNETWORKDAYS_INTL(args: RuntimeValue[]): RuntimeValue {
+export function fnNETWORKDAYS_INTL(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -960,7 +1040,7 @@ export function fnNETWORKDAYS_INTL(args: RuntimeValue[]): RuntimeValue {
   const sign = startN.value <= endN.value ? 1 : -1;
   let count = 0;
   for (let d = s; d <= e; d++) {
-    const dt = toDate(d);
+    const dt = toDate(d, context);
     if (!weekendDays.has(dt.getUTCDay()) && !holidays.has(d)) {
       count++;
     }
@@ -968,7 +1048,10 @@ export function fnNETWORKDAYS_INTL(args: RuntimeValue[]): RuntimeValue {
   return rvNumber(count * sign);
 }
 
-export function fnWORKDAY_INTL(args: RuntimeValue[]): RuntimeValue {
+export function fnWORKDAY_INTL(
+  args: RuntimeValue[],
+  context: FunctionRuntimeContext = DEFAULT_FUNCTION_CONTEXT
+): RuntimeValue {
   const startN = argToNumber(args[0]);
   if (isError(startN)) {
     return startN;
@@ -997,7 +1080,7 @@ export function fnWORKDAY_INTL(args: RuntimeValue[]): RuntimeValue {
   let remaining = Math.abs(daysInt);
   while (remaining > 0) {
     current += step;
-    const dt = toDate(current);
+    const dt = toDate(current, context);
     if (!weekendDays.has(dt.getUTCDay()) && !holidays.has(current)) {
       remaining--;
     }

@@ -2,18 +2,17 @@
 
 [English](README.md)
 
-独立的 Excel 兼容公式引擎 — tokenizer、parser、compiler、evaluator、依赖图、动态数组 spill 物化器,433 个内置函数。零运行时依赖。
+Excel 兼容的 tokenizer、parser、compiler、evaluator、依赖图、动态数组 spill 物化器,433 个内置函数。零运行时依赖。
 
-## 两种使用方式
+## 使用方式
 
-调用哪个入口,取决于你的数据放在哪里。不 import 引擎就不会为它付出任何代价。
+workbook 重算由 `documonster/excel/formula` 暴露;语法检查由
+`documonster/formula` 暴露。两者都是直接函数调用,**无需安装或注册**。
 
-| 模式                   | 用法                                                       | 适用场景                                                                                  |
-| ---------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **配合 `Workbook` 用** | `documonster/excel/formula` 的 `calculateFormulas(wb)`     | 你使用 excel 模块的 `Workbook`,想重算它的公式(以及 PDF 导出时重算)。                      |
-| **单独使用 / 函数式**  | `documonster/formula` 的 `Formula.calculate(workbookLike)` | 你操作的是 `WorkbookLike` 对象(自定义宿主、服务端重算、测试)— **完全不用 excel 运行时**。 |
-
-两种模式跑的是同一套引擎。之所以分开:excel 的 workbook 句柄是纯数据记录(`WorkbookData`),而引擎消费的是结构化的 `WorkbookLike` 契约 — 两者之间的适配器就放在 `documonster/excel/formula` 里。两种模式都**没有任何安装或注册步骤**。tree-shake 数字见[为什么分成多个 subpath?](#为什么分成多个-subpath)。
+| 任务                  | 入口                                               |
+| --------------------- | -------------------------------------------------- |
+| 重算 Excel workbook   | `/excel/formula` 的 `calculateFormulas(wb)`        |
+| tokenize / parse 语法 | `/formula` 的 `Formula.tokenize` / `Formula.parse` |
 
 ## 特性
 
@@ -67,29 +66,6 @@ calculateFormulas(wb);
 console.log(Cell.getResult(ws, "A4")); // 60
 ```
 
-### 单独使用 / 函数式
-
-引擎接受任何形状符合 `WorkbookLike` 的对象 — 你**完全不必**使用 excel 模块。只 import `Formula.calculate` 的 bundle 里**零** excel 运行时代码。
-
-```typescript
-import { Formula, type WorkbookLike } from "documonster/formula";
-
-// 你自己的数据结构 — 只要实现 WorkbookLike 就行。
-// 不需要 Workbook。
-const wb: WorkbookLike = buildMyWorkbookLike();
-
-Formula.calculate(wb); // 纯函数,零全局副作用
-```
-
-这种模式适合:
-
-- 服务端对已缓存 XLSX 的重算
-- 已有自己数据模型的自定义表格宿主
-- 需要每实例独立行为的测试和 benchmark
-- 并发求值多个 workbook,不污染进程全局状态
-
-`Formula.calculate` **不接受** excel 的 workbook 句柄:`Workbook.Handle`(`WorkbookData`)是纯数据记录,既没有 `worksheets` 数组也没有 `getWorksheet()` 方法,传进去会直接编译报错(运行时也会抛异常)。这种情况请用 `documonster/excel/formula`。
-
 ### 重算已加载的工作簿
 
 用 excel 模块加载 XLSX,然后函数式地重算它的公式。没有任何安装或注册步骤。
@@ -121,37 +97,37 @@ const ast = Formula.parse(tokens); // 语法错误时抛异常
 | 导入方式                                       | Excel 模块 | Formula 引擎 |
 | ---------------------------------------------- | ---------- | ------------ |
 | 只从 `/excel` import `Workbook`                | ✓          | ✗            |
-| 从 `/formula` import `Formula.calculate`       | ✗          | ✓            |
+| 从 `/formula` import `Formula.tokenize`        | ✗          | 仅语法       |
 | 从 `/excel/formula` import `calculateFormulas` | ✓          | ✓            |
 
-函数式 `Formula.calculate` API 通过 `WorkbookLike` 结构化接口工作,**不引入任何 excel 运行时代码** — 只要对象形状符合 workbook 接口就能传进去。重算 excel 模块加载出来的 workbook 走 `/excel/formula`,这是唯一同时链接两边的入口。
+把重算功能放在独立 subpath(而不是做成 `Workbook` 命名空间的一个成员),才能让"不主动要就不含引擎"在**所有**产物格式下都成立,而不只是在支持成员级 DCE 的打包器下成立。实测:挂到 `Workbook` 上会让 `<script>` 版 excel IIFE 增加约 200 KB,所有 CDN 用户都要付这笔钱 — 因为 IIFE 必须保留入口的全部导出。当前拆分方式由 `pnpm verify:treeshake`(`scripts/treeshake-verify.ts`)在 rolldown 和 rspack 上断言。
 
-把重算功能放在独立 subpath(而不是做成 `Workbook` 命名空间的一个成员),才能让"不主动要就不含引擎"在**所有**产物格式下都成立,而不只是在支持成员级 DCE 的打包器下成立。实测:挂到 `Workbook` 上会让 `<script>` 版 excel IIFE 增加约 200 KB,所有 CDN 用户都要付这笔钱 — 因为 IIFE 必须保留入口的全部导出。当前拆分方式由 `scripts/verify-treeshake` 在 rolldown 和 rspack 上断言。
-
-> **IIFE 说明:** `<script>` 标签的 IIFE 产物
-> (`dist/iife/documonster.excel.iife.min.js` 等)刻意不包含公式引擎,保持精简 —
-> 引擎单独打在 `dist/iife/documonster.formula.iife.min.js`。如果通过
-> `<script>` 标签使用时需要重算 excel workbook,请改用 ESM,从
+> **IIFE 说明:** 没有任何 `<script>` 版 IIFE 产物包含计算引擎。
+> `dist/iife/documonster.formula.iife.min.js` 只含 tokenizer 与 parser,
+> `dist/iife/documonster.excel.iife.min.js` 不受本 subpath 影响。通过
+> `<script>` 使用且需要重算 workbook 时,请改用 ESM/CJS,从
 > `documonster/excel/formula` import `calculateFormulas`。
 
 ## 示例
 
 可运行示例在 `src/modules/formula/examples/`:
 
-| 文件                         | 演示内容                                                       |
-| ---------------------------- | -------------------------------------------------------------- |
-| `formula-math.ts`            | 算术、舍入、三角、矩阵、幂与对数                               |
-| `formula-text.ts`            | 切片、查找/替换、拼接、格式化、正则                            |
-| `formula-logical.ts`         | `IF`/`IFS`、布尔运算、`IFERROR`、`SWITCH`、`CHOOSE`            |
-| `formula-date.ts`            | 日期构造、提取、时长、工作日、格式化                           |
-| `formula-lookup.ts`          | `VLOOKUP`、`XLOOKUP`、`INDEX/MATCH`、`OFFSET`、`INDIRECT`      |
-| `formula-statistical.ts`     | 描述统计、条件聚合、回归、概率分布                             |
-| `formula-financial.ts`       | 贷款、时值计算、NPV/IRR、折旧                                  |
-| `formula-dynamic-array.ts`   | `FILTER`/`SORT`/`UNIQUE`、spill、`SEQUENCE`、`LAMBDA`/`REDUCE` |
-| `formula-database.ts`        | `DSUM`/`DCOUNT`/`DAVERAGE` + 条件区域                          |
-| `formula-engineering.ts`     | 进制转换、位运算、复数、ERF/BESSELJ                            |
-| `formula-standalone.ts`      | 函数式 API + 不求值的 `tokenize`/`parse`                       |
-| `formula-pdf-integration.ts` | `Pdf.fromExcel()` 中的自动重算                                 |
+| 文件                          | 演示内容                                                       |
+| ----------------------------- | -------------------------------------------------------------- |
+| `formula-math.ts`             | 算术、舍入、三角、矩阵、幂与对数                               |
+| `formula-text.ts`             | 切片、查找/替换、拼接、格式化、正则                            |
+| `formula-logical.ts`          | `IF`/`IFS`、布尔运算、`IFERROR`、`SWITCH`、`CHOOSE`            |
+| `formula-date.ts`             | 日期构造、提取、时长、工作日、格式化                           |
+| `formula-lookup.ts`           | `VLOOKUP`、`XLOOKUP`、`INDEX/MATCH`、`OFFSET`、`INDIRECT`      |
+| `formula-statistical.ts`      | 描述统计、条件聚合、回归、概率分布                             |
+| `formula-financial.ts`        | 贷款、时值计算、NPV/IRR、折旧                                  |
+| `formula-dynamic-array.ts`    | `FILTER`/`SORT`/`UNIQUE`、spill、`SEQUENCE`、`LAMBDA`/`REDUCE` |
+| `formula-database.ts`         | `DSUM`/`DCOUNT`/`DAVERAGE` + 条件区域                          |
+| `formula-engineering.ts`      | 进制转换、位运算、复数、ERF/BESSELJ                            |
+| `formula-information.ts`      | `ISNUMBER`/`ISBLANK`/`CELL`/`TYPE` 等信息函数                  |
+| `formula-custom-functions.ts` | 注册、覆盖与注销自定义函数                                     |
+| `formula-standalone.ts`       | 重算 + 不求值的 `tokenize`/`parse`                             |
+| `formula-pdf-integration.ts`  | `Pdf.fromExcel()` 中的自动重算                                 |
 
 运行任意示例:
 
@@ -172,22 +148,16 @@ npx tsx src/modules/formula/examples/formula-pdf-integration.ts
 ├─ runtime/       evaluator、函数注册表、RuntimeValue
 ├─ functions/     433 个函数实现(分 11 个文件)
 ├─ materialize/   spill 引擎、幽灵单元格跟踪、writeback 计划
-└─ integration/   workbook adapter、snapshot、calculate-formulas 入口
+└─ integration/   immutable snapshot、calculate pipeline
 ```
 
-所有层只依赖 `materialize/types.ts` 里的**结构化接口**(`WorkbookLike`、`WorksheetLike`、`CellLike` 等),不依赖 excel 模块里的具体 `Workbook`/`Worksheet`/`Cell` 类。任何实现这些接口的宿主都能驱动引擎。
+计算核心是纯 `WorkbookSnapshot + FormulaCalculationState → WritebackPlan` 变换,完全不 import Excel。Excel 侧 adapter 同时拥有两端副作用:计算前捕获 `Workbook.Handle`,计算后应用 plan。AST/spill 持久状态是显式对象,且只有全部写操作成功后才提交。
 
 ## API
 
-### `Formula.calculate(workbook: WorkbookLike): void`
-
-函数式求值入口。遍历 workbook 所有公式单元格,完整解析依赖后求值,把结果写回每个单元格的 `result` 属性,并将动态数组 spill 物化到幽灵单元格。就地修改 workbook。零全局副作用;对不同 workbook 的并发调用是安全的。**没有安装或注册步骤**,也**没有 `Workbook.calculateFormulas()` 方法**。
-
-它接受的是 `WorkbookLike` — 即暴露 `worksheets` 数组、`getWorksheet()` 方法以及活的 worksheet/cell 视图的宿主。excel 的 `Workbook.Handle` 是纯数据记录,**不满足**该契约;这种情况请用下面的 `calculateFormulas`。
-
 ### `calculateFormulas(workbook: Workbook.Handle): void`
 
-来自 `documonster/excel/formula`。把 excel workbook 句柄适配成 `WorkbookLike` 并在其上运行引擎,结果写回真实单元格。只要 workbook 来自 `documonster/excel`(包括从 XLSX 加载的),就用这个入口。
+来自 `documonster/excel/formula`。捕获不可变 snapshot,运行引擎,再把结果写回真实单元格。这是唯一公开的求值入口,也适用于从 XLSX 加载的 workbook。
 
 ### PDF 导出重算
 
@@ -199,6 +169,33 @@ import { calculateFormulas } from "documonster/excel/formula";
 
 const bytes = await Pdf.fromExcel(wb, { recalculate: calculateFormulas });
 ```
+
+### 自定义函数
+
+自定义函数接收并返回带 tag 的 `FormulaValue`。类型与 tag 映射都由同一个 bridge 入口导出:
+
+```typescript
+import { Workbook } from "documonster/excel";
+import { FormulaValueKind } from "documonster/excel/formula";
+import type { FormulaValue } from "documonster/excel/formula";
+
+const wb = Workbook.create();
+
+Workbook.registerFunction(
+  wb,
+  "TAX",
+  (args: FormulaValue[]): FormulaValue => {
+    const [amount, rate] = args;
+    if (amount?.kind !== FormulaValueKind.Number || rate?.kind !== FormulaValueKind.Number) {
+      return { kind: FormulaValueKind.Error, code: "#VALUE!" };
+    }
+    return { kind: FormulaValueKind.Number, value: amount.value * rate.value };
+  },
+  { minArity: 2, maxArity: 2 }
+);
+```
+
+函数内抛出的异常会转成 `#VALUE!`。`Workbook.unregisterFunction(wb, name)` 可移除覆盖并恢复被遮蔽的内建函数。
 
 ### 定义名称的语法分类
 
@@ -232,9 +229,11 @@ Pratt parser — 从 token 流构建类型化 AST。结构错误抛异常。
 
 `FormulaError`(基类)、`FormulaParseError`(携带可选的 0-based `position`),以及 `isFormulaError` 类型守卫。
 
-### 结构化类型
+### 导出的类型
 
-`WorkbookLike`、`WorksheetLike`、`CellLike`、`RowLike`、`CellErrorValueLike`、`FormulaResultLike`、`DefinedNameEntry`、`DefinedNamesLike`、`DimensionsLike`、`SpillRegion`。
+`documonster/formula`:`Token`、`TokenType`、`AstNode`、`NodeType`。
+
+`documonster/excel/formula`:`FormulaFunction`、`FormulaValue`,以及构造自定义函数返回值所需的 `FormulaValueKind` tag 映射。
 
 ## 兼容性说明
 

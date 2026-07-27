@@ -13,9 +13,8 @@
  * 2. **Self-contained** — every piece of information the engine needs
  *    (cell values, formula text, table metadata, defined names, calc
  *    properties) is captured up front.
- * 3. **No @excel/ imports** — this file defines pure data types. The
- *    concrete builder that populates these structures lives in
- *    `workbook-adapter.ts` and is the only file that touches live objects.
+ * 3. **No @excel/ imports** — this file defines pure data types. Concrete
+ *    hosts own snapshot capture and writeback outside the formula module.
  */
 
 // ============================================================================
@@ -94,6 +93,8 @@ export interface CellSnapshot {
 
   /** The cell's raw value (for non-formula cells) or cached result (for formula cells). */
   readonly value: SnapshotCellValue;
+  /** Source spill key when this cell is an engine-owned ghost. */
+  readonly ghostOwner?: string;
 
   // ── Formula ──
 

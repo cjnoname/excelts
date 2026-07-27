@@ -37,10 +37,12 @@ import type { CellData, FormulaResult, FormulaValueData } from "@excel/core/cell
 import {
   cellAlignment,
   cellCol,
+  cellComment,
   cellGetValue,
   cellIsMerged,
   cellMaster,
   cellMerge,
+  cellSetComment,
   cellSetValue,
   cellType,
   cellUnmerge,
@@ -470,7 +472,7 @@ export function duplicateRow(
   // either inserting new or overwriting existing rows
 
   const rSrc = getRow(ws, rowNum);
-  const inserts = Array.from<RowValues>({ length: count }).fill(rowValues(rSrc));
+  const inserts = Array.from<RowValues>({ length: count }).fill(rowValuesForStructuralCopy(rSrc));
 
   // Collect single-row merges from the source row before splicing
   // (only merges where top == bottom == rowNum, i.e. horizontal merges within one row)
@@ -595,11 +597,13 @@ export function spliceRows(
       rSrc = ws._rows[i - 1];
       if (rSrc) {
         const rDst = getRow(ws, i + nExpand);
-        rowSetValues(rDst, rowValues(rSrc));
+        rowSetValues(rDst, rowValuesForStructuralCopy(rSrc));
         rDst.style = (copyStyle(rSrc.style) as Partial<Style>) ?? {};
         rDst.height = rSrc.height;
         rowEachCell(rSrc, { includeEmpty: true }, (cell: CellData, colNumber: number) => {
-          rowGetCell(rDst, colNumber).style = (copyStyle(cell.style) as Partial<Style>) ?? {};
+          const target = rowGetCell(rDst, colNumber);
+          target.style = (copyStyle(cell.style) as Partial<Style>) ?? {};
+          cellSetComment(target, cellComment(cell));
         });
         ws._rows[i - 1] = undefined!;
       } else {
@@ -612,11 +616,13 @@ export function spliceRows(
       rSrc = ws._rows[i - 1];
       if (rSrc) {
         const rDst = getRow(ws, i + nExpand);
-        rowSetValues(rDst, rowValues(rSrc));
+        rowSetValues(rDst, rowValuesForStructuralCopy(rSrc));
         rDst.style = (copyStyle(rSrc.style) as Partial<Style>) ?? {};
         rDst.height = rSrc.height;
         rowEachCell(rSrc, { includeEmpty: true }, (cell: CellData, colNumber: number) => {
-          rowGetCell(rDst, colNumber).style = (copyStyle(cell.style) as Partial<Style>) ?? {};
+          const target = rowGetCell(rDst, colNumber);
+          target.style = (copyStyle(cell.style) as Partial<Style>) ?? {};
+          cellSetComment(target, cellComment(cell));
         });
       } else {
         ws._rows[i + nExpand - 1] = undefined!;
@@ -662,6 +668,16 @@ export function spliceRows(
   _spliceMerges(ws, "row", start, count, nInserts);
 }
 
+function rowValuesForStructuralCopy(row: RowData): CellValue[] {
+  const values = rowValues(row);
+  row.cells.forEach(cell => {
+    if (cell?._formulaGhostOwner !== undefined) {
+      values[cellCol(cell)] = null;
+    }
+  });
+  return values;
+}
+
 export function mergeCells(ws: WorksheetData, ...cells: RangeInput[]): void {
   const dimensions = rangeCreate(cells);
   _mergeCellsInternal(ws, dimensions);
@@ -693,6 +709,9 @@ export function _mergeCellsInternal(
 
   // Apply merge — slave cells inherit the master's full style
   const master = getCell(ws, dimensions.top, dimensions.left);
+  // A merge turns the top-left cell into user-owned content. It must no
+  // longer be treated as a derived spill ghost during cleanup/serialization.
+  master._formulaGhostOwner = undefined;
   for (let i = top; i <= bottom; i++) {
     for (let j = left; j <= right; j++) {
       if (i > top || j > left) {

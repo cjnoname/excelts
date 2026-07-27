@@ -160,6 +160,138 @@ describe("calculate-formulas: iterative calculation", () => {
     expect(typeof Cell.getResult(ws, "A1")).toBe("number");
     expect(typeof Cell.getResult(ws, "A2")).toBe("number");
   });
+
+  it("iterates every element of a circular dynamic array", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 100, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", {
+      formula: "A1:A2/2+1",
+      result: 0,
+      isDynamicArray: true
+    });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "A1")).toBeCloseTo(2, 2);
+    expect(Cell.getValue(ws, "A2")).toBeCloseTo(2, 2);
+  });
+
+  it("orders a direct reference to a first-pass spill ghost after its master", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", { formula: "C3*10", result: 0 });
+    Cell.setValue(ws, "C1", { formula: "SEQUENCE(3)", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "A1")).toBe(30);
+  });
+
+  it("re-evaluates direct ghost dependents after circular arrays converge", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 100, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", {
+      formula: "A1:A3/2+1",
+      result: 0,
+      isDynamicArray: true
+    });
+    Cell.setValue(ws, "C1", { formula: "A3*10", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "C1")).toBeCloseTo(20, 1);
+  });
+
+  it("updates dependencies when a circular spill expands during iteration", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 20, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", {
+      formula: "SEQUENCE(IF(A1<1,1,3))",
+      result: 0,
+      isDynamicArray: true
+    });
+    Cell.setValue(ws, "C1", { formula: "A3", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "C1")).toBe(3);
+  });
+
+  it("restarts iteration when spill expansion creates a new cycle", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 100, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", {
+      formula: "SEQUENCE(IF(A1<1,1,3),1,B1)",
+      result: 0,
+      isDynamicArray: true
+    });
+    Cell.setValue(ws, "B1", { formula: "A3/2+1", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "B1")).toBeCloseTo(4, 2);
+    expect(Cell.getValue(ws, "A3")).toBeCloseTo(6, 2);
+  });
+
+  it("resynchronizes footprints after dynamic-dependency reevaluation", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", { formula: 'SEQUENCE(INDIRECT("C3"))', result: 0 });
+    Cell.setValue(ws, "B1", { formula: "A3", result: 0 });
+    Cell.setValue(ws, "C1", { formula: "SEQUENCE(3)", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "B1")).toBe(3);
+  });
+
+  it("remaps dynamic ghost dependencies to their spill master", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 100, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", { formula: 'INDIRECT("C3")/2+1', result: 0 });
+    Cell.setValue(ws, "C1", {
+      formula: "SEQUENCE(3,1,A1)",
+      result: 0,
+      isDynamicArray: true
+    });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "A1")).toBeCloseTo(4, 2);
+  });
+
+  it("replaces dynamic dependency branches instead of accumulating stale edges", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "B1", { formula: 'INDIRECT(IF(C3=3,"D1","E1"))', result: 0 });
+    Cell.setValue(ws, "C1", { formula: "SEQUENCE(3)", result: 0 });
+    Cell.setValue(ws, "D1", 10);
+    Cell.setValue(ws, "E1", { formula: "B1+1", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "B1")).toBe(10);
+    expect(Cell.getResult(ws, "E1")).toBe(11);
+  });
+
+  it("keeps other formula dependencies inside a range that starts at a spill master", () => {
+    const wb = Workbook.create();
+    wb.calcProperties = { iterate: true, iterateCount: 100, iterateDelta: 0.001 };
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", { formula: "SEQUENCE(2)", result: 0 });
+    Cell.setValue(ws, "A3", { formula: "B1/2", result: 0 });
+    Cell.setValue(ws, "B1", { formula: "SUM(A1:A3)", result: 0 });
+
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "B1")).toBeCloseTo(6, 2);
+    expect(Cell.getResult(ws, "A3")).toBeCloseTo(3, 2);
+  });
 });
 
 // ============================================================================

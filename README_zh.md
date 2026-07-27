@@ -36,7 +36,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Formula — Excel 兼容公式引擎
 
-独立的 433 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。作为单独的 subpath 发布,不会被打进只读写 XLSX 的 bundle。`Formula.calculate()` 可就地对任意 `WorkbookLike` 宿主求值;要重算 excel 模块的 workbook,请调用 `documonster/excel/formula` 的 `calculateFormulas()`。两种方式都无需任何安装步骤,引擎本身**零 excel 运行时依赖**。
+433 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 workbook;用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤,且引擎不会进入只读写 XLSX 的 bundle。
 
 - [文档](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [示例](src/modules/formula/examples/)
@@ -157,9 +157,9 @@ import { Cell } from "documonster/excel";
 Cell.setValue(sheet, "A4", { formula: "SUM(A1:A3)" });
 calculateFormulas(workbook); // 现在能填充单元格计算结果了
 
-// 也可以让引擎单独作用于你自己的任意 WorkbookLike 对象
+// 语法检查单独可用
 import { Formula } from "documonster/formula";
-Formula.calculate(anyWorkbookLikeObject);
+const ast = Formula.parse(Formula.tokenize("SUM(A1:A3)"));
 ```
 
 ## 浏览器支持
@@ -180,8 +180,7 @@ const buffer = await Workbook.toBuffer(wb);
 ```
 
 > IIFE 打包产物不包含公式计算引擎。如果需要重算公式，请改用 ESM + 导入
-> `documonster/excel/formula`（若宿主是你自己的 `WorkbookLike` 对象，则用
-> `documonster/formula`）。
+> `documonster/excel/formula`。
 
 对于不支持原生 `CompressionStream` API 的旧版浏览器，Documonster 自动使用内置的纯 JavaScript DEFLATE 实现 — 无需 polyfill。
 

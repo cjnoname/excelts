@@ -2,8 +2,7 @@
  * Public-API contract for formula recalculation (issue #193).
  *
  * `documonster/excel/formula` is the published seam between the excel workbook
- * (a plain-data `WorkbookData` record) and the formula engine's structural
- * `WorkbookLike` contract.
+ * (a plain-data `WorkbookData` record) and the snapshot-based formula engine.
  *
  * Regression guard: every recalculation test in the repo used to deep-import
  * `@excel/core/formula-adapter`, which was NOT part of any published entry
@@ -79,5 +78,40 @@ describe("documonster/excel/formula — calculateFormulas (public surface)", () 
     expect(Cell.getResult(ws, "A1")).toBe(1);
     expect(Cell.getValue(ws, "A2")).toBe(2);
     expect(Cell.getValue(ws, "A3")).toBe(3);
+  });
+
+  it("persists spill state by WorkbookData identity across recalculations", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Spill");
+    Cell.setValue(ws, "A1", { formula: "SEQUENCE(3)" });
+    calculateFormulas(wb);
+
+    expect(Cell.getValue(ws, "A2")).toBe(2);
+    expect(Cell.getValue(ws, "A3")).toBe(3);
+
+    Cell.setValue(ws, "A1", { formula: "SEQUENCE(1)" });
+    calculateFormulas(wb);
+
+    expect(Cell.getResult(ws, "A1")).toBe(1);
+    expect(Cell.getValue(ws, "A2")).toBeNull();
+    expect(Cell.getValue(ws, "A3")).toBeNull();
+  });
+
+  it("never reclaims a former ghost cell the user turned into a formula", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Spill");
+    Cell.setValue(ws, "A1", { formula: "SEQUENCE(3)" });
+    calculateFormulas(wb);
+    expect(Cell.getValue(ws, "A3")).toBe(3);
+
+    // The user types a brand-new formula over a former ghost. It has no cached
+    // result yet, so it must still be treated as user content: the spill has to
+    // report #SPILL! and the formula must survive untouched.
+    Cell.setValue(ws, "A3", { formula: "1+1" });
+    calculateFormulas(wb);
+
+    expect(Cell.getFormula(ws, "A3")).toBe("1+1");
+    expect(Cell.getResult(ws, "A3")).toBe(2);
+    expect(Cell.getResult(ws, "A1")).toEqual({ error: "#SPILL!" });
   });
 });

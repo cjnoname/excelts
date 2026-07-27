@@ -1,7 +1,6 @@
 /**
- * Workbook Adapter — Bridge between a host workbook (implementing the
- * `WorkbookLike` / `WorksheetLike` / `CellLike` interfaces) and the
- * engine's snapshot representation.
+ * Excel formula snapshot capture — converts concrete Excel records into the
+ * formula engine's immutable snapshot representation.
  *
  * This is the only file in the engine pipeline that walks a live host
  * workbook; the rest of the pipeline consumes the immutable
@@ -9,12 +8,20 @@
  *
  * ## Responsibilities
  *
- * 1. `buildWorkbookSnapshot()` — walk the host workbook and produce an
+ * 1. `captureFormulaSnapshot()` — walk the workbook and produce an
  *    immutable `WorkbookSnapshot`.
  * 2. Cell value conversion — Date → serial number, rich text → string,
  *    shared formula translation, etc.
  */
 
+import type { CellData } from "@excel/core/cell";
+import { cellFormula, cellGetValue, cellResult, cellType } from "@excel/core/cell";
+import { definedNamesGetAllEntries } from "@excel/core/defined-names";
+import { Enums } from "@excel/core/enums";
+import type { WorkbookData } from "@excel/core/workbook-core";
+import { getWorksheets } from "@excel/core/workbook.browser";
+import type { WorksheetData } from "@excel/core/worksheet";
+import { eachRow, getSheetDimensions, getTables } from "@excel/core/worksheet";
 import type {
   CalcPropertiesSnapshot,
   CellSnapshot,
@@ -30,13 +37,6 @@ import type {
   WorksheetSnapshot
 } from "@formula/integration/workbook-snapshot";
 import { snapshotCellKey, scopedNameKey } from "@formula/integration/workbook-snapshot";
-import type {
-  CellLike,
-  TableDefinitionLike,
-  WorkbookLike,
-  WorksheetLike
-} from "@formula/materialize/types";
-import { CellValueTypeLike } from "@formula/materialize/types";
 import { dateToExcel } from "@utils/utils.base";
 
 // ============================================================================
@@ -50,21 +50,22 @@ import { dateToExcel } from "@utils/utils.base";
  * engine-internal snapshot types. The result is a fully self-contained,
  * read-only data structure.
  */
-export function buildWorkbookSnapshot(workbook: WorkbookLike): WorkbookSnapshot {
+export function captureFormulaSnapshot(workbook: WorkbookData): WorkbookSnapshot {
   const worksheets: WorksheetSnapshot[] = [];
   const worksheetsByName = new Map<string, WorksheetSnapshot>();
   const worksheetsById = new Map<number, WorksheetSnapshot>();
 
   const date1904 = workbook.properties?.date1904 ?? false;
+  const hostWorksheets = getWorksheets(workbook);
 
-  for (const ws of workbook.worksheets) {
+  for (const ws of hostWorksheets) {
     const wsSnapshot = buildWorksheetSnapshot(ws, date1904);
     worksheets.push(wsSnapshot);
-    worksheetsByName.set(ws.name.toLowerCase(), wsSnapshot);
+    worksheetsByName.set(ws._name.toLowerCase(), wsSnapshot);
     worksheetsById.set(ws.id, wsSnapshot);
   }
 
-  const definedNames = buildDefinedNames(workbook);
+  const definedNames = buildDefinedNames(workbook, hostWorksheets);
 
   // Build table-by-name index for O(1) lookup
   const tablesByName = new Map<string, ResolvedTable>();
@@ -105,14 +106,14 @@ export function buildWorkbookSnapshot(workbook: WorkbookLike): WorkbookSnapshot 
 // Build Worksheet Snapshot
 // ============================================================================
 
-function buildWorksheetSnapshot(ws: WorksheetLike, date1904: boolean): WorksheetSnapshot {
+function buildWorksheetSnapshot(ws: WorksheetData, date1904: boolean): WorksheetSnapshot {
   const cells = new Map<string, CellSnapshot>();
   const hiddenRows = new Set<number>();
 
   // Use includeEmpty so we observe the `hidden` flag on rows that have
   // no populated cells — a user may hide an empty row (e.g. filter UI)
   // and SUBTOTAL(1xx,…) still needs to treat that row as hidden.
-  ws.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+  eachRow(ws, { includeEmpty: true }, (row, rowNumber) => {
     if (row.hidden) {
       hiddenRows.add(rowNumber);
     }
@@ -128,27 +129,25 @@ function buildWorksheetSnapshot(ws: WorksheetLike, date1904: boolean): Worksheet
     });
   });
 
-  const dims = ws.dimensions;
-  const dimensions = dims
-    ? { top: dims.top, left: dims.left, bottom: dims.bottom, right: dims.right }
-    : null;
+  const dims = getSheetDimensions(ws);
+  const dimensions =
+    dims.top <= dims.bottom && dims.left <= dims.right
+      ? { top: dims.top, left: dims.left, bottom: dims.bottom, right: dims.right }
+      : null;
 
   const tables = buildTables(ws);
 
-  // Defensive copy — snapshot must not alias host-owned arrays.
-  const hostMergedRegions = ws.mergedRegions;
-  const mergedRegions = hostMergedRegions
-    ? hostMergedRegions.map(r => ({
-        top: r.top,
-        left: r.left,
-        bottom: r.bottom,
-        right: r.right
-      }))
-    : [];
+  // Snapshot plain rectangles so engine state never aliases live merge records.
+  const mergedRegions = Object.values(ws._merges).map(r => ({
+    top: r.top,
+    left: r.left,
+    bottom: r.bottom,
+    right: r.right
+  }));
 
   return {
     id: ws.id,
-    name: ws.name,
+    name: ws._name,
     dimensions,
     cells,
     hiddenRows,
@@ -162,15 +161,15 @@ function buildWorksheetSnapshot(ws: WorksheetLike, date1904: boolean): Worksheet
 // ============================================================================
 
 function buildCellSnapshot(
-  cell: CellLike,
+  cell: CellData,
   row: number,
   col: number,
   date1904: boolean
 ): CellSnapshot | null {
-  const cellType = cell.type;
+  const type = cellType(cell);
 
   // Skip truly empty cells
-  if (cellType === CellValueTypeLike.Null) {
+  if (type === Enums.ValueType.Null) {
     return null;
   }
 
@@ -179,38 +178,39 @@ function buildCellSnapshot(
   // `cell.value` from the master, so letting them into `cells` would
   // double-count master values in range aggregates. See
   // and the `Merge` case in `CellValueTypeLike`.
-  if (cellType === CellValueTypeLike.Merge) {
+  if (type === Enums.ValueType.Merge) {
     return null;
   }
 
   // ── Formula cells ──
-  if (cellType === CellValueTypeLike.Formula) {
+  if (type === Enums.ValueType.Formula) {
     return buildFormulaCellSnapshot(cell, row, col, date1904);
   }
 
   // ── Non-formula cells ──
-  const value = convertCellValue(cell.value, date1904);
+  const value = convertCellValue(cellGetValue(cell), date1904);
 
   return {
     row,
     col,
     value,
+    ghostOwner: cell._formulaGhostOwner,
     formulaKind: "none"
   };
 }
 
 function buildFormulaCellSnapshot(
-  cell: CellLike,
+  cell: CellData,
   row: number,
   col: number,
   date1904: boolean
 ): CellSnapshot | null {
-  const model = cell.model;
-  const formula = cell.formula; // triggers shared formula translation for slaves
+  const model = cell._value.model;
+  const formula = cellFormula(cell); // triggers shared formula translation for slaves
 
   if (formula == null) {
     // Formula cell with no parseable formula — capture the cached result
-    const cachedResult = convertFormulaResult(cell.result, date1904);
+    const cachedResult = convertFormulaResult(cellResult(cell), date1904);
     return {
       row,
       col,
@@ -224,7 +224,7 @@ function buildFormulaCellSnapshot(
   const kind = classifyFormulaKind(model);
 
   // Capture the cached result from the XLSX
-  const cachedResult = convertFormulaResult(cell.result, date1904);
+  const cachedResult = convertFormulaResult(cellResult(cell), date1904);
 
   return {
     row,
@@ -296,42 +296,46 @@ function convertCellValue(value: unknown, date1904: boolean): SnapshotCellValue 
   if (value instanceof Date) {
     return dateToExcel(value, date1904);
   }
-  if (typeof value === "object" && "error" in value) {
+  if (isRecord(value) && typeof value.error === "string") {
     // Gate the error code through the known set so user-supplied values
     // like `{ error: "anything" }` can't pollute the snapshot. Unknown
     // strings fall back to #VALUE! — matches Excel's default diagnostic
     // when it reads an unrecognised error value from a persisted file.
-    const raw = (value as { error: string }).error;
-    const KNOWN_ERRORS = new Set([
-      "#N/A",
-      "#NULL!",
-      "#DIV/0!",
-      "#VALUE!",
-      "#REF!",
-      "#NAME?",
-      "#NUM!",
-      "#GETTING_DATA",
-      "#CALC!",
-      "#SPILL!",
-      "#CONNECT!",
-      "#BLOCKED!",
-      "#UNKNOWN!",
-      "#FIELD!",
-      "#BUSY!"
-    ]);
-    const code = KNOWN_ERRORS.has(raw) ? raw : "#VALUE!";
-    return { error: code } as SnapshotErrorValue;
+    return { error: normalizeErrorCode(value.error) };
   }
   // Rich text → plain string
-  if (typeof value === "object" && "richText" in value) {
-    return ((value as { richText: { text: string }[] }).richText || []).map(r => r.text).join("");
+  if (isRecord(value) && Array.isArray(value.richText)) {
+    return value.richText
+      .map(run => (isRecord(run) && typeof run.text === "string" ? run.text : ""))
+      .join("");
   }
   // Hyperlink / other objects with text
-  if (typeof value === "object" && "text" in value) {
-    return (value as { text: string }).text;
+  if (isRecord(value) && typeof value.text === "string") {
+    return value.text;
   }
 
   return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function normalizeErrorCode(error: string): SnapshotErrorValue["error"] {
+  switch (error) {
+    case "#N/A":
+    case "#NULL!":
+    case "#DIV/0!":
+    case "#VALUE!":
+    case "#REF!":
+    case "#NAME?":
+    case "#NUM!":
+    case "#CALC!":
+    case "#SPILL!":
+      return error;
+    default:
+      return "#VALUE!";
+  }
 }
 
 /**
@@ -348,15 +352,11 @@ function convertFormulaResult(result: unknown, date1904: boolean): SnapshotCellV
 // Build Tables
 // ============================================================================
 
-function buildTables(ws: WorksheetLike): TableSnapshot[] {
-  if (!ws.getTables) {
-    return [];
-  }
-
+function buildTables(ws: WorksheetData): TableSnapshot[] {
   const tables: TableSnapshot[] = [];
 
-  for (const t of ws.getTables()) {
-    const model: TableDefinitionLike | undefined = t.table;
+  for (const t of getTables(ws)) {
+    const model = t.table;
     if (!model || !model.tl) {
       continue;
     }
@@ -382,10 +382,13 @@ function buildTables(ws: WorksheetLike): TableSnapshot[] {
 // Build Defined Names
 // ============================================================================
 
-function buildDefinedNames(workbook: WorkbookLike): ReadonlyMap<string, DefinedNameSnapshot> {
+function buildDefinedNames(
+  workbook: WorkbookData,
+  worksheets: readonly WorksheetData[]
+): ReadonlyMap<string, DefinedNameSnapshot> {
   const map = new Map<string, DefinedNameSnapshot>();
 
-  if (!workbook.definedNames) {
+  if (!workbook._definedNames) {
     return map;
   }
 
@@ -402,13 +405,13 @@ function buildDefinedNames(workbook: WorkbookLike): ReadonlyMap<string, DefinedN
   // `localSheetId` to match the new positions; this layer just reflects the
   // workbook's current state.
   const sheetIdToName = new Map<number, string>();
-  const liveSheets = workbook.worksheets;
+  const liveSheets = worksheets;
   for (let idx = 0; idx < liveSheets.length; idx++) {
-    sheetIdToName.set(idx, liveSheets[idx].name);
+    sheetIdToName.set(idx, liveSheets[idx]._name);
   }
 
   // getAllEntries() returns self-contained entries — no second lookup needed.
-  const entries = workbook.definedNames.getAllEntries();
+  const entries = definedNamesGetAllEntries(workbook._definedNames);
   for (const entry of entries) {
     if (!entry.ranges || entry.ranges.length === 0) {
       continue;

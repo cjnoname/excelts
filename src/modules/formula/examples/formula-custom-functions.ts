@@ -1,4 +1,5 @@
-import { calculateFormulas } from "@excel/bridge/formula";
+import { calculateFormulas, FormulaValueKind } from "@excel/bridge/formula";
+import type { FormulaValue } from "@excel/bridge/formula";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -10,28 +11,16 @@ import { Cell, Workbook } from "@excel/index";
  * `Workbook.registerFunction(wb, name, fn, options?)` and removal through
  * `Workbook.unregisterFunction(wb, name)`.
  *
- * The `fn` receives evaluated arguments as RuntimeValues — tagged unions of
- * the shape `{ kind, value }` (see `formula/runtime/values.ts`):
- *   kind 0 = Blank, 1 = Number, 2 = String, 3 = Boolean, 4 = Error (uses
- *   `code` instead of `value`), 5 = Array.
- * It must return a RuntimeValue of the same shape. A thrown error is caught
- * at the boundary and surfaces as `#VALUE!`.
+ * The `fn` receives evaluated arguments as `FormulaValue`s — tagged unions of
+ * the shape `{ kind, value }`, where `kind` comes from the published
+ * `FormulaValueKind` map (errors carry `code` instead of `value`). It must
+ * return a `FormulaValue` of the same shape. A thrown error is caught at the
+ * boundary and surfaces as `#VALUE!`.
  *
  * Usage: npx tsx src/modules/formula/examples/formula-custom-functions.ts
  */
 
-// RuntimeValue kind tags (mirrors RVKind in formula/runtime/values.ts).
-const NUMBER = 1;
-const STRING = 2;
-const BOOLEAN = 3;
-const ERROR = 4;
-
-type RV =
-  | { kind: 0 }
-  | { kind: 1; value: number }
-  | { kind: 2; value: string }
-  | { kind: 3; value: boolean }
-  | { kind: 4; code: string };
+const { Number: NUMBER, String: STRING, Boolean: BOOLEAN, Error: ERROR } = FormulaValueKind;
 
 const wb = Workbook.create();
 const ws = Workbook.addWorksheet(wb, "Custom");
@@ -41,8 +30,8 @@ Workbook.registerFunction(
   wb,
   "TAX",
   args => {
-    const amount = args[0] as RV;
-    const rate = args[1] as RV;
+    const amount = args[0] as FormulaValue;
+    const rate = args[1] as FormulaValue;
     if (amount.kind !== NUMBER || rate.kind !== NUMBER) {
       return { kind: ERROR, code: "#VALUE!" };
     }
@@ -56,7 +45,7 @@ Workbook.registerFunction(
   wb,
   "GREET",
   args => {
-    const name = args[0] as RV;
+    const name = args[0] as FormulaValue;
     const who = name.kind === STRING ? name.value : "world";
     return { kind: STRING, value: `Hello, ${who}!` };
   },
@@ -71,7 +60,7 @@ Workbook.registerFunction(
   wb,
   "ISPOSITIVE",
   args => {
-    const v = args[0] as RV;
+    const v = args[0] as FormulaValue;
     if (v.kind !== NUMBER) {
       return { kind: ERROR, code: "#N/A" };
     }
@@ -83,7 +72,7 @@ Workbook.registerFunction(
 // ── 5. Shadow a built-in: override SUM for THIS workbook only ──
 // Our SUM doubles the first argument — proof the user map wins.
 Workbook.registerFunction(wb, "SUM", args => {
-  const v = args[0] as RV;
+  const v = args[0] as FormulaValue;
   return { kind: NUMBER, value: v.kind === NUMBER ? v.value * 2 : 0 };
 });
 

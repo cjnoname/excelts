@@ -84,6 +84,8 @@ import { synthGuid } from "@excel/utils/guid";
 import { buildWorkbookProtection } from "@excel/utils/workbook-protection";
 import type { RelationshipModel } from "@excel/xlsx/xform/core/relationship-xform";
 import type { ChartsheetModel } from "@excel/xlsx/xform/sheet/chartsheet-xform";
+import type { RuntimeValue } from "@formula/runtime/values";
+import { BLANK, rvBoolean, rvNumber, rvString } from "@formula/runtime/values";
 
 // =============================================================================
 // Internal Types
@@ -902,7 +904,7 @@ export function registerPerson(
 export function registerFunction(
   wb: WorkbookData,
   name: string,
-  fn: (args: unknown[]) => unknown,
+  fn: (args: RuntimeValue[]) => RuntimeValue | number | string | boolean | null | undefined,
   options?: { minArity?: number; maxArity?: number; volatile?: boolean }
 ): void {
   if (!wb.userFunctions) {
@@ -911,9 +913,27 @@ export function registerFunction(
   wb.userFunctions.set(name.toUpperCase(), {
     minArity: options?.minArity ?? 0,
     maxArity: options?.maxArity ?? 255,
-    invoke: fn,
-    volatile: options?.volatile ?? false
+    volatile: options?.volatile,
+    invoke: args => normalizeFunctionResult(fn(args))
   });
+}
+
+function normalizeFunctionResult(
+  value: RuntimeValue | number | string | boolean | null | undefined
+): RuntimeValue {
+  if (value === null || value === undefined) {
+    return BLANK;
+  }
+  if (typeof value === "number") {
+    return rvNumber(value);
+  }
+  if (typeof value === "string") {
+    return rvString(value);
+  }
+  if (typeof value === "boolean") {
+    return rvBoolean(value);
+  }
+  return value;
 }
 
 export function unregisterFunction(wb: WorkbookData, name: string): boolean {

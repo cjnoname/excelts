@@ -723,7 +723,7 @@ export function rowSplice(r: RowData, start: number, count: number, ...inserts: 
       cSrc = r.cells[i - nExpand - 1];
       if (cSrc) {
         cDst = rowGetCell(r, i);
-        cellSetValue(cDst, cellGetValue(cSrc));
+        cellSetValue(cDst, cSrc._formulaGhostOwner === undefined ? cellGetValue(cSrc) : null);
         cDst.style = copyStyle(cSrc.style) ?? {};
         cellSetComment(cDst, cellComment(cSrc));
       } else if (cDst) {
@@ -737,7 +737,7 @@ export function rowSplice(r: RowData, start: number, count: number, ...inserts: 
       cSrc = r.cells[i - 1];
       if (cSrc) {
         cDst = rowGetCell(r, i + nExpand);
-        cellSetValue(cDst, cellGetValue(cSrc));
+        cellSetValue(cDst, cSrc._formulaGhostOwner === undefined ? cellGetValue(cSrc) : null);
         cDst.style = copyStyle(cSrc.style) ?? {};
         cellSetComment(cDst, cellComment(cSrc));
       } else {

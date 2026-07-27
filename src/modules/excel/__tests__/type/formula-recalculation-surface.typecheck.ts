@@ -2,31 +2,32 @@
 //
 // Type-level contract for formula recalculation (issue #193).
 //
-// `calculateFormulas` from `documonster/excel/formula` is the public seam: the
-// excel workbook handle is a plain-data record (`WorkbookData`), while the
-// engine entry `Formula.calculate` consumes the structural `WorkbookLike`
-// contract (`worksheets` array + `getWorksheet()` method + live worksheet/cell
-// views). The two are deliberately NOT structurally compatible — the adapter in
-// `@excel/core/formula-adapter` bridges them, and the `excel/formula` subpath
-// is how consumers reach it.
-//
-// The `@ts-expect-error` below is the load-bearing assertion: it fails the
-// build if `WorkbookData` ever silently becomes assignable to `WorkbookLike`,
-// which is what the old docs incorrectly promised.
+// `calculateFormulas` from `documonster/excel/formula` is the only public
+// evaluation seam. The formula module no longer exposes a workbook-shaped host
+// contract or a second calculation entry.
 
 import { calculateFormulas } from "@excel/bridge/formula";
-import type { Workbook } from "@excel/index";
-import { Formula } from "@formula/index";
+import type { FormulaFunction, FormulaValue } from "@excel/bridge/formula";
+import { Workbook } from "@excel/index";
+import type { Formula } from "@formula/index";
 
 declare const wb: Workbook.Handle;
 
 // Public path — must typecheck.
 calculateFormulas(wb);
 
-// The engine entry takes a `WorkbookLike`, never the excel workbook handle.
-// @ts-expect-error `WorkbookData` is missing `worksheets` / `getWorksheet`
-Formula.calculate(wb);
+type HasCalculate = "calculate" extends keyof typeof Formula ? true : false;
+const formulaHasNoCalculate: HasCalculate = false;
+void formulaHasNoCalculate;
 
-// `Formula.calculate` still accepts a genuine structural host.
-declare const host: Parameters<typeof Formula.calculate>[0];
-Formula.calculate(host);
+const customFunction: FormulaFunction = {
+  minArity: 1,
+  maxArity: 1,
+  invoke(args: FormulaValue[]): FormulaValue {
+    return args[0];
+  }
+};
+Workbook.registerFunction(wb, "IDENTITY", customFunction.invoke, {
+  minArity: customFunction.minArity,
+  maxArity: customFunction.maxArity
+});

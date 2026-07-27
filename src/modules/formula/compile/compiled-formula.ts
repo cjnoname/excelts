@@ -474,7 +474,8 @@ export function detectSubtotalOutput(ast: AstNode, bound: BoundExpr): boolean {
  */
 export function analyzeExpr(
   expr: BoundExpr,
-  nameResolver?: NameDepResolver
+  nameResolver?: NameDepResolver,
+  additionalVolatileFunctions?: ReadonlySet<string>
 ): {
   isVolatile: boolean;
   hasDynamicRefs: boolean;
@@ -497,7 +498,7 @@ export function analyzeExpr(
         // `_XLFN.RANDARRAY()` (an XLFN-prefixed volatile) correctly
         // invalidates the session cache across calc cycles.
         const canonical = stripFunctionPrefix(e.name);
-        if (VOLATILE_FUNCTIONS.has(canonical)) {
+        if (VOLATILE_FUNCTIONS.has(canonical) || additionalVolatileFunctions?.has(canonical)) {
           isVolatile = true;
         }
         for (const arg of e.args) {
@@ -512,7 +513,7 @@ export function analyzeExpr(
         if (DYNAMIC_REF_FUNCTIONS.has(e.name)) {
           hasDynamicRefs = true;
         }
-        if (VOLATILE_FUNCTIONS.has(e.name)) {
+        if (VOLATILE_FUNCTIONS.has(e.name) || additionalVolatileFunctions?.has(e.name)) {
           isVolatile = true;
         }
         for (const arg of e.args) {
