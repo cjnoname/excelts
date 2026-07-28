@@ -76,7 +76,14 @@ class FilterColumnXform extends BaseXform<FilterColumnModel> {
         };
         return true;
       case "dynamicFilter":
-        // Ignore dynamicFilter nodes - we don't need to preserve them for reading
+      case "dateGroupItem":
+      case "top10":
+      case "colorFilter":
+      case "iconFilter":
+      case "extLst":
+        // ECMA-376 Part 1, Section 18.3.2 (AutoFilter Settings):
+        // https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.spreadsheet.filtercolumn
+        // Ignore non-value filter criteria nodes on read to prevent XmlParseError on valid XLSX files
         return true;
       default:
         this.parser = this.map[node.name];

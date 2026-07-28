@@ -48,6 +48,20 @@ const expectations = [
     },
     tests: ["prepare", "render", "renderIn", "parse"],
     options: { index: 0 }
+  },
+  {
+    title: "with dateGroupItem filter",
+    create() {
+      return new FilterColumnXform();
+    },
+    initialModel: { filterButton: true },
+    preparedModel: { colId: "0", filterButton: true },
+    xml: '<filterColumn colId="0" hiddenButton="0"><filters><dateGroupItem year="2025" month="8" dateTimeGrouping="month"/></filters></filterColumn>',
+    get parsedModel() {
+      return { filterButton: true };
+    },
+    tests: ["parse"],
+    options: { index: 0 }
   }
 ];
 
