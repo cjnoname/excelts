@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/documonster/documonster/compare/v0.2.0...v0.3.0) (2026-07-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **formula:** isolate calculation behind snapshot plans
+
+### Bug Fixes
+
+* **excel:** Expose formula recalculation via documonster/excel/formula ([233625e](https://github.com/documonster/documonster/commit/233625e9ba595c5ec2b4b29669992c28e656536a)), closes [#193](https://github.com/documonster/documonster/issues/193)
+
+
+### Code Refactoring
+
+* **excel:** Streamline chart and formula planning ([6f314fa](https://github.com/documonster/documonster/commit/6f314fa5aae60a297580140d42f490b44c1b2f25))
+* **formula:** Isolate calculation behind snapshot plans ([1c90316](https://github.com/documonster/documonster/commit/1c9031681577ff7e3f39bc2f456d226832eb0646))
+
 ## [0.2.0](https://github.com/documonster/documonster/compare/v0.1.2...v0.2.0) (2026-07-23)
 
 
