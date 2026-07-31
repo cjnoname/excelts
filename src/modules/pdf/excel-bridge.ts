@@ -55,6 +55,7 @@ import {
   chartsheetModel,
   chartsheetName,
   chartsheetPageSetup,
+  chartsheetPageMargins,
   chartsheetState
 } from "@excel/core/chartsheet";
 import { ValueType } from "@excel/core/enums";
@@ -80,6 +81,7 @@ import {
   getSheetModel,
   getSheetName,
   getSheetWorkbook,
+  getWatermark,
   getSparklineGroups,
   rowEachCell
 } from "@excel/core/worksheet";
@@ -92,7 +94,8 @@ import type {
   Border,
   Borders,
   Alignment,
-  CellRichTextValue
+  CellRichTextValue,
+  HeaderFooter
 } from "@excel/types";
 import { formatCellValue } from "@excel/utils/cell-format";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
@@ -113,6 +116,9 @@ import type {
   PdfBorderSideData,
   PdfAlignmentData,
   PdfPageSetupData,
+  PdfHeaderFooterContent,
+  PdfHeaderFooterData,
+  PdfHeaderFooterRun,
   PdfSheetImage,
   PdfSheetChart,
   PdfAnchorRange,
@@ -355,7 +361,7 @@ async function excelWorkbookToPdf(workbook: Workbook): Promise<PdfWorkbook> {
     getWorksheets(workbook).map(ws => convertSheet(ws, workbook))
   );
   const chartsheetResults = await Promise.all(
-    getChartsheets(workbook).map(cs => convertChartsheet(cs))
+    getChartsheets(workbook).map(cs => convertChartsheet(cs, workbook))
   );
 
   const combined: PdfWorkbookSheet[] = [...worksheetResults, ...chartsheetResults];
@@ -367,6 +373,9 @@ async function excelWorkbookToPdf(workbook: Workbook): Promise<PdfWorkbook> {
     title: workbook.title || undefined,
     creator: workbook.creator || undefined,
     subject: workbook.subject || undefined,
+    sourceFilePath: workbook.sourceFilePath ? dirname(workbook.sourceFilePath) : undefined,
+    sourceFileName: workbook.sourceFilePath ? basename(workbook.sourceFilePath) : undefined,
+    locale: workbook.language,
     sheets: combined
   };
 }
@@ -480,13 +489,16 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
               left: ps.margins.left,
               right: ps.margins.right,
               top: ps.margins.top,
-              bottom: ps.margins.bottom
+              bottom: ps.margins.bottom,
+              header: ps.margins.header,
+              footer: ps.margins.footer
             }
           : undefined,
         scale: ps.scale,
         printTitlesRow: ps.printTitlesRow,
         showGridLines: ps.showGridLines,
-        printArea: ps.printArea
+        printArea: ps.printArea,
+        firstPageNumber: ps.useFirstPageNumber === false ? undefined : ps.firstPageNumber
       }
     : undefined;
 
@@ -577,11 +589,307 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
     rows,
     merges,
     pageSetup,
+    headerFooter: convertHeaderFooter(ws, workbook),
     rowBreaks,
     colBreaks,
     images,
     charts: allCharts
   };
+}
+
+// =============================================================================
+// Header / Footer Conversion
+// =============================================================================
+
+interface HeaderFooterStyle {
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  doubleUnderline: boolean;
+  strike: boolean;
+  superscript: boolean;
+  subscript: boolean;
+  outline: boolean;
+  shadow: boolean;
+  color?: { r: number; g: number; b: number };
+}
+
+function convertHeaderFooter(ws: Worksheet, workbook: Workbook): PdfHeaderFooterData | undefined {
+  const source = ws.headerFooter;
+  const fields = [
+    source.oddHeader,
+    source.oddFooter,
+    source.evenHeader,
+    source.evenFooter,
+    source.firstHeader,
+    source.firstFooter
+  ];
+  const images = convertHeaderFooterImages(ws, workbook);
+  if (!fields.some(Boolean) && images.length === 0) {
+    return undefined;
+  }
+
+  return {
+    differentFirst: source.differentFirst,
+    differentOddEven: source.differentOddEven,
+    scaleWithDoc: source.scaleWithDoc ?? true,
+    alignWithMargins: source.alignWithMargins ?? true,
+    oddHeader: parseHeaderFooter(source.oddHeader),
+    oddFooter: parseHeaderFooter(source.oddFooter),
+    evenHeader: parseHeaderFooter(source.evenHeader),
+    evenFooter: parseHeaderFooter(source.evenFooter),
+    firstHeader: parseHeaderFooter(source.firstHeader),
+    firstFooter: parseHeaderFooter(source.firstFooter),
+    images
+  };
+}
+
+function convertHeaderFooterModel(
+  source: Partial<HeaderFooter> | undefined,
+  images: PdfHeaderFooterData["images"] = []
+): PdfHeaderFooterData | undefined {
+  if (!source && images.length === 0) {
+    return undefined;
+  }
+  source ??= {};
+  const values = [
+    source.oddHeader,
+    source.oddFooter,
+    source.evenHeader,
+    source.evenFooter,
+    source.firstHeader,
+    source.firstFooter
+  ];
+  if (!values.some(Boolean) && images.length === 0) {
+    return undefined;
+  }
+  return {
+    differentFirst: source.differentFirst ?? false,
+    differentOddEven: source.differentOddEven ?? false,
+    scaleWithDoc: source.scaleWithDoc ?? true,
+    alignWithMargins: source.alignWithMargins ?? true,
+    oddHeader: parseHeaderFooter(source.oddHeader ?? null),
+    oddFooter: parseHeaderFooter(source.oddFooter ?? null),
+    evenHeader: parseHeaderFooter(source.evenHeader ?? null),
+    evenFooter: parseHeaderFooter(source.evenFooter ?? null),
+    firstHeader: parseHeaderFooter(source.firstHeader ?? null),
+    firstFooter: parseHeaderFooter(source.firstFooter ?? null),
+    images
+  };
+}
+
+function convertHeaderFooterImages(
+  ws: Worksheet,
+  workbook: Workbook
+): PdfHeaderFooterData["images"] {
+  const headerImages = getSheetModel(ws).media.filter(image => image.type === "headerImage");
+  const watermark = getWatermark(ws);
+  if (headerImages.length === 0 && watermark?.mode === "header") {
+    headerImages.push({
+      type: "headerImage",
+      imageId: String(watermark.imageId),
+      headerWidth: watermark.headerWidth,
+      headerHeight: watermark.headerHeight,
+      position: "CH"
+    });
+  }
+  return headerImages.flatMap(image => {
+    const media = getImage(workbook, image.imageId);
+    const format = media?.extension === "jpg" ? "jpeg" : media?.extension;
+    const data =
+      media?.buffer instanceof Uint8Array
+        ? media.buffer
+        : media?.base64
+          ? base64ToUint8Array(media.base64)
+          : undefined;
+    if (!data?.length || (format !== "png" && format !== "jpeg")) {
+      return [];
+    }
+    return [
+      {
+        data,
+        format,
+        width: image.headerWidth ?? 467.25,
+        height: image.headerHeight ?? 311.25,
+        position: image.position ?? "CH"
+      }
+    ];
+  });
+}
+
+function parseHeaderFooter(value: string | null): PdfHeaderFooterContent | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const content: PdfHeaderFooterContent = { left: [], center: [], right: [] };
+  let section: keyof PdfHeaderFooterContent = "center";
+  let style: HeaderFooterStyle = {
+    fontFamily: "",
+    fontSize: 11,
+    bold: false,
+    italic: false,
+    underline: false,
+    doubleUnderline: false,
+    strike: false,
+    superscript: false,
+    subscript: false,
+    outline: false,
+    shadow: false
+  };
+  let text = "";
+
+  const flush = (): void => {
+    if (!text) {
+      return;
+    }
+    content[section].push({ text, ...style });
+    text = "";
+  };
+  const pushField = (field: PdfHeaderFooterRun["field"], offset?: number): void => {
+    flush();
+    content[section].push({ field, offset, ...style });
+  };
+
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] !== "&") {
+      text += value[i];
+      continue;
+    }
+    const code = value[++i];
+    if (code === undefined) {
+      text += "&";
+      break;
+    }
+    if (code === "&") {
+      text += "&";
+      continue;
+    }
+    if (code === "[") {
+      const end = value.indexOf("]", i + 1);
+      if (end !== -1) {
+        const namedField = value.slice(i + 1, end).toLowerCase();
+        const namedFieldMap: Record<string, NonNullable<PdfHeaderFooterRun["field"]>> = {
+          page: "pageNumber",
+          pages: "pageCount",
+          tab: "sheetName",
+          file: "fileName",
+          path: "filePath",
+          date: "date",
+          time: "time",
+          picture: "image"
+        };
+        if (namedFieldMap[namedField]) {
+          pushField(namedFieldMap[namedField]);
+          i = end;
+          continue;
+        }
+      }
+    }
+    if (code === "L" || code === "C" || code === "R") {
+      flush();
+      section = code === "L" ? "left" : code === "R" ? "right" : "center";
+      continue;
+    }
+    if (code === '"') {
+      const end = value.indexOf('"', i + 1);
+      if (end === -1) {
+        text += '&"';
+        continue;
+      }
+      flush();
+      const fontSpec = value.slice(i + 1, end);
+      const comma = fontSpec.lastIndexOf(",");
+      const family = comma >= 0 ? fontSpec.slice(0, comma) : fontSpec;
+      const styleName = comma >= 0 ? fontSpec.slice(comma + 1) : "";
+      style = {
+        ...style,
+        fontFamily: family === "-" ? "" : family || style.fontFamily,
+        bold: /bold/i.test(styleName),
+        italic: /italic/i.test(styleName)
+      };
+      i = end;
+      continue;
+    }
+    if (/\d/.test(code)) {
+      let end = i + 1;
+      while (end < value.length && /\d/.test(value[end])) {
+        end++;
+      }
+      flush();
+      style = { ...style, fontSize: Number(value.slice(i, end)) };
+      i = end - 1;
+      continue;
+    }
+    if (code === "K") {
+      const colorText = value.slice(i + 1, i + 7);
+      if (/^[0-9A-Fa-f]{6}$/.test(colorText)) {
+        flush();
+        style = { ...style, color: hexToRgb01(colorText) ?? undefined };
+        i += 6;
+      }
+      continue;
+    }
+    if (code === "P") {
+      const offsetMatch = /^[+-]\d+/.exec(value.slice(i + 1));
+      pushField("pageNumber", offsetMatch ? Number(offsetMatch[0]) : undefined);
+      if (offsetMatch) {
+        i += offsetMatch[0].length;
+      }
+      continue;
+    }
+    const fieldMap: Partial<Record<string, NonNullable<PdfHeaderFooterRun["field"]>>> = {
+      N: "pageCount",
+      A: "sheetName",
+      F: "fileName",
+      Z: "filePath",
+      D: "date",
+      T: "time",
+      G: "image"
+    };
+    if (fieldMap[code]) {
+      pushField(fieldMap[code]);
+      continue;
+    }
+    const toggle = (key: keyof HeaderFooterStyle): void => {
+      flush();
+      style = { ...style, [key]: !style[key] };
+    };
+    if (code === "B") {
+      toggle("bold");
+    } else if (code === "I") {
+      toggle("italic");
+    } else if (code === "U") {
+      toggle("underline");
+    } else if (code === "E") {
+      toggle("doubleUnderline");
+    } else if (code === "S") {
+      toggle("strike");
+    } else if (code === "X") {
+      toggle("superscript");
+    } else if (code === "Y") {
+      toggle("subscript");
+    } else if (code === "O") {
+      toggle("outline");
+    } else if (code === "H") {
+      toggle("shadow");
+    } else {
+      text += `&${code}`;
+    }
+  }
+  flush();
+  return content.left.length || content.center.length || content.right.length ? content : undefined;
+}
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+function dirname(path: string): string {
+  const lastSeparator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return lastSeparator >= 0 ? path.slice(0, lastSeparator + 1) : "";
 }
 
 // =============================================================================
@@ -1306,7 +1614,10 @@ const CHARTSHEET_RASTER_PX = { width: 1280, height: 720 } as const;
  *   (matches what Excel prints for a chartsheet whose chart was deleted
  *   but the sheet kept).
  */
-async function convertChartsheet(cs: ChartsheetData): Promise<PdfChartsheetData> {
+async function convertChartsheet(
+  cs: ChartsheetData,
+  workbook: Workbook
+): Promise<PdfChartsheetData> {
   const classicModel = chartsheetChartModel(cs);
   const chartExModel = chartsheetChartExModel(cs);
 
@@ -1361,13 +1672,26 @@ async function convertChartsheet(cs: ChartsheetData): Promise<PdfChartsheetData>
   // the fields we surface here are the ones the PDF renderer knows how
   // to interpret. Unknown fields are silently dropped.
   const ps = chartsheetPageSetup(cs);
-  const pageSetup: PdfPageSetupData | undefined = ps
-    ? {
-        orientation: ps.orientation,
-        paperSize: ps.paperSize,
-        showGridLines: false
-      }
-    : undefined;
+  const margins = chartsheetPageMargins(cs);
+  const pageSetup: PdfPageSetupData | undefined =
+    ps || margins
+      ? {
+          orientation: ps?.orientation,
+          paperSize: ps?.paperSize,
+          showGridLines: false,
+          firstPageNumber: ps?.useFirstPageNumber === false ? undefined : ps?.firstPageNumber,
+          margins: margins
+            ? {
+                left: margins.left ?? margins.l ?? 0.7,
+                right: margins.right ?? margins.r ?? 0.7,
+                top: margins.top ?? margins.t ?? 0.75,
+                bottom: margins.bottom ?? margins.b ?? 0.75,
+                header: margins.header,
+                footer: margins.footer
+              }
+            : undefined
+        }
+      : undefined;
 
   return {
     kind: "chartsheet",
@@ -1376,6 +1700,37 @@ async function convertChartsheet(cs: ChartsheetData): Promise<PdfChartsheetData>
     orderNo: chartsheetModel(cs).orderNo,
     orientation,
     chart,
-    pageSetup
+    pageSetup,
+    headerFooter: convertHeaderFooterModel(
+      chartsheetModel(cs).headerFooter,
+      convertChartsheetHeaderImages(chartsheetModel(cs).headerImages, workbook)
+    )
   };
+}
+
+function convertChartsheetHeaderImages(
+  images: ReturnType<typeof chartsheetModel>["headerImages"],
+  workbook: Workbook
+): PdfHeaderFooterData["images"] {
+  return (images ?? []).flatMap(image => {
+    const media = getImage(workbook, image.imageId);
+    const format = media?.extension === "jpg" ? "jpeg" : media?.extension;
+    const data =
+      media?.buffer instanceof Uint8Array
+        ? media.buffer
+        : media?.base64
+          ? base64ToUint8Array(media.base64)
+          : undefined;
+    return data?.length && (format === "png" || format === "jpeg")
+      ? [
+          {
+            data,
+            format,
+            width: image.width ?? 467.25,
+            height: image.height ?? 311.25,
+            position: image.position
+          }
+        ]
+      : [];
+  });
 }

@@ -8,6 +8,7 @@ import {
 } from "@excel/core/workbook-core";
 import type { WorkbookData } from "@excel/core/workbook-core";
 import type { ChartHandle, WorksheetData } from "@excel/core/worksheet-core";
+import type { HeaderFooter } from "@excel/types";
 import type { ChartsheetModel } from "@excel/xlsx/xform/sheet/chartsheet-xform";
 
 /**
@@ -42,6 +43,8 @@ export interface ChartsheetOptions extends ChartsheetViewOptions {
   pageMargins?: ChartsheetModel["pageMargins"];
   /** Page setup for the chartsheet (CT_CsPageSetup). */
   pageSetup?: ChartsheetModel["pageSetup"];
+  /** Printable headers and footers. */
+  headerFooter?: Partial<HeaderFooter>;
 }
 
 export interface AddChartsheetOptions extends ChartsheetOptions {
@@ -231,6 +234,17 @@ export function chartsheetSetPageSetup(
   value: ChartsheetModel["pageSetup"]
 ): void {
   cs._model.pageSetup = value;
+}
+
+export function chartsheetHeaderFooter(cs: ChartsheetData): ChartsheetModel["headerFooter"] {
+  return cs._model.headerFooter;
+}
+
+export function chartsheetSetHeaderFooter(
+  cs: ChartsheetData,
+  value: ChartsheetModel["headerFooter"]
+): void {
+  cs._model.headerFooter = value;
 }
 
 export function chartsheetTabSelected(cs: ChartsheetData): boolean | undefined {

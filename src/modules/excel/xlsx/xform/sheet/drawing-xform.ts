@@ -6,8 +6,12 @@ interface DrawingModel {
 }
 
 class DrawingXform extends BaseXform {
+  constructor(private readonly drawingTag = "drawing") {
+    super();
+  }
+
   get tag(): string {
-    return "drawing";
+    return this.drawingTag;
   }
 
   render(xmlStream: XmlSink, model?: DrawingModel): void {

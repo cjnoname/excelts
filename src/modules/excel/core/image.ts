@@ -48,6 +48,8 @@ interface HeaderImageModel {
   headerWidth?: number;
   headerHeight?: number;
   applyTo?: "all" | "odd" | "even" | "first";
+  /** Excel header/footer image section. */
+  position?: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
 }
 
 interface ImageRangeModel {
@@ -94,6 +96,7 @@ interface ModelInput {
   headerWidth?: number;
   headerHeight?: number;
   applyTo?: "all" | "odd" | "even" | "first";
+  position?: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
   /**
    * Absolute position/size from the picture's original `<xdr:spPr><a:xfrm>`,
    * in EMU. For an `editAs="oneCell"` picture this is what Excel renders from —
@@ -126,6 +129,8 @@ export interface ImageData {
   headerHeight?: number;
   /** Header watermark applyTo setting. */
   applyTo?: "all" | "odd" | "even" | "first";
+  /** Excel header/footer image section. */
+  position?: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
   /** See `xfrmOffX` on {@link ModelInput}. */
   xfrmOffX?: number;
   xfrmOffY?: number;
@@ -163,7 +168,8 @@ export function imageModel(img: ImageData): Model {
         imageId: img.imageId ?? "",
         headerWidth: img.headerWidth,
         headerHeight: img.headerHeight,
-        applyTo: img.applyTo
+        applyTo: img.applyTo,
+        position: img.position
       };
     case "image": {
       const range = img.range;
@@ -217,6 +223,7 @@ export function applyImageModel(
     headerWidth,
     headerHeight,
     applyTo,
+    position,
     xfrmOffX,
     xfrmOffY,
     xfrmExtCx,
@@ -230,6 +237,7 @@ export function applyImageModel(
   img.headerWidth = headerWidth;
   img.headerHeight = headerHeight;
   img.applyTo = applyTo;
+  img.position = position;
   img.xfrmOffX = xfrmOffX;
   img.xfrmOffY = xfrmOffY;
   img.xfrmExtCx = xfrmExtCx;

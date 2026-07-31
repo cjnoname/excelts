@@ -71,6 +71,8 @@ export interface WorkbookData {
   language?: string;
   revision?: number;
   contentStatus?: string;
+  /** Source file path remembered by Node `readFile`; absent for buffers/browser inputs. */
+  sourceFilePath?: string;
   /**
    * Override ContentType for `/xl/workbook.xml` captured from the source file's
    * `[Content_Types].xml` (templates / macro-enabled workbooks differ from a

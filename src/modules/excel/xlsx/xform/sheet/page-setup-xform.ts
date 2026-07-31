@@ -1,4 +1,5 @@
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
+import { parseXsdBoolean } from "@excel/xlsx/xform/xsd-values";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
 
 function booleanToXml(model: boolean): string | undefined {
@@ -76,6 +77,7 @@ class PageSetupXform extends BaseXform {
 
   render(xmlStream: XmlSink, model: PageSetupModel): void {
     if (model) {
+      const useFirstPageNumber = model.useFirstPageNumber ?? model.firstPageNumber !== undefined;
       const attributes = {
         paperSize: model.paperSize,
         orientation: model.orientation,
@@ -90,8 +92,8 @@ class PageSetupXform extends BaseXform {
         scale: model.scale !== 100 ? model.scale : undefined,
         fitToWidth: model.fitToWidth !== 1 ? model.fitToWidth : undefined,
         fitToHeight: model.fitToHeight !== 1 ? model.fitToHeight : undefined,
-        firstPageNumber: model.firstPageNumber,
-        useFirstPageNumber: booleanToXml(!!model.firstPageNumber),
+        firstPageNumber: useFirstPageNumber ? model.firstPageNumber : undefined,
+        useFirstPageNumber: booleanToXml(useFirstPageNumber),
         usePrinterDefaults: booleanToXml(model.usePrinterDefaults!),
         copies: model.copies
       };
@@ -117,8 +119,11 @@ class PageSetupXform extends BaseXform {
           scale: parseInt(node.attributes.scale ?? "100", 10),
           fitToWidth: parseInt(node.attributes.fitToWidth ?? "1", 10),
           fitToHeight: parseInt(node.attributes.fitToHeight ?? "1", 10),
-          firstPageNumber: parseInt(node.attributes.firstPageNumber ?? "1", 10),
-          useFirstPageNumber: node.attributes.useFirstPageNumber === "1",
+          firstPageNumber:
+            node.attributes.firstPageNumber !== undefined
+              ? parseInt(node.attributes.firstPageNumber, 10)
+              : undefined,
+          useFirstPageNumber: parseXsdBoolean(node.attributes.useFirstPageNumber) ?? false,
           usePrinterDefaults: node.attributes.usePrinterDefaults === "1",
           copies: parseInt(node.attributes.copies ?? "1", 10)
         };

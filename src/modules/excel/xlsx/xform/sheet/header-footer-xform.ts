@@ -1,15 +1,18 @@
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
+import { parseXsdBoolean } from "@excel/xlsx/xform/xsd-values";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
 
-interface HeaderFooterModel {
+export interface HeaderFooterModel {
   differentFirst?: boolean;
   differentOddEven?: boolean;
-  oddHeader?: string;
-  oddFooter?: string;
-  evenHeader?: string;
-  evenFooter?: string;
-  firstHeader?: string;
-  firstFooter?: string;
+  scaleWithDoc?: boolean;
+  alignWithMargins?: boolean;
+  oddHeader?: string | null;
+  oddFooter?: string | null;
+  evenHeader?: string | null;
+  evenFooter?: string | null;
+  firstHeader?: string | null;
+  firstFooter?: string | null;
 }
 
 class HeaderFooterXform extends BaseXform {
@@ -32,6 +35,12 @@ class HeaderFooterXform extends BaseXform {
     }
     if (model.differentOddEven) {
       attrs.differentOddEven = "1";
+    }
+    if (model.scaleWithDoc === false) {
+      attrs.scaleWithDoc = "0";
+    }
+    if (model.alignWithMargins === false) {
+      attrs.alignWithMargins = "0";
     }
     if (model.oddHeader && typeof model.oddHeader === "string") {
       children.push({ name: "oddHeader", text: model.oddHeader });
@@ -66,10 +75,16 @@ class HeaderFooterXform extends BaseXform {
       case "headerFooter":
         this.model = {};
         if (node.attributes.differentFirst) {
-          this.model.differentFirst = parseInt(node.attributes.differentFirst, 0) === 1;
+          this.model.differentFirst = parseXsdBoolean(node.attributes.differentFirst) ?? false;
         }
         if (node.attributes.differentOddEven) {
-          this.model.differentOddEven = parseInt(node.attributes.differentOddEven, 0) === 1;
+          this.model.differentOddEven = parseXsdBoolean(node.attributes.differentOddEven) ?? false;
+        }
+        if (node.attributes.scaleWithDoc !== undefined) {
+          this.model.scaleWithDoc = parseXsdBoolean(node.attributes.scaleWithDoc) ?? true;
+        }
+        if (node.attributes.alignWithMargins !== undefined) {
+          this.model.alignWithMargins = parseXsdBoolean(node.attributes.alignWithMargins) ?? true;
         }
         return true;
 

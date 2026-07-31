@@ -180,6 +180,8 @@ export interface WorksheetData {
   _headerRowCount?: number;
   _drawing: unknown;
   _watermark: WatermarkOptions | null;
+  /** The exact media entry created by the watermark API, for precise removal. */
+  _watermarkMedia: ImageData | null;
   /**
    * Optional streaming-writer hook. Present on streaming worksheet writers,
    * absent on plain record worksheets; `_commitRow` dispatches to it when set.

@@ -274,6 +274,8 @@ export interface PageSetup {
   showRowColHeaders: boolean;
   showGridLines: boolean;
   firstPageNumber?: number;
+  /** Whether the source explicitly enables `firstPageNumber`. */
+  useFirstPageNumber?: boolean;
   horizontalCentered: boolean;
   verticalCentered: boolean;
   rowBreaks?: RowBreak[];
@@ -288,6 +290,10 @@ export interface PageSetup {
 export interface HeaderFooter {
   differentFirst: boolean;
   differentOddEven: boolean;
+  /** Scale header/footer formatting with the printed document. OOXML default: true. */
+  scaleWithDoc?: boolean;
+  /** Align left/right header/footer sections with page margins. OOXML default: true. */
+  alignWithMargins?: boolean;
   oddHeader: string | null;
   oddFooter: string | null;
   evenHeader: string | null;
@@ -910,6 +916,18 @@ export type WatermarkMode = "overlay" | "header";
  *   mode: "header"
  * });
  * ```
+ *
+ * @example Footer image in the right-hand section:
+ * ```typescript
+ * worksheet.addWatermark({ imageId: imgId, mode: "header", position: "RF" });
+ * ```
+ *
+ * In `"header"` mode the call updates `worksheet.headerFooter` immediately:
+ * the `&G` image placeholder is written into the fields selected by
+ * `position` and `applyTo`, and `differentOddEven` / `differentFirst` are set
+ * when those page types are targeted. `removeWatermark()` strips the
+ * placeholder again, and repeated `addWatermark()` calls replace the previous
+ * image (and its placeholder) rather than accumulating.
  */
 export interface WatermarkOptions {
   /** Image ID obtained from `workbook.addImage()`. */
@@ -945,10 +963,35 @@ export interface WatermarkOptions {
    * - `"even"` — applies only to evenHeader
    * - `"first"` — applies only to firstHeader
    *
-   * @default "all"
+   * @default "odd" — when odd/even and first-page variants are disabled,
+   * the standard odd field is the shared header/footer for every page.
    */
   applyTo?: "all" | "odd" | "even" | "first";
+  /**
+   * Which header/footer section the image occupies (only for `"header"` mode).
+   *
+   * Excel defines six header/footer image sections:
+   * `"LH"`/`"CH"`/`"RH"` for the left/centre/right header and
+   * `"LF"`/`"CF"`/`"RF"` for the left/centre/right footer. The chosen section
+   * decides both the VML shape id and which field receives the `&G`
+   * placeholder — a footer position writes into `oddFooter`/`evenFooter`/
+   * `firstFooter` rather than the header fields.
+   *
+   * This convenience API manages one watermark image at a time; calling it
+   * again replaces the previous API-owned watermark, and targeting a section
+   * that already holds an image replaces that occupant.
+   *
+   * For per-section control — including images loaded from an existing
+   * workbook — use the `HeaderFooterImage` namespace (`set` / `list` /
+   * `remove`), which addresses all six sections independently.
+   *
+   * @default "CH"
+   */
+  position?: HeaderFooterImagePosition;
 }
+
+/** Excel header/footer image sections (left/centre/right × header/footer). */
+export type HeaderFooterImagePosition = "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
 
 // ============================================================================
 // Location and Address Types

@@ -28,6 +28,8 @@ interface VmlHeaderImageModel {
   width?: number;
   /** Image height in points */
   height?: number;
+  /** Excel header/footer section id: LH, CH, RH, LF, CF, or RF. */
+  position?: string;
 }
 
 interface VmlDrawingModel {
@@ -37,6 +39,8 @@ interface VmlDrawingModel {
   formControls?: FormCheckboxModel[];
   /** Header/footer image (for watermark in header mode) */
   headerImage?: VmlHeaderImageModel;
+  /** All header/footer image shapes parsed from a foreign workbook. */
+  headerImages?: VmlHeaderImageModel[];
 }
 
 class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
@@ -62,10 +66,18 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
     const renderModel = (model || this.model)!;
     const comments = renderModel.comments;
     const formControls = renderModel.formControls;
-    const headerImage = renderModel.headerImage;
+    const declaredHeaderImages =
+      renderModel.headerImages ?? (renderModel.headerImage ? [renderModel.headerImage] : []);
+    // Excel holds at most one image per header/footer section, and a VML part
+    // must not repeat a shape id. Keep the last declaration per section.
+    const headerImages = [
+      ...new Map(
+        declaredHeaderImages.map(image => [image.position ?? "CH", image] as const)
+      ).values()
+    ];
     const hasComments = comments && comments.length > 0;
     const hasFormControls = formControls && formControls.length > 0;
-    const hasHeaderImage = !!headerImage;
+    const hasHeaderImage = headerImages.length > 0;
 
     xmlStream.openXml(StdDocAttributes);
     xmlStream.openNode(this.tag, VmlDrawingXform.DRAWING_ATTRIBUTES);
@@ -159,7 +171,9 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
 
     // Render header/footer image shape
     if (hasHeaderImage) {
-      this._renderHeaderImageShape(xmlStream, headerImage);
+      for (let i = 0; i < headerImages.length; i++) {
+        this._renderHeaderImageShape(xmlStream, headerImages[i], i);
+      }
     }
 
     xmlStream.closeNode();
@@ -168,14 +182,18 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
   /**
    * Render a header/footer image shape for watermark
    */
-  private _renderHeaderImageShape(xmlStream: XmlSink, headerImage: VmlHeaderImageModel): void {
+  private _renderHeaderImageShape(
+    xmlStream: XmlSink,
+    headerImage: VmlHeaderImageModel,
+    index: number
+  ): void {
     const width = headerImage.width ?? 467.25;
     const height = headerImage.height ?? 311.25;
 
-    // CH = Center Header, used by Excel for center-positioned header images
+    const position = headerImage.position ?? "CH";
     xmlStream.openNode("v:shape", {
-      id: "CH",
-      "o:spid": "_x0000_s2049",
+      id: position,
+      "o:spid": `_x0000_s${2049 + index}`,
       type: "#_x0000_t75",
       style: `position:absolute;margin-left:0;margin-top:0;width:${width}pt;height:${height}pt;z-index:1`
     });
@@ -288,6 +306,7 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
         // Check if this is a header image shape (type="#_x0000_t75")
         if (node.attributes.type === "#_x0000_t75") {
           this._parsingHeaderImage = true;
+          this._headerImagePosition = node.attributes.id;
           // Extract width/height from style
           const style = node.attributes.style || "";
           const widthMatch = /width:([0-9.]+)pt/.exec(style);
@@ -333,16 +352,21 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
     switch (name) {
       case "v:shape":
         if (this._parsingHeaderImage && this._headerImageRelId) {
-          this.model!.headerImage = {
+          const headerImage = {
             imageRelId: this._headerImageRelId,
             width: this._headerImageWidth,
-            height: this._headerImageHeight
+            height: this._headerImageHeight,
+            position: this._headerImagePosition
           };
+          this.model!.headerImages ??= [];
+          this.model!.headerImages.push(headerImage);
+          this.model!.headerImage ??= headerImage;
         }
         this._parsingHeaderImage = false;
         this._headerImageRelId = undefined;
         this._headerImageWidth = undefined;
         this._headerImageHeight = undefined;
+        this._headerImagePosition = undefined;
         return true;
       case this.tag:
         return false;
@@ -356,6 +380,7 @@ class VmlDrawingXform extends BaseXform<VmlDrawingModel> {
   private _headerImageRelId?: string;
   private _headerImageWidth?: number;
   private _headerImageHeight?: number;
+  private _headerImagePosition?: string;
 
   static DRAWING_ATTRIBUTES = {
     "xmlns:v": "urn:schemas-microsoft-com:vml",

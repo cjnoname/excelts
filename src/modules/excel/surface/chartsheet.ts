@@ -27,6 +27,8 @@ export {
   chartsheetSetPageMargins as setPageMargins,
   chartsheetPageSetup as pageSetup,
   chartsheetSetPageSetup as setPageSetup,
+  chartsheetHeaderFooter as headerFooter,
+  chartsheetSetHeaderFooter as setHeaderFooter,
   chartsheetTabSelected as tabSelected,
   chartsheetSetTabSelected as setTabSelected,
   chartsheetZoomScale as zoomScale,

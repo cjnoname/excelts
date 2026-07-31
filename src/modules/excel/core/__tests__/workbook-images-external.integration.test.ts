@@ -404,6 +404,16 @@ describe("Workbook external (linked) images", () => {
     await expectValidXlsx(out, { label: "streaming header rejection" });
   });
 
+  it("rejects embedded header watermarks in the streaming writer explicitly", async () => {
+    const { wb } = memoryStreamWriter();
+    const imageId = wb.addImage({ buffer: new Uint8Array([1, 2, 3]), extension: "png" });
+    const ws = wb.addWorksheet("Sheet1");
+
+    expect(() => ws.addWatermark({ imageId, mode: "header" })).toThrow(
+      /not supported by the streaming worksheet writer/i
+    );
+  });
+
   it("rejects an external background image in the streaming writer", async () => {
     const { wb } = memoryStreamWriter();
     const imageId = wb.addImage({ extension: "png", link: REMOTE_URL });

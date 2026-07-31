@@ -215,8 +215,13 @@ class XLSX extends XLSXBase<Workbook> {
     if (!(await fileExists(filename))) {
       throw new ExcelFileError(filename, "read", "File not found");
     }
+    // `loadFromFiles` clears stale origin metadata for all non-file reads.
+    // Set the path only after a successful parse so failed reads preserve the
+    // previously loaded workbook's origin.
     const stream = createReadStream(filename);
-    return this.read(stream, options);
+    const workbook = await this.read(stream, options);
+    workbook.sourceFilePath = filename;
+    return workbook;
   }
 
   writeFile(filename: string, options?: XlsxWriteOptions): Promise<void> {

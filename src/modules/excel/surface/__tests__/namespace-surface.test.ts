@@ -23,6 +23,7 @@ describe("documonster/excel namespace surface", () => {
       "DefinedNames",
       "Form",
       "Format",
+      "HeaderFooterImage",
       "Image",
       "Note",
       "Pivot",
@@ -35,7 +36,7 @@ describe("documonster/excel namespace surface", () => {
       "Workbook",
       "Worksheet"
     ];
-    // Object exports (namespaces) — must be exactly these 21.
+    // Object exports (namespaces) — must be exactly these 22.
     const namespaceKeys = Object.keys(Excel)
       .filter(k => typeof (Excel as Record<string, unknown>)[k] === "object")
       .sort();

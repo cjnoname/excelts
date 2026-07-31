@@ -621,6 +621,7 @@ export function addChartsheet(
     zoomToFit: options.zoomToFit,
     pageMargins: options.pageMargins,
     pageSetup: options.pageSetup,
+    headerFooter: options.headerFooter,
     drawing: { rId: "rId1" }
   };
 

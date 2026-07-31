@@ -26,8 +26,10 @@
  * `errors`).
  */
 
+import type { HeaderFooter } from "@excel/types";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import type { RelationshipModel } from "@excel/xlsx/xform/core/relationship-xform";
+import { HeaderFooterXform } from "@excel/xlsx/xform/sheet/header-footer-xform";
 import { parseXsdBoolean, parseXsdInt } from "@excel/xlsx/xform/xsd-values";
 import { xmlEncode as escapeXml, xmlEncodeAttr } from "@xml/encode";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
@@ -119,6 +121,17 @@ export interface ChartsheetModel {
      */
     rId?: string;
   };
+  /** Structured printable header/footer content. */
+  headerFooter?: Partial<HeaderFooter>;
+  /** VML drawing containing positioned header/footer images. */
+  legacyDrawingHF?: { rId: string };
+  /** Reconciled header/footer images for consumers such as PDF export. */
+  headerImages?: Array<{
+    imageId: number;
+    width?: number;
+    height?: number;
+    position: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
+  }>;
   /** Drawing relationship reference */
   drawing?: { rId: string };
   /** Relationships parsed from the chartsheet .rels file */
@@ -185,6 +198,7 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
   private captureParts: string[] = [];
   private skipNextCaptureClose = false;
   private sheetDepth = 0;
+  private headerFooterXform = new HeaderFooterXform();
 
   get tag(): string {
     return "chartsheet";
@@ -283,7 +297,7 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
       xmlStream.leafNode("pageSetup", attrs);
     }
 
-    writeRaw("headerFooter");
+    this.headerFooterXform.render(xmlStream, m.headerFooter);
 
     // drawing
     if (m.drawing) {
@@ -291,7 +305,9 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
     }
 
     writeRaw("legacyDrawing");
-    writeRaw("legacyDrawingHF");
+    if (m.legacyDrawingHF) {
+      xmlStream.leafNode("legacyDrawingHF", { "r:id": m.legacyDrawingHF.rId });
+    }
     writeRaw("drawingHF");
     writeRaw("picture");
     writeRaw("webPublishItems");
@@ -339,9 +355,15 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
         name: "",
         id: 0
       };
+      this.headerFooterXform.reset();
       return true;
     }
     this.sheetDepth += 1;
+
+    if (name === "headerFooter" || this.headerFooterXform.model) {
+      this.headerFooterXform.parseOpen(node);
+      return true;
+    }
 
     // Start a fresh capture for any DIRECT chartsheet child that we
     // don't structurally model. `sheetDepth === 2` means we're one
@@ -457,6 +479,11 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
           this.model.drawing = { rId: attrs["r:id"] };
         }
         break;
+      case "legacyDrawingHF":
+        if (this.model && attrs["r:id"]) {
+          this.model.legacyDrawingHF = { rId: attrs["r:id"] };
+        }
+        break;
       default:
         break;
     }
@@ -476,6 +503,10 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
   }
 
   parseText(text: string): void {
+    if (this.headerFooterXform.model) {
+      this.headerFooterXform.parseText(text);
+      return;
+    }
     // Pass text content through to the raw-capture buffer when we're
     // recording an unmodeled element. Top-level chartsheet children
     // have no meaningful text content (everything is element-based),
@@ -486,6 +517,16 @@ class ChartsheetXform extends BaseXform<ChartsheetModel> {
   }
 
   parseClose(name: string): boolean {
+    if (this.headerFooterXform.model) {
+      if (name === "headerFooter") {
+        this.model!.headerFooter = this.headerFooterXform.model;
+        this.headerFooterXform.reset();
+      } else {
+        this.headerFooterXform.parseClose();
+      }
+      this.sheetDepth -= 1;
+      return true;
+    }
     // Close-tag inside an active capture — pop depth and decide
     // whether the capture ends here.
     if (this.captureRoot) {
@@ -537,9 +578,7 @@ const RAW_CAPTURE_TAGS: ReadonlySet<string> = new Set([
   "sheetPr",
   "sheetProtection",
   "customSheetViews",
-  "headerFooter",
   "legacyDrawing",
-  "legacyDrawingHF",
   "drawingHF",
   "picture",
   "webPublishItems",

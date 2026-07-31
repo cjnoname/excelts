@@ -123,6 +123,7 @@ import type {
   ConditionalFormattingOptions,
   DataValidation,
   HeaderFooter,
+  HeaderFooterImagePosition,
   IgnoredError,
   PageSetup,
   RowBreak,
@@ -190,6 +191,7 @@ interface WorksheetModel {
   formControls: FormCheckboxModel[];
   ignoredErrors: IgnoredError[];
   watermark?: WatermarkOptions | null;
+  /** Internal snapshot used to make API-owned header watermark removal reversible. */
   cols?: ColumnModel[];
   rows?: RowModel[];
   dimensions?: RangeData;
@@ -290,6 +292,8 @@ export function createWorksheet(options: WorksheetOptions): WorksheetData {
   ws.headerFooter = {
     differentFirst: false,
     differentOddEven: false,
+    scaleWithDoc: true,
+    alignWithMargins: true,
     oddHeader: null,
     oddFooter: null,
     evenHeader: null,
@@ -337,6 +341,7 @@ export function createWorksheet(options: WorksheetOptions): WorksheetData {
 
   // watermark configuration
   ws._watermark = null;
+  ws._watermarkMedia = null;
 
   return ws;
 }
@@ -1410,8 +1415,16 @@ export function addWatermark(ws: WorksheetData, options: WatermarkOptions): void
     }
   }
 
-  // Remove any existing watermark media entries first
-  ws._media = ws._media.filter(m => m.type !== "watermark" && m.type !== "headerImage");
+  // Replace only the watermark owned by this API. Imported header/footer
+  // images are independent document content and must survive both replacement
+  // and removal of the API watermark.
+  if (ws._watermark?.mode === "header") {
+    removeWatermark(ws);
+  } else {
+    removeOwnedWatermarkMedia(ws);
+  }
+
+  const position = options.position ?? "CH";
 
   ws._watermark = {
     imageId: String(options.imageId),
@@ -1419,7 +1432,8 @@ export function addWatermark(ws: WorksheetData, options: WatermarkOptions): void
     opacity: options.opacity,
     headerWidth: options.headerWidth,
     headerHeight: options.headerHeight,
-    applyTo: options.applyTo
+    applyTo: options.applyTo,
+    position: options.position
   };
 
   if (ws._watermark.mode === "overlay") {
@@ -1429,18 +1443,269 @@ export function addWatermark(ws: WorksheetData, options: WatermarkOptions): void
       imageId: String(options.imageId),
       opacity: options.opacity
     };
-    ws._media.push(imageCreate(ws, model));
+    const medium = imageCreate(ws, model);
+    ws._media.push(medium);
+    ws._watermarkMedia = medium;
   } else {
-    // Header mode: add as a "headerImage" media entry for the VML pipeline.
-    const model = {
+    // Delegate section ownership, `&G` bookkeeping, and replacement semantics
+    // to the explicit six-section API.
+    setHeaderFooterImage(ws, {
+      imageId: options.imageId,
+      position,
+      width: options.headerWidth,
+      height: options.headerHeight,
+      applyTo: options.applyTo
+    });
+    ws._watermarkMedia =
+      ws._media.find(
+        medium => medium.type === "headerImage" && (medium.position ?? "CH") === position
+      ) ?? null;
+  }
+}
+
+/** Section token (`&L`/`&C`/`&R`) that anchors an image position. */
+function headerFooterSectionToken(position: HeaderFooterImagePosition): string {
+  return position[0] === "L" ? "&L" : position[0] === "R" ? "&R" : "&C";
+}
+
+/**
+ * Header/footer fields a given image position writes into, ordered
+ * odd → even → first, filtered by the caller's `applyTo` selection.
+ */
+function headerFooterImageFields(
+  position: HeaderFooterImagePosition,
+  applyTo: "all" | "odd" | "even" | "first",
+  headerFooter: HeaderFooter
+): Array<keyof HeaderFooter> {
+  const isFooter = position[1] === "F";
+  const odd = isFooter ? "oddFooter" : "oddHeader";
+  const even = isFooter ? "evenFooter" : "evenHeader";
+  const first = isFooter ? "firstFooter" : "firstHeader";
+  if (applyTo === "odd") {
+    return [odd];
+  }
+  if (applyTo === "even") {
+    return [even];
+  }
+  if (applyTo === "first") {
+    return [first];
+  }
+  return [odd, even, first];
+}
+
+/**
+ * Remove the `&G` image placeholder from one header/footer section across all
+ * three page variants, leaving every other section and code untouched.
+ */
+function stripSectionImagePlaceholder(
+  source: HeaderFooter,
+  position: HeaderFooterImagePosition
+): HeaderFooter {
+  const result: HeaderFooter = { ...source };
+  const token = headerFooterSectionToken(position);
+  const fields: Array<keyof HeaderFooter> =
+    position[1] === "F"
+      ? ["oddFooter", "evenFooter", "firstFooter"]
+      : ["oddHeader", "evenHeader", "firstHeader"];
+
+  for (const field of fields) {
+    const value = result[field];
+    if (typeof value !== "string" || !sectionContainsImage(value, token)) {
+      continue;
+    }
+    const start = value.indexOf(token);
+    const imageIndex = value.indexOf("&G", start + token.length);
+    let cleaned = value.slice(0, imageIndex) + value.slice(imageIndex + 2);
+    const sectionStart = cleaned.indexOf(token);
+    if (sectionStart >= 0) {
+      const sectionTail = cleaned.slice(sectionStart + token.length);
+      const nextSection = sectionTail.search(/&[LCR]/);
+      const sectionContent = nextSection < 0 ? sectionTail : sectionTail.slice(0, nextSection);
+      if (sectionContent === "") {
+        cleaned = cleaned.slice(0, sectionStart) + cleaned.slice(sectionStart + token.length);
+      }
+    }
+    result[field] = (cleaned || null) as never;
+  }
+  return result;
+}
+
+function sectionContainsImage(value: string | null | undefined, token: string): boolean {
+  if (!value) {
+    return false;
+  }
+  const start = value.indexOf(token);
+  if (start < 0) {
+    return false;
+  }
+  const tail = value.slice(start + token.length);
+  const nextSection = tail.search(/&[LCR]/);
+  return (nextSection < 0 ? tail : tail.slice(0, nextSection)).includes("&G");
+}
+
+function insertImagePlaceholder(value: string | null, token: string): string {
+  const existing = value ?? "";
+  if (sectionContainsImage(existing, token)) {
+    return existing;
+  }
+  const index = existing.indexOf(token);
+  return index >= 0
+    ? `${existing.slice(0, index + token.length)}&G${existing.slice(index + token.length)}`
+    : `${existing}${token}&G`;
+}
+
+/** Pure transformation used both when adding and when precisely undoing. */
+function buildWatermarkedHeaderFooter(
+  source: HeaderFooter,
+  position: HeaderFooterImagePosition,
+  applyTo: "all" | "odd" | "even" | "first"
+): HeaderFooter {
+  const result: HeaderFooter = { ...source };
+  const token = headerFooterSectionToken(position);
+  const isFooter = position[1] === "F";
+  const oddField = isFooter ? "oddFooter" : "oddHeader";
+  if (applyTo === "even" && !result.differentOddEven) {
+    result[isFooter ? "evenFooter" : "evenHeader"] = result[oddField];
+    result.differentOddEven = true;
+  }
+  if (applyTo === "all") {
+    if (!result.differentOddEven) {
+      result[isFooter ? "evenFooter" : "evenHeader"] = result[oddField];
+      result.differentOddEven = true;
+    }
+    if (!result.differentFirst) {
+      result[isFooter ? "firstFooter" : "firstHeader"] = result[oddField];
+      result.differentFirst = true;
+    }
+  }
+  if (applyTo === "first" && !result.differentFirst) {
+    result[isFooter ? "firstFooter" : "firstHeader"] = result[oddField];
+    result.differentFirst = true;
+  }
+  for (const field of headerFooterImageFields(position, applyTo, result)) {
+    const current = result[field];
+    if (typeof current === "string" || current === null) {
+      result[field] = insertImagePlaceholder(current, token) as never;
+    }
+  }
+  return result;
+}
+
+/**
+ * Remove the API-owned media entry. Imported sibling images are untouched.
+ */
+function removeOwnedWatermarkMedia(ws: WorksheetData): void {
+  const owned = ws._watermarkMedia;
+  if (!owned) {
+    return;
+  }
+  // Identity match: the API removes exactly the entry it created, never an
+  // identically-positioned image that came from the source document.
+  ws._media = ws._media.filter(medium => medium !== owned);
+  ws._watermarkMedia = null;
+}
+
+/**
+ * Options for {@link setHeaderFooterImage}.
+ */
+export interface HeaderFooterImageOptions {
+  /** Image ID obtained from `Workbook.addImage()`. */
+  imageId: string | number;
+  /** Section that holds the image. */
+  position: HeaderFooterImagePosition;
+  /** Image width in points. Defaults to Excel's 467.25. */
+  width?: number;
+  /** Image height in points. Defaults to Excel's 311.25. */
+  height?: number;
+  /**
+   * Which page variants show the image.
+   *
+   * @default "odd" — the shared field used by every page while the odd/even
+   * and first-page variants are disabled.
+   */
+  applyTo?: "all" | "odd" | "even" | "first";
+}
+
+/** A header/footer image as stored on the worksheet. */
+export interface HeaderFooterImageEntry {
+  imageId: string;
+  position: HeaderFooterImagePosition;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Place an image in one of Excel's six header/footer sections
+ * (`LH`/`CH`/`RH`/`LF`/`CF`/`RF`), replacing whatever occupied that section.
+ *
+ * This is the explicit counterpart to the single-value {@link addWatermark}
+ * API: it addresses each section independently, so images loaded from an
+ * existing workbook can be inspected, replaced, or removed individually.
+ */
+export function setHeaderFooterImage(ws: WorksheetData, options: HeaderFooterImageOptions): void {
+  const bookImage = getImage(ws._workbook, options.imageId);
+  if (bookImage && isExternalImage(bookImage)) {
+    throw new ImageError(
+      "Header/footer images cannot be external (linked) images. " +
+        "Use an embedded image (buffer/base64/filename)."
+    );
+  }
+
+  removeHeaderFooterImage(ws, options.position);
+  ws._media.push(
+    imageCreate(ws, {
       type: "headerImage",
       imageId: String(options.imageId),
-      headerWidth: options.headerWidth,
-      headerHeight: options.headerHeight,
-      applyTo: options.applyTo
-    };
-    ws._media.push(imageCreate(ws, model));
+      headerWidth: options.width,
+      headerHeight: options.height,
+      applyTo: options.applyTo,
+      position: options.position
+    })
+  );
+  ws.headerFooter = buildWatermarkedHeaderFooter(
+    ws.headerFooter,
+    options.position,
+    options.applyTo ?? "odd"
+  );
+}
+
+/** Every header/footer image on the worksheet, in section order. */
+export function getHeaderFooterImages(ws: WorksheetData): HeaderFooterImageEntry[] {
+  return ws._media
+    .filter(medium => medium.type === "headerImage")
+    .map(medium => ({
+      // Parsed workbooks carry numeric media indexes; normalise so the public
+      // shape is always the string id used by `Workbook.addImage()`.
+      imageId: String(medium.imageId ?? ""),
+      position: medium.position ?? "CH",
+      width: medium.headerWidth,
+      height: medium.headerHeight
+    }));
+}
+
+/**
+ * Remove the image in one header/footer section together with its `&G`
+ * placeholder. Returns `true` when a section image was removed.
+ */
+export function removeHeaderFooterImage(
+  ws: WorksheetData,
+  position: HeaderFooterImagePosition
+): boolean {
+  const occupants = ws._media.filter(
+    medium => medium.type === "headerImage" && (medium.position ?? "CH") === position
+  );
+  if (occupants.length === 0) {
+    return false;
   }
+  ws._media = ws._media.filter(medium => !occupants.includes(medium));
+  ws.headerFooter = stripSectionImagePlaceholder(ws.headerFooter, position);
+  if (occupants.includes(ws._watermarkMedia as never)) {
+    // The single-value watermark API owned this entry; drop its bookkeeping so
+    // a later removeWatermark() cannot resurrect a stale snapshot.
+    ws._watermark = null;
+    ws._watermarkMedia = null;
+  }
+  return true;
 }
 
 export function getWatermark(ws: WorksheetData): WatermarkOptions | null {
@@ -1448,8 +1713,17 @@ export function getWatermark(ws: WorksheetData): WatermarkOptions | null {
 }
 
 export function removeWatermark(ws: WorksheetData): void {
+  const watermark = ws._watermark;
+  if (!watermark) {
+    return;
+  }
+  if (watermark.mode === "header") {
+    removeHeaderFooterImage(ws, watermark.position ?? "CH");
+  } else {
+    removeOwnedWatermarkMedia(ws);
+  }
   ws._watermark = null;
-  ws._media = ws._media.filter(m => m.type !== "watermark" && m.type !== "headerImage");
+  ws._watermarkMedia = null;
 }
 
 export function addFormCheckbox(
@@ -2254,7 +2528,24 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws.dataValidations = createDataValidations(value.dataValidations);
   ws.properties = value.properties;
   ws.pageSetup = value.pageSetup;
-  ws.headerFooter = value.headerFooter;
+  // Re-apply the OOXML schema defaults: `scaleWithDoc` / `alignWithMargins`
+  // default to true and are omitted from the XML when unset, so a parsed
+  // model carries only the fields the file actually wrote. Filling them here
+  // keeps `HeaderFooter` fully populated for every source (fresh, cloned,
+  // parsed) instead of leaking `undefined` through the public shape.
+  const headerFooter = (value.headerFooter ?? {}) as Partial<HeaderFooter>;
+  ws.headerFooter = {
+    differentFirst: headerFooter.differentFirst ?? false,
+    differentOddEven: headerFooter.differentOddEven ?? false,
+    scaleWithDoc: headerFooter.scaleWithDoc ?? true,
+    alignWithMargins: headerFooter.alignWithMargins ?? true,
+    oddHeader: headerFooter.oddHeader ?? null,
+    oddFooter: headerFooter.oddFooter ?? null,
+    evenHeader: headerFooter.evenHeader ?? null,
+    evenFooter: headerFooter.evenFooter ?? null,
+    firstHeader: headerFooter.firstHeader ?? null,
+    firstFooter: headerFooter.firstFooter ?? null
+  };
   ws.rowBreaks = value.rowBreaks ?? [];
   ws.colBreaks = value.colBreaks ?? [];
   ws.views = value.views;
@@ -2263,6 +2554,7 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws._shapes = value.shapes ? value.shapes.slice() : [];
   // Restore watermark state from media entries
   ws._watermark = value.watermark ?? null;
+  ws._watermarkMedia = null;
   if (!ws._watermark) {
     for (const medium of ws._media) {
       if (medium.type === "watermark") {
@@ -2270,14 +2562,6 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
           imageId: medium.imageId ?? "",
           mode: "overlay",
           opacity: medium.opacity
-        };
-        break;
-      } else if (medium.type === "headerImage") {
-        ws._watermark = {
-          imageId: medium.imageId ?? "",
-          mode: "header",
-          headerWidth: medium.headerWidth,
-          headerHeight: medium.headerHeight
         };
         break;
       }

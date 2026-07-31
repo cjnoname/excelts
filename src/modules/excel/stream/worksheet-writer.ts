@@ -324,6 +324,8 @@ class WorksheetWriter {
       {
         differentFirst: false,
         differentOddEven: false,
+        scaleWithDoc: true,
+        alignWithMargins: true,
         oddHeader: null,
         oddFooter: null,
         evenHeader: null,
@@ -798,6 +800,10 @@ class WorksheetWriter {
             "Use an embedded image (buffer/base64/filename), or use overlay mode for linked images."
         );
       }
+      throw new ImageError(
+        "Header/footer watermark images are not supported by the streaming worksheet writer. " +
+          "Use a regular Workbook worksheet, or use overlay mode when streaming."
+      );
     }
 
     // Remove existing watermark entries (both stored type tags)
@@ -812,7 +818,8 @@ class WorksheetWriter {
       opacity,
       headerWidth: options.headerWidth,
       headerHeight: options.headerHeight,
-      applyTo: options.applyTo
+      applyTo: options.applyTo,
+      position: options.position
     };
 
     if (this._watermark.mode === "overlay") {
@@ -831,9 +838,6 @@ class WorksheetWriter {
       };
       this._media.push(entry);
     }
-    // Note: header mode for streaming writer is limited — the VML file generation
-    // happens in WorkbookWriter.addWorksheets(), which handles worksheet.headerImage.
-    // We store the config in _watermark and it's picked up by the commit path.
   }
 
   /**

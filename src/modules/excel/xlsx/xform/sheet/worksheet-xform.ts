@@ -198,6 +198,7 @@ class WorkSheetXform extends BaseXform {
       printOptions: new PrintOptionsXform(),
       picture: new PictureXform(),
       drawing: new DrawingXform(),
+      legacyDrawingHF: new DrawingXform("legacyDrawingHF"),
       sheetProtection: new SheetProtectionXform(),
       tableParts: new ListXform({
         tag: "tableParts",
@@ -721,9 +722,22 @@ class WorkSheetXform extends BaseXform {
     }
 
     if (headerImageMedia.length > 0) {
-      const medium = headerImageMedia[0]; // Only one header image per sheet
-      const bookImage = options.media[medium.imageId];
-      if (bookImage) {
+      const preparedImages = headerImageMedia.flatMap((medium, index) => {
+        const bookImage = options.media[medium.imageId];
+        return bookImage
+          ? [
+              {
+                imageId: medium.imageId,
+                bookImage,
+                imageRelId: `rId${index + 1}`,
+                position: medium.position ?? "CH",
+                headerWidth: medium.headerWidth,
+                headerHeight: medium.headerHeight
+              }
+            ]
+          : [];
+      });
+      if (preparedImages.length > 0) {
         const rIdVml = nextRid(rels);
         rels.push({
           Id: rIdVml,
@@ -731,44 +745,22 @@ class WorkSheetXform extends BaseXform {
           Target: vmlDrawingHFRelTargetFromWorksheet(fileIndex)
         });
         // Store header image info on the model for the VML writer and worksheet render
+        model.headerImages = preparedImages;
         model.headerImage = {
           vmlRelId: rIdVml,
-          imageId: medium.imageId,
-          bookImage,
-          headerWidth: medium.headerWidth,
-          headerHeight: medium.headerHeight
+          ...preparedImages[0]
         };
 
         // Flag for content-types registration
         options.hasHeaderWatermark = true;
 
-        // Update headerFooter to include &G placeholder.
-        // Respects the applyTo option: "all" (default), "odd", "even", "first".
+        // The `&G` placeholder is owned by the worksheet API
+        // (`addWatermark`) and by the parsed source file, so the writer never
+        // synthesises header/footer fields here. Emitting them in two places
+        // let the two rules drift apart (e.g. a footer-positioned image that
+        // the writer still announced in the centre header).
         if (!model.headerFooter) {
           model.headerFooter = {};
-        }
-        const applyTo = medium.applyTo || "all";
-        const insertG = (field: "oddHeader" | "evenHeader" | "firstHeader"): string => {
-          const existing: string = model.headerFooter[field] || "";
-          if (existing.includes("&G")) {
-            return existing;
-          }
-          if (existing.includes("&C")) {
-            return existing.replace("&C", "&C&G");
-          }
-          return existing + "&C&G";
-        };
-
-        if (applyTo === "all" || applyTo === "odd") {
-          model.headerFooter.oddHeader = insertG("oddHeader");
-        }
-        if (applyTo === "all" || applyTo === "even") {
-          model.headerFooter.evenHeader = insertG("evenHeader");
-          model.headerFooter.differentOddEven = true;
-        }
-        if (applyTo === "all" || applyTo === "first") {
-          model.headerFooter.firstHeader = insertG("firstHeader");
-          model.headerFooter.differentFirst = true;
         }
       }
     }
@@ -1120,6 +1112,7 @@ class WorkSheetXform extends BaseXform {
           headerFooter: this.map.headerFooter.model,
           background: this.map.picture.model,
           drawing: this.map.drawing.model,
+          legacyDrawingHF: this.map.legacyDrawingHF.model,
           tables: this.map.tableParts.model,
           conditionalFormattings,
           rowBreaks: this.map.rowBreaks.model ?? [],
@@ -1323,6 +1316,30 @@ class WorkSheetXform extends BaseXform {
     } else if (model.background) {
       // Relationship missing - clear stale reference
       model.background = undefined;
+    }
+
+    const headerVmlRel = model.legacyDrawingHF && rels[model.legacyDrawingHF.rId];
+    if (headerVmlRel) {
+      const match = /\/(vmlDrawingHF\d+)[.]vml$/.exec(headerVmlRel.Target);
+      const name = match?.[1];
+      const images = name && options.vmlDrawingHF?.[name];
+      const imageRels = name && options.vmlDrawingHFRels?.[name];
+      if (images && imageRels) {
+        const relMap = Object.fromEntries(imageRels.map(rel => [rel.Id, rel]));
+        for (const image of images) {
+          const target = relMap[image.imageRelId]?.Target?.split("/media/")[1];
+          const imageId = target && options.mediaIndex?.[target];
+          if (imageId !== undefined && /^(?:LH|CH|RH|LF|CF|RF)$/.test(image.position ?? "")) {
+            model.media.push({
+              type: "headerImage",
+              imageId,
+              headerWidth: image.width,
+              headerHeight: image.height,
+              position: image.position
+            });
+          }
+        }
+      }
     }
 
     model.tables = (model.tables ?? []).reduce((acc, tablePart) => {

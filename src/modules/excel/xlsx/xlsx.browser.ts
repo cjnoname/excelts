@@ -147,6 +147,7 @@ import {
   getThemeNameFromPath,
   getVmlDrawingNameFromPath,
   getVmlDrawingHFNameFromPath,
+  getVmlDrawingHFNameFromRelsPath,
   getWorksheetNoFromWorksheetPath,
   getWorksheetNoFromWorksheetRelsPath,
   isBinaryEntryPath,
@@ -5202,6 +5203,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       comments: {},
       tables: {},
       vmlDrawings: {},
+      vmlDrawingHF: {},
+      vmlDrawingHFRels: {},
       pivotTables: {},
       pivotTableRels: {},
       pivotCacheDefinitions: {},
@@ -5651,6 +5654,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       comments: model.comments,
       tables: model.tables,
       vmlDrawings: model.vmlDrawings,
+      vmlDrawingHF: model.vmlDrawingHF,
+      vmlDrawingHFRels: model.vmlDrawingHFRels,
       pivotTables: model.pivotTablesIndexed,
       hasDynamicArrayMetadata: !!model.metadata?.hasDynamicArrays,
       dynamicArrayCmIndices: model.metadata?.dynamicArrayCmIndices as Set<number> | undefined
@@ -5708,6 +5713,39 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
               }
             }
           }
+        }
+      }
+      if (cs.legacyDrawingHF && csRels) {
+        const vmlRel = csRels.find((r: any) => r.Id === cs.legacyDrawingHF.rId);
+        const match = vmlRel?.Target && /(vmlDrawingHF\d+)[.]vml$/.exec(vmlRel.Target);
+        const name = match?.[1];
+        const images = name && model.vmlDrawingHF?.[name];
+        const imageRels = name && model.vmlDrawingHFRels?.[name];
+        if (images && imageRels) {
+          const relMap = Object.fromEntries(imageRels.map((rel: any) => [rel.Id, rel]));
+          cs.headerImages = images.flatMap((image: any) => {
+            const target = relMap[image.imageRelId]?.Target?.split("/media/")[1];
+            const imageId = target && model.mediaIndex?.[target];
+            return imageId !== undefined && /^(?:LH|CH|RH|LF|CF|RF)$/.test(image.position ?? "")
+              ? [
+                  {
+                    imageId,
+                    width: image.width,
+                    height: image.height,
+                    position: image.position
+                  }
+                ]
+              : [];
+          });
+        }
+        if (!cs.headerImages?.length) {
+          // The source relationship cannot be reproduced safely (missing VML
+          // rels/media or malformed positions). Drop both ends instead of
+          // emitting a chartsheet relationship to a non-existent part.
+          cs.relationships = cs.relationships?.filter(
+            (rel: any) => rel.Id !== cs.legacyDrawingHF.rId
+          );
+          cs.legacyDrawingHF = undefined;
         }
       }
     }
@@ -6298,13 +6336,20 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     const { VmlDrawingXform } = await import("@excel/xlsx/xform/drawing/vml-drawing-xform");
     const xform = new VmlDrawingXform();
     const vmlDrawing = await xform.parseStream(entry);
-    // Store parsed header image info for reconciliation
-    if (vmlDrawing && vmlDrawing.headerImage) {
-      if (!model.vmlDrawingHF) {
-        model.vmlDrawingHF = {};
-      }
-      model.vmlDrawingHF[_name] = vmlDrawing.headerImage;
+    // Store every positioned header/footer image shape (LH/CH/RH/LF/CF/RF)
+    // for reconciliation against the VML part's own image relationships.
+    const headerImages =
+      vmlDrawing?.headerImages ?? (vmlDrawing?.headerImage ? [vmlDrawing.headerImage] : undefined);
+    if (headerImages?.length) {
+      model.vmlDrawingHF ??= {};
+      model.vmlDrawingHF[_name] = headerImages;
     }
+  }
+
+  async _processVmlDrawingHFRelsEntry(entry: any, model: any, name: string): Promise<void> {
+    const xform = new RelationshipsXform();
+    model.vmlDrawingHFRels ??= {};
+    model.vmlDrawingHFRels[name] = await xform.parseStream(entry);
   }
 
   async _processThemeEntry(stream: IParseStream, model: any, name: string): Promise<void> {
@@ -6470,6 +6515,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     zipData: Record<string, Uint8Array>,
     options?: XlsxReadOptions
   ): Promise<TWorkbook> {
+    this.workbook.sourceFilePath = undefined;
     const model: any = this.createEmptyModel();
 
     const entries = Object.keys(zipData).map(name => ({
@@ -6558,6 +6604,13 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     const vmlHFName = getVmlDrawingHFNameFromPath(entryName);
     if (vmlHFName) {
       await this._processVmlDrawingHFEntry(stream, model, vmlHFName);
+      return true;
+    }
+
+    // The VML part's own rels map each shape's `o:relid` to a media target.
+    const vmlHFRelsName = getVmlDrawingHFNameFromRelsPath(entryName);
+    if (vmlHFRelsName) {
+      await this._processVmlDrawingHFRelsEntry(stream, model, vmlHFRelsName);
       return true;
     }
 
@@ -7010,36 +7063,41 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       }
 
       // Generate VML drawing for header/footer images (watermark in header mode)
-      if (worksheet.headerImage) {
-        const hdrImage = worksheet.headerImage;
-        const bookImage = hdrImage.bookImage;
-        const imageFileName =
-          bookImage.name &&
-          bookImage.extension &&
-          bookImage.name.endsWith(`.${bookImage.extension}`)
-            ? bookImage.name
-            : `${bookImage.name}.${bookImage.extension}`;
-        const imageRelTarget = `../media/${imageFileName}`;
+      if (worksheet.headerImages?.length || worksheet.headerImage) {
+        const headerImages = worksheet.headerImages ?? [worksheet.headerImage];
 
         // Write the VML file for the header image
         await this._renderToZip(zip, vmlDrawingHFPath(fileIndex), vmlDrawingXform!, {
           comments: [],
           formControls: [],
-          headerImage: {
-            imageRelId: "rId1",
+          headerImages: headerImages.map(hdrImage => ({
+            imageRelId: hdrImage.imageRelId,
             width: hdrImage.headerWidth,
-            height: hdrImage.headerHeight
-          }
+            height: hdrImage.headerHeight,
+            position: hdrImage.position
+          }))
         });
 
         // Write the VML rels file referencing the image
-        await this._renderToZip(zip, vmlDrawingHFRelsPath(fileIndex), relationshipsXform, [
-          {
-            Id: "rId1",
-            Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-            Target: imageRelTarget
-          }
-        ]);
+        await this._renderToZip(
+          zip,
+          vmlDrawingHFRelsPath(fileIndex),
+          relationshipsXform,
+          headerImages.map(hdrImage => {
+            const bookImage = hdrImage.bookImage;
+            const imageFileName =
+              bookImage.name &&
+              bookImage.extension &&
+              bookImage.name.endsWith(`.${bookImage.extension}`)
+                ? bookImage.name
+                : `${bookImage.name}.${bookImage.extension}`;
+            return {
+              Id: hdrImage.imageRelId,
+              Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+              Target: `../media/${imageFileName}`
+            };
+          })
+        );
       }
 
       // Generate ctrlProp files for form controls
@@ -7112,7 +7170,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       // package — a dangling relationship. Walk the chartsheet's rels,
       // resolve each VML target against the chartsheet path, and emit
       // the parsed body captured at load time.
-      if (model.vmlDrawings) {
+      if (model.vmlDrawings || model.vmlDrawingHF || cs.headerImages?.length) {
         const baseDir = `xl/chartsheets/`;
         for (const rel of baseRels) {
           if (rel?.Type !== RelType.VmlDrawing || !rel.Target) {
@@ -7122,12 +7180,45 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
           if (emittedVmlPaths.has(vmlPath)) {
             continue;
           }
-          const vmlModel = model.vmlDrawings[vmlPath];
+          const vmlName = /\/(vmlDrawingHF\d+)[.]vml$/.exec(vmlPath)?.[1];
+          const validHeaderImages = vmlName
+            ? (cs.headerImages ?? []).flatMap((image: any) => {
+                const medium = model.media?.[image.imageId];
+                return medium ? [{ image, medium }] : [];
+              })
+            : [];
+          const parsedHeaderImages = vmlName ? model.vmlDrawingHF?.[vmlName] : undefined;
+          const headerImages =
+            parsedHeaderImages ??
+            validHeaderImages.map(({ image }: any, index: number) => ({
+              imageRelId: `rId${index + 1}`,
+              width: image.width,
+              height: image.height,
+              position: image.position
+            }));
+          const vmlModel =
+            model.vmlDrawings?.[vmlPath] ?? (headerImages ? { headerImages } : undefined);
           if (!vmlModel) {
             continue;
           }
           emittedVmlPaths.add(vmlPath);
           await this._renderToZip(zip, vmlPath, vmlDrawingXform, vmlModel);
+          const headerImageRels =
+            (vmlName && model.vmlDrawingHFRels?.[vmlName]) ??
+            validHeaderImages.map(({ medium }: any, index: number) => {
+              const filename = medium.name?.endsWith(`.${medium.extension}`)
+                ? medium.name
+                : `${medium.name}.${medium.extension}`;
+              return {
+                Id: `rId${index + 1}`,
+                Type: RelType.Image,
+                Target: `../media/${filename}`
+              };
+            });
+          if (vmlName && headerImageRels?.length) {
+            const relsPath = vmlPath.replace(/\/([^/]+)[.]vml$/, "/_rels/$1.vml.rels");
+            await this._renderToZip(zip, relsPath, relsXform, headerImageRels);
+          }
           // `prepareChartsheets` already flipped `model.hasChartsheetVml`
           // before content-types was written, so no further signalling
           // is needed here.
@@ -7868,23 +7959,16 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     // shipped without its content-type declaration, and Excel refused
     // to open the resulting package. Compute it here, during `prepare`,
     // before any part is written.
-    if (model.vmlDrawings) {
-      for (const cs of model.chartsheets) {
-        if (!Array.isArray(cs.relationships)) {
-          continue;
-        }
-        const hasVmlRel = cs.relationships.some(
+    model.hasChartsheetVml = model.chartsheets.some(
+      (cs: any) =>
+        cs.headerImages?.length > 0 ||
+        cs.relationships?.some(
           (rel: any) =>
             rel?.Type === RelType.VmlDrawing &&
             typeof rel.Target === "string" &&
-            model.vmlDrawings[resolveRelTarget("xl/chartsheets/", rel.Target)] !== undefined
-        );
-        if (hasVmlRel) {
-          model.hasChartsheetVml = true;
-          break;
-        }
-      }
-    }
+            model.vmlDrawings?.[resolveRelTarget("xl/chartsheets/", rel.Target)] !== undefined
+        )
+    );
   }
 }
 

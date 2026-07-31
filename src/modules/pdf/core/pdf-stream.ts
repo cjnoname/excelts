@@ -63,6 +63,15 @@ export class PdfContentStream {
     return this;
   }
 
+  /**
+   * Append another content stream without serialising it. Deferred fragments
+   * stay deferred, so text encoding can still resolve after fonts are frozen.
+   */
+  append(other: PdfContentStream): this {
+    this.parts.push(...other.parts);
+    return this;
+  }
+
   // ===========================================================================
   // Graphics State
   // ===========================================================================
@@ -399,6 +408,12 @@ export class PdfContentStream {
    */
   setTextRise(rise: number): this {
     this.parts.push(`${pdfNumber(rise)} Ts`);
+    return this;
+  }
+
+  /** Set PDF text rendering mode (`Tr`): fill, stroke, or fill-and-stroke. */
+  setTextRenderingMode(mode: 0 | 1 | 2): this {
+    this.parts.push(`${mode} Tr`);
     return this;
   }
 

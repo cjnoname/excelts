@@ -20,7 +20,7 @@
 import type { PdfContentStream } from "@pdf/core/pdf-stream";
 import type { FontManager } from "@pdf/font/font-manager";
 import { resolvePdfFontName } from "@pdf/font/font-manager";
-import { alphaGsName, emitTextWithMatrix } from "@pdf/render/page-renderer";
+import { alphaGsName, emitTextBlock } from "@pdf/render/page-renderer";
 import type { PdfChartDrawingSurface, PdfChartPathOp, PdfColor } from "@pdf/types";
 
 /**
@@ -128,66 +128,33 @@ export function createChartSurface(
       const anchor = options.anchor ?? "start";
       const rotation = options.rotation ?? 0;
 
-      const resourceName = resolveResourceName(fontManager, fontFamily, bold, italic);
-      const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
+      // Font resources are frozen before page content is written. Track every
+      // chart label during the exporter preflight so Unicode glyph subsets and
+      // Type1 style variants exist before the resource dictionary is emitted.
+      fontManager.trackText(text);
 
-      // Resolve anchor into an x-shift along the text baseline direction.
-      // We measure with the primary resource; mixed-font runs use the
-      // same width estimate, which is correct for Latin-dominant chart
-      // labels and close enough for CJK fallbacks.
-      const measuredWidth = fontManager.measureText(text, resourceName, fontSize);
-      let anchorShift = 0;
-      if (anchor === "middle") {
-        anchorShift = -measuredWidth / 2;
-      } else if (anchor === "end") {
-        anchorShift = -measuredWidth;
-      }
+      const resourceName = resolveResourceName(fontManager, fontFamily, bold, italic);
 
       stream.save();
       stream.setFillColor(color);
       applyAlpha(color);
 
-      if (rotation === 0) {
-        emitTextWithMatrix(
-          stream,
+      emitTextBlock(
+        stream,
+        {
           text,
-          1,
-          0,
-          0,
-          1,
-          options.x + anchorShift,
-          options.y,
-          resourceName,
+          x: options.x,
+          y: options.y,
+          type1ResourceName: resourceName,
           fontSize,
-          fontManager,
-          useType3
-        );
-      } else {
-        // Rotation: chart callers pass degrees clockwise (the interface
-        // is documented that way in `ChartPdfDrawingSurface.drawText`).
-        // PDF's text matrix rotates counter-clockwise with positive
-        // angle, so negate. The 2×3 matrix (a, b, c, d, tx, ty) rotates
-        // around the origin then translates; to rotate around the
-        // anchor point we translate there first (tx, ty) and push the
-        // anchor shift into the local frame (x component).
-        const theta = (-rotation * Math.PI) / 180;
-        const cos = Math.cos(theta);
-        const sin = Math.sin(theta);
-        emitTextWithMatrix(
-          stream,
-          text,
-          cos,
-          sin,
-          -sin,
-          cos,
-          options.x + cos * anchorShift,
-          options.y + sin * anchorShift,
-          resourceName,
-          fontSize,
-          fontManager,
-          useType3
-        );
-      }
+          anchor,
+          lineHeightFactor: 1,
+          // Chart surface rotation is clockwise; text blocks use PDF's
+          // counter-clockwise convention.
+          rotation: -rotation
+        },
+        fontManager
+      );
 
       stream.restore();
       return this;

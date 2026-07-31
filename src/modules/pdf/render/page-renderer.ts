@@ -30,7 +30,9 @@ import type {
   PdfTextWatermark,
   PdfImageWatermark,
   PdfWatermark,
-  PdfColor
+  PdfColor,
+  PdfHeaderFooterContent,
+  PdfHeaderFooterRun
 } from "@pdf/types";
 
 // =============================================================================
@@ -167,16 +169,105 @@ export function renderPage(
   }
 
   // --- Step 5: Draw page header (sheet name) ---
-  if (options.showSheetNames) {
+  const excelHeader = selectHeaderFooter(page, "header");
+  const excelFooter = selectHeaderFooter(page, "footer");
+  if (excelHeader !== undefined) {
+    if (excelHeader) {
+      drawExcelHeaderFooter(stream, page, options, fontManager, excelHeader, "header");
+    }
+  } else if (options.showSheetNames) {
     drawPageHeader(stream, page, options, fontManager);
   }
 
   // --- Step 6: Draw page footer (page number) ---
-  if (options.showPageNumbers) {
+  if (excelFooter !== undefined) {
+    if (excelFooter) {
+      drawExcelHeaderFooter(stream, page, options, fontManager, excelFooter, "footer");
+    }
+  } else if (options.showPageNumbers) {
     drawPageFooter(stream, page, options, fontManager, totalPages);
   }
 
   return { stream, alphaValues };
+}
+
+export function selectHeaderFooter(
+  page: LayoutPage,
+  kind: "header" | "footer"
+): PdfHeaderFooterContent | null | undefined {
+  const hf = page.headerFooter;
+  if (!hf) {
+    return undefined;
+  }
+  const suffix = kind === "header" ? "Header" : "Footer";
+  if (hf.differentFirst && page.sheetPageIndex === 1) {
+    return hf[`first${suffix}` as "firstHeader" | "firstFooter"] ?? null;
+  }
+  if (hf.differentOddEven && page.sheetPageNumber % 2 === 0) {
+    return hf[`even${suffix}` as "evenHeader" | "evenFooter"] ?? null;
+  }
+  return hf[`odd${suffix}` as "oddHeader" | "oddFooter"];
+}
+
+export function resolveHeaderFooterRunText(run: PdfHeaderFooterRun, page: LayoutPage): string {
+  if (run.text !== undefined) {
+    return run.text;
+  }
+  switch (run.field) {
+    case "pageNumber":
+      return String(page.sheetPageNumber + (run.offset ?? 0));
+    case "pageCount":
+      return String(page.sheetPageCount);
+    case "sheetName":
+      return page.sheetName;
+    case "fileName":
+      return page.options.sourceFileName;
+    case "filePath":
+      return page.options.sourceFilePath;
+    case "date": {
+      const date = page.options.headerFooterDate;
+      return formatHeaderFooterDate(date, page.options.headerFooterLocale, "date");
+    }
+    case "time": {
+      const date = page.options.headerFooterDate;
+      return formatHeaderFooterDate(date, page.options.headerFooterLocale, "time");
+    }
+    default:
+      return "";
+  }
+}
+
+function resolveHeaderFooterFontFamily(run: PdfHeaderFooterRun, page: LayoutPage): string {
+  return run.fontFamily || page.options.defaultFontFamily;
+}
+
+const HEADER_FOOTER_DATE_OPTIONS: Intl.DateTimeFormatOptions = {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric"
+};
+
+const HEADER_FOOTER_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
+  hour: "numeric",
+  minute: "2-digit"
+};
+
+function formatHeaderFooterDate(
+  date: Date,
+  locale: string | undefined,
+  kind: "date" | "time"
+): string {
+  const options = kind === "date" ? HEADER_FOOTER_DATE_OPTIONS : HEADER_FOOTER_TIME_OPTIONS;
+  try {
+    return new Intl.DateTimeFormat(locale, options).format(date);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    // Unknown/invalid locale tag — fall back to the runtime default rather
+    // than failing the whole export for one header field.
+    return new Intl.DateTimeFormat(undefined, options).format(date);
+  }
 }
 
 // =============================================================================
@@ -850,8 +941,6 @@ function drawRotated90(
     startX = rect.x + pad.left + ascent;
   }
 
-  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineWidth = fontManager.measureText(line, resourceName, fontSize);
@@ -871,20 +960,12 @@ function drawRotated90(
     }
     ty = Math.max(ty, rect.y + pad.bottom);
 
-    emitTextWithMatrix(
-      stream,
-      line,
-      0,
-      1,
-      -1,
-      0,
-      colX,
-      ty,
+    emitTextWithMatrix(stream, fontManager, {
+      text: line,
+      matrix: [0, 1, -1, 0, colX, ty],
       resourceName,
-      fontSize,
-      fontManager,
-      useType3
-    );
+      fontSize
+    });
   }
 }
 
@@ -914,8 +995,6 @@ function drawRotatedMinus90(
     startX = rect.x + pad.left + totalColumnsWidth - lineHeight + ascent;
   }
 
-  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineWidth = fontManager.measureText(line, resourceName, fontSize);
@@ -935,20 +1014,12 @@ function drawRotatedMinus90(
     }
     ty = Math.min(ty, rect.y + rect.height - pad.top);
 
-    emitTextWithMatrix(
-      stream,
-      line,
-      0,
-      -1,
-      1,
-      0,
-      colX,
-      ty,
+    emitTextWithMatrix(stream, fontManager, {
+      text: line,
+      matrix: [0, -1, 1, 0, colX, ty],
       resourceName,
-      fontSize,
-      fontManager,
-      useType3
-    );
+      fontSize
+    });
   }
 }
 
@@ -1017,8 +1088,6 @@ function drawRotatedGeneral(
     cx = rect.x + rect.width / 2 + indentOffset + slantAtCy;
   }
 
-  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineWidth = fontManager.measureText(line, resourceName, fontSize);
@@ -1028,20 +1097,12 @@ function drawRotatedGeneral(
     const tx = cx + offsetX * cos - offsetY * sin;
     const ty = cy + offsetX * sin + offsetY * cos;
 
-    emitTextWithMatrix(
-      stream,
-      line,
-      cos,
-      sin,
-      -sin,
-      cos,
-      tx,
-      ty,
+    emitTextWithMatrix(stream, fontManager, {
+      text: line,
+      matrix: [cos, sin, -sin, cos, tx, ty],
       resourceName,
-      fontSize,
-      fontManager,
-      useType3
-    );
+      fontSize
+    });
   }
 }
 
@@ -1081,22 +1142,34 @@ function emitText(
  * the deferred body recomputes the routing from the now-settled font
  * manager state.
  */
+export interface TextMatrixOptions {
+  text: string;
+  matrix: [a: number, b: number, c: number, d: number, tx: number, ty: number];
+  resourceName: string;
+  fontSize: number;
+  renderingMode?: 0 | 1 | 2;
+}
+
 export function emitTextWithMatrix(
   stream: PdfContentStream,
-  text: string,
-  a: number,
-  b: number,
-  c: number,
-  d: number,
-  tx: number,
-  ty: number,
-  type1ResourceName: string,
-  fontSize: number,
   fontManager: FontManager,
-  _useType3: boolean
+  options: TextMatrixOptions
 ): void {
+  const [a, b, c, d, tx, ty] = options.matrix;
   stream.deferred(() =>
-    renderTextBlock(text, a, b, c, d, tx, ty, type1ResourceName, fontSize, fontManager)
+    renderTextBlock(
+      options.text,
+      a,
+      b,
+      c,
+      d,
+      tx,
+      ty,
+      options.resourceName,
+      options.fontSize,
+      fontManager,
+      options.renderingMode ?? 0
+    )
   );
 }
 
@@ -1220,7 +1293,8 @@ function renderTextBlock(
   ty: number,
   type1ResourceName: string,
   fontSize: number,
-  fontManager: FontManager
+  fontManager: FontManager,
+  renderingMode: 0 | 1 | 2 = 0
 ): string {
   const sink = new PdfContentStream();
 
@@ -1237,6 +1311,9 @@ function renderTextBlock(
   if (!useType3) {
     const resourceName = fontManager.resolveRenderResourceName(type1ResourceName);
     sink.beginText();
+    if (renderingMode !== 0) {
+      sink.setTextRenderingMode(renderingMode);
+    }
     sink.setFont(resourceName, fontSize);
     sink.setTextMatrix(a, b, c, d, tx, ty);
     emitText(sink, fontManager, text, resourceName);
@@ -1250,6 +1327,9 @@ function renderTextBlock(
   let curTy = ty;
   for (const run of runs) {
     sink.beginText();
+    if (renderingMode !== 0) {
+      sink.setTextRenderingMode(renderingMode);
+    }
     if (run.type3) {
       sink.setFont(run.type3.resourceName, fontSize);
       sink.setTextMatrix(a, b, c, d, curTx, curTy);
@@ -1344,20 +1424,12 @@ function emitTextWithType3(
   fontManager: FontManager,
   useType3: boolean
 ): number {
-  emitTextWithMatrix(
-    stream,
+  emitTextWithMatrix(stream, fontManager, {
     text,
-    1,
-    0,
-    0,
-    1,
-    textX,
-    textY,
-    type1ResourceName,
-    fontSize,
-    fontManager,
-    useType3
-  );
+    matrix: [1, 0, 0, 1, textX, textY],
+    resourceName: type1ResourceName,
+    fontSize
+  });
   return fontManager.measureText(text, type1ResourceName, fontSize);
 }
 
@@ -1399,7 +1471,6 @@ function drawVerticalStackedText(
   }
 
   stream.setFillColor(cell.textColor);
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
 
   for (let colIdx = 0; colIdx < columns.length; colIdx++) {
     const colText = columns[colIdx];
@@ -1423,20 +1494,12 @@ function drawVerticalStackedText(
       }
       const charWidth = fontManager.measureText(ch, resourceName, fontSize);
 
-      emitTextWithMatrix(
-        stream,
-        ch,
-        1,
-        0,
-        0,
-        1,
-        colX - charWidth / 2,
-        currentY,
+      emitTextWithMatrix(stream, fontManager, {
+        text: ch,
+        matrix: [1, 0, 0, 1, colX - charWidth / 2, currentY],
         resourceName,
-        fontSize,
-        fontManager,
-        useType3
-      );
+        fontSize
+      });
       currentY -= charHeight;
     }
   }
@@ -1761,6 +1824,205 @@ function wrapRichTextLines(
 // Page Header / Footer
 // =============================================================================
 
+/**
+ * Proportional constants for Excel header/footer text effects. Excel does not
+ * publish exact metrics for these, so the ratios are approximations chosen to
+ * read correctly between 8 pt and 36 pt.
+ */
+const HEADER_FOOTER_METRICS = {
+  /** Baseline inset from the top of the header band. */
+  ASCENT_RATIO: 0.75,
+  /** Baseline inset from the bottom of the footer band. */
+  DESCENT_RATIO: 0.25,
+  /** `&X` superscript rise, as a fraction of font size. */
+  SUPERSCRIPT_RISE: 0.35,
+  /** `&Y` subscript drop, as a fraction of font size. */
+  SUBSCRIPT_DROP: 0.2,
+  /** `&S` strike-through height, as a fraction of font size. */
+  STRIKE_RATIO: 0.3,
+  /** `&O` outline stroke width, as a fraction of font size. */
+  OUTLINE_WIDTH_RATIO: 1 / 30,
+  /** Gutter used when `alignWithMargins` is disabled. */
+  UNPINNED_EDGE_INSET: 18
+} as const;
+
+/** `&H` shadow colour — Excel renders a flat grey drop shadow. */
+const HEADER_FOOTER_SHADOW_COLOR: PdfColor = { r: 0.5, g: 0.5, b: 0.5 };
+
+function drawExcelHeaderFooter(
+  stream: PdfContentStream,
+  page: LayoutPage,
+  options: ResolvedPdfOptions,
+  fontManager: FontManager,
+  content: PdfHeaderFooterContent,
+  kind: "header" | "footer"
+): void {
+  const alignWithMargins = page.headerFooter?.alignWithMargins !== false;
+  const leftEdge = alignWithMargins
+    ? options.margins.left
+    : HEADER_FOOTER_METRICS.UNPINNED_EDGE_INSET;
+  const rightEdge = alignWithMargins
+    ? page.width - options.margins.right
+    : page.width - HEADER_FOOTER_METRICS.UNPINNED_EDGE_INSET;
+  const center = page.width / 2;
+  const baseline =
+    kind === "header"
+      ? page.height -
+        options.headerMargin -
+        maxRunFontSize(content) * HEADER_FOOTER_METRICS.ASCENT_RATIO
+      : options.footerMargin - maxRunFontSize(content) * HEADER_FOOTER_METRICS.DESCENT_RATIO;
+
+  drawHeaderFooterSection(
+    stream,
+    page,
+    fontManager,
+    content.left,
+    leftEdge,
+    baseline,
+    "left",
+    kind
+  );
+  drawHeaderFooterSection(
+    stream,
+    page,
+    fontManager,
+    content.center,
+    center,
+    baseline,
+    "center",
+    kind
+  );
+  drawHeaderFooterSection(
+    stream,
+    page,
+    fontManager,
+    content.right,
+    rightEdge,
+    baseline,
+    "right",
+    kind
+  );
+}
+
+function maxRunFontSize(content: PdfHeaderFooterContent): number {
+  let max = 11;
+  for (const runs of [content.left, content.center, content.right]) {
+    for (const run of runs) {
+      max = Math.max(max, run.fontSize);
+    }
+  }
+  return max;
+}
+
+function drawHeaderFooterSection(
+  stream: PdfContentStream,
+  page: LayoutPage,
+  fontManager: FontManager,
+  runs: PdfHeaderFooterRun[],
+  anchorX: number,
+  baseline: number,
+  alignment: "left" | "center" | "right",
+  kind: "header" | "footer"
+): void {
+  const lines: Array<Array<{ run: PdfHeaderFooterRun; text: string }>> = [[]];
+  for (const run of runs.filter(run => run.field !== "image")) {
+    const text = resolveHeaderFooterRunText(run, page);
+    const parts = text.split(/\r?\n/);
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        lines.push([]);
+      }
+      if (parts[i]) {
+        lines[lines.length - 1].push({ run, text: parts[i] });
+      }
+    }
+  }
+  const lineHeight =
+    Math.max(11, maxRunFontSize({ left: runs, center: [], right: [] })) * LINE_HEIGHT_FACTOR;
+  const firstBaseline = kind === "footer" ? baseline + (lines.length - 1) * lineHeight : baseline;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const resolved = resolveLineRuns(lines[lineIndex], page, fontManager);
+    const totalWidth = resolved.reduce((sum, item) => sum + item.width, 0);
+    let x =
+      alignment === "center"
+        ? anchorX - totalWidth / 2
+        : alignment === "right"
+          ? anchorX - totalWidth
+          : anchorX;
+    const lineBaseline = firstBaseline - lineIndex * lineHeight;
+
+    for (const item of resolved) {
+      const { run, text, resourceName, fontSize, width } = item;
+      const shift = run.superscript
+        ? fontSize * HEADER_FOOTER_METRICS.SUPERSCRIPT_RISE
+        : run.subscript
+          ? -fontSize * HEADER_FOOTER_METRICS.SUBSCRIPT_DROP
+          : 0;
+      const color = run.color ?? { r: 0, g: 0, b: 0 };
+      stream.save();
+      stream.setFillColor(color);
+      stream.setStrokeColor(color);
+      stream.setLineWidth(Math.max(0.25, fontSize * HEADER_FOOTER_METRICS.OUTLINE_WIDTH_RATIO));
+      if (run.shadow) {
+        stream.setFillColor(HEADER_FOOTER_SHADOW_COLOR);
+        emitTextWithMatrix(stream, fontManager, {
+          text,
+          matrix: [1, 0, 0, 1, x + 1, lineBaseline + shift - 1],
+          resourceName,
+          fontSize
+        });
+        stream.setFillColor(color);
+      }
+      emitTextWithMatrix(stream, fontManager, {
+        text,
+        matrix: [1, 0, 0, 1, x, lineBaseline + shift],
+        resourceName,
+        fontSize,
+        renderingMode: run.outline ? 1 : 0
+      });
+      const lineWidth = 0.5;
+      const decorationY = lineBaseline - 1;
+      if (run.underline || run.doubleUnderline) {
+        stream.drawLine(x, decorationY, x + width, decorationY, color, lineWidth);
+        if (run.doubleUnderline) {
+          stream.drawLine(x, decorationY - 2, x + width, decorationY - 2, color, lineWidth);
+        }
+      }
+      if (run.strike) {
+        const strikeY = lineBaseline + fontSize * HEADER_FOOTER_METRICS.STRIKE_RATIO;
+        stream.drawLine(x, strikeY, x + width, strikeY, color, lineWidth);
+      }
+      stream.restore();
+      x += width;
+    }
+  }
+}
+
+function resolveLineRuns(
+  line: Array<{ run: PdfHeaderFooterRun; text: string }>,
+  page: LayoutPage,
+  fontManager: FontManager
+): Array<{
+  run: PdfHeaderFooterRun;
+  text: string;
+  resourceName: string;
+  fontSize: number;
+  width: number;
+}> {
+  return line.map(({ run, text }) => {
+    const resourceName = fontManager.hasEmbeddedFont()
+      ? fontManager.getEmbeddedResourceName()
+      : fontManager.ensureFont(
+          resolvePdfFontName(resolveHeaderFooterFontFamily(run, page), run.bold, run.italic)
+        );
+    const fontSize =
+      run.fontSize * (page.headerFooter?.scaleWithDoc === false ? 1 : page.scaleFactor);
+    const width = fontManager.measureText(text, resourceName, fontSize);
+    return { run, text, resourceName, fontSize, width };
+  });
+}
+
 function drawPageHeader(
   stream: PdfContentStream,
   page: LayoutPage,
@@ -1779,21 +2041,12 @@ function drawPageHeader(
 
   stream.save();
   stream.setFillColor({ r: 0.3, g: 0.3, b: 0.3 });
-  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
-  emitTextWithMatrix(
-    stream,
-    headerText,
-    1,
-    0,
-    0,
-    1,
-    x,
-    y,
+  emitTextWithMatrix(stream, fontManager, {
+    text: headerText,
+    matrix: [1, 0, 0, 1, x, y],
     resourceName,
-    headerFontSize,
-    fontManager,
-    useType3
-  );
+    fontSize: headerFontSize
+  });
   stream.restore();
 }
 
@@ -1957,8 +2210,6 @@ function renderTextWatermark(
   const needsAlpha = opacity < 1;
   const gsName = needsAlpha ? alphaGsName(opacity) : "";
 
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
-
   const drawSingleWatermark = (cx: number, cy: number) => {
     // Center the text at (cx, cy), compensating for both width and ascent height
     const halfW = textWidth / 2;
@@ -1971,20 +2222,12 @@ function renderTextWatermark(
       stream.setGraphicsState(gsName);
     }
     stream.setFillColor(color);
-    emitTextWithMatrix(
-      stream,
-      watermark.text,
-      cos,
-      sin,
-      -sin,
-      cos,
-      tx,
-      ty,
+    emitTextWithMatrix(stream, fontManager, {
+      text: watermark.text,
+      matrix: [cos, sin, -sin, cos, tx, ty],
       resourceName,
-      fontSize,
-      fontManager,
-      useType3
-    );
+      fontSize
+    });
     stream.restore();
   };
 

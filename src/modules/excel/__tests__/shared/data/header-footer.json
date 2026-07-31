@@ -1,6 +1,8 @@
 {
   "differentFirst": true,
   "differentOddEven": true,
+  "scaleWithDoc": true,
+  "alignWithMargins": true,
   "firstHeader": "Hello Documonster",
   "firstFooter": "Hello World",
   "oddHeader": "&C&KCCCCCC&\"Aril\"52 documonster oddHeader",

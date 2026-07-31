@@ -1,3 +1,5 @@
+import { inflateSync } from "node:zlib";
+
 import {
   cellSetAlignment,
   cellSetBorder,
@@ -7,11 +9,14 @@ import {
 } from "@excel/core/cell";
 import { rowAddPageBreak, rowSetHidden } from "@excel/core/row";
 import { addWorkbookImage } from "@excel/core/workbook-core";
-import { addImage, getCell } from "@excel/core/worksheet";
+import { addImage, addWatermark, getCell } from "@excel/core/worksheet";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 import { PdfError } from "@pdf/errors";
 import { excelToPdf } from "@pdf/excel-bridge";
+import { iterateSystemFontCandidates } from "@pdf/font/system-fonts";
 import { pdf as standalonePdf } from "@pdf/pdf";
+import { readPdf } from "@pdf/reader/pdf-reader";
+import { exportPdf } from "@pdf/render/pdf-exporter";
 /**
  * Integration tests for the full PDF export pipeline.
  * Tests the PDF exporter with real Workbook instances via the Excel bridge,
@@ -21,6 +26,27 @@ import { describe, it, expect } from "vitest";
 
 import { pdfToString, expectValidPdf } from "./test-helpers";
 import { buildMinimalTtf } from "./ttf-test-utils";
+
+const TINY_PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1,
+  0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44, 0x41, 0x54, 8, 0xd7,
+  0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0, 0, 0, 0, 0x49, 0x45, 0x4e,
+  0x44, 0xae, 0x42, 0x60, 0x82
+]);
+
+function decompressPdfContent(pdfBytes: Uint8Array): string {
+  const pdfStr = Buffer.from(pdfBytes).toString("latin1");
+  const parts: string[] = [];
+  for (const match of pdfStr.matchAll(/stream\r?\n([\s\S]*?)endstream/g)) {
+    const raw = Buffer.from(match[1], "latin1");
+    try {
+      parts.push(inflateSync(raw).toString("latin1"));
+    } catch {
+      parts.push(raw.toString("latin1"));
+    }
+  }
+  return parts.join("\n");
+}
 
 describe("excelToPdf", () => {
   describe("Basic Export", () => {
@@ -336,7 +362,7 @@ describe("excelToPdf", () => {
 
       expectValidPdf(pdf);
       const text = pdfToString(pdf);
-      expect(text).toContain("Page 1 of 1");
+      expect(text.replace(/\s+/g, " ")).toContain("Page 1 of 1");
     });
 
     it("should register footer fonts even when using an embedded font", async () => {
@@ -350,6 +376,419 @@ describe("excelToPdf", () => {
 
       const text = pdfToString(pdf);
       expect(text).toContain("/BaseFont /Helvetica");
+    });
+
+    it("should render Excel header/footer sections, fields, and formatting", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Report");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddHeader = '&L&"Helvetica,Bold"&14Acme&C&A&R&D &T';
+      ws.headerFooter.oddFooter = "&L&& internal&CPage &P of &N&R&F";
+
+      const pdf = await excelToPdf(wb, {
+        headerFooter: {
+          fileName: "report.xlsx",
+          date: new Date(2026, 6, 29, 9, 5),
+          locale: "en-US"
+        }
+      });
+      const result = await readPdf(pdf);
+      const text = result.pages.map(page => page.text).join("\n");
+
+      expect(text).toContain("Acme");
+      expect(text).toContain("Report");
+      expect(text).toContain("7/29/2026");
+      expect(text).toContain("9:05");
+      expect(text).toContain("& internal");
+      expect(text.replace(/\s+/g, " ")).toContain("Page 1 of 1");
+      expect(text).toContain("report.xlsx");
+      expect(pdfToString(pdf)).toContain("/BaseFont /Helvetica-Bold");
+    });
+
+    it("should select first, odd, and even headers per sheet", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Paged");
+      ws.pageSetup.firstPageNumber = 8;
+      ws.headerFooter.differentFirst = true;
+      ws.headerFooter.differentOddEven = true;
+      ws.headerFooter.firstHeader = "&CFIRST";
+      ws.headerFooter.oddHeader = "&CODD";
+      ws.headerFooter.evenHeader = "&CEVEN";
+      for (let row = 1; row <= 120; row++) {
+        Cell.setValue(ws, `A${row}`, `Row ${row}`);
+      }
+
+      const result = await readPdf(await excelToPdf(wb, { fitToPage: false }));
+      const text = result.pages.map(page => page.text).join("\n");
+
+      expect(text.match(/FIRST/g)).toHaveLength(1);
+      expect(text).toContain("EVEN");
+      expect(text).toContain("ODD");
+    });
+
+    it("should prefer Excel content over convenience headers and allow disabling it", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet fallback");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddHeader = "&CExcel header";
+      ws.headerFooter.oddFooter = "&CExcel footer";
+
+      const enabledPdf = await excelToPdf(wb, { showSheetNames: true, showPageNumbers: true });
+      const enabled = (await readPdf(enabledPdf)).pages.map(page => page.text).join("\n");
+      expect(enabled).toContain("Excel header");
+      expect(enabled).toContain("Excel footer");
+      expect(enabled).not.toContain("Page 1 of 1");
+
+      const disabledPdf = await excelToPdf(wb, {
+        headerFooter: { enabled: false },
+        showSheetNames: true,
+        showPageNumbers: true
+      });
+      const disabled = (await readPdf(disabledPdf)).pages.map(page => page.text).join("\n");
+      expect(disabled).not.toContain("Excel header");
+      expect(disabled).not.toContain("Excel footer");
+      expect(disabled).toContain("Sheet fallback");
+      expect(disabled).toContain("Page 1 of 1");
+    });
+
+    it("should render long-form fields and header images", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Picture");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddHeader = "&L&[Tab]&C&[Picture]&R&[Page]/&[Pages]";
+      const imageId = addWorkbookImage(wb, {
+        buffer: new Uint8Array([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+          0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44,
+          0x41, 0x54, 8, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0,
+          0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+        ]),
+        extension: "png"
+      });
+      addWatermark(ws, { imageId, mode: "header", headerWidth: 12, headerHeight: 12 });
+
+      const pdf = await excelToPdf(wb);
+      const result = await readPdf(pdf);
+      const text = result.pages[0].text.replace(/\s+/g, " ");
+
+      expect(text).toContain("Picture");
+      expect(text.replace(/\s+/g, "")).toContain("1/1");
+      expect(pdfToString(pdf)).toContain("/Subtype /Image");
+    });
+
+    it("should keep oversized header watermarks behind content without changing pagination", async () => {
+      const makeWorkbook = (withWatermark: boolean) => {
+        const wb = Workbook.create();
+        const ws = Workbook.addWorksheet(wb, "Watermark");
+        for (let row = 1; row <= 80; row++) {
+          Cell.setValue(ws, `A${row}`, `Row ${row}`);
+        }
+        if (withWatermark) {
+          ws.headerFooter.oddHeader = "&C&G";
+          const imageId = addWorkbookImage(wb, {
+            buffer: new Uint8Array([
+              0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+              0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49,
+              0x44, 0x41, 0x54, 8, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc,
+              0x33, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+            ]),
+            extension: "png"
+          });
+          addWatermark(ws, {
+            imageId,
+            mode: "header",
+            headerWidth: 300,
+            headerHeight: 300
+          });
+        }
+        return wb;
+      };
+
+      const plain = await readPdf(await excelToPdf(makeWorkbook(false), { fitToPage: false }));
+      const watermarked = await readPdf(await excelToPdf(makeWorkbook(true), { fitToPage: false }));
+
+      expect(watermarked.pages).toHaveLength(plain.pages.length);
+      expect(watermarked.pages[0].textFragments.find(f => f.text === "Row 1")?.y).toBe(
+        plain.pages[0].textFragments.find(f => f.text === "Row 1")?.y
+      );
+    });
+
+    it("should render locale-aware dates, outlines, shadows, and explicit newlines", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Effects");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddHeader = "&L&OOutlined&O\n&HShadowed&H&C&D &T";
+
+      const pdf = await excelToPdf(wb, {
+        headerFooter: { date: new Date(2026, 6, 29, 9, 5), locale: "de-DE" }
+      });
+      const text = (await readPdf(pdf)).pages[0].text;
+
+      expect(text).toContain("Outlined");
+      expect(text).toContain("Shadowed");
+      expect(text).toContain("29.7.2026");
+    });
+
+    it("should derive file fields from workbook source metadata", async () => {
+      const wb = Workbook.create();
+      wb.sourceFilePath = "/reports/quarterly.xlsx";
+      const ws = Workbook.addWorksheet(wb, "Source");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddFooter = "&L&Z&C&F";
+
+      const text = (await readPdf(await excelToPdf(wb))).pages[0].text;
+
+      expect(text).toContain("/reports/");
+      expect(text).toContain("quarterly.xlsx");
+    });
+
+    it("should clear stale source metadata when loading from bytes", async () => {
+      const source = Workbook.create();
+      const sourceSheet = Workbook.addWorksheet(source, "Source");
+      Cell.setValue(sourceSheet, "A1", "Data");
+      const bytes = await Workbook.toBuffer(source);
+
+      const reused = Workbook.create();
+      reused.sourceFilePath = "/stale/old.xlsx";
+      await Workbook.read(reused, bytes);
+
+      expect(reused.sourceFilePath).toBeUndefined();
+    });
+
+    it("should keep multiline footer lines in visual top-to-bottom order", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Footer");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddFooter = "&LtopLine\nbottomLine";
+
+      const fragments = (await readPdf(await excelToPdf(wb))).pages[0].textFragments;
+      const top = fragments.find(fragment => fragment.text === "topLine");
+      const bottom = fragments.find(fragment => fragment.text === "bottomLine");
+
+      expect(top).toBeDefined();
+      expect(bottom).toBeDefined();
+      expect(top!.y).toBeGreaterThan(bottom!.y);
+    });
+
+    it("should use the PDF default font for Excel's dash font placeholder", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Font");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.oddHeader = '&C&"-,Bold"Default font';
+
+      const raw = pdfToString(await excelToPdf(wb, { defaultFontFamily: "Courier" }));
+
+      expect(raw).toContain("/BaseFont /Courier-Bold");
+    });
+
+    it("should number pages across the complete print job", async () => {
+      const wb = Workbook.create();
+      for (const name of ["First", "Second"]) {
+        const ws = Workbook.addWorksheet(wb, name);
+        for (let row = 1; row <= 70; row++) {
+          Cell.setValue(ws, `A${row}`, `${name} ${row}`);
+        }
+        ws.headerFooter.oddFooter = "&C&P/&N";
+      }
+
+      const result = await readPdf(await excelToPdf(wb, { fitToPage: false }));
+      const footerTexts = result.pages.map(page => page.text.replace(/\s+/g, ""));
+
+      expect(result.pages.length).toBeGreaterThan(2);
+      for (let index = 0; index < footerTexts.length; index++) {
+        expect(footerTexts[index]).toContain(`${index + 1}/${footerTexts.length}`);
+      }
+    });
+
+    it("should restart explicit sheet page numbers without changing job page count", async () => {
+      const wb = Workbook.create();
+      const first = Workbook.addWorksheet(wb, "First");
+      Cell.setValue(first, "A1", "First");
+      first.headerFooter.oddFooter = "&C&P/&N";
+      const second = Workbook.addWorksheet(wb, "Second");
+      Cell.setValue(second, "A1", "Second");
+      second.pageSetup.firstPageNumber = 100;
+      second.headerFooter.oddFooter = "&C&P/&N";
+
+      const pages = (await readPdf(await excelToPdf(wb))).pages;
+
+      expect(pages[0].text.replace(/\s+/g, "")).toContain("1/2");
+      expect(pages[1].text.replace(/\s+/g, "")).toContain("100/2");
+    });
+
+    it("should restart a later sheet explicitly at page one", async () => {
+      const wb = Workbook.create();
+      const first = Workbook.addWorksheet(wb, "First");
+      for (let row = 1; row <= 80; row++) {
+        Cell.setValue(first, `A${row}`, `First ${row}`);
+      }
+      first.headerFooter.oddFooter = "&C&P";
+      const second = Workbook.addWorksheet(wb, "Second");
+      Cell.setValue(second, "A1", "Second");
+      second.pageSetup.firstPageNumber = 1;
+      second.headerFooter.oddFooter = "&C&P";
+
+      const pages = (await readPdf(await excelToPdf(wb, { fitToPage: false }))).pages;
+
+      expect(pages.at(-1)!.text.replace(/\s+/g, "")).toContain("Second1");
+    });
+
+    it("should ignore default firstPageNumber when useFirstPageNumber is false", async () => {
+      const source = Workbook.create();
+      for (const name of ["First", "Second"]) {
+        const ws = Workbook.addWorksheet(source, name);
+        Cell.setValue(ws, "A1", name);
+        ws.headerFooter.oddFooter = "&C&P";
+      }
+      const loaded = Workbook.create();
+      await Workbook.read(loaded, await Workbook.toBuffer(source));
+
+      const pages = (await readPdf(await excelToPdf(loaded))).pages;
+
+      expect(pages[0].text.replace(/\s+/g, "")).toContain("First1");
+      expect(pages[1].text.replace(/\s+/g, "")).toContain("Second2");
+    });
+
+    it("should render Unicode text watermarks", async () => {
+      const wb = Workbook.create();
+      Cell.setValue(Workbook.addWorksheet(wb, "Sheet1"), "A1", "Data");
+
+      const text = (
+        await readPdf(await excelToPdf(wb, { watermark: { type: "text", text: "机密" } }))
+      ).pages[0].text;
+
+      expect(text).toContain("机密");
+    });
+
+    it("should render Unicode text that appears only in a header", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Unicode");
+      Cell.setValue(ws, "A1", "ASCII");
+      ws.headerFooter.oddHeader = "&C中文标题";
+
+      const text = (await readPdf(await excelToPdf(wb))).pages[0].text;
+
+      expect(text).toContain("中文标题");
+    });
+
+    it("should keep an intentionally blank first header blank", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "SheetName");
+      Cell.setValue(ws, "A1", "Data");
+      ws.headerFooter.differentFirst = true;
+      ws.headerFooter.oddHeader = "&CODD";
+      ws.headerFooter.firstHeader = null;
+
+      const text = (await readPdf(await excelToPdf(wb, { showSheetNames: true }))).pages[0].text;
+
+      expect(text).not.toContain("SheetName");
+      expect(text).not.toContain("ODD");
+    });
+
+    it("should render chartsheet headers and footers", async () => {
+      const wb = Workbook.create();
+      const data = Workbook.addWorksheet(wb, "Data");
+      Cell.setValue(data, "A1", "A");
+      Cell.setValue(data, "B1", 1);
+      Workbook.addChartsheet(wb, "Chart Sheet", {
+        chart: {
+          type: "bar",
+          series: [{ categories: "Data!$A$1:$A$1", values: "Data!$B$1:$B$1" }]
+        },
+        headerFooter: {
+          oddHeader: "&CChart report",
+          oddFooter: "&C&P/&N"
+        }
+      });
+
+      const text = (await readPdf(await excelToPdf(wb, { sheets: ["Chart Sheet"] }))).pages[0].text;
+
+      expect(text).toContain("Chart report");
+      expect(text.replace(/\s+/g, "")).toContain("1/1");
+    });
+
+    it("should place a footer-positioned image in the footer", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "FooterImage");
+      Cell.setValue(ws, "A1", "Data");
+      const imageId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+      addWatermark(ws, {
+        imageId,
+        mode: "header",
+        position: "RF",
+        headerWidth: 20,
+        headerHeight: 20
+      });
+
+      expect(ws.headerFooter.oddFooter).toContain("&R&G");
+      expect(ws.headerFooter.oddHeader).toBeNull();
+
+      const pdf = await excelToPdf(wb);
+      expect((await readPdf(pdf)).pages[0].images).toHaveLength(1);
+
+      // `cm` places the image XObject: `w 0 0 h x y cm`. A footer image must
+      // sit in the bottom band of the page, a header image in the top band.
+      const placement = /([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm/.exec(
+        decompressPdfContent(pdf)
+      );
+      expect(placement).not.toBeNull();
+      expect(Number(placement![4])).toBeLessThan(100);
+    });
+
+    it("should keep repeated header-image calls idempotent", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Idempotent");
+      Cell.setValue(ws, "A1", "Data");
+      const imageId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+      addWatermark(ws, { imageId, mode: "header", position: "LH" });
+      addWatermark(ws, { imageId, mode: "header", position: "LH" });
+
+      expect(ws.headerFooter.oddHeader).toBe("&L&G");
+      expect((await readPdf(await excelToPdf(wb))).pages[0].images).toHaveLength(1);
+    });
+
+    it("should move the placeholder when the image position changes", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Moved");
+      Cell.setValue(ws, "A1", "Data");
+      const imageId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+      addWatermark(ws, { imageId, mode: "header", position: "LH" });
+      addWatermark(ws, { imageId, mode: "header", position: "CF" });
+
+      expect(ws.headerFooter.oddHeader).toBeNull();
+      expect(ws.headerFooter.oddFooter).toBe("&C&G");
+    });
+
+    it("should apply header images to the selected odd/even page type", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Images");
+      for (let row = 1; row <= 110; row++) {
+        Cell.setValue(ws, `A${row}`, `Row ${row}`);
+      }
+      const imageId = addWorkbookImage(wb, {
+        buffer: new Uint8Array([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+          0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44,
+          0x41, 0x54, 8, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0,
+          0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+        ]),
+        extension: "png"
+      });
+      addWatermark(ws, {
+        imageId,
+        mode: "header",
+        applyTo: "even",
+        headerWidth: 12,
+        headerHeight: 12
+      });
+
+      const pages = (await readPdf(await excelToPdf(wb, { fitToPage: false }))).pages;
+
+      expect(pages.length).toBeGreaterThan(1);
+      expect(pages[0].images).toHaveLength(0);
+      expect(pages[1].images).toHaveLength(1);
     });
   });
 
@@ -1125,6 +1564,61 @@ describe("excelToPdf", () => {
       expect(pdf).toBeInstanceOf(Uint8Array);
       expectValidPdf(pdf);
     });
+  });
+});
+
+describe("exportPdf vector chart preparation", () => {
+  it("invokes a vector chart callback exactly once", async () => {
+    let calls = 0;
+    const bytes = await exportPdf({
+      sheets: [
+        {
+          kind: "chartsheet",
+          name: "Chart",
+          chart: {
+            drawVector(surface, rect) {
+              calls++;
+              surface.drawText("Title", { x: rect.x, y: rect.y, fontSize: 12 });
+            }
+          }
+        }
+      ]
+    });
+
+    expectValidPdf(bytes);
+    expect(calls).toBe(1);
+  });
+
+  it("uses final font metrics for centered Unicode chart text", async () => {
+    const systemFont = iterateSystemFontCandidates().next().value;
+    if (!systemFont) {
+      return;
+    }
+    const makeWorkbook = () => {
+      const wb = Workbook.create();
+      const data = Workbook.addWorksheet(wb, "Data");
+      Cell.setValue(data, "A1", "甲");
+      Cell.setValue(data, "B1", 1);
+      Workbook.addChartsheet(wb, "Chart", {
+        chart: {
+          type: "bar",
+          title: "图表标题很长很长",
+          series: [{ categories: "Data!$A$1:$A$1", values: "Data!$B$1:$B$1" }]
+        }
+      });
+      return wb;
+    };
+
+    const auto = await readPdf(await excelToPdf(makeWorkbook(), { sheets: ["Chart"] }));
+    const explicit = await readPdf(
+      await excelToPdf(makeWorkbook(), { sheets: ["Chart"], font: systemFont })
+    );
+    const autoTitle = auto.pages[0].textFragments.find(f => f.text === "图表标题很长很长");
+    const explicitTitle = explicit.pages[0].textFragments.find(f => f.text === "图表标题很长很长");
+
+    expect(autoTitle).toBeDefined();
+    expect(explicitTitle).toBeDefined();
+    expect(autoTitle!.x).toBeCloseTo(explicitTitle!.x, 1);
   });
 });
 

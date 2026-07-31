@@ -118,6 +118,18 @@ describe("PdfContentStream", () => {
       expect(stream.toString()).toBe("1 0 0 1 72 720 Tm");
     });
 
+    it("should set text rendering mode", () => {
+      const stream = new PdfContentStream();
+      stream.setTextRenderingMode(1);
+      expect(stream.toString()).toBe("1 Tr");
+    });
+
+    it("should emit the default text rendering mode to reset text state", () => {
+      const stream = new PdfContentStream();
+      stream.setTextRenderingMode(0);
+      expect(stream.toString()).toBe("0 Tr");
+    });
+
     it("should move text position", () => {
       const stream = new PdfContentStream();
       stream.moveText(10, -15);

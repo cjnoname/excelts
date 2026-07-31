@@ -127,11 +127,76 @@ export interface PdfColumnData {
 export interface PdfPageSetupData {
   orientation?: string;
   paperSize?: number;
-  margins?: { left: number; right: number; top: number; bottom: number };
+  margins?: {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    header?: number;
+    footer?: number;
+  };
   scale?: number;
   printTitlesRow?: string;
   showGridLines?: boolean;
   printArea?: string;
+  firstPageNumber?: number;
+}
+
+export type PdfHeaderFooterField =
+  | "pageNumber"
+  | "pageCount"
+  | "sheetName"
+  | "fileName"
+  | "filePath"
+  | "date"
+  | "time"
+  | "image";
+
+export interface PdfHeaderFooterRun {
+  text?: string;
+  field?: PdfHeaderFooterField;
+  /** Offset used by Excel's `&P+N` / `&P-N` page-number syntax. */
+  offset?: number;
+  fontFamily: string;
+  fontSize: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  doubleUnderline: boolean;
+  strike: boolean;
+  superscript: boolean;
+  subscript: boolean;
+  outline: boolean;
+  shadow: boolean;
+  color?: PdfColor;
+}
+
+export interface PdfHeaderFooterContent {
+  left: PdfHeaderFooterRun[];
+  center: PdfHeaderFooterRun[];
+  right: PdfHeaderFooterRun[];
+}
+
+export interface PdfHeaderFooterImage {
+  data: Uint8Array;
+  format: "jpeg" | "png";
+  width: number;
+  height: number;
+  position: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
+}
+
+export interface PdfHeaderFooterData {
+  differentFirst: boolean;
+  differentOddEven: boolean;
+  scaleWithDoc: boolean;
+  alignWithMargins: boolean;
+  oddHeader?: PdfHeaderFooterContent;
+  oddFooter?: PdfHeaderFooterContent;
+  evenHeader?: PdfHeaderFooterContent;
+  evenFooter?: PdfHeaderFooterContent;
+  firstHeader?: PdfHeaderFooterContent;
+  firstFooter?: PdfHeaderFooterContent;
+  images: PdfHeaderFooterImage[];
 }
 
 /** Anchor range shared by embedded images and charts. */
@@ -295,6 +360,8 @@ export interface PdfSheetData {
   /** Merge ranges in "A1:B2" format */
   merges?: string[];
   pageSetup?: PdfPageSetupData;
+  /** Parsed printable headers and footers inherited from the source worksheet. */
+  headerFooter?: PdfHeaderFooterData;
   /** Row numbers where manual page breaks occur */
   rowBreaks?: number[];
   /** Column numbers where manual page breaks occur */
@@ -339,6 +406,7 @@ export interface PdfChartsheetData {
    * `pageSetup?.orientation`.
    */
   pageSetup?: PdfPageSetupData;
+  headerFooter?: PdfHeaderFooterData;
 }
 
 /**
@@ -363,6 +431,9 @@ export interface PdfWorkbook {
   title?: string;
   creator?: string;
   subject?: string;
+  sourceFileName?: string;
+  sourceFilePath?: string;
+  locale?: string;
   sheets: PdfWorkbookSheet[];
 }
 
@@ -405,6 +476,31 @@ export const PageSizes: Record<PageSizeName, PdfPageSize> = {
  * Page orientation for PDF export.
  */
 export type PdfOrientation = "portrait" | "landscape";
+
+/**
+ * Excel header/footer rendering options.
+ *
+ * Excel resolves `&F`, `&Z`, `&D`, and `&T` against the host application's
+ * document and locale. A standalone exporter has no such context, so these
+ * fields supply it. When omitted, `&F` / `&Z` fall back to the workbook's
+ * recorded source path, and `&D` / `&T` use the export time and workbook
+ * language.
+ */
+export interface PdfHeaderFooterOptions {
+  /**
+   * Whether to render headers and footers defined by the source worksheet.
+   * @default true
+   */
+  enabled?: boolean;
+  /** File name substituted for `&F`. */
+  fileName?: string;
+  /** Directory substituted for `&Z`. */
+  filePath?: string;
+  /** Date/time used by `&D` and `&T`. Defaults to the export time. */
+  date?: Date;
+  /** Locale used by `&D` and `&T`. Falls back to the workbook language. */
+  locale?: string;
+}
 
 /**
  * Options for controlling PDF export behavior.
@@ -498,6 +594,12 @@ export interface PdfExportOptions {
    * @default false
    */
   showPageNumbers?: boolean;
+
+  /**
+   * Excel header/footer rendering. Excel-specific substitutions are grouped
+   * here rather than flattened onto the top-level export options.
+   */
+  headerFooter?: PdfHeaderFooterOptions;
 
   /**
    * PDF document title metadata.
@@ -837,6 +939,13 @@ export interface ResolvedPdfOptions {
   defaultFontSize: number;
   showSheetNames: boolean;
   showPageNumbers: boolean;
+  includeHeadersFooters: boolean;
+  headerMargin: number;
+  footerMargin: number;
+  sourceFileName: string;
+  sourceFilePath: string;
+  headerFooterDate: Date;
+  headerFooterLocale?: string;
   title: string;
   author: string;
   subject: string;
@@ -970,6 +1079,14 @@ export interface LayoutBorder {
 export interface LayoutPage {
   /** Page number (1-based) */
   pageNumber: number;
+  /** Page number within the source sheet, including its first-page offset. */
+  sheetPageNumber: number;
+  /** Physical page index within the source sheet (always starts at 1). */
+  sheetPageIndex: number;
+  /** Total number of pages in the selected print job (`&N`). */
+  sheetPageCount: number;
+  /** Explicit first page number from the source sheet, including explicit 1. */
+  firstPageNumber?: number;
   /** Resolved rendering options for the sheet that produced this page */
   options: ResolvedPdfOptions;
   /** Cells to render on this page */
@@ -998,6 +1115,7 @@ export interface LayoutPage {
   charts: LayoutChart[];
   /** Scale factor applied to this page (for fitToPage) */
   scaleFactor: number;
+  headerFooter?: PdfHeaderFooterData;
 }
 
 /**

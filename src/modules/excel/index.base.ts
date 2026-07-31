@@ -36,6 +36,7 @@ export * as Note from "@excel/surface/note";
 export * as Address from "@excel/surface/address";
 export * as Anchor from "@excel/surface/anchor";
 export * as Watermark from "@excel/surface/watermark";
+export * as HeaderFooterImage from "@excel/surface/header-footer-image";
 export * as Format from "@excel/surface/format";
 
 // --- Errors (extend BaseError; consistent with every other module's entry) ---

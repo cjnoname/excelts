@@ -12,6 +12,7 @@
  */
 
 import { extractAll } from "@archive/unzip/extract";
+import { createZip } from "@archive/zip/zip-bytes";
 import { expectValidXlsx } from "@excel/__tests__/helpers/expect-valid-xlsx";
 import type { SyntheticFixture } from "@excel/__tests__/helpers/synthetic-fixtures";
 import { buildChartsheetFixtures } from "@excel/__tests__/helpers/synthetic-fixtures";
@@ -29,6 +30,10 @@ import {
 import { getChartsheets, getWorksheets } from "@excel/core/workbook";
 import { Chart, Workbook } from "@excel/index";
 import { beforeAll, describe, expect, it } from "vitest";
+
+function fileEntry(path: string, data: Uint8Array) {
+  return { path, data, type: "file" as const, size: data.length, mode: 0 };
+}
 
 let chartsheetFixtures: SyntheticFixture[];
 
@@ -176,5 +181,118 @@ describe("Chartsheet round-trip", () => {
     expect(chartsheetChart(pie2)).toBeDefined();
     expect(Chart.title(chartsheetChart(pie2)!)).toBe("Mutated Pie Title");
     expect(chartsheetZoomScale(pie2)).toBe(80);
+  });
+
+  it("preserves chartsheet header/footer VML image parts and relationships", async () => {
+    const [fixture] = chartsheetFixtures;
+    const entries = await extractAll(fixture.bytes);
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    const sheetPath = "xl/chartsheets/sheet1.xml";
+    const sheetRelsPath = "xl/chartsheets/_rels/sheet1.xml.rels";
+    const sheet = decoder
+      .decode(entries.get(sheetPath)!.data)
+      .replace("</chartsheet>", '<legacyDrawingHF r:id="rIdHeaderImage"/></chartsheet>');
+    const sheetRels = decoder
+      .decode(entries.get(sheetRelsPath)!.data)
+      .replace(
+        "</Relationships>",
+        '<Relationship Id="rIdHeaderImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawingHF99.vml"/></Relationships>'
+      );
+    entries.set(sheetPath, fileEntry(sheetPath, encoder.encode(sheet)));
+    entries.set(sheetRelsPath, fileEntry(sheetRelsPath, encoder.encode(sheetRels)));
+    const vmlPath = "xl/drawings/vmlDrawingHF99.vml";
+    entries.set(
+      vmlPath,
+      fileEntry(
+        vmlPath,
+        encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>
+        <xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+          <v:shape id="CH" type="#_x0000_t75" style="width:20pt;height:10pt">
+            <v:imagedata o:relid="rIdImage"/>
+          </v:shape>
+        </xml>`)
+      )
+    );
+    const vmlRelsPath = "xl/drawings/_rels/vmlDrawingHF99.vml.rels";
+    entries.set(
+      vmlRelsPath,
+      fileEntry(
+        vmlRelsPath,
+        encoder.encode(`<?xml version="1.0" encoding="UTF-8"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/header99.png"/>
+        </Relationships>`)
+      )
+    );
+    const mediaPath = "xl/media/header99.png";
+    entries.set(
+      mediaPath,
+      fileEntry(
+        mediaPath,
+        new Uint8Array([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+          0, 0, 1, 0, 0, 0, 1
+        ])
+      )
+    );
+    const input = await createZip(
+      [...entries].map(([name, entry]) => ({ name, data: entry.data }))
+    );
+
+    const wb = Workbook.create();
+    await Workbook.read(wb, input);
+    const output = await Workbook.toBuffer(wb);
+    const outputEntries = await extractAll(output);
+
+    expect(outputEntries.has("xl/drawings/vmlDrawingHF99.vml")).toBe(true);
+    expect(outputEntries.has("xl/drawings/_rels/vmlDrawingHF99.vml.rels")).toBe(true);
+    expect(entryText(outputEntries, sheetPath)).toContain("legacyDrawingHF");
+    expect(entryText(outputEntries, sheetRelsPath)).toContain("vmlDrawingHF99.vml");
+    expect(entryText(outputEntries, "[Content_Types].xml")).toContain('Extension="vml"');
+    await expectValidXlsx(output, { label: "chartsheet header/footer image round-trip" });
+  });
+
+  it("drops an unreproducible chartsheet VML relationship instead of dangling it", async () => {
+    const [fixture] = chartsheetFixtures;
+    const entries = await extractAll(fixture.bytes);
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const sheetPath = "xl/chartsheets/sheet1.xml";
+    const relsPath = "xl/chartsheets/_rels/sheet1.xml.rels";
+    entries.get(sheetPath)!.data = encoder.encode(
+      decoder
+        .decode(entries.get(sheetPath)!.data)
+        .replace("</chartsheet>", '<legacyDrawingHF r:id="rIdBroken"/></chartsheet>')
+    );
+    entries.get(relsPath)!.data = encoder.encode(
+      decoder
+        .decode(entries.get(relsPath)!.data)
+        .replace(
+          "</Relationships>",
+          '<Relationship Id="rIdBroken" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawingHF100.vml"/></Relationships>'
+        )
+    );
+    entries.set(
+      "xl/drawings/vmlDrawingHF100.vml",
+      fileEntry(
+        "xl/drawings/vmlDrawingHF100.vml",
+        encoder.encode(
+          '<xml xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="CH" type="#_x0000_t75"><v:imagedata o:relid="missing"/></v:shape></xml>'
+        )
+      )
+    );
+    const input = await createZip(
+      [...entries].map(([name, entry]) => ({ name, data: entry.data }))
+    );
+    const wb = Workbook.create();
+    await Workbook.read(wb, input);
+    const output = await Workbook.toBuffer(wb);
+    const out = await extractAll(output);
+
+    expect(entryText(out, sheetPath)).not.toContain("legacyDrawingHF");
+    expect(entryText(out, relsPath)).not.toContain("vmlDrawingHF100.vml");
+    await expectValidXlsx(output, { label: "chartsheet broken VML cleanup" });
   });
 });

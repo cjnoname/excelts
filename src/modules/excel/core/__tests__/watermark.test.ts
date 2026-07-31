@@ -4,12 +4,17 @@ import {
   addImage,
   addWatermark,
   getImages,
+  getHeaderFooterImages,
   getSheetModel,
   getWatermark,
+  removeHeaderFooterImage,
   removeWatermark,
+  setHeaderFooterImage,
   setSheetModel
 } from "@excel/core/worksheet";
+import type { WorksheetData } from "@excel/core/worksheet-core";
 import { Cell, Workbook } from "@excel/index";
+import type { HeaderFooterImagePosition } from "@excel/types";
 import { createTextWatermarkImage } from "@excel/utils/watermark-image";
 /**
  * Tests for Excel watermark feature.
@@ -82,6 +87,163 @@ describe("Worksheet Watermark API", () => {
 
     removeWatermark(ws);
     expect(getWatermark(ws)).toBeNull();
+  });
+
+  // Adding then removing a header watermark must restore the section exactly,
+  // for every combination of pre-existing content and target section.
+  const roundTripCases: Array<{
+    name: string;
+    before: string | null;
+    position?: HeaderFooterImagePosition;
+    edit?: (ws: WorksheetData) => void;
+    after: string | null;
+  }> = [
+    { name: "empty header", before: null, after: null },
+    { name: "aligned text in another section", before: "&LReport", after: "&LReport" },
+    {
+      name: "aligned text in the same section",
+      before: "&LReport",
+      position: "LH",
+      after: "&LReport"
+    },
+    {
+      name: "a pre-existing image placeholder",
+      before: "&L&GLogo&CReport",
+      after: "&L&GLogo&CReport"
+    },
+    {
+      name: "text appended after the placeholder",
+      before: null,
+      edit: ws => {
+        ws.headerFooter.oddHeader += "Report";
+      },
+      after: "&CReport"
+    }
+  ];
+
+  for (const testCase of roundTripCases) {
+    it(`should restore the header exactly with ${testCase.name}`, () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      ws.headerFooter.oddHeader = testCase.before;
+      const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+      addWatermark(ws, {
+        imageId: imgId,
+        mode: "header",
+        position: testCase.position,
+        applyTo: "odd"
+      });
+      expect(ws.headerFooter.oddHeader).toContain("&G");
+      testCase.edit?.(ws);
+
+      removeWatermark(ws);
+
+      expect(ws.headerFooter.oddHeader).toBe(testCase.after);
+    });
+  }
+
+  it("should preserve header/footer edits made after adding a watermark", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(ws, { imageId: imgId, mode: "header" });
+    ws.headerFooter.oddFooter = "&CPage &P of &N";
+
+    removeWatermark(ws);
+
+    expect(ws.headerFooter.oddFooter).toBe("&CPage &P of &N");
+  });
+
+  it("should not enable first/even variants for the default shared page field", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+    addWatermark(ws, { imageId: imgId, mode: "header" });
+
+    expect(ws.headerFooter.oddHeader).toBe("&C&G");
+    expect(ws.headerFooter.evenHeader).toBeNull();
+    expect(ws.headerFooter.firstHeader).toBeNull();
+    expect(ws.headerFooter.differentOddEven).toBe(false);
+    expect(ws.headerFooter.differentFirst).toBe(false);
+  });
+
+  it("should not claim ownership of a native image after XLSX round-trip", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(ws, { imageId: imgId, mode: "header", applyTo: "odd" });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+    const loadedSheet = getWorksheets(loaded)[0];
+    expect(getWatermark(loadedSheet)).toBeNull();
+
+    removeWatermark(loadedSheet);
+    expect(loadedSheet.headerFooter.oddHeader).toContain("&G");
+  });
+
+  it("should replace an existing image in the same header section", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const first = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(ws, { imageId: first, mode: "header", position: "CH" });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+    const loadedSheet = getWorksheets(loaded)[0];
+    const second = addWorkbookImage(loaded, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(loadedSheet, { imageId: second, mode: "header", position: "CH" });
+
+    const headerImages = (getSheetModel(loadedSheet) as any).media.filter(
+      (medium: any) => medium.type === "headerImage"
+    );
+    expect(headerImages).toHaveLength(1);
+    expect(headerImages[0].imageId).toBe(String(second));
+  });
+
+  it("should keep a native same-file image when only its own watermark is removed", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(ws, { imageId: imgId, mode: "header", position: "RH" });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+    const loadedSheet = getWorksheets(loaded)[0];
+    const nativeHeader = loadedSheet.headerFooter.oddHeader;
+
+    addWatermark(loadedSheet, { imageId: imgId, mode: "header", position: "LH" });
+    removeWatermark(loadedSheet);
+
+    const headerImages = (getSheetModel(loadedSheet) as any).media.filter(
+      (medium: any) => medium.type === "headerImage"
+    );
+    expect(headerImages).toHaveLength(1);
+    expect(headerImages[0].position).toBe("RH");
+    expect(loadedSheet.headerFooter.oddHeader).toBe(nativeHeader);
+  });
+
+  it("should leave the section empty after replacing then removing an image", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    addWatermark(ws, { imageId: imgId, mode: "header", position: "CH" });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+    const loadedSheet = getWorksheets(loaded)[0];
+    expect(loadedSheet.headerFooter.oddHeader).toContain("&G");
+
+    addWatermark(loadedSheet, { imageId: imgId, mode: "header", position: "CH" });
+    removeWatermark(loadedSheet);
+
+    const headerImages = (getSheetModel(loadedSheet) as any).media.filter(
+      (medium: any) => medium.type === "headerImage"
+    );
+    expect(headerImages).toHaveLength(0);
+    expect(loadedSheet.headerFooter.oddHeader).toBeNull();
   });
 
   it("should return null when no watermark is set", () => {
@@ -339,14 +501,104 @@ describe("Watermark round-trip", () => {
 // Header watermark applyTo
 // =============================================================================
 
+describe("Header/footer image sections", () => {
+  it("manages the six sections independently", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+    setHeaderFooterImage(ws, { imageId: imgId, position: "LH" });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "RF", width: 20, height: 10 });
+
+    expect(
+      getHeaderFooterImages(ws)
+        .map(image => image.position)
+        .sort()
+    ).toEqual(["LH", "RF"]);
+    expect(ws.headerFooter.oddHeader).toBe("&L&G");
+    expect(ws.headerFooter.oddFooter).toBe("&R&G");
+
+    expect(removeHeaderFooterImage(ws, "LH")).toBe(true);
+    expect(removeHeaderFooterImage(ws, "LH")).toBe(false);
+    expect(ws.headerFooter.oddHeader).toBeNull();
+    expect(getHeaderFooterImages(ws).map(image => image.position)).toEqual(["RF"]);
+    expect(ws.headerFooter.oddFooter).toBe("&R&G");
+  });
+
+  it("replaces the occupant of a section", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const first = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    const second = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+
+    setHeaderFooterImage(ws, { imageId: first, position: "CH" });
+    setHeaderFooterImage(ws, { imageId: second, position: "CH" });
+
+    const images = getHeaderFooterImages(ws);
+    expect(images).toHaveLength(1);
+    expect(images[0].imageId).toBe(String(second));
+    expect(ws.headerFooter.oddHeader).toBe("&C&G");
+  });
+
+  it("can remove images loaded from an existing workbook", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "RH", width: 30, height: 12 });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+    const loadedSheet = getWorksheets(loaded)[0];
+    expect(getHeaderFooterImages(loadedSheet)).toEqual([
+      { imageId: "0", position: "RH", width: 30, height: 12 }
+    ]);
+
+    expect(removeHeaderFooterImage(loadedSheet, "RH")).toBe(true);
+    expect(getHeaderFooterImages(loadedSheet)).toHaveLength(0);
+    expect(loadedSheet.headerFooter.oddHeader).toBeNull();
+  });
+
+  it("round-trips every section through XLSX", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "LH", width: 10, height: 10 });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "RH", width: 12, height: 12 });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "CF", width: 14, height: 14 });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, await Workbook.toBuffer(wb));
+
+    expect(getHeaderFooterImages(getWorksheets(loaded)[0])).toEqual([
+      { imageId: "0", position: "LH", width: 10, height: 10 },
+      { imageId: "0", position: "RH", width: 12, height: 12 },
+      { imageId: "0", position: "CF", width: 14, height: 14 }
+    ]);
+  });
+
+  it("keeps other sections when the watermark API removes its own image", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
+    setHeaderFooterImage(ws, { imageId: imgId, position: "LF" });
+    addWatermark(ws, { imageId: imgId, mode: "header", position: "CH" });
+
+    removeWatermark(ws);
+
+    expect(getHeaderFooterImages(ws).map(image => image.position)).toEqual(["LF"]);
+    expect(ws.headerFooter.oddFooter).toBe("&L&G");
+    expect(ws.headerFooter.oddHeader).toBeNull();
+  });
+});
+
 describe("Header watermark applyTo", () => {
-  it("should default applyTo all — set oddHeader, evenHeader, firstHeader", async () => {
+  it("should explicitly apply to all page variants", async () => {
     const wb = Workbook.create();
     const ws = Workbook.addWorksheet(wb, "Sheet1");
     Cell.setValue(ws, "A1", "Test");
 
     const imgId = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
-    addWatermark(ws, { imageId: imgId, mode: "header" });
+    addWatermark(ws, { imageId: imgId, mode: "header", applyTo: "all" });
 
     const buffer = await Workbook.toBuffer(wb);
     const wb2 = Workbook.create();

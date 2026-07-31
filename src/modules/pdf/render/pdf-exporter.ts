@@ -19,7 +19,13 @@ import { iterateSystemFontCandidates } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { createChartSurface } from "@pdf/render/chart-surface";
 import { layoutChartsheet, layoutSheet } from "@pdf/render/layout-engine";
-import { renderPage, alphaGsName, renderWatermark } from "@pdf/render/page-renderer";
+import {
+  renderPage,
+  alphaGsName,
+  renderWatermark,
+  resolveHeaderFooterRunText,
+  selectHeaderFooter
+} from "@pdf/render/page-renderer";
 import { argbToPdfColor } from "@pdf/render/style-converter";
 import type {
   PdfWorkbook,
@@ -31,6 +37,7 @@ import type {
   PdfColor,
   PdfOrientation,
   LayoutPage,
+  LayoutChart,
   PdfWatermark
 } from "@pdf/types";
 import { PageSizes, PdfCellType, isPdfChartsheet } from "@pdf/types";
@@ -53,13 +60,26 @@ export async function exportPdf(
   workbook: PdfWorkbook,
   options?: PdfExportOptions
 ): Promise<Uint8Array> {
-  const ctx = prepareExport(workbook, options);
+  // Bind the header/footer substitutions once so `&F` / `&Z` / `&D` / `&T`
+  // resolve identically on every sheet and page of this export.
+  const headerFooter = options?.headerFooter;
+  const resolvedInput: PdfExportOptions = {
+    ...options,
+    headerFooter: {
+      ...headerFooter,
+      fileName: headerFooter?.fileName ?? workbook.sourceFileName,
+      filePath: headerFooter?.filePath ?? workbook.sourceFilePath,
+      locale: headerFooter?.locale ?? workbook.locale,
+      date: headerFooter?.date ?? new Date()
+    }
+  };
+  const ctx = prepareExport(workbook, resolvedInput);
 
   for (const sheet of ctx.sheets) {
-    await layoutSheetInto(ctx, sheet, options);
+    await layoutSheetInto(ctx, sheet, resolvedInput);
   }
 
-  return finishExport(ctx, workbook, options);
+  return finishExport(ctx, workbook, resolvedInput);
 }
 
 // =============================================================================
@@ -88,30 +108,13 @@ function prepareExport(workbook: PdfWorkbook, options?: PdfExportOptions): Expor
   const fontManager = new FontManager();
   const writer = new PdfWriter();
 
-  // Determine font data: user-provided > auto-discovered system font
-  let fontData = options?.font ?? null;
+  // User-provided fonts can be registered immediately. Automatic discovery is
+  // delayed until after layout/preflight, when headers, footers, watermarks,
+  // and vector charts have all reported their Unicode text.
+  const fontData = options?.font ?? null;
 
   if (!fontData) {
-    // Collect non-WinAnsi code points from the document (single pass)
-    const nonWinAnsi = collectNonWinAnsiCodePoints(sheets);
-    if (nonWinAnsi.size > 0) {
-      // Try system font candidates lazily in preference order until one
-      // covers all chars. Iterating instead of materializing the full
-      // candidate list lets us stop the moment a match is found, which
-      // avoids the cost of recursively scanning every system font dir.
-      for (const candidate of iterateSystemFontCandidates()) {
-        try {
-          const testTtf = parseTtf(candidate);
-          const allCovered = [...nonWinAnsi].every(cp => testTtf.cmap.has(cp));
-          if (allCovered) {
-            fontData = candidate;
-            break;
-          }
-        } catch {
-          // Parse failed — try next candidate
-        }
-      }
-    }
+    registerSystemFontForCodePoints(fontManager, collectNonWinAnsiCodePoints(sheets));
   }
 
   if (fontData) {
@@ -166,8 +169,12 @@ async function finishExport(
   const documentOptions = resolveOptions(options, sheets[0]);
 
   ensureAtLeastOnePage(allPages, documentOptions, sheets);
+  for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
+    fontManager.trackText(String.fromCodePoint(codePoint));
+  }
   fixPageNumbers(allPages);
   trackFontsForHeaders(allPages, fontManager);
+  const chartCache = preflightCharts(allPages, fontManager);
 
   // Track watermark fonts
   const watermark = documentOptions.watermark;
@@ -175,12 +182,13 @@ async function finishExport(
     const wmFontFamily = watermark.fontFamily ?? "Helvetica";
     const wmBold = watermark.bold ?? false;
     const wmItalic = watermark.italic ?? false;
-    if (fontManager.hasEmbeddedFont()) {
-      fontManager.trackText(watermark.text);
-    } else {
+    fontManager.trackText(watermark.text);
+    if (!fontManager.hasEmbeddedFont()) {
       fontManager.ensureFont(resolvePdfFontName(wmFontFamily, wmBold, wmItalic));
     }
   }
+
+  registerAutoDiscoveredFont(fontManager);
 
   const fontObjectMap = await fontManager.writeFontResources(writer);
   const { pageObjNums, sheetFirstPage, pagesTreeObjNum } = await renderAllPages(
@@ -188,6 +196,7 @@ async function finishExport(
     fontManager,
     writer,
     fontObjectMap,
+    chartCache,
     watermark
   );
 
@@ -202,6 +211,61 @@ async function finishExport(
   );
 }
 
+interface PreparedChart {
+  stream: PdfContentStream;
+  alphaValues: Set<number>;
+}
+
+type ChartRenderCache = WeakMap<LayoutChart, PreparedChart>;
+
+function preflightCharts(allPages: LayoutPage[], fontManager: FontManager): ChartRenderCache {
+  const cache: ChartRenderCache = new WeakMap();
+  for (const page of allPages) {
+    for (const chart of page.charts) {
+      if (!chart.drawVector) {
+        continue;
+      }
+      const stream = new PdfContentStream();
+      const alphaValues = new Set<number>();
+      const surface = createChartSurface(stream, fontManager, alphaValues);
+      chart.drawVector(surface, constrainChartAspectRatio(chart.rect));
+      cache.set(chart, { stream, alphaValues });
+    }
+  }
+  return cache;
+}
+
+function registerAutoDiscoveredFont(fontManager: FontManager): void {
+  if (fontManager.hasEmbeddedFont()) {
+    return;
+  }
+  const codePoints = fontManager.getType3CodePoints();
+  if (codePoints.size === 0) {
+    return;
+  }
+  registerSystemFontForCodePoints(fontManager, codePoints);
+}
+
+function registerSystemFontForCodePoints(
+  fontManager: FontManager,
+  codePoints: ReadonlySet<number>
+): void {
+  if (codePoints.size === 0) {
+    return;
+  }
+  for (const candidate of iterateSystemFontCandidates()) {
+    try {
+      const ttf = parseTtf(candidate);
+      if ([...codePoints].every(cp => ttf.cmap.has(cp))) {
+        fontManager.registerEmbeddedFont(ttf);
+        return;
+      }
+    } catch {
+      // Parse failed — try the next system font candidate.
+    }
+  }
+}
+
 function ensureAtLeastOnePage(
   allPages: LayoutPage[],
   documentOptions: ResolvedPdfOptions,
@@ -210,6 +274,10 @@ function ensureAtLeastOnePage(
   if (allPages.length === 0) {
     allPages.push({
       pageNumber: 1,
+      sheetPageNumber: 1,
+      sheetPageIndex: 1,
+      sheetPageCount: 1,
+      firstPageNumber: undefined,
       options: documentOptions,
       cells: [],
       width: documentOptions.pageSize.width,
@@ -229,8 +297,15 @@ function ensureAtLeastOnePage(
 }
 
 function fixPageNumbers(allPages: LayoutPage[]): void {
+  let automaticPageNumber = 1;
   for (let i = 0; i < allPages.length; i++) {
-    allPages[i].pageNumber = i + 1;
+    const page = allPages[i];
+    page.pageNumber = i + 1;
+    if (page.sheetPageIndex === 1 && page.firstPageNumber !== undefined) {
+      automaticPageNumber = page.firstPageNumber;
+    }
+    page.sheetPageNumber = automaticPageNumber++;
+    page.sheetPageCount = allPages.length;
   }
 }
 
@@ -256,6 +331,35 @@ function trackFontsForHeaders(allPages: LayoutPage[], fontManager: FontManager):
       }
     }
   }
+
+  for (const page of allPages) {
+    for (const content of [
+      selectHeaderFooter(page, "header"),
+      selectHeaderFooter(page, "footer")
+    ]) {
+      if (!content) {
+        continue;
+      }
+      for (const runs of [content.left, content.center, content.right]) {
+        for (const run of runs) {
+          if (run.field === "image") {
+            continue;
+          }
+          const text = resolveHeaderFooterRunText(run, page);
+          fontManager.trackText(text);
+          if (!fontManager.hasEmbeddedFont()) {
+            fontManager.ensureFont(
+              resolvePdfFontName(
+                run.fontFamily || page.options.defaultFontFamily,
+                run.bold,
+                run.italic
+              )
+            );
+          }
+        }
+      }
+    }
+  }
 }
 
 interface RenderResult {
@@ -264,17 +368,21 @@ interface RenderResult {
   pagesTreeObjNum: number;
 }
 
+type ImageObjectCache = WeakMap<Uint8Array, number>;
+
 async function renderAllPages(
   allPages: LayoutPage[],
   fontManager: FontManager,
   writer: PdfWriter,
   fontObjectMap: Map<string, number>,
+  chartCache: ChartRenderCache,
   watermark?: PdfWatermark
 ): Promise<RenderResult> {
   const pageObjNums: number[] = [];
   const pagesTreeObjNum = writer.allocObject();
   const sheetFirstPage = new Map<string, number>();
   const totalPages = allPages.length;
+  const imageObjectCache: ImageObjectCache = new WeakMap();
 
   for (let i = 0; i < allPages.length; i++) {
     renderSinglePage(
@@ -282,6 +390,8 @@ async function renderAllPages(
       fontManager,
       writer,
       fontObjectMap,
+      chartCache,
+      imageObjectCache,
       totalPages,
       pageObjNums,
       pagesTreeObjNum,
@@ -301,6 +411,8 @@ function renderSinglePage(
   fontManager: FontManager,
   writer: PdfWriter,
   fontObjectMap: Map<string, number>,
+  chartCache: ChartRenderCache,
+  imageObjectCache: ImageObjectCache,
   totalPages: number,
   pageObjNums: number[],
   pagesTreeObjNum: number,
@@ -317,11 +429,52 @@ function renderSinglePage(
 
     // Handle images: create XObject Image entries and draw them
     const imageXObjects = new Map<string, number>();
+    let headerImageContentObjNum: number | undefined;
+    const headerContent = selectHeaderFooter(page, "header");
+    const footerContent = selectHeaderFooter(page, "footer");
+    const headerImages = page.headerFooter?.images ?? [];
+    const activePositions = new Set([
+      ...headerFooterImagePositions(headerContent, "H"),
+      ...headerFooterImagePositions(footerContent, "F")
+    ]);
+    if (headerImages.length > 0 && activePositions.size > 0) {
+      const imageStream = new PdfContentStream();
+      const alignWithMargins = page.headerFooter?.alignWithMargins !== false;
+      const leftEdge = alignWithMargins ? page.options.margins.left : 18;
+      const rightEdge = alignWithMargins
+        ? page.width - page.options.margins.right
+        : page.width - 18;
+      for (let index = 0; index < headerImages.length; index++) {
+        const headerImage = headerImages[index];
+        if (!activePositions.has(headerImage.position)) {
+          continue;
+        }
+        const imageName = `HfIm${index + 1}`;
+        imageXObjects.set(
+          imageName,
+          getOrWriteImageObject(writer, imageObjectCache, headerImage.data, headerImage.format)
+        );
+        const placement = headerFooterImagePlacement(headerImage.position);
+        const imageX =
+          placement.section === "left"
+            ? leftEdge
+            : placement.section === "right"
+              ? rightEdge - headerImage.width
+              : (page.width - headerImage.width) / 2;
+        const imageY =
+          placement.kind === "header"
+            ? page.height - page.options.headerMargin - headerImage.height
+            : page.options.footerMargin;
+        imageStream.drawImage(imageName, imageX, imageY, headerImage.width, headerImage.height);
+      }
+      headerImageContentObjNum = writer.allocObject();
+      writer.addStreamObject(headerImageContentObjNum, new PdfDict(), imageStream);
+    }
     if (page.images.length > 0) {
       for (let imgIdx = 0; imgIdx < page.images.length; imgIdx++) {
         const img = page.images[imgIdx];
         const imgName = `Im${imgIdx + 1}`;
-        const imgObjNum = writeImageXObject(writer, img.data, img.format);
+        const imgObjNum = getOrWriteImageObject(writer, imageObjectCache, img.data, img.format);
         imageXObjects.set(imgName, imgObjNum);
         contentStream.drawImage(imgName, img.rect.x, img.rect.y, img.rect.width, img.rect.height);
       }
@@ -339,18 +492,24 @@ function renderSinglePage(
       let rasterCounter = page.images.length;
       for (const chart of page.charts) {
         if (chart.drawVector) {
-          const surface = createChartSurface(contentStream, fontManager, alphaValues);
-          // Constrain aspect ratio: charts look best at roughly 16:9 to
-          // 4:3. If the allocated rect is too extreme (e.g. very tall and
-          // narrow due to page layout), letterbox the chart within the
-          // rect so it keeps a sensible proportion.
-          const drawRect = constrainChartAspectRatio(chart.rect);
-          chart.drawVector(surface, drawRect);
+          const prepared = chartCache.get(chart);
+          if (!prepared) {
+            throw new PdfRenderError("Vector chart was not prepared before font resources");
+          }
+          contentStream.append(prepared.stream);
+          for (const alpha of prepared.alphaValues) {
+            alphaValues.add(alpha);
+          }
           continue;
         }
         if (chart.raster) {
           const imgName = `Im${++rasterCounter}`;
-          const imgObjNum = writeImageXObject(writer, chart.raster.data, chart.raster.format);
+          const imgObjNum = getOrWriteImageObject(
+            writer,
+            imageObjectCache,
+            chart.raster.data,
+            chart.raster.format
+          );
           imageXObjects.set(imgName, imgObjNum);
           contentStream.drawImage(
             imgName,
@@ -379,7 +538,7 @@ function renderSinglePage(
 
       // Register watermark image XObjects
       for (const wmImg of wmResult.imageXObjects) {
-        const imgObjNum = writeImageXObject(writer, wmImg.data, wmImg.format);
+        const imgObjNum = getOrWriteImageObject(writer, imageObjectCache, wmImg.data, wmImg.format);
         imageXObjects.set(wmImg.name, imgObjNum);
       }
 
@@ -396,12 +555,17 @@ function renderSinglePage(
     // placement "under" (default): watermark stream first, then content
     // placement "over": content first, then watermark stream on top
     let contentsRef: string;
-    if (watermarkContentObjNum) {
+    if (watermarkContentObjNum || headerImageContentObjNum) {
       const placement = watermark?.placement ?? "under";
+      const underRefs = [headerImageContentObjNum, watermarkContentObjNum]
+        .filter((value): value is number => value !== undefined)
+        .map(pdfRef);
       if (placement === "over") {
-        contentsRef = `[${pdfRef(contentObjNum)} ${pdfRef(watermarkContentObjNum)}]`;
+        const overRef = watermarkContentObjNum ? ` ${pdfRef(watermarkContentObjNum)}` : "";
+        const headerRef = headerImageContentObjNum ? `${pdfRef(headerImageContentObjNum)} ` : "";
+        contentsRef = `[${headerRef}${pdfRef(contentObjNum)}${overRef}]`;
       } else {
-        contentsRef = `[${pdfRef(watermarkContentObjNum)} ${pdfRef(contentObjNum)}]`;
+        contentsRef = `[${underRefs.join(" ")} ${pdfRef(contentObjNum)}]`;
       }
     } else {
       contentsRef = pdfRef(contentObjNum);
@@ -475,6 +639,47 @@ function renderSinglePage(
       cause: err
     });
   }
+}
+
+function getOrWriteImageObject(
+  writer: PdfWriter,
+  cache: ImageObjectCache,
+  data: Uint8Array,
+  format: "png" | "jpeg"
+): number {
+  const existing = cache.get(data);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const objectNumber = writeImageXObject(writer, data, format);
+  cache.set(data, objectNumber);
+  return objectNumber;
+}
+
+function headerFooterImagePositions(
+  content: ReturnType<typeof selectHeaderFooter>,
+  kind: "H" | "F"
+): Array<"LH" | "CH" | "RH" | "LF" | "CF" | "RF"> {
+  if (!content) {
+    return [];
+  }
+  const sections: Array<"LH" | "CH" | "RH" | "LF" | "CF" | "RF"> = [];
+  for (const section of ["left", "center", "right"] as const) {
+    if (content[section].some(run => run.field === "image")) {
+      sections.push(`${section === "left" ? "L" : section === "right" ? "R" : "C"}${kind}`);
+    }
+  }
+  return sections;
+}
+
+function headerFooterImagePlacement(position: "LH" | "CH" | "RH" | "LF" | "CF" | "RF"): {
+  section: "left" | "center" | "right";
+  kind: "header" | "footer";
+} {
+  return {
+    section: position[0] === "L" ? "left" : position[0] === "R" ? "right" : "center",
+    kind: position[1] === "H" ? "header" : "footer"
+  };
 }
 
 function buildFinalPdf(
@@ -631,6 +836,13 @@ function resolveOptions(
     defaultFontSize: options?.defaultFontSize ?? 11,
     showSheetNames: options?.showSheetNames ?? false,
     showPageNumbers: options?.showPageNumbers ?? false,
+    includeHeadersFooters: options?.headerFooter?.enabled ?? true,
+    headerMargin: (ps?.margins?.header ?? 0.3) * 72,
+    footerMargin: (ps?.margins?.footer ?? 0.3) * 72,
+    sourceFileName: options?.headerFooter?.fileName ?? "",
+    sourceFilePath: options?.headerFooter?.filePath ?? "",
+    headerFooterDate: options?.headerFooter?.date ?? new Date(),
+    headerFooterLocale: options?.headerFooter?.locale,
     title: options?.title ?? "",
     author: options?.author ?? "",
     subject: options?.subject ?? "",
@@ -791,6 +1003,26 @@ function isWatermarkApplicable(watermark: PdfWatermark, page: LayoutPage): boole
 function collectNonWinAnsiCodePoints(sheets: PdfWorkbookSheet[]): Set<number> {
   const result = new Set<number>();
   for (const sheet of sheets) {
+    const headerFooter = sheet.headerFooter;
+    if (headerFooter) {
+      for (const content of [
+        headerFooter.oddHeader,
+        headerFooter.oddFooter,
+        headerFooter.evenHeader,
+        headerFooter.evenFooter,
+        headerFooter.firstHeader,
+        headerFooter.firstFooter
+      ]) {
+        if (!content) {
+          continue;
+        }
+        for (const runs of [content.left, content.center, content.right]) {
+          for (const run of runs) {
+            collectFromText(run.text, result);
+          }
+        }
+      }
+    }
     if (isPdfChartsheet(sheet)) {
       continue;
     }

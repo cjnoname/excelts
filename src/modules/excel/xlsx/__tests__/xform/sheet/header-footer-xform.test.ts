@@ -90,6 +90,34 @@ const expectations = [
       oddFooter: "&C&B&KFF0000Red Bold"
     },
     tests: ["render", "renderIn", "parse"]
+  },
+  {
+    title: "set scaling and margin alignment",
+    create: () => new HeaderFooterXform(),
+    preparedModel: {
+      scaleWithDoc: false,
+      alignWithMargins: false,
+      oddHeader: "&CTest"
+    },
+    xml: '<headerFooter scaleWithDoc="0" alignWithMargins="0"><oddHeader>&amp;CTest</oddHeader></headerFooter>',
+    parsedModel: {
+      scaleWithDoc: false,
+      alignWithMargins: false,
+      oddHeader: "&CTest"
+    },
+    tests: ["render", "renderIn", "parse"]
+  },
+  {
+    title: "parse XSD boolean words",
+    create: () => new HeaderFooterXform(),
+    xml: '<headerFooter differentFirst="true" scaleWithDoc="false" alignWithMargins="false"><oddHeader>&amp;CTest</oddHeader></headerFooter>',
+    parsedModel: {
+      differentFirst: true,
+      scaleWithDoc: false,
+      alignWithMargins: false,
+      oddHeader: "&CTest"
+    },
+    tests: ["parse"]
   }
 ];
 

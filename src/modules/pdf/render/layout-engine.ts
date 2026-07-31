@@ -153,6 +153,13 @@ export async function layoutSheet(
     assignChartsToPages(sheet.charts, layoutPages, ctx.scaleFactor);
   }
 
+  const firstPageNumber = sheet.pageSetup?.firstPageNumber ?? 1;
+  for (let i = 0; i < layoutPages.length; i++) {
+    layoutPages[i].sheetPageNumber = firstPageNumber + i;
+    layoutPages[i].sheetPageIndex = i + 1;
+    layoutPages[i].sheetPageCount = layoutPages.length;
+  }
+
   return layoutPages;
 }
 
@@ -195,10 +202,11 @@ export function layoutChartsheet(
 
   const margins = options.margins;
   const headerHeight = options.showSheetNames ? 20 : 0;
+  const footerHeight = options.showPageNumbers ? 20 : 0;
   const contentX = margins.left;
-  const contentY = margins.bottom;
+  const contentY = margins.bottom + footerHeight;
   const contentWidth = pageWidth - margins.left - margins.right;
-  const contentHeight = pageHeight - margins.top - margins.bottom - headerHeight;
+  const contentHeight = pageHeight - margins.top - margins.bottom - headerHeight - footerHeight;
 
   const chart: LayoutChart = {
     rect: {
@@ -213,6 +221,10 @@ export function layoutChartsheet(
 
   const page: LayoutPage = {
     pageNumber: 1,
+    sheetPageNumber: sheet.pageSetup?.firstPageNumber ?? 1,
+    sheetPageIndex: 1,
+    sheetPageCount: 1,
+    firstPageNumber: sheet.pageSetup?.firstPageNumber,
     options,
     cells: [],
     width: pageWidth,
@@ -226,7 +238,8 @@ export function layoutChartsheet(
     rowHeights: [],
     images: [],
     charts: [chart],
-    scaleFactor: 1
+    scaleFactor: 1,
+    headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
   };
 
   return [page];
@@ -273,9 +286,6 @@ function prepareLayout(
   const contentWidth = pageWidth - margins.left - margins.right;
   const contentHeight = pageHeight - margins.top - margins.bottom;
   const headerHeight = options.showSheetNames ? 20 : 0;
-  const footerHeight = options.showPageNumbers ? 20 : 0;
-  const availableHeight = contentHeight - headerHeight - footerHeight;
-
   const printRange = getPrintRange(sheet, options);
 
   // --- Step 1: Visible columns and widths ---
@@ -294,6 +304,8 @@ function prepareLayout(
     }
   }
   const scaledColumnWidths = columnWidths.map(w => w * scaleFactor);
+  const footerHeight = options.showPageNumbers ? 20 : 0;
+  const availableHeight = contentHeight - headerHeight - footerHeight;
 
   // --- Step 3: Visible rows and heights ---
   const { rowHeights, visibleRows } = computeRowHeights(
@@ -483,6 +495,10 @@ function buildPageLayout(
 
   return {
     pageNumber: currentPageCount + 1,
+    sheetPageNumber: currentPageCount + 1,
+    sheetPageIndex: currentPageCount + 1,
+    sheetPageCount: 1,
+    firstPageNumber: sheet.pageSetup?.firstPageNumber,
     options,
     cells,
     width: pageWidth,
@@ -496,7 +512,8 @@ function buildPageLayout(
     rowHeights: pageRowHeights,
     images: [],
     charts: [],
-    scaleFactor
+    scaleFactor,
+    headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
   };
 }
 
@@ -509,6 +526,10 @@ function createEmptyPage(sheet: PdfSheetData, options: ResolvedPdfOptions): Layo
 
   return {
     pageNumber: 1,
+    sheetPageNumber: sheet.pageSetup?.firstPageNumber ?? 1,
+    sheetPageIndex: 1,
+    sheetPageCount: 1,
+    firstPageNumber: sheet.pageSetup?.firstPageNumber,
     options,
     cells: [],
     width: pageWidth,
@@ -522,7 +543,8 @@ function createEmptyPage(sheet: PdfSheetData, options: ResolvedPdfOptions): Layo
     rowHeights: [],
     images: [],
     charts: [],
-    scaleFactor: 1
+    scaleFactor: 1,
+    headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
   };
 }
 
