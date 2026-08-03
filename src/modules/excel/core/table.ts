@@ -13,11 +13,16 @@ import type {
 } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
 
+interface LoadedTableColumnProperties extends TableColumnProperties {
+  rawFilterXml?: string[];
+  namespaceAttributes?: Record<string, string>;
+}
+
 interface TableModel {
   ref: string;
   name: string;
   displayName?: string;
-  columns: TableColumnProperties[];
+  columns: LoadedTableColumnProperties[];
   rows: CellValue[][];
   headerRow?: boolean;
   totalsRow?: boolean;
@@ -26,6 +31,21 @@ interface TableModel {
   tl?: Address;
   autoFilterRef?: string;
   tableRef?: string;
+  sortStateXml?: string;
+  sortStateAutoFilterRef?: string;
+  autoFilterSortStateXml?: string;
+  autoFilterSortStateRef?: string;
+  autoFilterExtLstXml?: string;
+  rawAttributes?: Record<string, string>;
+  extLstXml?: string;
+  autoFilterNamespaceAttributes?: Record<string, string>;
+}
+
+function clearStaleSortState(t: TableData): void {
+  t.table.sortStateXml = undefined;
+  t.table.sortStateAutoFilterRef = undefined;
+  t.table.autoFilterSortStateXml = undefined;
+  t.table.autoFilterSortStateRef = undefined;
 }
 
 /**
@@ -485,6 +505,7 @@ export function tableAddRow(
 ): void {
   // Add a row of data, either insert at rowNumber or append
   tableCacheState(t);
+  clearStaleSortState(t);
 
   if (rowNumber === undefined) {
     t.table.rows.push(values);
@@ -505,6 +526,9 @@ export function tableRemoveRows(
 ): void {
   // Remove a rows of data
   tableCacheState(t);
+  if (count > 0) {
+    clearStaleSortState(t);
+  }
   t.table.rows.splice(rowIndex, count);
 
   if (options?.commit !== false) {
@@ -526,6 +550,7 @@ export function tableAddColumn(
   // Add a new column, including column defn and values
   // Inserts at colNumber or adds to the right
   tableCacheState(t);
+  clearStaleSortState(t);
 
   if (colIndex === undefined) {
     t.table.columns.push(column);
@@ -543,6 +568,9 @@ export function tableAddColumn(
 export function tableRemoveColumns(t: TableData, colIndex: number, count: number = 1): void {
   // Remove a column with data
   tableCacheState(t);
+  if (count > 0) {
+    clearStaleSortState(t);
+  }
 
   t.table.columns.splice(colIndex, count);
   t.table.rows.forEach(row => {
@@ -564,6 +592,9 @@ export function tableRef(t: TableData): string {
   return t.table.ref;
 }
 export function tableSetRef(t: TableData, value: string): void {
+  if (t.table.ref !== value) {
+    clearStaleSortState(t);
+  }
   tableAssign(t, t.table, "ref", value);
 }
 
@@ -614,6 +645,9 @@ export function tableHeaderRow(t: TableData): boolean | undefined {
   return t.table.headerRow;
 }
 export function tableSetHeaderRow(t: TableData, value: boolean | undefined): void {
+  if (t.table.headerRow !== value) {
+    clearStaleSortState(t);
+  }
   tableAssign(t, t.table, "headerRow", value);
 }
 
@@ -621,6 +655,11 @@ export function tableTotalsRow(t: TableData): boolean | undefined {
   return t.table.totalsRow;
 }
 export function tableSetTotalsRow(t: TableData, value: boolean | undefined): void {
+  if (t.table.totalsRow !== value && t.table.rawAttributes) {
+    // `totalsRowShown` is preserved from the loaded file; once the public
+    // totals-row state is changed the stale attribute must not survive.
+    delete t.table.rawAttributes.totalsRowShown;
+  }
   tableAssign(t, t.table, "totalsRow", value);
 }
 

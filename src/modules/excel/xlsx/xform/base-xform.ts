@@ -77,6 +77,12 @@ class BaseXform<TModel = any> {
     // chunk of text encountered for current node
   }
 
+  parseCdata(text: string): void {
+    // CDATA and ordinary text have the same parsed value. Xforms that need to
+    // preserve the lexical CDATA wrapper may override this method.
+    this.parseText(text);
+  }
+
   parseClose(_name: string): boolean {
     // XML node closed
     return false;
@@ -158,6 +164,8 @@ class BaseXform<TModel = any> {
           }
         } else if (event.eventType === "text") {
           this.parseText(event.value);
+        } else if (event.eventType === "cdata") {
+          this.parseCdata(event.value);
         } else if (event.eventType === "closetag") {
           const value = event.value;
           // Fast path for normal files
@@ -247,6 +255,12 @@ class BaseXform<TModel = any> {
     parser.on("text", (text: string) => {
       if (!done) {
         this.parseText(text);
+      }
+    });
+
+    parser.on("cdata", (text: string) => {
+      if (!done) {
+        this.parseCdata(text);
       }
     });
 

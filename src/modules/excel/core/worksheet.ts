@@ -90,7 +90,12 @@ import {
   removeWorksheetEx,
   validateSheetName
 } from "@excel/core/workbook-core";
-import type { WorksheetData, SheetProtection, ChartHandle } from "@excel/core/worksheet-core";
+import type {
+  AutoFilterCriteria,
+  WorksheetData,
+  SheetProtection,
+  ChartHandle
+} from "@excel/core/worksheet-core";
 import {
   _copyStyle,
   _setStyleOption,
@@ -182,6 +187,11 @@ interface WorksheetModel {
   colBreaks: ColBreak[];
   views: Partial<WorksheetView>[];
   autoFilter: AutoFilter | null;
+  autoFilterCriteria?: AutoFilterCriteria;
+  sortStateXml?: string;
+  worksheetNamespaceAttributes?: Record<string, string>;
+  worksheetMcIgnorable?: string;
+  sortStateAutoFilterRef?: string;
   media: ImageModel[];
   shapes?: ShapeModel[];
   sheetProtection: SheetProtection | null;
@@ -2419,6 +2429,11 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
     colBreaks: ws.colBreaks,
     views: ws.views,
     autoFilter: ws.autoFilter,
+    autoFilterCriteria: ws._autoFilterCriteria,
+    sortStateXml: ws._sortStateXml,
+    worksheetNamespaceAttributes: ws._worksheetNamespaceAttributes,
+    worksheetMcIgnorable: ws._worksheetMcIgnorable,
+    sortStateAutoFilterRef: ws._sortStateAutoFilterRef,
     media: ws._media.map(medium => imageModel(medium)),
     shapes: ws._shapes.map(shape => _resolveShapeModel(ws, shape)),
     sheetProtection: ws.sheetProtection,
@@ -2550,6 +2565,11 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws.colBreaks = value.colBreaks ?? [];
   ws.views = value.views;
   ws.autoFilter = value.autoFilter;
+  ws._autoFilterCriteria = value.autoFilterCriteria;
+  ws._sortStateXml = value.sortStateXml;
+  ws._worksheetNamespaceAttributes = value.worksheetNamespaceAttributes;
+  ws._worksheetMcIgnorable = value.worksheetMcIgnorable;
+  ws._sortStateAutoFilterRef = value.sortStateAutoFilterRef;
   ws._media = value.media.map(medium => imageCreate(ws, medium));
   ws._shapes = value.shapes ? value.shapes.slice() : [];
   // Restore watermark state from media entries

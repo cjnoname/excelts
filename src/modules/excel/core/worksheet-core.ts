@@ -90,6 +90,13 @@ import type {
 import { colCache } from "@excel/utils/col-cache";
 import { copyStyle } from "@excel/utils/copy-style";
 
+/** Opaque worksheet auto-filter criteria preserved for XLSX round trips. */
+export interface AutoFilterCriteria {
+  ref: string;
+  xml: string;
+  namespaceAttributes?: Record<string, string>;
+}
+
 export interface SheetProtection {
   sheet?: boolean;
   objects?: boolean;
@@ -166,6 +173,18 @@ export interface WorksheetData {
   dataValidations: DataValidationsData;
   views: Partial<WorksheetView>[];
   autoFilter: AutoFilter | null;
+  /**
+   * Filter criteria captured from a loaded `<autoFilter>`. The public
+   * `autoFilter` property is only a range, so criteria are carried verbatim to
+   * survive a save; they are dropped automatically once the range changes.
+   */
+  _autoFilterCriteria?: AutoFilterCriteria;
+  /** The worksheet's `<sortState>` block, preserved verbatim from a loaded file. */
+  _sortStateXml?: string;
+  /** Additional root namespace declarations needed by preserved worksheet XML. */
+  _worksheetNamespaceAttributes?: Record<string, string>;
+  _worksheetMcIgnorable?: string;
+  _sortStateAutoFilterRef?: string;
   _media: ImageData[];
   _shapes: ShapeModel[];
   _charts: ChartHandle[];

@@ -23,7 +23,8 @@ import { RelType } from "@excel/xlsx/rel-type";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import type { RelationshipModel } from "@excel/xlsx/xform/core/relationship-xform";
 import { ListXform } from "@excel/xlsx/xform/list-xform";
-import { AutoFilterXform } from "@excel/xlsx/xform/sheet/auto-filter-xform";
+import { PreservedSubtreeXform } from "@excel/xlsx/xform/preserved-xml-xform";
+import { AutoFilterXform, resolveAutoFilterRef } from "@excel/xlsx/xform/sheet/auto-filter-xform";
 import { ConditionalFormattingsXform } from "@excel/xlsx/xform/sheet/cf/conditional-formattings-xform";
 import { ColBreaksXform } from "@excel/xlsx/xform/sheet/col-breaks-xform";
 import { ColXform } from "@excel/xlsx/xform/sheet/col-xform";
@@ -145,6 +146,8 @@ class WorkSheetXform extends BaseXform {
   declare public map: Record<string, BaseXform>;
   declare private ignoreNodes: string[];
   declare public parser?: BaseXform;
+  declare private namespaceAttributes?: Record<string, string>;
+  declare private mcIgnorable?: string;
 
   static WORKSHEET_ATTRIBUTES = {
     xmlns: "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -179,6 +182,7 @@ class WorkSheetXform extends BaseXform {
         maxItems: maxRows
       }),
       autoFilter: new AutoFilterXform(),
+      sortState: new PreservedSubtreeXform(),
       mergeCells: new ListXform({
         tag: "mergeCells",
         count: true,
@@ -871,12 +875,24 @@ class WorkSheetXform extends BaseXform {
 
   render(xmlStream, model) {
     xmlStream.openXml(StdDocAttributes);
-    const worksheetAttrs: Record<string, string> = { ...WorkSheetXform.WORKSHEET_ATTRIBUTES };
+    const worksheetAttrs: Record<string, string> = {
+      ...WorkSheetXform.WORKSHEET_ATTRIBUTES,
+      ...model.worksheetNamespaceAttributes
+    };
+    if (model.worksheetMcIgnorable) {
+      worksheetAttrs["mc:Ignorable"] = [
+        ...new Set(
+          `${worksheetAttrs["mc:Ignorable"]} ${model.worksheetMcIgnorable}`.trim().split(/\s+/)
+        )
+      ].join(" ");
+    }
     if (model.formControls && model.formControls.length > 0) {
       worksheetAttrs["xmlns:x14"] = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
       worksheetAttrs["xmlns:xdr"] =
         "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
-      worksheetAttrs["mc:Ignorable"] = `${worksheetAttrs["mc:Ignorable"]} x14`;
+      worksheetAttrs["mc:Ignorable"] = [
+        ...new Set(`${worksheetAttrs["mc:Ignorable"]} x14`.trim().split(/\s+/))
+      ].join(" ");
     }
     xmlStream.openNode("worksheet", worksheetAttrs);
 
@@ -918,7 +934,19 @@ class WorkSheetXform extends BaseXform {
     this.map.cols.render(xmlStream, model.cols);
     this.map.sheetData.render(xmlStream, model.rows);
     this.map.sheetProtection.render(xmlStream, sheetProtectionModel); // Note: must be after sheetData and before autoFilter
-    this.map.autoFilter.render(xmlStream, model.autoFilter);
+    (this.map.autoFilter as AutoFilterXform).render(
+      xmlStream,
+      model.autoFilter,
+      model.autoFilterCriteria
+    );
+    if (
+      model.sortStateXml &&
+      (model.sortStateAutoFilterRef === undefined ||
+        (model.autoFilter &&
+          model.sortStateAutoFilterRef === resolveAutoFilterRef(model.autoFilter)))
+    ) {
+      xmlStream.writeRaw(model.sortStateXml);
+    }
     this.map.mergeCells.render(xmlStream, model.mergeCells);
     this.map.conditionalFormatting.render(xmlStream, model.conditionalFormattings); // Note: must be before dataValidations
     this.map.dataValidations.render(xmlStream, model.dataValidations);
@@ -1050,6 +1078,15 @@ class WorkSheetXform extends BaseXform {
       Object.values(this.map).forEach((xform: BaseXform) => {
         xform.reset();
       });
+      this.namespaceAttributes = Object.fromEntries(
+        Object.entries(node.attributes).filter(
+          ([key]) => key.startsWith("xmlns:") && !(key in WorkSheetXform.WORKSHEET_ATTRIBUTES)
+        )
+      ) as Record<string, string>;
+      const extraIgnorable = (node.attributes["mc:Ignorable"] ?? "")
+        .split(/\s+/)
+        .filter(token => token && token !== "x14ac");
+      this.mcIgnorable = extraIgnorable.length > 0 ? extraIgnorable.join(" ") : undefined;
       return true;
     }
 
@@ -1122,6 +1159,25 @@ class WorkSheetXform extends BaseXform {
 
         if (this.map.autoFilter.model) {
           this.model.autoFilter = this.map.autoFilter.model;
+          // Filter criteria are not part of the public `autoFilter` range
+          // model; carry them separately so a save can replay them.
+          const { criteria } = this.map.autoFilter as AutoFilterXform;
+          if (criteria) {
+            this.model.autoFilterCriteria = criteria;
+          }
+        }
+        if (this.namespaceAttributes && Object.keys(this.namespaceAttributes).length > 0) {
+          this.model.worksheetNamespaceAttributes = this.namespaceAttributes;
+        }
+        if (this.mcIgnorable) {
+          this.model.worksheetMcIgnorable = this.mcIgnorable;
+        }
+        if (this.map.sortState.model) {
+          // The sort the user last applied. Not modelled, so preserved as XML.
+          this.model.sortStateXml = this.map.sortState.model;
+          if (this.map.autoFilter.model) {
+            this.model.sortStateAutoFilterRef = resolveAutoFilterRef(this.map.autoFilter.model);
+          }
         }
         if (this.map.sheetProtection.model) {
           this.model.sheetProtection = this.map.sheetProtection.model;

@@ -295,6 +295,19 @@ describe("Workbook", () => {
       const wb = Workbook.create();
       await Workbook.readFile(wb, excelTestDataPath("table-autofilter-optional.xlsx"));
       expect(getWorksheets(wb).length).toBeGreaterThan(0);
+
+      const buffer = await Workbook.toBuffer(wb);
+      const entries = await extractAll(new Uint8Array(buffer));
+      const table1 = new TextDecoder().decode(entries.get("xl/tables/table1.xml")!.data);
+      const table2 = new TextDecoder().decode(entries.get("xl/tables/table2.xml")!.data);
+      expect(table1).toContain(
+        '<customFilters><customFilter operator="notEqual" val="4"/></customFilters>'
+      );
+      expect(table2).toContain(
+        '<filters><filter val="T123456789"/><filter val="T123456791"/><filter val="T123456793"/></filters>'
+      );
+      expect(table1).toContain('colId="0"');
+      expect(table2).toContain('colId="0"');
     });
 
     it("<contentType /> element", async () => {
