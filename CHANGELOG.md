@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/documonster/documonster/compare/v0.3.0...v0.4.0) (2026-08-03)
+
+
+### Features
+
+* **pdf:** Render Excel headers and footers on export ([5bbff48](https://github.com/documonster/documonster/commit/5bbff48a893f9ecef649df61f4793acb12ee3d4d))
+
+
+### Bug Fixes
+
+* **excel:** Preserve table and worksheet filter criteria on save ([e77b88b](https://github.com/documonster/documonster/commit/e77b88bcf908610ee0cf6229a52acbdbb916ff18))
+* **formula:** Stabilize GEOMEAN across runtimes ([d8b9828](https://github.com/documonster/documonster/commit/d8b9828cd637684a38469d5f37df0fd100e634d2))
+* **pdf:** Preserve Unicode Type3 text runs ([6edb2ab](https://github.com/documonster/documonster/commit/6edb2ab808b5fd33936c78883d8e6ae7e5c7be99))
+
 ## [0.3.0](https://github.com/documonster/documonster/compare/v0.2.0...v0.3.0) (2026-07-27)
 
 
