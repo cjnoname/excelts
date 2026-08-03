@@ -5093,7 +5093,38 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   /**
-   * Write workbook to a stream
+   * Write workbook to a stream.
+   *
+   * The returned promise resolves only after the sink has accepted the whole
+   * package. This writer **respects downstream backpressure**: when
+   * `stream.write()` returns `false` it waits for the sink's `'drain'` event at
+   * the next zip-entry boundary before producing more bytes.
+   *
+   * ⚠️ The sink must already be consumed (or be a real terminal sink such as
+   * `fs.createWriteStream`, an HTTP response, or an upload body) *before* this
+   * call. Handing an unconsumed intermediate stream — most commonly a bare
+   * `stream.PassThrough` — will deadlock: once its internal buffers fill
+   * (`highWaterMark`, 64 KB per side on Node 22+, so roughly 128 KB of output)
+   * `write()` returns `false`, no `'drain'` will ever fire because nothing is
+   * reading, and this promise never settles. Small workbooks that fit inside
+   * those buffers appear to work, which makes the failure look size-dependent.
+   *
+   * ```ts
+   * // ❌ Deadlocks for any workbook larger than ~128 KB: the consumer is
+   * //    attached only after `write()` resolves, which never happens.
+   * const passThrough = new PassThrough();
+   * await Workbook.writeStream(wb, passThrough);
+   * await upload(passThrough);
+   *
+   * // ✅ Start the consumer first, then await the producer.
+   * const passThrough = new PassThrough();
+   * const uploading = upload(passThrough);
+   * await Workbook.writeStream(wb, passThrough);
+   * await uploading;
+   *
+   * // ✅ Or skip streaming entirely and buffer the package in memory.
+   * await upload(await Workbook.toBuffer(wb));
+   * ```
    */
   async write(stream: IWritableStream, options?: XlsxWriteOptions): Promise<this> {
     options = options || {};

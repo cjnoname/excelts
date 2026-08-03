@@ -140,6 +140,13 @@ export interface WorkbookWriterOptions {
   useSharedStrings?: boolean;
   useStyles?: boolean;
   zip?: Partial<WorkbookZipOptions>;
+  /**
+   * Destination sink. Backpressure is respected, so the sink must already be
+   * consumed (or be a terminal sink such as `fs.createWriteStream`, an HTTP
+   * response, or an upload body). Handing over an unconsumed intermediate
+   * stream — e.g. a bare `PassThrough` whose reader is attached only after
+   * `commit()` resolves — deadlocks once its buffers fill.
+   */
   stream?: Writable | WritableStream<Uint8Array>;
   filename?: string; // Node.js only
   trueStreaming?: boolean;

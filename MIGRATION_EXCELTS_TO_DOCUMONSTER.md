@@ -163,6 +163,33 @@ The old `workbook.xlsx.*` accessor (`readFile`, `writeFile`, `load`,
 | `wb.xlsx.write(stream)`       | `await Workbook.writeStream(wb, stream)`   |
 | `wb.xlsx.read(stream)`        | `await Workbook.readStream(wb, stream)`    |
 
+> **`writeStream` respects backpressure — attach the consumer first.** Unlike
+> exceljs, whose zip writer ignores `write()` returning `false` and lets the
+> sink buffer without bound, `Workbook.writeStream` waits for the sink to
+> `'drain'` at each zip-entry boundary. Awaiting it on an **unconsumed**
+> intermediate stream therefore deadlocks once the stream's buffers fill
+> (~128 KB of output on Node 22+, i.e. every non-trivial workbook), while small
+> workbooks still succeed:
+>
+> ```ts
+> // ❌ never resolves: the consumer is attached only after `writeStream` returns
+> const passThrough = new PassThrough();
+> await Workbook.writeStream(wb, passThrough);
+> await upload(passThrough);
+>
+> // ✅ start the consumer, then await the producer
+> const passThrough = new PassThrough();
+> const uploading = upload(passThrough);
+> await Workbook.writeStream(wb, passThrough);
+> await uploading;
+>
+> // ✅ or don't stream at all
+> await upload(await Workbook.toBuffer(wb));
+> ```
+>
+> A terminal sink (`fs.createWriteStream`, an HTTP response, an SDK upload body
+> that starts reading immediately) needs no special handling.
+
 Reading always fills an existing workbook handle you create first:
 
 ```ts

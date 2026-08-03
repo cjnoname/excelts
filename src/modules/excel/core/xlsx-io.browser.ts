@@ -50,7 +50,14 @@ export function readStream(
   return getXlsxIo(wb).read(stream, options);
 }
 
-/** Write a workbook to a writable stream. */
+/**
+ * Write a workbook to a writable stream.
+ *
+ * Respects downstream backpressure, so the sink must already be consumed
+ * before this call. Passing an unconsumed intermediate stream (e.g. a bare
+ * `PassThrough`) deadlocks once its buffers fill — start the consumer first,
+ * or use {@link toBuffer}. See `XLSX.write` for the full explanation.
+ */
 export function writeStream(
   wb: WorkbookData,
   stream: IWritableStream,
