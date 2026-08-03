@@ -903,25 +903,142 @@ export { fnFACT, fnFACTDOUBLE, fnCOMBIN, fnCOMBINA, fnPERMUT } from "@formula/fu
 // GEOMEAN, HARMEAN, TRIMMEAN, DEVSQ, AVEDEV
 // ============================================================================
 
-export function fnGEOMEAN(args: RuntimeValue[]): RuntimeValue {
-  let logSum = 0;
+// Scratch view used to read the binary exponent of a double. Reused across
+// calls; JavaScript is single-threaded and the reads below never re-enter.
+const doubleBits = /* @__PURE__ */ new DataView(new ArrayBuffer(8));
+
+/** Smallest positive normal double (2^-1022). */
+const MIN_NORMAL = 2.2250738585072014e-308;
+
+/**
+ * Split the product of every positive finite number visited by `forEachNumber`
+ * into a mantissa in [1, 2) and a binary exponent, so that
+ * `Π xᵢ = mantissa * 2^exp2` (subject only to normal floating-point rounding
+ * in the mantissa multiplications).
+ *
+ * Multiplying by a power of two only shifts the exponent field, so the running
+ * rescale is loss-free: the mantissa can never overflow to Infinity nor decay
+ * into the subnormal range, whatever the magnitude or the ordering of the
+ * inputs. The final root therefore retains full double precision without a
+ * log-domain approximation.
+ */
+function splitPositiveProduct(args: RuntimeValue[]): {
+  mantissa: number;
+  exp2: number;
+  count: number;
+  firstValue: number;
+  allIdentical: boolean;
+  hasInfinity: boolean;
+  hasNaN: boolean;
+  outOfRange: boolean;
+  err: ErrorValue | null;
+} {
+  let mantissa = 1;
+  let exp2 = 0;
   let count = 0;
+  let firstValue = NaN;
+  let allIdentical = true;
+  let hasInfinity = false;
+  let hasNaN = false;
   let outOfRange = false;
   const err = forEachNumber(args, n => {
+    if (count === 0) {
+      firstValue = n;
+    } else if (n !== firstValue) {
+      allIdentical = false;
+    }
+    count++;
     if (n <= 0) {
       outOfRange = true;
       return;
     }
-    logSum += Math.log(n);
-    count++;
+    if (Number.isNaN(n)) {
+      hasNaN = true;
+      return;
+    }
+    if (n === Infinity) {
+      hasInfinity = true;
+      return;
+    }
+    doubleBits.setFloat64(0, n);
+    let high = doubleBits.getUint32(0);
+    let exponent = ((high >>> 20) & 0x7ff) - 1023;
+    if (exponent === -1023) {
+      // Subnormal input: scale into the normal range (exactly) and re-read.
+      doubleBits.setFloat64(0, n * 2 ** 64);
+      high = doubleBits.getUint32(0);
+      exponent = ((high >>> 20) & 0x7ff) - 1087;
+    }
+    // Force the exponent field to 0 (biased 1023) to isolate the mantissa.
+    doubleBits.setUint32(0, (high & 0x800fffff) | (1023 << 20));
+    mantissa *= doubleBits.getFloat64(0);
+    exp2 += exponent;
+    if (mantissa >= 2) {
+      // Two factors in [1, 2) multiply to < 4, so one halving re-normalises.
+      mantissa *= 0.5;
+      exp2 += 1;
+    }
   });
+  return {
+    mantissa,
+    exp2,
+    count,
+    firstValue,
+    allIdentical,
+    hasInfinity,
+    hasNaN,
+    outOfRange,
+    err
+  };
+}
+
+export function fnGEOMEAN(args: RuntimeValue[]): RuntimeValue {
+  const product = splitPositiveProduct(args);
+  const { mantissa, exp2, count } = product;
+  const { firstValue, allIdentical, hasInfinity, hasNaN, outOfRange, err } = product;
   if (err) {
     return err;
   }
   if (outOfRange || count === 0) {
     return ERRORS.NUM;
   }
-  return rvNumber(Math.exp(logSum / count));
+  // This identity is exact and avoids asking an approximated root operation to
+  // reconstruct a value already present in the input.
+  if (allIdentical) {
+    return rvNumber(firstValue);
+  }
+  // Preserve the old non-finite behavior. Formula values are normally finite,
+  // but RuntimeValue is public and permits callers to construct these values.
+  if (hasNaN) {
+    return rvNumber(NaN);
+  }
+  if (hasInfinity) {
+    return rvNumber(Infinity);
+  }
+  // GEOMEAN = (mantissa * 2^exp2)^(1/count) = mantissa^(1/count) * 2^(exp2/count).
+  // Peel off the integral part of exp2/count: scaling by 2^quotient afterwards
+  // is exact, which keeps the whole dynamic range out of `Math.pow` and leaves
+  // it a tiny, well-conditioned argument.
+  const quotient = Math.trunc(exp2 / count);
+  const remainder = exp2 - quotient * count;
+  const scaled = mantissa * 2 ** remainder;
+  // A single `Math.pow` minimizes rounding and preserves common exact cases
+  // (GEOMEAN(4, 9) is 6, not 5.999999999999999). Never use the algebraically
+  // equivalent `Math.exp(Σ log xᵢ / count)`: `Math.log`/`Math.exp` are only
+  // "implementation-approximated" by the spec, so that form is both inaccurate
+  // (it inflates each log's error by the magnitude of the result) and
+  // engine-dependent — `Math.exp(Math.log(5))` is 5 under Node.js' V8 and
+  // 4.999999999999999 under Chromium's.
+  const root =
+    scaled >= MIN_NORMAL && scaled < Infinity
+      ? Math.pow(scaled, 1 / count)
+      : // |remainder| < count, so 2^remainder only leaves the double range for
+        // very large samples. Take the two roots separately (one extra rounding).
+        Math.pow(mantissa, 1 / count) * Math.pow(2, remainder / count);
+  // Split the exact power-of-two scaling in half so it cannot overflow or turn
+  // subnormal on the way to a representable result.
+  const half = Math.trunc(quotient / 2);
+  return rvNumber(root * 2 ** half * 2 ** (quotient - half));
 }
 
 export function fnHARMEAN(args: RuntimeValue[]): RuntimeValue {

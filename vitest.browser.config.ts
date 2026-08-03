@@ -1,7 +1,7 @@
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
-import { preferBrowserFilesPlugin } from "./src/utils/browser";
+import { preferBrowserFilesPlugin } from "./src/utils/browser.js";
 
 export default defineConfig({
   plugins: [preferBrowserFilesPlugin()],

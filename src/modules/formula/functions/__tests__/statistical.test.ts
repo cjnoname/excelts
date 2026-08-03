@@ -701,7 +701,53 @@ describe("GEOMEAN comprehensive", () => {
     expect(asNumber(fnGEOMEAN([rvNumber(5)]))).toBe(5);
   });
   it("GEOMEAN of [4, 9] = 6", () => {
-    expect(asNumber(fnGEOMEAN([rvArray([[rvNumber(4), rvNumber(9)]])]))).toBeCloseTo(6, 10);
+    expect(asNumber(fnGEOMEAN([rvArray([[rvNumber(4), rvNumber(9)]])]))).toBe(6);
+  });
+  // The geometric mean of n copies of v is exactly v. Sampling a single value
+  // hid a latent precision bug: `exp(Σ log xᵢ / n)` happened to round to 5 on
+  // one V8 build and to 4.999999999999999 on another, and was already wrong
+  // for most other integers on both.
+  it("GEOMEAN of n identical values returns that value exactly", () => {
+    for (const v of [3, 5, 7, 10, 42, 1.07, 0.35, 1e-8, 1e8]) {
+      for (const n of [1, 2, 3, 5, 12]) {
+        const cells = Array.from({ length: n }, () => rvNumber(v));
+        expect(asNumber(fnGEOMEAN([rvArray([cells])]))).toBe(v);
+      }
+    }
+  });
+  it("GEOMEAN stays exact when the running product overflows the double range", () => {
+    // 1000 × 1e6 ⇒ a product of 1e6000, far past Number.MAX_VALUE.
+    const cells = Array.from({ length: 1000 }, () => rvNumber(1e6));
+    expect(asNumber(fnGEOMEAN([rvArray([cells])]))).toBe(1e6);
+  });
+  it("GEOMEAN stays exact when the running product underflows to zero", () => {
+    // 200 × 1e-10 ⇒ a product of 1e-2000, far below Number.MIN_VALUE.
+    const cells = Array.from({ length: 200 }, () => rvNumber(1e-10));
+    expect(asNumber(fnGEOMEAN([rvArray([cells])]))).toBe(1e-10);
+  });
+  it("GEOMEAN avoids intermediate overflow in different input orderings", () => {
+    const values = [1e200, 1e-200, 1e200, 1e-200, 3.5, 1 / 3];
+    const of = (vs: number[]) => asNumber(fnGEOMEAN([rvArray([vs.map(v => rvNumber(v))])]));
+    const expected = Math.pow(3.5 / 3, 1 / values.length);
+    expect(of([...values].reverse())).toBeCloseTo(expected, 14);
+    expect(of([values[0], values[2], values[4], values[1], values[3], values[5]])).toBeCloseTo(
+      expected,
+      14
+    );
+  });
+  it("GEOMEAN handles subnormal inputs", () => {
+    expect(asNumber(fnGEOMEAN([rvArray([[rvNumber(5e-324), rvNumber(5e-324)]])]))).toBe(5e-324);
+  });
+  it("GEOMEAN preserves non-finite scalar behavior", () => {
+    expect(asNumber(fnGEOMEAN([rvNumber(Infinity), rvNumber(1e-300)]))).toBe(Infinity);
+    expect(Number.isNaN(asNumber(fnGEOMEAN([rvNumber(NaN), rvNumber(5)])))).toBe(true);
+    expect(fnGEOMEAN([rvNumber(Infinity), rvNumber(0)])).toEqual(ERRORS.NUM);
+  });
+  it("GEOMEAN sits between the min and the max input", () => {
+    const values = [0.5, 2, 8, 1e-5, 4e7];
+    const gm = asNumber(fnGEOMEAN([rvArray([values.map(v => rvNumber(v))])]));
+    expect(gm).toBeGreaterThanOrEqual(Math.min(...values));
+    expect(gm).toBeLessThanOrEqual(Math.max(...values));
   });
   it("GEOMEAN negative → #NUM!", () => {
     expect(fnGEOMEAN([rvArray([[rvNumber(4), rvNumber(-9)]])])).toEqual(ERRORS.NUM);
