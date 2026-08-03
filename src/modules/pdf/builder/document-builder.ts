@@ -26,7 +26,7 @@ import { PdfContentStream } from "@pdf/core/pdf-stream";
 import { PdfWriter } from "@pdf/core/pdf-writer";
 import { writePdfAMetadata, writePdfAOutputIntent } from "@pdf/core/pdfa";
 import { FontManager } from "@pdf/font/font-manager";
-import { iterateSystemFontCandidates } from "@pdf/font/system-fonts";
+import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { emitTextBlock, alphaGsName } from "@pdf/render/page-renderer";
 import type { PdfColor, PdfExportOptions } from "@pdf/types";
@@ -1348,21 +1348,13 @@ export class PdfDocumentBuilder {
       if (nonWinAnsi.size > 0) {
         // Try auto-discovery unless the caller opted out.
         if (!this._disableFontAutoDiscovery) {
-          for (const candidate of iterateSystemFontCandidates()) {
-            try {
-              const testTtf = parseTtf(candidate);
-              const allCovered = [...nonWinAnsi].every(cp => testTtf.cmap.has(cp));
-              if (allCovered) {
-                this._fontManager.registerEmbeddedFont(testTtf);
-                this._warn(
-                  `Auto-embedded system font '${testTtf.familyName}' to render ${nonWinAnsi.size} non-WinAnsi character(s). ` +
-                    `Call embedFont(bytes) explicitly for deterministic output.`
-                );
-                break;
-              }
-            } catch {
-              // Parse failed — try next candidate
-            }
+          const discovered = findSystemFontForCodePoints(nonWinAnsi);
+          if (discovered) {
+            this._fontManager.registerEmbeddedFont(discovered);
+            this._warn(
+              `Auto-embedded system font '${discovered.familyName}' to render ${nonWinAnsi.size} non-WinAnsi character(s). ` +
+                `Call embedFont(bytes) explicitly for deterministic output.`
+            );
           }
         }
         if (!this._fontManager.hasEmbeddedFont()) {

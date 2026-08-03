@@ -17,8 +17,14 @@
  * and full enumeration. Once the full snapshot has been produced it is
  * cached and replayed on subsequent calls; partial iterations rely on
  * the OS page cache to make repeat reads of the same font files cheap.
+ *
+ * Auto-embed callers should not iterate themselves: use
+ * {@link findSystemFontForCodePoints}, which owns the coverage rule so every
+ * pipeline picks the same font for the same text.
  */
 
+import { parseTtf } from "@pdf/font/ttf-parser";
+import type { TtfFont } from "@pdf/font/ttf-parser";
 import { fileExistsSync, readFileBytesSync, traverseDirectorySync } from "@utils/fs";
 import type { FileEntry } from "@utils/fs";
 
@@ -252,6 +258,39 @@ export function discoverSystemFontCandidates(): Uint8Array[] {
 export function discoverSystemFont(): Uint8Array | null {
   const candidates = discoverSystemFontCandidates();
   return candidates.length > 0 ? candidates[0] : null;
+}
+
+/**
+ * Find the highest-priority system font whose `cmap` covers **every** one of
+ * `codePoints`, and return it parsed.
+ *
+ * This is the single selection rule used by every auto-embed path (the
+ * spreadsheet exporter and `PdfDocumentBuilder.build()`), so they all agree
+ * on which font a document ends up with. Candidates that fail to parse are
+ * skipped; iteration stops at the first full-coverage match, so a hit among
+ * the preferred filenames never triggers a recursive scan of every system
+ * font directory.
+ *
+ * Returns `null` when `codePoints` is empty or no candidate covers them — the
+ * caller then falls back to Type3 glyphs (and should warn, since uncovered
+ * code points render as NOTDEF boxes).
+ */
+export function findSystemFontForCodePoints(codePoints: ReadonlySet<number>): TtfFont | null {
+  if (codePoints.size === 0) {
+    return null;
+  }
+  const wanted = [...codePoints];
+  for (const candidate of iterateSystemFontCandidates()) {
+    try {
+      const ttf = parseTtf(candidate);
+      if (wanted.every(cp => ttf.cmap.has(cp))) {
+        return ttf;
+      }
+    } catch {
+      // Parse failed — try the next system font candidate.
+    }
+  }
+  return null;
 }
 
 /**

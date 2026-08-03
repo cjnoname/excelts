@@ -1278,7 +1278,8 @@ function renderTextBlockLayout(options: TextBlockOptions, fontManager: FontManag
  * Produce the PDF operator string for a positioned text run, choosing the
  * encoding from the font manager's *current* (build-time) state:
  *   - embedded font  → single BT/ET with CIDFont hex encoding
- *   - Type3 fallback → split into WinAnsi (Type1) and per-glyph Type3 runs
+ *   - Type3 fallback → split into runs of WinAnsi (Type1) and same-resource
+ *     Type3 characters, one BT/ET per run
  *   - neither        → single BT/ET with Type1/WinAnsi encoding
  *
  * Must only be called after font resolution (i.e. from a deferred fragment).
@@ -1360,25 +1361,56 @@ function renderTextBlock(
 interface TextRun {
   /** The text content of this run. */
   text: string;
-  /** Non-null if this run should be rendered with a Type3 font. */
+  /**
+   * Non-null if this run should be rendered with a Type3 font. `hex` holds
+   * the run's single-byte codes for one `Tj` (`<XXYY…>`).
+   */
   type3: { resourceName: string; hex: string } | null;
 }
 
 /**
- * Split a line of text into runs of consecutive WinAnsi and non-WinAnsi
- * characters.  Each non-WinAnsi character becomes its own Type3 run (since
- * different code points may map to different Type3 fonts).  Consecutive
- * WinAnsi characters are merged into a single Type1 run.
+ * Split a line of text into the fewest possible runs, where each run is
+ * rendered by exactly one font resource.
+ *
+ * Consecutive WinAnsi characters merge into a single Type1 run, and
+ * consecutive non-WinAnsi characters that resolve to the *same* Type3
+ * fallback font merge into a single Type3 run (Type3 fonts are single-byte
+ * encoded, so the run becomes one multi-byte `Tj`). A boundary is only
+ * introduced where the font resource actually changes — at a
+ * WinAnsi/non-WinAnsi transition, or at a Type3 font partition boundary
+ * (every 255 distinct non-WinAnsi code points).
+ *
+ * Merging matters beyond stream size: one `Tj` per glyph makes every glyph a
+ * separate text-showing operation, so PDF text extractors (including this
+ * package's reader) recover `机`, `密` as two fragments instead of the word
+ * `机密`. Keeping runs whole preserves word boundaries for copy/paste and
+ * search in the Type3 fallback path.
+ *
+ * Non-WinAnsi characters that were tracked but have no Type3 glyph join the
+ * Type1 run (the WinAnsi encoder renders them as a space).
  */
 function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
   const runs: TextRun[] = [];
-  let winAnsiBuffer = "";
 
-  const flushWinAnsi = () => {
-    if (winAnsiBuffer) {
-      runs.push({ text: winAnsiBuffer, type3: null });
-      winAnsiBuffer = "";
+  // The run being accumulated. `pendingResource` is null for a WinAnsi/Type1
+  // run; `pendingCodePoints` is only needed by Type3 runs (to build the hex).
+  let pendingText = "";
+  let pendingResource: string | null = null;
+  let pendingCodePoints: number[] = [];
+
+  const flush = () => {
+    if (!pendingText) {
+      return;
     }
+    const resource = pendingResource;
+    const hex = resource === null ? null : fontManager.encodeType3Run(pendingCodePoints, resource);
+    runs.push({
+      text: pendingText,
+      type3: resource !== null && hex !== null ? { resourceName: resource, hex } : null
+    });
+    pendingText = "";
+    pendingResource = null;
+    pendingCodePoints = [];
   };
 
   for (let i = 0; i < text.length; i++) {
@@ -1388,25 +1420,24 @@ function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
       i++; // skip low surrogate
     }
 
-    if (fontManager.needsType3(cp)) {
-      flushWinAnsi();
-      const t3 = fontManager.resolveType3(cp);
-      if (t3) {
-        const hex = fontManager.encodeType3Char(cp);
-        runs.push({
-          text: ch,
-          type3: { resourceName: t3.resourceName, hex: hex ?? "<00>" }
-        });
-      } else {
-        // Character tracked but Type3 not yet written — render as space
-        runs.push({ text: ch, type3: null });
-      }
-    } else {
-      winAnsiBuffer += ch;
+    // Which font resource will render this character: a Type3 fallback font,
+    // or null for the Type1/WinAnsi run (also used when a tracked code point
+    // has no Type3 glyph).
+    const resource = fontManager.needsType3(cp)
+      ? (fontManager.resolveType3(cp)?.resourceName ?? null)
+      : null;
+
+    if (resource !== pendingResource) {
+      flush();
+      pendingResource = resource;
+    }
+    pendingText += ch;
+    if (resource !== null) {
+      pendingCodePoints.push(cp);
     }
   }
 
-  flushWinAnsi();
+  flush();
   return runs;
 }
 

@@ -458,18 +458,31 @@ export class FontManager {
   }
 
   /**
-   * Encode a single character for a Type3 font.
-   * Returns a hex string `<XX>` suitable for the Tj operator.
+   * Encode a run of code points that all live in the same Type3 font.
+   *
+   * Type3 fallback fonts use single-byte encoding, so a run of consecutive
+   * code points sharing one resource becomes a single multi-byte hex string
+   * (`<XXYY…>`) that can be shown with one `Tj`. Emitting the whole run at
+   * once keeps the text as one string in the content stream, which is what
+   * PDF text extractors (and our own reader) need to recover the original
+   * word instead of one fragment per glyph.
+   *
+   * Returns null when the Type3 fallback has not been built yet, the run is
+   * empty, or any code point is missing from `resourceName`'s encoding —
+   * callers then fall back to the Type1/WinAnsi path for that run.
    */
-  encodeType3Char(codePoint: number): string | null {
-    if (!this._type3Result) {
+  encodeType3Run(codePoints: readonly number[], resourceName: string): string | null {
+    if (!this._type3Result || codePoints.length === 0) {
       return null;
     }
-    const entry = this._type3Result.encoding.get(codePoint);
-    if (!entry) {
-      return null;
+    let hex = "";
+    for (const cp of codePoints) {
+      const entry = this._type3Result.encoding.get(cp);
+      if (!entry || entry.resourceName !== resourceName) {
+        return null;
+      }
+      hex += entry.charCode.toString(16).toUpperCase().padStart(2, "0");
     }
-    const hex = entry.charCode.toString(16).toUpperCase().padStart(2, "0");
     return `<${hex}>`;
   }
 

@@ -13,7 +13,7 @@ import { addImage, addWatermark, getCell } from "@excel/core/worksheet";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 import { PdfError } from "@pdf/errors";
 import { excelToPdf } from "@pdf/excel-bridge";
-import { iterateSystemFontCandidates } from "@pdf/font/system-fonts";
+import { resetFontDiscoveryCache, _setCandidatesForTest } from "@pdf/font/system-fonts";
 import { pdf as standalonePdf } from "@pdf/pdf";
 import { readPdf } from "@pdf/reader/pdf-reader";
 import { exportPdf } from "@pdf/render/pdf-exporter";
@@ -22,10 +22,10 @@ import { exportPdf } from "@pdf/render/pdf-exporter";
  * Tests the PDF exporter with real Workbook instances via the Excel bridge,
  * and standalone pdf() API.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 import { pdfToString, expectValidPdf } from "./test-helpers";
-import { buildMinimalTtf } from "./ttf-test-utils";
+import { buildMinimalTtf, buildTtfWithCmap } from "./ttf-test-utils";
 
 const TINY_PNG = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1,
@@ -1590,35 +1590,92 @@ describe("exportPdf vector chart preparation", () => {
   });
 
   it("uses final font metrics for centered Unicode chart text", async () => {
-    const systemFont = iterateSystemFontCandidates().next().value;
-    if (!systemFont) {
-      return;
-    }
+    const title = "图表标题很长很长";
+    const category = "甲";
+    const codePoints = [...new Set([...`${title}${category}`].map(ch => ch.codePointAt(0)!))].sort(
+      (a, b) => a - b
+    );
+    const font = buildTtfWithCmap(
+      codePoints.map((cp, index) => ({ start: cp, end: cp, delta: index + 1 - cp })),
+      codePoints.length + 1,
+      {
+        familyName: "ChartCjkTest",
+        advanceWidths: [500, ...codePoints.map((_, index) => 500 + index * 20)]
+      }
+    );
+
+    // Make auto-discovery deterministic: both exports must use this exact
+    // font, regardless of the fonts installed on the test host.
+    _setCandidatesForTest([font]);
     const makeWorkbook = () => {
       const wb = Workbook.create();
       const data = Workbook.addWorksheet(wb, "Data");
-      Cell.setValue(data, "A1", "甲");
+      Cell.setValue(data, "A1", category);
       Cell.setValue(data, "B1", 1);
       Workbook.addChartsheet(wb, "Chart", {
         chart: {
           type: "bar",
-          title: "图表标题很长很长",
+          title,
           series: [{ categories: "Data!$A$1:$A$1", values: "Data!$B$1:$B$1" }]
         }
       });
       return wb;
     };
 
-    const auto = await readPdf(await excelToPdf(makeWorkbook(), { sheets: ["Chart"] }));
-    const explicit = await readPdf(
-      await excelToPdf(makeWorkbook(), { sheets: ["Chart"], font: systemFont })
-    );
-    const autoTitle = auto.pages[0].textFragments.find(f => f.text === "图表标题很长很长");
-    const explicitTitle = explicit.pages[0].textFragments.find(f => f.text === "图表标题很长很长");
+    try {
+      const auto = await readPdf(await excelToPdf(makeWorkbook(), { sheets: ["Chart"] }));
+      const explicit = await readPdf(await excelToPdf(makeWorkbook(), { sheets: ["Chart"], font }));
+      const autoTitle = auto.pages[0].textFragments.find(f => f.text === title);
+      const explicitTitle = explicit.pages[0].textFragments.find(f => f.text === title);
 
-    expect(autoTitle).toBeDefined();
-    expect(explicitTitle).toBeDefined();
-    expect(autoTitle!.x).toBeCloseTo(explicitTitle!.x, 1);
+      expect(autoTitle).toBeDefined();
+      expect(explicitTitle).toBeDefined();
+      expect(autoTitle!.x).toBeCloseTo(explicitTitle!.x, 1);
+    } finally {
+      resetFontDiscoveryCache();
+    }
+  });
+});
+
+// =============================================================================
+// Type3 Fallback Text Runs
+// =============================================================================
+
+describe("Type3 fallback text runs", () => {
+  // Force the "no system font covers this text" branch on every host. Without
+  // it these assertions would only exercise the Type3 path on machines that
+  // happen to lack a CJK font (bare Linux CI images), while macOS/Windows
+  // silently auto-embedded a TrueType subset instead.
+  beforeEach(() => {
+    _setCandidatesForTest([]);
+  });
+  afterEach(() => {
+    resetFontDiscoveryCache();
+  });
+
+  it("shows a run of Type3 glyphs as one text-showing operation", async () => {
+    const wb = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(wb, "Sheet1"), "A1", "Data");
+
+    const pdf = await excelToPdf(wb, { watermark: { type: "text", text: "机密" } });
+    const page = (await readPdf(pdf)).pages[0];
+
+    // Both glyphs live in the same Type3 font, so they must be one Tj with a
+    // two-byte string — one Tj per glyph would make the word unextractable.
+    expect(decompressPdfContent(pdf)).toMatch(/<[0-9A-F]{4}> Tj/);
+    expect(page.textFragments.map(f => f.text)).toContain("机密");
+    expect(page.text).toContain("机密");
+  });
+
+  it("keeps mixed WinAnsi and Type3 text in reading order", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", "中文标题 ABC 混排文本");
+
+    const page = (await readPdf(await excelToPdf(wb))).pages[0];
+
+    // One run per font switch: Type3 → Type1 → Type3, nothing finer.
+    expect(page.textFragments.map(f => f.text)).toEqual(["中文标题", " ABC ", "混排文本"]);
   });
 });
 

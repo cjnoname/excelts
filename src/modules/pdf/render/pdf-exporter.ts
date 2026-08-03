@@ -15,7 +15,7 @@ import { PdfContentStream, isWinAnsiCodePoint } from "@pdf/core/pdf-stream";
 import { PdfWriter } from "@pdf/core/pdf-writer";
 import { PdfError, PdfRenderError } from "@pdf/errors";
 import { FontManager, resolvePdfFontName } from "@pdf/font/font-manager";
-import { iterateSystemFontCandidates } from "@pdf/font/system-fonts";
+import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { createChartSurface } from "@pdf/render/chart-surface";
 import { layoutChartsheet, layoutSheet } from "@pdf/render/layout-engine";
@@ -250,19 +250,9 @@ function registerSystemFontForCodePoints(
   fontManager: FontManager,
   codePoints: ReadonlySet<number>
 ): void {
-  if (codePoints.size === 0) {
-    return;
-  }
-  for (const candidate of iterateSystemFontCandidates()) {
-    try {
-      const ttf = parseTtf(candidate);
-      if ([...codePoints].every(cp => ttf.cmap.has(cp))) {
-        fontManager.registerEmbeddedFont(ttf);
-        return;
-      }
-    } catch {
-      // Parse failed — try the next system font candidate.
-    }
+  const ttf = findSystemFontForCodePoints(codePoints);
+  if (ttf) {
+    fontManager.registerEmbeddedFont(ttf);
   }
 }
 
