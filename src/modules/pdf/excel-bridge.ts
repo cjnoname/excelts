@@ -45,7 +45,8 @@ import {
   cellHyperlink,
   cellResult,
   cellText,
-  cellType
+  cellType,
+  mergeCellStyle
 } from "@excel/core/cell";
 import type { CellData } from "@excel/core/cell";
 import type { ChartsheetData } from "@excel/core/chartsheet";
@@ -59,6 +60,7 @@ import {
   chartsheetState
 } from "@excel/core/chartsheet";
 import { ValueType } from "@excel/core/enums";
+import type { RowData } from "@excel/core/row";
 import { computeSparklineGeometry } from "@excel/core/sparkline";
 import type { SparklineGroup } from "@excel/core/sparkline";
 import { getChartsheets, getImage, getWorksheets } from "@excel/core/workbook";
@@ -71,10 +73,9 @@ import { getWorksheet } from "@excel/core/workbook-core";
 // XLSX surface intentionally omits.
 import type { Workbook } from "@excel/core/workbook.browser";
 import {
+  findCell,
   findRow,
-  getCell,
   getCharts,
-  getColumn,
   getImages,
   getHasMerges,
   getSheetDimensions,
@@ -82,8 +83,7 @@ import {
   getSheetName,
   getSheetWorkbook,
   getWatermark,
-  getSparklineGroups,
-  rowEachCell
+  getSparklineGroups
 } from "@excel/core/worksheet";
 import type { Worksheet } from "@excel/core/worksheet";
 import type {
@@ -398,50 +398,65 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
     : { top: 0, left: 0, bottom: 0, right: 0 };
 
   // Expand bounds to include cells that only have styles (borders, fills, fonts)
-  // but no values — these are not tracked by dimensions.
-  if (hasData) {
-    for (let r = bounds.top; r <= bounds.bottom; r++) {
-      const row = findRow(ws, r);
-      if (!row) {
+  // but no values — these are not tracked by dimensions. This also establishes
+  // bounds for a sheet whose only content is styled cells.
+  let hasContent = hasData;
+  // Scan every materialised slot, not just the rows inside the value
+  // dimensions: a style-only cell can sit above, left of, or below them just
+  // as easily as to the right.
+  //
+  // `rowEachCell({ includeEmpty: true })` used to create every hole up to
+  // `row.cells.length`, and those virtual cells inherited row/column styles.
+  // Resolve the same style without writing the virtual cell back to the row.
+  // Only style matters here: `dimensions` already covers every non-Null cell
+  // (see `rowDimensions`), so a cell carrying a value is always inside bounds.
+  for (let r = 1; r <= ws._rows.length; r++) {
+    const row = ws._rows[r - 1];
+    if (!row) {
+      continue;
+    }
+    for (let c = 1; c <= row.cells.length; c++) {
+      const cell = row.cells[c - 1];
+      const style = cell ? cell.style : inheritedCellStyle(ws, row, c);
+      if (!hasRenderableCellStyle(style)) {
         continue;
       }
-      rowEachCell(row, { includeEmpty: true }, cell => {
-        if (cellCol(cell) > bounds.right) {
-          const hasStyle =
-            cell.style &&
-            ((cell.style.border &&
-              (cell.style.border.top ||
-                cell.style.border.right ||
-                cell.style.border.bottom ||
-                cell.style.border.left)) ||
-              cell.style.fill ||
-              cell.style.font);
-          if (
-            hasStyle ||
-            (cellType(cell) !== ValueType.Null && cellType(cell) !== ValueType.Merge)
-          ) {
-            bounds.right = cellCol(cell);
-          }
-        }
-      });
+      if (!hasContent) {
+        bounds.top = bounds.bottom = r;
+        bounds.left = bounds.right = c;
+        hasContent = true;
+        continue;
+      }
+      if (r < bounds.top) {
+        bounds.top = r;
+      } else if (r > bounds.bottom) {
+        bounds.bottom = r;
+      }
+      if (c < bounds.left) {
+        bounds.left = c;
+      } else if (c > bounds.right) {
+        bounds.right = c;
+      }
     }
   }
 
   // Convert columns
   const columns = new Map<number, PdfColumnData>();
-  if (hasData) {
+  if (hasContent) {
     for (let c = bounds.left; c <= bounds.right; c++) {
-      const col = getColumn(ws, c);
+      // `getColumn` extends `ws._columns`; export must not. An absent column has
+      // no explicit width or hidden flag, which is what the renderer defaults to.
+      const col = ws._columns[c - 1];
       columns.set(c, {
-        hidden: col.hidden || undefined,
-        width: col.width ?? undefined
+        hidden: col?.hidden || undefined,
+        width: col?.width ?? undefined
       });
     }
   }
 
   // Convert rows
   const rows = new Map<number, PdfRowData>();
-  if (hasData) {
+  if (hasContent) {
     for (let r = bounds.top; r <= bounds.bottom; r++) {
       const row = findRow(ws, r);
       if (!row) {
@@ -449,21 +464,20 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
       }
 
       const cells = new Map<number, PdfCellData>();
-      rowEachCell(row, { includeEmpty: true }, cell => {
-        const hasValue = cellType(cell) !== ValueType.Null && cellType(cell) !== ValueType.Merge;
-        const hasStyle =
-          cell.style &&
-          ((cell.style.border &&
-            (cell.style.border.top ||
-              cell.style.border.right ||
-              cell.style.border.bottom ||
-              cell.style.border.left)) ||
-            cell.style.fill ||
-            cell.style.font);
-        if (hasValue || hasStyle) {
-          cells.set(cellCol(cell), convertCell(cell));
+      for (let c = 1; c <= row.cells.length; c++) {
+        const cell = row.cells[c - 1];
+        if (cell) {
+          const hasValue = cellType(cell) !== ValueType.Null && cellType(cell) !== ValueType.Merge;
+          if (hasValue || hasRenderableCellStyle(cell.style)) {
+            cells.set(c, convertCell(cell));
+          }
+        } else {
+          const style = inheritedCellStyle(ws, row, c);
+          if (hasRenderableCellStyle(style)) {
+            cells.set(c, convertEmptyCell(c, style));
+          }
         }
-      });
+      }
 
       rows.set(r, {
         hidden: row.hidden || undefined,
@@ -565,10 +579,10 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
     // Ensure columns/rows exist for extended bounds
     for (let c = bounds.left; c <= bounds.right; c++) {
       if (!columns.has(c)) {
-        const col = getColumn(ws, c);
+        const col = ws._columns[c - 1];
         columns.set(c, {
-          hidden: col.hidden || undefined,
-          width: col.width ?? undefined
+          hidden: col?.hidden || undefined,
+          width: col?.width ?? undefined
         });
       }
     }
@@ -909,6 +923,32 @@ function convertCell(cell: CellData): PdfCellData {
     hyperlink: cellHyperlink(cell) || undefined,
     result: cellResult(cell) ?? undefined,
     col: cellCol(cell)
+  };
+}
+
+/** Resolve the style a cell would inherit if it were materialised. */
+function inheritedCellStyle(ws: Worksheet, row: RowData, col: number): Partial<Style> {
+  return mergeCellStyle(row.style, ws._columns[col - 1]?.style ?? {}, {});
+}
+
+/** The renderer only includes style-only cells for visible formatting. */
+function hasRenderableCellStyle(style: Partial<Style>): boolean {
+  return Boolean(
+    (style.border &&
+      (style.border.top || style.border.right || style.border.bottom || style.border.left)) ||
+    style.fill ||
+    style.font
+  );
+}
+
+/** PDF counterpart of an unmaterialised, styled Excel cell. */
+function convertEmptyCell(col: number, style: Partial<Style>): PdfCellData {
+  return {
+    type: PdfCellType.Empty,
+    value: null,
+    text: "",
+    style: convertCellStyle(style),
+    col
   };
 }
 
@@ -1368,22 +1408,30 @@ function resolveSparklineData(ws: Worksheet, dataRef: string): number[] {
   const endCol = colLetterToNumber(endMatch[1]);
   const endRow = parseInt(endMatch[2], 10);
 
+  // `findCell`, not `getCell`: `sourceWs` is frequently a *different* worksheet
+  // from the one being rendered, so materialising here would have let a PDF
+  // export mutate an unrelated sheet. A missing cell plots as NaN, exactly as an
+  // existing non-numeric one does.
+  const readNumber = (row: number, col: number): number => {
+    const cell = findCell(sourceWs, row, col);
+    if (!cell) {
+      return NaN;
+    }
+    const value = cellGetValue(cell);
+    const v = typeof value === "number" ? value : (cellResult(cell) ?? NaN);
+    return typeof v === "number" ? v : NaN;
+  };
+
   const values: number[] = [];
   if (startRow === endRow) {
     // Horizontal range
     for (let c = startCol; c <= endCol; c++) {
-      const cell = getCell(sourceWs, startRow, c);
-      const v =
-        typeof cellGetValue(cell) === "number" ? cellGetValue(cell) : (cellResult(cell) ?? NaN);
-      values.push(typeof v === "number" ? v : NaN);
+      values.push(readNumber(startRow, c));
     }
   } else {
     // Vertical range
     for (let r = startRow; r <= endRow; r++) {
-      const cell = getCell(sourceWs, r, startCol);
-      const v =
-        typeof cellGetValue(cell) === "number" ? cellGetValue(cell) : (cellResult(cell) ?? NaN);
-      values.push(typeof v === "number" ? v : NaN);
+      values.push(readNumber(r, startCol));
     }
   }
   return values;

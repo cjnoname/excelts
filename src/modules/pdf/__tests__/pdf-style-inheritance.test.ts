@@ -2,7 +2,7 @@ import { inflateSync } from "node:zlib";
 
 import { cellSetAlignment, cellSetFont, cellSetValue } from "@excel/core/cell";
 import { getCell } from "@excel/core/worksheet";
-import { Cell, Column, Workbook } from "@excel/index";
+import { Cell, Column, Row, Sparkline, Workbook, Worksheet } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { describe, it, expect } from "vitest";
 
@@ -32,6 +32,158 @@ function decompressPdfContent(pdfBytes: Uint8Array): string {
 }
 
 describe("PDF style rendering", () => {
+  describe("Unmaterialised inherited styles", () => {
+    async function renderColumnFill(materialise: boolean) {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      const fill = {
+        type: "pattern" as const,
+        pattern: "solid" as const,
+        fgColor: { argb: "FFFF0000" }
+      };
+      Column.setStyle(ws, 2, { fill });
+      Cell.setValue(ws, "A1", "A");
+      Cell.setValue(ws, "C1", "C");
+      if (materialise) {
+        Cell.setStyle(ws, "B1", { fill });
+      }
+
+      const pdf = await excelToPdf(wb);
+      return { content: decompressPdfContent(pdf), ws };
+    }
+
+    it("renders inherited column styles without materialising the empty cell", async () => {
+      const virtual = await renderColumnFill(false);
+      const explicit = await renderColumnFill(true);
+
+      expect(virtual.content).toBe(explicit.content);
+      expect(virtual.ws._rows[0]?.cells[1]).toBeUndefined();
+    });
+
+    it("renders inherited row font and border without materialising the empty cell", async () => {
+      const inherited = {
+        font: { bold: true },
+        border: {
+          top: { style: "thin" as const },
+          bottom: { style: "thin" as const }
+        }
+      };
+      const render = async (materialise: boolean) => {
+        const wb = Workbook.create();
+        const ws = Workbook.addWorksheet(wb, "Sheet1");
+        Row.setStyle(ws, 1, inherited);
+        Cell.setValue(ws, "A1", "A");
+        Cell.setValue(ws, "C1", "C");
+        if (materialise) {
+          Cell.setStyle(ws, "B1", inherited);
+        }
+        return { content: decompressPdfContent(await excelToPdf(wb)), ws };
+      };
+
+      const virtual = await render(false);
+      const explicit = await render(true);
+      expect(virtual.content).toBe(explicit.content);
+      expect(virtual.ws._rows[0]?.cells[1]).toBeUndefined();
+    });
+
+    it("renders a sheet whose only content is a styled cell", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Cell.setStyle(ws, "C3", {
+        fill: {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF0000" }
+        }
+      });
+
+      // Style-only cells are deliberately excluded from worksheet dimensions.
+      expect(Worksheet.dimensions(ws)).toEqual({ top: 0, left: 0, bottom: 0, right: 0 });
+
+      const content = decompressPdfContent(await excelToPdf(wb));
+      expect((content.match(/1 0 0 rg/g) ?? []).length).toBe(1);
+    });
+
+    it("includes style-only cells above, left of, and below the value dimensions", async () => {
+      const RED = {
+        type: "pattern" as const,
+        pattern: "solid" as const,
+        fgColor: { argb: "FFFF0000" }
+      };
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      // Only C3 carries a value, so `dimensions` is exactly C3:C3. The fills sit
+      // above/left (A1), below (C9) and right (E3) of it.
+      Cell.setValue(ws, "C3", "v");
+      Cell.setStyle(ws, "A1", { fill: RED });
+      Cell.setStyle(ws, "C9", { fill: RED });
+      Cell.setStyle(ws, "E3", { fill: RED });
+
+      expect(Worksheet.dimensions(ws)).toEqual({ top: 3, left: 3, bottom: 3, right: 3 });
+
+      const content = decompressPdfContent(await excelToPdf(wb));
+      // Bounds used to grow rightward only, so A1 and C9 were dropped.
+      expect((content.match(/1 0 0 rg/g) ?? []).length).toBe(3);
+    });
+
+    it("expands PDF bounds for an inherited style to the right of the value dimensions", async () => {
+      const inherited = {
+        fill: {
+          type: "pattern" as const,
+          pattern: "solid" as const,
+          fgColor: { argb: "FF00FF00" }
+        }
+      };
+      const render = async (materialise: boolean) => {
+        const wb = Workbook.create();
+        const ws = Workbook.addWorksheet(wb, "Sheet1");
+        Column.setStyle(ws, 4, inherited);
+        Cell.setValue(ws, "A1", "A");
+        // E1 establishes row.cells.length = 5, then removing it leaves holes D1/E1
+        // beyond the value dimensions while preserving the row's right extent.
+        Cell.setValue(ws, "E1", "temporary");
+        Cell.setValue(ws, "E1", null);
+        if (materialise) {
+          Cell.setStyle(ws, "D1", inherited);
+        }
+        return { content: decompressPdfContent(await excelToPdf(wb)), ws };
+      };
+
+      const virtual = await render(false);
+      const explicit = await render(true);
+      expect(virtual.content).toBe(explicit.content);
+      expect(virtual.ws._rows[0]?.cells[3]).toBeUndefined();
+    });
+
+    it("does not materialise holes while converting rows", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Cell.setValue(ws, "A1", "A");
+      Cell.setValue(ws, "C1", "C");
+
+      expect(ws._rows[0]?.cells[1]).toBeUndefined();
+      await excelToPdf(wb);
+      expect(ws._rows[0]?.cells[1]).toBeUndefined();
+    });
+
+    it("does not materialise cells on a sparkline's source worksheet", async () => {
+      const wb = Workbook.create();
+      const data = Workbook.addWorksheet(wb, "Data");
+      Column.setStyle(data, 2, { numFmt: "0.00%" });
+      Worksheet.addAoa(data, [[1, null, 3, 4, 5]]);
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Cell.setValue(ws, "A1", "spark");
+      Sparkline.add(ws, {
+        type: "line",
+        sparklines: [{ dataRef: "Data!A1:E1", cellRef: "B1" }]
+      });
+
+      expect(data._rows[0]?.cells[1]).toBeUndefined();
+      await excelToPdf(wb);
+      expect(data._rows[0]?.cells[1]).toBeUndefined();
+    });
+  });
+
   describe("Bug 1: Rich text inherits cell font properties", () => {
     it("should use cell font size for runs without explicit size", async () => {
       const wb = Workbook.create();
