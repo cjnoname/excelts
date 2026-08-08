@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1](https://github.com/documonster/documonster/compare/v0.5.0...v0.5.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **excel:** Stop reads from mutating the workbook ([ef6c876](https://github.com/documonster/documonster/commit/ef6c8762562a7d92055902abae2179e02c6c6357))
+* **pdf:** Render inherited and out-of-dimension cell styles ([0433235](https://github.com/documonster/documonster/commit/0433235569fb740a1bfc2f4e08b04e1ac56c5607))
+* **release:** Update canary version format to include 'sha' prefix ([d6b9392](https://github.com/documonster/documonster/commit/d6b93927af40212130239310c4fc5c991f841408))
+
+
+### Code Refactoring
+
+* **excel:** Export the cell style inheritance helper ([8461477](https://github.com/documonster/documonster/commit/846147715168bf732434b461ee2457ce8d45ab73))
+
 ## [0.5.0](https://github.com/documonster/documonster/compare/v0.4.0...v0.5.0) (2026-08-08)
 
 
