@@ -573,11 +573,20 @@ export function columnEachCell(
 
 export function columnValues(c: ColumnData): CellValueType[] {
   const v: CellValueType[] = [];
-  columnEachCell(c, (cell, rowNumber) => {
-    if (cell && cellType(cell) !== Enums.ValueType.Null) {
-      v[rowNumber] = cellGetValue(cell);
+  // Deliberately not via `columnEachCell`: its callback signature demands a
+  // `CellData`, so it materialises a cell on every row of the column. This is a
+  // getter, so walk the rows non-destructively instead.
+  const rows = c.worksheet._rows;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) {
+      continue;
     }
-  });
+    const cell = rowFindCell(row, c.number);
+    if (cell && cellType(cell) !== Enums.ValueType.Null) {
+      v[row.number] = cellGetValue(cell);
+    }
+  }
   return v;
 }
 

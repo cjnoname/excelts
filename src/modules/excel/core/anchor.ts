@@ -1,6 +1,5 @@
 import { columnIsCustomWidth } from "@excel/core/column";
 import type { WorksheetData as Worksheet } from "@excel/core/worksheet-core";
-import { getColumn, getRow } from "@excel/core/worksheet-core";
 import { colCache } from "@excel/utils/col-cache";
 
 interface AnchorModel {
@@ -60,16 +59,16 @@ export function isAnchorData(value: unknown): value is AnchorData {
 
 /** Column width (EMU) at the anchor's native column, or the default 640000. */
 export function anchorColWidth(a: AnchorData): number {
-  return a.worksheet &&
-    getColumn(a.worksheet, a.nativeCol + 1) &&
-    columnIsCustomWidth(getColumn(a.worksheet, a.nativeCol + 1))
-    ? Math.floor(getColumn(a.worksheet, a.nativeCol + 1).width! * 10000)
-    : 640000;
+  // Read `_columns` directly — `getColumn` extends the array as a side effect,
+  // and this is a getter reached from read-only paths (`Anchor.col`, PDF export).
+  // A column that does not exist has no custom width, which is the default case.
+  const column = a.worksheet?._columns[a.nativeCol];
+  return column && columnIsCustomWidth(column) ? Math.floor(column.width! * 10000) : 640000;
 }
 
 /** Row height (EMU) at the anchor's native row, or the default 180000. */
 export function anchorRowHeight(a: AnchorData): number {
-  const height = a.worksheet ? getRow(a.worksheet, a.nativeRow + 1)?.height : undefined;
+  const height = a.worksheet?._rows[a.nativeRow]?.height;
   return height ? Math.floor(height * 10000) : 180000;
 }
 

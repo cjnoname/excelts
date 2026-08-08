@@ -21,7 +21,7 @@ import { Enums } from "@excel/core/enums";
 import type { WorkbookData } from "@excel/core/workbook-core";
 import { getWorksheets } from "@excel/core/workbook.browser";
 import type { WorksheetData } from "@excel/core/worksheet";
-import { eachRow, getSheetDimensions, getTables } from "@excel/core/worksheet";
+import { getSheetDimensions, getTables } from "@excel/core/worksheet";
 import type {
   CalcPropertiesSnapshot,
   CellSnapshot,
@@ -110,10 +110,17 @@ function buildWorksheetSnapshot(ws: WorksheetData, date1904: boolean): Worksheet
   const cells = new Map<string, CellSnapshot>();
   const hiddenRows = new Set<number>();
 
-  // Use includeEmpty so we observe the `hidden` flag on rows that have
-  // no populated cells — a user may hide an empty row (e.g. filter UI)
-  // and SUBTOTAL(1xx,…) still needs to treat that row as hidden.
-  eachRow(ws, { includeEmpty: true }, (row, rowNumber) => {
+  // Walk `_rows` directly rather than `eachRow({ includeEmpty: true })`, which
+  // creates a row for every hole — capture is a read. Iterating the backing
+  // array still observes the `hidden` flag on rows that have no populated cells
+  // (a user may hide an empty row via the filter UI, and SUBTOTAL(1xx,…) has to
+  // treat that row as hidden); a hole has no flag and no cells to miss.
+  for (let i = 0; i < ws._rows.length; i++) {
+    const row = ws._rows[i];
+    if (!row) {
+      continue;
+    }
+    const rowNumber = row.number;
     if (row.hidden) {
       hiddenRows.add(rowNumber);
     }
@@ -127,7 +134,7 @@ function buildWorksheetSnapshot(ws: WorksheetData, date1904: boolean): Worksheet
         cells.set(snapshotCellKey(rowNumber, colNumber), cellSnapshot);
       }
     });
-  });
+  }
 
   const dims = getSheetDimensions(ws);
   const dimensions =

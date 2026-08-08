@@ -2076,6 +2076,24 @@ export function toJSON(
     return [];
   }
 
+  // `toJSON` is a getter, so it must not materialise the rectangle it walks.
+  // A cell that does not exist has no value, and formats to "" — which the
+  // callers below already treat as empty.
+  const readValue = (row: number, col: number): CellValue => {
+    const cell = findCell(ws, row, col);
+    if (!cell) {
+      return null;
+    }
+    return cellGetValue(cell);
+  };
+  const readCell = (row: number, col: number): CellValue => {
+    if (o.raw !== false) {
+      return readValue(row, col);
+    }
+    const cell = findCell(ws, row, col);
+    return cell ? getCellDisplayText(cellView(cell), o.dateFormat).trim() : null;
+  };
+
   const headerOpt = o.header;
 
   // header: 1 — return array of arrays
@@ -2088,11 +2106,7 @@ export function toJSON(
       let isEmpty = true;
 
       for (let col = startCol; col <= endCol; col++) {
-        const cell = getCell(ws, row, col);
-        const val =
-          o.raw === false
-            ? getCellDisplayText(cellView(cell), o.dateFormat).trim()
-            : cellGetValue(cell);
+        const val = readCell(row, col);
 
         if (val != null && val !== "") {
           rowData[col - startCol] = val;
@@ -2122,11 +2136,7 @@ export function toJSON(
       let isEmpty = true;
 
       for (let col = startCol; col <= endCol; col++) {
-        const cell = getCell(ws, row, col);
-        const val =
-          o.raw === false
-            ? getCellDisplayText(cellView(cell), o.dateFormat).trim()
-            : cellGetValue(cell);
+        const val = readCell(row, col);
         const key = encodeCol(col - 1);
 
         if (val != null && val !== "") {
@@ -2157,11 +2167,7 @@ export function toJSON(
       for (let col = startCol; col <= endCol; col++) {
         const colIdx = col - startCol;
         const key = headerOpt[colIdx] ?? `__EMPTY_${colIdx}`;
-        const cell = getCell(ws, row, col);
-        const val =
-          o.raw === false
-            ? getCellDisplayText(cellView(cell), o.dateFormat).trim()
-            : cellGetValue(cell);
+        const val = readCell(row, col);
 
         if (val != null && val !== "") {
           rowData[key] = val;
@@ -2184,8 +2190,7 @@ export function toJSON(
   const headerCounts: Record<string, number> = {};
 
   for (let col = startCol; col <= endCol; col++) {
-    const cell = getCell(ws, startRow, col);
-    const val = cellGetValue(cell);
+    const val = readValue(startRow, col);
     let header = val != null ? String(val) : `__EMPTY_${col - startCol}`;
 
     if (headerCounts[header] !== undefined) {
@@ -2207,11 +2212,7 @@ export function toJSON(
     let isEmpty = true;
 
     for (let col = startCol; col <= endCol; col++) {
-      const cell = getCell(ws, row, col);
-      const val =
-        o.raw === false
-          ? getCellDisplayText(cellView(cell), o.dateFormat).trim()
-          : cellGetValue(cell);
+      const val = readCell(row, col);
       const key = headers[col - startCol];
 
       if (val != null && val !== "") {
@@ -2291,13 +2292,25 @@ export function addJSON(
 export function toAOA(ws: WorksheetData): CellValue[][] {
   const result: CellValue[][] = [];
 
-  eachRow(ws, { includeEmpty: true }, (row, rowNumber) => {
+  // Walk the backing arrays directly. `eachRow`/`rowEachCell` with
+  // `includeEmpty` hand back a cell handle for every slot, which means creating
+  // one for every hole — and `toAOA` is a getter. Preserve the old output shape:
+  // a missing row is `[]`, while a missing cell inside a row is `null`. Index by
+  // slot because the hole branch has no row to read a number from; a row always
+  // sits at `row.number - 1`, so the two agree.
+  for (let i = 0; i < ws._rows.length; i++) {
+    const row = ws._rows[i];
+    if (!row) {
+      result[i] = [];
+      continue;
+    }
     const rowData: CellValue[] = [];
-    rowEachCell(row, { includeEmpty: true }, (cell, colNumber) => {
-      rowData[colNumber - 1] = cellGetValue(cell);
-    });
-    result[rowNumber - 1] = rowData;
-  });
+    for (let j = 0; j < row.cells.length; j++) {
+      const cell = row.cells[j];
+      rowData[j] = cell ? cellGetValue(cell) : null;
+    }
+    result[i] = rowData;
+  }
 
   return result;
 }
