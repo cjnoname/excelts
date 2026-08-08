@@ -197,7 +197,7 @@ export interface CellData {
   _formulaGhostOwner?: string;
 }
 
-function mergeStyle(
+export function mergeCellStyle(
   rowStyle: Partial<Style>,
   colStyle: Partial<Style>,
   style: Partial<Style>
@@ -254,13 +254,13 @@ export function cellCreate(row: RowData, column: ColumnData, address: string): C
     throw new ExcelError("A Cell needs a Row");
   }
   colCache.validateAddress(address);
-  // `mergeStyle` builds and returns the cell's own style object in one pass, so
+  // `mergeCellStyle` builds and returns the cell's own style object in one pass, so
   // we set it directly rather than allocating a throwaway `{}` literal first.
   const cell = {
     row,
     column,
     address,
-    style: mergeStyle(row.style, column.style, {}),
+    style: mergeCellStyle(row.style, column.style, {}),
     _mergeCount: 0
   } as CellData;
   cell._value = Value.create(Types.Null, cell);
@@ -453,7 +453,7 @@ export function cellUnmerge(c: CellData): void {
   if (cellType(c) === Types.Merge) {
     c._value.release();
     c._value = Value.create(Types.Null, c);
-    c.style = mergeStyle(c.row.style, c.column.style, { ...c.style });
+    c.style = mergeCellStyle(c.row.style, c.column.style, { ...c.style });
   }
 }
 
