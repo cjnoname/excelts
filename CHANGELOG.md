@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/documonster/documonster/compare/v0.4.0...v0.5.0) (2026-08-08)
+
+
+### Features
+
+* **excel:** Read a rectangular range with Range.getValues ([c672c76](https://github.com/documonster/documonster/commit/c672c767cfe96361921b4c6464c71b823b293327)), closes [#198](https://github.com/documonster/documonster/issues/198)
+
 ## [0.4.0](https://github.com/documonster/documonster/compare/v0.3.0...v0.4.0) (2026-08-03)
 
 
