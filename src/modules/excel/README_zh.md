@@ -85,6 +85,30 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
 });
 ```
 
+### 读取区域
+
+`Range.getValues` 按行优先把矩形区域读成矩阵：
+
+```typescript
+import { Range } from "documonster/excel";
+
+const values = Range.getValues(worksheet, "G7:H19");
+// values.length === 13，values[0].length === 2
+// values[r][c] 对应第 7 + r 行、第 G + c 列的单元格
+```
+
+返回的矩阵尺寸始终与区域一致 —— 空行和空格保留各自位置并读为 `null`，因此无论工作表多稀疏，下标都与请求一一对应。读取不会创建单元格，工作表保持原样。
+
+取值语义与 `Cell.getValue` 完全相同：公式单元格返回 `{ formula, result }` 记录，日期返回 `Date`，合并区域的每个单元格都返回主单元格的值。
+
+除 A1 字符串外也接受 `Range.Handle`，几何计算与读取可以组合：
+
+```typescript
+Range.getValues(worksheet, Range.create(7, 7, 19, 8)); // 等价于 "G7:H19"
+```
+
+整列（`"A:A"`）和整行（`"1:5"`）引用会被拒绝 —— 它们没有可读的边界，未设置的区域同理。要读取整张表，可以传 `Worksheet.dimensions(worksheet)`（空表的 dimensions 处于未设置状态，因此会被拒绝），或者用 `Worksheet.getValues(worksheet)` —— 注意后者按行**号**索引，`result[1]` 是第 1 行，`result[0]` 为空。
+
 ### 设置单元格样式
 
 ```typescript

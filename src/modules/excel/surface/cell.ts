@@ -303,3 +303,11 @@ export function setResult(ws: Sheet, addr: Addr, value: FormulaResult | undefine
 export function getFullAddress(ws: Sheet, addr: Addr): ReturnType<typeof cellFullAddress> {
   return cellFullAddress(getCell(ws, addr));
 }
+
+// --- types ---
+
+/**
+ * A value read out of a cell — what {@link getValue} returns, and the element
+ * type of the matrix `Range.getValues` returns.
+ */
+export type Value = CellValueType;

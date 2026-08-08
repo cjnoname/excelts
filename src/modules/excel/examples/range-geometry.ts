@@ -1,7 +1,7 @@
 /**
- * Range geometry helpers — the `Range` namespace.
+ * Range helpers — the `Range` namespace.
  *
- * Covers the geometric range utilities (no worksheet required):
+ * Covers the geometric utilities, which need no worksheet:
  * - Range.create        — build a range from an A1 range string
  * - Range.toString      — serialise back to a range string
  * - Range.count         — number of cells covered
@@ -12,10 +12,13 @@
  * - Range.expandToAddress — grow a range to include an A1 address
  * - Range.forEachAddress — iterate every cell address in the range
  *
+ * …plus the one helper that reads a worksheet:
+ * - Range.getValues     — read a rectangular range as a row-major matrix
+ *
  * Usage:
  *   npx tsx src/modules/excel/examples/range-geometry.ts
  */
-import { Range } from "@excel/index";
+import { Cell, Range, Workbook } from "@excel/index";
 import type { Address } from "@excel/types";
 
 // 1. Create + serialise + count
@@ -52,5 +55,20 @@ Range.forEachAddress(small, (address, row, col) => {
   addresses.push(`${address}(r${row},c${col})`);
 });
 console.log("forEachAddress A1:B2:", addresses.join(" "));
+
+// 8. getValues — read a rectangular range off a worksheet as a matrix.
+//    The shape always matches the range, so blank rows/cells keep their
+//    position (they read as null) and the sheet is never mutated by the read.
+const wb = Workbook.create();
+const ws = Workbook.addWorksheet(wb, "Sheet1");
+Cell.setValue(ws, "G7", "top-left");
+Cell.setValue(ws, "H9", 42);
+
+const values = Range.getValues(ws, "G7:H9");
+console.log("getValues G7:H9:", JSON.stringify(values));
+// [["top-left",null],[null,null],[null,42]]
+
+// A Range.Handle works too, so geometry and reads compose.
+console.log("getValues via handle:", JSON.stringify(Range.getValues(ws, Range.create(7, 7, 9, 8))));
 
 console.log("Done.");

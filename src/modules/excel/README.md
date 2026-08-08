@@ -86,6 +86,40 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
 });
 ```
 
+### Reading a Range
+
+`Range.getValues` reads a rectangular block as a row-major matrix:
+
+```typescript
+import { Range } from "documonster/excel";
+
+const values = Range.getValues(worksheet, "G7:H19");
+// values.length === 13, values[0].length === 2
+// values[r][c] is the cell at row 7 + r, column G + c
+```
+
+The result is always exactly as tall and wide as the range — blank rows and cells
+keep their position and read as `null`, so indices line up with the request no
+matter how sparse the sheet is. Reading never creates cells, so it leaves the
+worksheet untouched.
+
+Values carry the same semantics as `Cell.getValue`: formula cells yield a
+`{ formula, result }` record, dates yield `Date`, and every cell of a merged
+region yields the master cell's value.
+
+A `Range.Handle` works in place of the A1 string, so geometry composes with
+reads:
+
+```typescript
+Range.getValues(worksheet, Range.create(7, 7, 19, 8)); // same as "G7:H19"
+```
+
+Whole-column (`"A:A"`) and whole-row (`"1:5"`) references are rejected — they
+have no bounds to read, as is an unset range. To read the whole sheet, either
+pass `Worksheet.dimensions(worksheet)` (which is unset, and so rejected, on a
+sheet with no cells) or use `Worksheet.getValues(worksheet)` — note that one is
+indexed by row _number_, so `result[1]` is row 1 and `result[0]` is empty.
+
 ### Styling Cells
 
 ```typescript

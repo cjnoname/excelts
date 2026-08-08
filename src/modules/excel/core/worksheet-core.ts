@@ -52,6 +52,7 @@ import type { FormCheckboxData } from "@excel/core/form-control";
 import type { ImageData } from "@excel/core/image";
 import type { PivotTable } from "@excel/core/pivot-table";
 import type { RangeData } from "@excel/core/range";
+import { rangeCreate, rangeRange } from "@excel/core/range";
 import type { RowData, RowModel } from "@excel/core/row";
 import {
   rowCreate,
@@ -63,7 +64,7 @@ import {
 import type { SparklineGroup } from "@excel/core/sparkline";
 import type { TableData } from "@excel/core/table";
 import type { Workbook } from "@excel/core/workbook";
-import { ExcelError } from "@excel/errors";
+import { ExcelError, InvalidAddressError } from "@excel/errors";
 import type {
   Alignment,
   AutoFilter,
@@ -372,6 +373,98 @@ export function getCell(ws: WorksheetData, r: number | string, c?: number): Cell
   const address = colCache.getAddress(r, c);
   const row = getRow(ws, address.row);
   return rowGetCellEx(row, address);
+}
+
+/**
+ * Read every cell value in a rectangular range as a row-major matrix.
+ *
+ * The result is always exactly `bottom - top + 1` rows by `right - left + 1`
+ * columns — blank rows and columns are never dropped, so `result[r][c]` maps
+ * positionally onto the requested range regardless of how sparse the sheet is.
+ * Cells that do not exist read as `null`.
+ *
+ * Unlike {@link getCell}, this never materialises rows or cells, so reading a
+ * range leaves the worksheet (and everything derived from it — `rowCount`,
+ * `columnCount`, memory footprint) untouched.
+ *
+ * Values carry the same semantics as a single {@link cellGetValue}: formula
+ * cells yield a `FormulaValueData` record rather than the cached result, dates
+ * yield `Date`, rich text and hyperlinks yield their object forms. Every cell of
+ * a merged region yields the master cell's value.
+ *
+ * @param ws - Worksheet to read from.
+ * @param range - An A1 range (`"G7:H19"`), a single address (`"G7"`), or a
+ *   {@link RangeData} handle. Reversed corners are normalised, including on a
+ *   hand-built handle. An optional sheet qualifier must name `ws` (compared
+ *   case-insensitively, as Excel does).
+ * @throws {InvalidAddressError} If the range cannot be decoded, is unbounded
+ *   (`"A:A"`, `"1:5"`), or is unset — including the dimensions of a sheet that
+ *   has no cells.
+ * @throws {ExcelError} If the range is qualified with a different worksheet.
+ */
+export function getRangeValues(ws: WorksheetData, range: string | RangeData): CellValue[][] {
+  const r = typeof range === "string" ? rangeCreate(range) : range;
+
+  const bounds = [r.top, r.left, r.bottom, r.right];
+  const decoded = bounds.every(n => Number.isInteger(n));
+  const set = decoded && bounds.every(n => n >= 1);
+  // `rangeTl`/`rangeToString` coerce 0 and NaN bounds to 1, so an unusable range
+  // would render as a plausible-looking "A1:A1". Describe the raw bounds instead.
+  const label =
+    typeof range === "string"
+      ? range
+      : set
+        ? rangeRange(r)
+        : `{ top: ${r.top}, left: ${r.left}, bottom: ${r.bottom}, right: ${r.right} }`;
+
+  if (!decoded) {
+    // `colCache.decodeAddress` yields `undefined` for a missing row or column,
+    // which `rangeCreate` turns into a NaN bound. That covers both unbounded
+    // references ("A:A", "1:5") and strings it cannot decode at all.
+    throw new InvalidAddressError(
+      label,
+      'expected a bounded A1 range like "G7:H19" — whole-column and whole-row references have no bounds to read'
+    );
+  }
+  if (!set) {
+    // All-zero is `rangeCreate`'s unset sentinel — e.g. `Range.create()`, or the
+    // dimensions of a sheet with no cells. Reading it as "A1" would hide the bug.
+    throw new InvalidAddressError(
+      label,
+      "range bounds must be 1-based row and column numbers; this range is unset or empty"
+    );
+  }
+  if (r.sheetName) {
+    const sheetName = getSheetName(ws);
+    if (r.sheetName.toLowerCase() !== sheetName.toLowerCase()) {
+      throw new ExcelError(
+        `Range "${label}" refers to worksheet "${r.sheetName}" but was read from worksheet "${sheetName}"`
+      );
+    }
+  }
+
+  // `rangeCreate` normalises reversed corners, but `RangeData` is a plain record
+  // a caller can hand-build, so normalise here too rather than deriving a
+  // negative height and failing inside `new Array()`.
+  const top = Math.min(r.top, r.bottom);
+  const bottom = Math.max(r.top, r.bottom);
+  const left = Math.min(r.left, r.right);
+  const right = Math.max(r.left, r.right);
+
+  const width = right - left + 1;
+  const result: CellValue[][] = new Array(bottom - top + 1);
+
+  for (let row = top; row <= bottom; row++) {
+    const rowData: CellValue[] = new Array(width);
+    const rowHandle = findRow(ws, row);
+    for (let col = left; col <= right; col++) {
+      const cell = rowHandle ? rowFindCell(rowHandle, col) : undefined;
+      rowData[col - left] = cell ? cellGetValue(cell) : null;
+    }
+    result[row - top] = rowData;
+  }
+
+  return result;
 }
 
 // =============================================================================

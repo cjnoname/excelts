@@ -146,4 +146,26 @@ describe("documonster/excel namespace surface", () => {
     expect(Excel.Cell.getValue(ws, "A1")).toBe("a");
     expect(Excel.Cell.getValue(ws, "C1")).toBe("c");
   });
+
+  it("Range namespace exposes geometry helpers plus getValues", () => {
+    for (const m of ["create", "contains", "intersects", "forEachAddress", "count", "getValues"]) {
+      expect(typeof (Excel.Range as Record<string, unknown>)[m], `Range.${m}`).toBe("function");
+    }
+  });
+
+  it("Range.getValues reads a positional matrix off the sheet", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "G7", 1);
+    Excel.Cell.setValue(ws, "H8", "x");
+
+    const values: Excel.Cell.Value[][] = Excel.Range.getValues(ws, "G7:H9");
+    expect(values).toEqual([
+      [1, null],
+      [null, "x"],
+      [null, null]
+    ]);
+    // accepts a Range.Handle as well as an A1 string
+    expect(Excel.Range.getValues(ws, Excel.Range.create(7, 7, 9, 8))).toEqual(values);
+  });
 });
