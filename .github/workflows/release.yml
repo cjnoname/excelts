@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
   pull-requests: write
 
 jobs:
@@ -57,7 +58,7 @@ jobs:
           COMMIT_SHORT=$(git rev-parse --short HEAD)
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          CANARY_VERSION="${CURRENT_VERSION}-canary.${TIMESTAMP}.${COMMIT_SHORT}"
+          CANARY_VERSION="${CURRENT_VERSION}-canary.${TIMESTAMP}.sha.${COMMIT_SHORT}"
           echo "version=${CANARY_VERSION}" >> $GITHUB_OUTPUT
           node -e "const p=require('./package.json');p.version='${CANARY_VERSION}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
 
