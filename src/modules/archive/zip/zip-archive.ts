@@ -285,13 +285,16 @@ export class ZipArchive {
             throwIfAborted(signal);
             onChunk(bytes);
             await file.push(bytes, true);
+            await file.outputCheckpoint();
           } else {
             for await (const chunk of toAsyncIterable(entry.source, { signal, onChunk })) {
               throwIfAborted(signal);
               await file.push(chunk, false);
+              await file.outputCheckpoint();
             }
             throwIfAborted(signal);
             await file.push(new Uint8Array(0), true);
+            await file.outputCheckpoint();
           }
 
           await file.complete();

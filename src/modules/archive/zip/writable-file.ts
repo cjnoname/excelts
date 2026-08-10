@@ -66,7 +66,7 @@ export interface ZipWritableFile {
    * @param data - Output bytes (local header, compressed data, data descriptor)
    * @param final - True if this is the last chunk for this entry
    */
-  ondata: ((data: Uint8Array, final: boolean) => void) | null;
+  ondata: ((data: Uint8Array, final: boolean) => void | Promise<void>) | null;
 
   /**
    * Callback invoked when an error occurs.

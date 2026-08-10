@@ -713,6 +713,7 @@ export class ZipEditor {
             s.currentEntry = { name: entry.name, index: idx, bytesIn: entryBytesIn };
           });
           await file.push(data, true);
+          await file.outputCheckpoint();
           await file.complete();
           progress.set("entriesDone", progress.snapshot.entriesDone + 1);
         }
@@ -755,14 +756,17 @@ export class ZipEditor {
             throwIfAborted(signal);
             onChunk(bytes);
             await file.push(bytes, true);
+            await file.outputCheckpoint();
           } else {
             // Streaming path (includes Blob via toAsyncIterable(Blob) which prefers Blob.stream())
             for await (const chunk of toAsyncIterable(entry.source, { signal, onChunk })) {
               throwIfAborted(signal);
               await file.push(chunk, false);
+              await file.outputCheckpoint();
             }
             throwIfAborted(signal);
             await file.push(new Uint8Array(0), true);
+            await file.outputCheckpoint();
           }
 
           await file.complete();

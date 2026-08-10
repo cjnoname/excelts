@@ -22,7 +22,7 @@ describe("async-queue", () => {
     await expect(itor.next()).resolves.toEqual({ value: undefined, done: true });
 
     // Should ignore pushes after cancellation.
-    q.push(123);
+    await expect(q.push(123)).rejects.toThrow("closed");
     await expect(itor.next()).resolves.toEqual({ value: undefined, done: true });
 
     // Idempotent.
@@ -63,5 +63,38 @@ describe("async-queue", () => {
     // close() after fail() should be ignored.
     q.close();
     await expect(itor.next()).rejects.toThrow("x");
+  });
+
+  it("should block at capacity and wake blocked producers on terminal states", async () => {
+    const q = createAsyncQueue<number>({ capacity: 1 });
+    const iterator = q.iterable[Symbol.asyncIterator]();
+    await q.push(1);
+    let admitted = false;
+    const blocked = q.push(2).then(() => {
+      admitted = true;
+    });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    await expect(iterator.next()).resolves.toEqual({ value: 1, done: false });
+    await blocked;
+
+    const err = new Error("failed");
+    const failed = createAsyncQueue<number>({ capacity: 1 });
+    await failed.push(1);
+    const failedPush = failed.push(2);
+    failed.fail(err);
+    await expect(failedPush).rejects.toBe(err);
+
+    const closed = createAsyncQueue<number>({ capacity: 1 });
+    await closed.push(1);
+    const closedPush = closed.push(2);
+    closed.close();
+    await expect(closedPush).rejects.toThrow("closed");
+
+    const cancelled = createAsyncQueue<number>({ capacity: 1, cancelError: () => err });
+    await cancelled.push(1);
+    const cancelledPush = cancelled.push(2);
+    await cancelled.iterable[Symbol.asyncIterator]().return!();
+    await expect(cancelledPush).rejects.toBe(err);
   });
 });

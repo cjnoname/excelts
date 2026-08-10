@@ -93,6 +93,8 @@ export function createZipOperation(
   );
 
   const queue = createAsyncQueue<Uint8Array>({
+    capacity: 1,
+    cancelError: () => createAbortError("cancelled"),
     onCancel: () => {
       try {
         controller.abort("cancelled");
@@ -101,6 +103,8 @@ export function createZipOperation(
       }
     }
   });
+
+  let outputTail = Promise.resolve();
 
   const zip = new StreamingZip(
     (err, data, final) => {
@@ -114,15 +118,20 @@ export function createZipOperation(
         progress.mutate(s => {
           s.bytesOut += data.length;
         });
-        queue.push(data);
+        outputTail = outputTail.then(() => queue.push(data));
+        void outputTail.catch(() => undefined);
       }
 
       if (final) {
-        if (progress.snapshot.phase === "running") {
-          progress.update({ phase: "done" });
-        }
-        queue.close();
+        outputTail = outputTail.then(() => {
+          if (progress.snapshot.phase === "running") {
+            progress.update({ phase: "done" });
+          }
+          queue.close();
+        });
+        void outputTail.catch(() => undefined);
       }
+      return outputTail;
     },
     {
       comment: zipOptions.comment,
@@ -147,9 +156,10 @@ export function createZipOperation(
   (async () => {
     try {
       await processFn({ zip, signal, progress });
+      await outputTail;
     } catch (e) {
       const err = toError(e);
-      if (err.name === "AbortError") {
+      if (signal.aborted || err.name === "AbortError") {
         progress.update({ phase: "aborted" });
         try {
           zip.abort(err);

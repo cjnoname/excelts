@@ -93,7 +93,7 @@ export class ZipDeflateFile {
   private _compressedSize: number = 0;
   private _finalized = false;
   private _headerEmitted = false;
-  private _ondata: ((data: Uint8Array, final: boolean) => void) | null = null;
+  private _ondata: ((data: Uint8Array, final: boolean) => void | Promise<void>) | null = null;
   private _onerror: ((err: Error) => void) | null = null;
   private _centralDirEntryInfo: ZipCentralDirEntry | null = null;
   private _pendingEnd = false;
@@ -133,6 +133,7 @@ export class ZipDeflateFile {
 
   // Serialize push() calls so callers don't need to await to preserve ordering.
   private _pushChain: Promise<void> = Promise.resolve();
+  private _outputTail: Promise<void> = Promise.resolve();
 
   // Input batching: accumulate small chunks before feeding the compression
   // pipeline.  This collapses thousands of tiny push() calls (each creating a
@@ -542,13 +543,21 @@ export class ZipDeflateFile {
 
   private _enqueueData(data: Uint8Array, final: boolean): void {
     if (this._ondata) {
-      this._ondata(data, final);
+      this._trackHandoff(this._ondata(data, final));
     } else {
       this._dataQueue.push(data);
       if (final) {
         this._finalQueued = true;
       }
     }
+  }
+
+  private _trackHandoff(handoff: void | Promise<void>): void {
+    if (!handoff) {
+      return;
+    }
+    this._outputTail = this._outputTail.then(() => handoff);
+    void this._outputTail.catch(() => undefined);
   }
 
   private _flushQueue(): void {
@@ -559,17 +568,17 @@ export class ZipDeflateFile {
     const len = this._dataQueue.length;
     const finalIndex = this._finalQueued ? len - 1 : -1;
     for (let i = 0; i < len; i++) {
-      this._ondata(this._dataQueue[i], i === finalIndex);
+      this._trackHandoff(this._ondata(this._dataQueue[i], i === finalIndex));
     }
     this._dataQueue.length = 0;
     this._finalQueued = false;
   }
 
-  get ondata(): ((data: Uint8Array, final: boolean) => void) | null {
+  get ondata(): ((data: Uint8Array, final: boolean) => void | Promise<void>) | null {
     return this._ondata;
   }
 
-  set ondata(cb: (data: Uint8Array, final: boolean) => void) {
+  set ondata(cb: (data: Uint8Array, final: boolean) => void | Promise<void>) {
     this._ondata = cb;
     // Flush any queued data
     this._flushQueue();
@@ -627,6 +636,11 @@ export class ZipDeflateFile {
       return;
     }
     promise.then(() => callback()).catch(err => callback(err));
+  }
+
+  private async _waitForOutput(promise: Promise<void>): Promise<void> {
+    await promise;
+    await this._outputTail;
   }
 
   private _writeDataSync(data: Uint8Array, final: boolean): void {
@@ -819,7 +833,8 @@ export class ZipDeflateFile {
           ? flushPromise.then(() => this._writeData(data))
           : this._writeData(data);
       }
-      const promise = final ? this._finalizeAfterWrite(writePromise) : writePromise;
+      const outputPromise = final ? this._finalizeAfterWrite(writePromise) : writePromise;
+      const promise = this._waitForOutput(outputPromise);
       this._tapCallback(promise, callback);
       return promise;
     }
@@ -827,7 +842,8 @@ export class ZipDeflateFile {
     this._emitHeaderIfNeeded();
 
     const writePromise = this._writeData(data);
-    const promise = final ? this._finalizeAfterWrite(writePromise) : writePromise;
+    const outputPromise = final ? this._finalizeAfterWrite(writePromise) : writePromise;
+    const promise = this._waitForOutput(outputPromise);
     this._tapCallback(promise, callback);
     return promise;
   }
@@ -861,43 +877,30 @@ export class ZipDeflateFile {
         callback?.(err instanceof Error ? err : new Error(String(err)));
         return Promise.reject(err);
       }
-      return Promise.resolve();
+      return this._outputTail;
     }
 
     // --- Async path: batch small chunks to reduce Promise-chain overhead ---
-    // Each real push through the async pipeline creates a full Promise chain
-    // (push → _pushChain → _pushUnchained → AsyncStreamCodec.writeChain →
-    // CompressionStream.writer.write).  By accumulating small chunks into a
-    // 64 KB buffer we reduce the number of async round-trips by ~100x for
-    // typical XML workloads without sacrificing streaming semantics.
-
     if (!final && data.length > 0 && data.length < INPUT_BATCH_BYTES) {
-      // Lazy-allocate the batch buffer.
       if (!this._inputBuf) {
         this._inputBuf = new Uint8Array(INPUT_BATCH_BYTES);
         this._inputPos = 0;
       }
-
-      // If the chunk fits in the remaining space, just copy it in.
       if (this._inputPos + data.length <= INPUT_BATCH_BYTES) {
         this._inputBuf.set(data, this._inputPos);
         this._inputPos += data.length;
-
-        // Not full yet — return resolved promise, no async work.
         callback?.();
-        return Promise.resolve();
+        return this._outputTail;
       }
 
-      // Buffer would overflow — flush everything (buffered + new data) together.
       const combined = new Uint8Array(this._inputPos + data.length);
       combined.set(this._inputBuf.subarray(0, this._inputPos));
       combined.set(data, this._inputPos);
       this._inputPos = 0;
-
       return this._pushAsync(combined, false, callback);
     }
 
-    // Large chunk or final — flush any buffered data first, then push.
+    // Large or final data flushes any buffered input first.
     if (this._inputPos > 0) {
       const flushData = this._inputBuf!.slice(0, this._inputPos);
       this._inputPos = 0;
@@ -1099,6 +1102,22 @@ export class ZipDeflateFile {
     return this._ensureCompletePromise();
   }
 
+  /** @internal Wait until input accepted so far has emitted and handed off its output. */
+  async outputCheckpoint(): Promise<void> {
+    if (this._inputPos > 0) {
+      const data = this._inputBuf!.slice(0, this._inputPos);
+      this._inputPos = 0;
+      await this._pushAsync(data, false);
+    }
+    await this._pushChain;
+    // Smart STORE intentionally buffers up to SMART_STORE_DECIDE_BYTES before
+    // choosing STORE vs DEFLATE. Do not force that decision merely to create an
+    // output checkpoint: doing so would change compression semantics for small
+    // streaming chunks. Until output exists, there is nothing downstream to
+    // backpressure; the fixed 16 KiB sample is the producer-side memory bound.
+    await this._outputTail;
+  }
+
   /**
    * Get entry metadata in the same shape as unzip parser outputs.
    * This is best-effort: writer-only fields like encryption are always false.
@@ -1188,8 +1207,9 @@ export class ZipRawFile implements ZipWritableFile {
   private _dataQueueHead = 0;
   private _finalQueued = false;
 
-  private _ondata: ((data: Uint8Array, final: boolean) => void) | null = null;
+  private _ondata: ((data: Uint8Array, final: boolean) => void | Promise<void>) | null = null;
   private _onerror: ((err: Error) => void) | null = null;
+  private _outputTail: Promise<void> = Promise.resolve();
 
   private _centralDirEntryInfo: ZipCentralDirEntry;
 
@@ -1296,11 +1316,11 @@ export class ZipRawFile implements ZipWritableFile {
     return this._donePromise;
   }
 
-  get ondata(): ((data: Uint8Array, final: boolean) => void) | null {
+  get ondata(): ((data: Uint8Array, final: boolean) => void | Promise<void>) | null {
     return this._ondata;
   }
 
-  set ondata(fn: ((data: Uint8Array, final: boolean) => void) | null) {
+  set ondata(fn: ((data: Uint8Array, final: boolean) => void | Promise<void>) | null) {
     this._ondata = fn;
     this._drainQueue();
   }
@@ -1337,7 +1357,11 @@ export class ZipRawFile implements ZipWritableFile {
 
     while (this._dataQueueHead < this._dataQueue.length) {
       const chunk = this._dataQueue[this._dataQueueHead++]!;
-      this._ondata(chunk, false);
+      const handoff = this._ondata(chunk, false);
+      if (handoff) {
+        this._outputTail = this._outputTail.then(() => handoff);
+        void this._outputTail.catch(() => undefined);
+      }
     }
 
     if (this._dataQueueHead > 0) {
@@ -1347,17 +1371,25 @@ export class ZipRawFile implements ZipWritableFile {
 
     if (this._finalQueued) {
       this._finalQueued = false;
-      this._ondata(EMPTY_UINT8ARRAY, true);
+      const handoff = this._ondata(EMPTY_UINT8ARRAY, true);
+      if (handoff) {
+        this._outputTail = this._outputTail.then(() => handoff);
+        void this._outputTail.catch(() => undefined);
+      }
 
       // Emitting final means this file is fully written.
-      try {
-        this._doneResolve?.();
-      } catch {
-        // ignore
-      } finally {
-        this._doneResolve = null;
-        this._doneReject = null;
-      }
+      void this._outputTail.then(
+        () => {
+          this._doneResolve?.();
+          this._doneResolve = null;
+          this._doneReject = null;
+        },
+        err => {
+          this._doneReject?.(err);
+          this._doneResolve = null;
+          this._doneReject = null;
+        }
+      );
     }
   }
 
@@ -1399,6 +1431,7 @@ export class ZipRawFile implements ZipWritableFile {
         // Fast path: emit entire buffer if small enough (avoids loop overhead)
         if (this._source.length <= this._chunkSize) {
           this._enqueueData(this._source, false);
+          await this._outputTail;
         } else {
           for (let offset = 0; offset < this._source.length; offset += this._chunkSize) {
             const chunk = this._source.subarray(
@@ -1406,17 +1439,20 @@ export class ZipRawFile implements ZipWritableFile {
               Math.min(this._source.length, offset + this._chunkSize)
             );
             this._enqueueData(chunk, false);
+            await this._outputTail;
           }
         }
       } else {
         for await (const chunk of this._source) {
           this._enqueueData(chunk, false);
+          await this._outputTail;
         }
       }
 
       if (!this._finalized) {
         this._finalized = true;
         this._enqueueData(this._buildDataDescriptor(), true);
+        await this._outputTail;
       }
     } catch (e) {
       const err = toError(e);
@@ -1463,7 +1499,7 @@ export class ZipRawFile implements ZipWritableFile {
  * Streaming ZIP Creator - processes files sequentially
  */
 export class StreamingZip {
-  private callback: (err: Error | null, data: Uint8Array, final: boolean) => void;
+  private callback: (err: Error | null, data: Uint8Array, final: boolean) => void | Promise<void>;
   private entries: ZipCentralDirEntry[] = [];
   private currentOffset = 0;
   private ended = false;
@@ -1481,7 +1517,7 @@ export class StreamingZip {
   private activeFile: ZipWritableFile | null = null;
 
   constructor(
-    callback: (err: Error | null, data: Uint8Array, final: boolean) => void,
+    callback: (err: Error | null, data: Uint8Array, final: boolean) => void | Promise<void>,
     options?: {
       comment?: string;
       zip64?: Zip64Mode;
@@ -1546,7 +1582,7 @@ export class StreamingZip {
         return;
       }
       this.currentOffset += data.length;
-      this.callback(null, data, false);
+      const handoff = this.callback(null, data, false);
 
       if (final) {
         const entryInfo = file.getCentralDirectoryEntryInfo();
@@ -1558,6 +1594,7 @@ export class StreamingZip {
         // Process next file
         this._processNextFile();
       }
+      return handoff;
     };
 
     // Auto-start writers that require an explicit start().
