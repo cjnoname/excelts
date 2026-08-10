@@ -116,8 +116,9 @@ export function writeStream(
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
  * backpressure is sampled after each ZIP entry, and a worksheet is rendered as
  * one entry, so peak buffering may substantially exceed the
- * configured value and is usually driven by the largest worksheet. Reach for
- * `Stream.WorkbookWriter` when row-level flow control matters.
+ * configured value and is usually driven by the largest worksheet. See
+ * {@link XlsxStreamOptions.highWaterMark} for how `Stream.WorkbookWriter`
+ * compares.
  *
  * Do not mutate the workbook until the stream ends. A consumer that abandons the
  * stream should `destroy()` it, which releases the parked writer; serialization
