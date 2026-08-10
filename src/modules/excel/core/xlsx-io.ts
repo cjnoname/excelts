@@ -117,8 +117,8 @@ export function writeStream(
  * ```
  *
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
- * backpressure is sampled at selected ZIP-entry boundaries, and a worksheet is
- * rendered in one pass, so peak buffering may substantially exceed the
+ * backpressure is sampled after each ZIP entry, and a worksheet is rendered as
+ * one entry, so peak buffering may substantially exceed the
  * configured value and is usually driven by the largest worksheet. Reach for
  * `Stream.WorkbookWriter` when row-level flow control matters.
  *

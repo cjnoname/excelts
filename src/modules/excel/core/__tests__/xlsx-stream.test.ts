@@ -1,4 +1,3 @@
-import { createXlsxByteStream } from "@excel/core/xlsx-stream";
 /**
  * `Workbook.toStream` / `Workbook.writeStream` contract.
  *
@@ -6,11 +5,9 @@ import { createXlsxByteStream } from "@excel/core/xlsx-stream";
  * adapter lives in `core/xlsx-stream.ts` and only the `@stream` `Readable`
  * underneath it is platform specific — so this suite deliberately avoids Node
  * APIs and runs in both Node and a real browser.
- *
- * Node-specific consequences of the writer's ZIP-entry backpressure granularity
- * (which depends on synchronous deflate) are pinned in `xlsx.node.test.ts`.
  */
-import { Cell, Workbook } from "@excel/index";
+import { createXlsxByteStream } from "@excel/core/xlsx-stream";
+import { Cell, Image, Workbook } from "@excel/index";
 import { describe, it, expect } from "vitest";
 
 const PAYLOAD = "0123456789abcdef".repeat(32);
@@ -21,6 +18,26 @@ function buildWorkbook(rows: number): Workbook.Handle {
   const ws = Workbook.addWorksheet(wb, "Stream");
   for (let row = 1; row <= rows; row++) {
     Cell.setValue(ws, `A${row}`, `${row}-${PAYLOAD}`);
+  }
+  return wb;
+}
+
+/**
+ * Build a workbook dominated by many sizeable, poorly compressible images, i.e.
+ * a package whose bulk arrives through buffered parts rather than worksheet XML.
+ */
+function buildImageWorkbook(count: number, bytesEach: number): Workbook.Handle {
+  const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "S");
+  Cell.setValue(ws, "A1", "x");
+  for (let i = 0; i < count; i++) {
+    const buffer = new Uint8Array(bytesEach);
+    let seed = i + 1;
+    for (let b = 0; b < bytesEach; b++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      buffer[b] = seed & 0xff;
+    }
+    Image.place(ws, Image.add(wb, { buffer, extension: "png" }), `B${2 + i * 6}:D${6 + i * 6}`);
   }
   return wb;
 }
@@ -170,6 +187,30 @@ describe("Workbook.toStream", () => {
 
     source.destroy();
   });
+
+  it("keeps buffering near one part for a package built from buffered entries", async () => {
+    // Images are written as already-materialised parts, so this is the path that
+    // bypassed flow control entirely: every image was queued before anything
+    // asked the reader whether it could keep up. Measured before the fix, the
+    // queue held the whole package (5,245,333 of 5,253,330 bytes on Node,
+    // 4,982,444 in Chromium); afterwards it stays near a single image.
+    const wb = buildImageWorkbook(12, 128 * 1024);
+    const packageSize = (await Workbook.toBuffer(wb)).length;
+    const source = Workbook.toStream(wb, { highWaterMark: 1024 });
+
+    let peak = 0;
+    for await (const chunk of source) {
+      void chunk;
+      peak = Math.max(peak, source.readableLength);
+      // Consume deliberately slowly: a writer that ignores the reader has every
+      // opportunity to run ahead here.
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    // Half the package is a deliberately loose bound — the point is the
+    // difference between "one part" and "everything", not an exact figure.
+    expect(peak).toBeLessThan(packageSize / 2);
+  }, 60000);
 
   it("uses the same buffer thresholds on every runtime", async () => {
     // Node and browser resolve the default through the same `@stream` helper;

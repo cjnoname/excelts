@@ -221,10 +221,11 @@ export interface IStreamBuf extends XlsxWritable {
 export interface IZipWriter extends EmitterLike {
   append(data: string | Uint8Array, options: { name: string; base64?: boolean }): void;
   /**
-   * Create a streaming entry. `end()` resolves only after its compressed output
-   * has reached `ondata`, so callers can sample sink backpressure afterwards.
+   * Create a streaming entry: write chunks incrementally, then call end().
+   * The entry's compressed output is tracked internally, so a later
+   * `waitForDrain()` observes it even when compression is asynchronous.
    */
-  createEntry(name: string): { write(chunk: string): void; end(): Promise<void> };
+  createEntry(name: string): { write(chunk: string): void; end(): void };
   pipe(stream: XlsxWritable): void;
   finalize(): void;
   /** Wait for downstream backpressure to clear. Resolves immediately if no backpressure. */
@@ -251,6 +252,12 @@ class StreamingZipWriterAdapter implements IZipWriter {
   private _pendingWriteResolvers: Array<() => void> = [];
   private _sinkTerminated = false;
   private _sinkError: Error | null = null;
+  // Compressed output that has been requested but has not reached the sink yet.
+  // Browser deflate is asynchronous, so an entry's bytes are handed to
+  // `pipedStream.write()` after the call that produced them has returned.
+  // `waitForDrain()` joins these first, otherwise it would sample `_needsDrain`
+  // before the sink ever saw the data and read a stale "no backpressure".
+  private readonly _pendingOutput = new Set<Promise<void>>();
 
   // Buffer errors that occur before _finalize registers its error listener,
   // so async compression errors during writeToZip() are never silently lost.
@@ -422,11 +429,33 @@ class StreamingZipWriterAdapter implements IZipWriter {
   }
 
   /**
+   * Track one entry's compressed output until it has been handed to the sink.
+   * Only settlement matters here: compression failures travel through the
+   * `'error'` channel (`StreamingZip` reports them via the adapter callback),
+   * and swallowing the rejection keeps them from surfacing twice.
+   */
+  private _trackOutput(output: Promise<void>): void {
+    const settled = output.then(
+      () => {},
+      () => {}
+    );
+    this._pendingOutput.add(settled);
+    void settled.then(() => {
+      this._pendingOutput.delete(settled);
+    });
+  }
+
+  /**
    * Wait for the downstream writable to drain if it signaled backpressure.
    * If any write() calls are still in-flight (returned a Promise that hasn't
    * settled), waits for all of them first so the backpressure signal isn't missed.
    */
   async waitForDrain(): Promise<void> {
+    // Let every byte produced so far reach the sink before asking whether it
+    // wants us to pause; see `_pendingOutput`.
+    if (this._pendingOutput.size > 0) {
+      await Promise.all([...this._pendingOutput]);
+    }
     // Wait for all in-flight async writes to settle so _needsDrain is up to date.
     if (this._pendingWrites > 0) {
       await new Promise<void>(resolve => {
@@ -471,10 +500,10 @@ class StreamingZipWriterAdapter implements IZipWriter {
     });
     this.zip.add(file);
 
-    file.push(buffer, true);
+    this._trackOutput(file.push(buffer, true));
   }
 
-  createEntry(name: string): { write(chunk: string): void; end(): Promise<void> } {
+  createEntry(name: string): { write(chunk: string): void; end(): void } {
     if (this.finalized) {
       throw new ExcelStreamStateError("createEntry", "stream already finalized");
     }
@@ -489,8 +518,8 @@ class StreamingZipWriterAdapter implements IZipWriter {
       write(chunk: string): void {
         file.push(encoder.encode(chunk));
       },
-      end(): Promise<void> {
-        return file.push(new Uint8Array(0), true);
+      end: (): void => {
+        this._trackOutput(file.push(new Uint8Array(0), true));
       }
     };
   }
@@ -5051,7 +5080,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         continue;
       }
       for (const [path, bytes] of Object.entries(source)) {
-        zip.append(bytes, { name: path });
+        await this._appendToZip(zip, bytes, { name: path });
       }
     }
   }
@@ -5067,7 +5096,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     if (!persons || persons.length === 0) {
       return;
     }
-    zip.append(renderPersonList(persons), { name: "xl/persons/person.xml" });
+    await this._appendToZip(zip, renderPersonList(persons), { name: "xl/persons/person.xml" });
   }
 
   // ===========================================================================
@@ -5519,8 +5548,12 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
    * Supports buffer, base64, and filename (if readFileAsync is provided)
    */
   async addMedia(zip: IZipWriter, model: MediaModel): Promise<void> {
-    await Promise.all(
-      model.media.map(async (medium: WorkbookMediaLike) => {
+    // Keep filename reads concurrent as before, but append the resolved data in
+    // model order. ZIP output itself is strictly sequential, and only a
+    // sequential append makes each completion promise mean that entry's bytes
+    // have reached the sink before backpressure is inspected.
+    const resolved = await Promise.all(
+      (model.media as WorkbookMediaLike[]).map(async medium => {
         if (medium.type !== "image") {
           throw new ImageError("Unsupported media");
         }
@@ -5529,17 +5562,16 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         // written into the package; the relationship (TargetMode="External")
         // references the image in place.
         if (isExternalImage(medium)) {
-          return;
+          return null;
         }
 
         // Preserve legacy behavior: `${undefined}` becomes "undefined" in template strings
         const mediaName = medium.name ?? "undefined";
-        const filename = mediaPath(`${mediaName}.${medium.extension}`);
+        const name = mediaPath(`${mediaName}.${medium.extension}`);
 
         if (medium.filename) {
           if (this.readFileAsync) {
-            const data = await this.readFileAsync(medium.filename);
-            return zip.append(data, { name: filename });
+            return { data: await this.readFileAsync(medium.filename), options: { name } };
           }
           throw new ExcelNotSupportedError(
             "Loading images from filename",
@@ -5548,17 +5580,25 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         }
 
         if (medium.buffer) {
-          return zip.append(medium.buffer, { name: filename });
+          return { data: medium.buffer, options: { name } };
         }
 
         if (medium.base64) {
-          const content = medium.base64.substring(medium.base64.indexOf(",") + 1);
-          return zip.append(content, { name: filename, base64: true });
+          return {
+            data: medium.base64.substring(medium.base64.indexOf(",") + 1),
+            options: { name, base64: true }
+          };
         }
 
         throw new ImageError("Unsupported media");
       })
     );
+
+    for (const media of resolved) {
+      if (media) {
+        await this._appendToZip(zip, media.data, media.options);
+      }
+    }
   }
 
   /**
@@ -6840,8 +6880,24 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     const entry = zip.createEntry(path);
     const stream = new XmlStreamWriter(entry);
     xform.render(stream, model);
-    await entry.end();
+    entry.end();
     // Respect downstream backpressure between entries
+    await zip.waitForDrain();
+  }
+
+  /**
+   * Write one already-materialised part, then give the sink a chance to push
+   * back. Every part goes through here (or `_renderToZip`) so peak buffering
+   * stays near a single entry instead of growing with the package: a forgotten
+   * checkpoint would not corrupt anything, it would just let that part's bytes
+   * queue up unthrottled.
+   */
+  private async _appendToZip(
+    zip: IZipWriter,
+    data: string | Uint8Array,
+    options: { name: string; base64?: boolean }
+  ): Promise<void> {
+    zip.append(data, options);
     await zip.waitForDrain();
   }
 
@@ -6859,10 +6915,10 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
 
   async addThemes(zip: IZipWriter, model: any): Promise<void> {
     const themes = model.themes || { theme1: theme1Xml };
-    Object.keys(themes).forEach(name => {
+    for (const name of Object.keys(themes)) {
       const xml = themes[name];
-      zip.append(xml, { name: themePath(name) });
-    });
+      await this._appendToZip(zip, xml, { name: themePath(name) });
+    }
   }
 
   async addOfficeRels(zip: IZipWriter, _model: any): Promise<void> {
@@ -7072,7 +7128,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       // the payload is small and the shape maps 1:1 onto the output.
       if (worksheet.threadedComments && worksheet.threadedComments.length > 0) {
         const xml = renderThreadedComments(worksheet.threadedComments);
-        zip.append(xml, {
+        await this._appendToZip(zip, xml, {
           name: `xl/threadedComments/threadedComment${fileIndex}.xml`
         });
       }
@@ -7327,7 +7383,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
               : chartRelTargetFromDrawing(cs.chartNumber)
           }
         ];
-        zip.append(drawingXml, { name: drawingPath(cs.drawingName) });
+        await this._appendToZip(zip, drawingXml, { name: drawingPath(cs.drawingName) });
         await this._renderToZip(zip, drawingRelsPath(cs.drawingName), relsXform, drawingRels);
       }
     }
@@ -7340,12 +7396,12 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       [string, ChartEntry]
     >) {
       if (shouldPassthroughChartEntry(chartEntry)) {
-        zip.append(chartEntry.rawData, { name: chartPath(n) });
+        await this._appendToZip(zip, chartEntry.rawData, { name: chartPath(n) });
       } else {
         const requireRawPatch = shouldRequireChartRawPatch(chartEntry, strictTemplateMode);
         const patched = tryPatchChartRawXml(chartEntry, requireRawPatch);
         if (patched) {
-          zip.append(patched, { name: chartPath(n) });
+          await this._appendToZip(zip, patched, { name: chartPath(n) });
         } else {
           if (requireRawPatch) {
             throw new ChartOptionsError(buildChartStrictFailureMessage(n, chartEntry.model));
@@ -7356,18 +7412,18 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
           // backed xform parser drops `comment` events so the
           // structured model has no memory of them.
           const buffered = renderChartWithLeadingComments(chartEntry, new ChartSpaceXform());
-          zip.append(buffered, { name: chartPath(n) });
+          await this._appendToZip(zip, buffered, { name: chartPath(n) });
         }
       }
 
       // Write chart style (raw bytes)
       if (model.chartStyles?.[n]) {
-        zip.append(model.chartStyles[n], { name: chartStylePath(n) });
+        await this._appendToZip(zip, model.chartStyles[n], { name: chartStylePath(n) });
       }
 
       // Write chart colors (raw bytes)
       if (model.chartColors?.[n]) {
-        zip.append(model.chartColors[n], { name: chartColorsPath(n) });
+        await this._appendToZip(zip, model.chartColors[n], { name: chartColorsPath(n) });
       }
 
       // Build chart rels
@@ -7441,7 +7497,9 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       // Target accordingly so the chart XML's existing `r:id` still
       // resolves.
       if (chartEntry.userShapesXml) {
-        zip.append(chartEntry.userShapesXml, { name: chartUserShapesPath(n) });
+        await this._appendToZip(zip, chartEntry.userShapesXml, {
+          name: chartUserShapesPath(n)
+        });
         const targetPath = chartUserShapesRelTarget(n);
         const existingRel = rels.find(r => r?.Type === RelType.ChartUserShapes);
         if (existingRel) {
@@ -7477,7 +7535,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         const requireRawPatch = shouldRequireChartExRawPatch(structuredEntry, strictTemplateMode);
         const patched = tryPatchChartExRawXml(structuredEntry, requireRawPatch);
         if (patched) {
-          zip.append(patched, { name: chartExPath(n) });
+          await this._appendToZip(zip, patched, { name: chartExPath(n) });
         } else {
           if (requireRawPatch) {
             throw new ChartOptionsError(buildChartExStrictFailureMessage(n, structuredEntry.model));
@@ -7491,12 +7549,12 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
             ? new TextDecoder().decode(rawBytes as Uint8Array)
             : structuredEntry.model.rawXml;
           const finalXml = spliceChartExLeadingComments(renderedXml, originalRawXml);
-          zip.append(finalXml, {
+          await this._appendToZip(zip, finalXml, {
             name: chartExPath(n)
           });
         }
       } else {
-        zip.append(rawBytes as Uint8Array, { name: chartExPath(n) });
+        await this._appendToZip(zip, rawBytes as Uint8Array, { name: chartExPath(n) });
       }
       written.add(n);
 
@@ -7506,7 +7564,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       if (chartExRels.length > 0) {
         await this._renderToZip(zip, chartExRelsPath(n), relsXform, chartExRels);
       }
-      this._appendChartExSidecars(zip, model, n, structuredEntry);
+      await this._appendChartExSidecars(zip, model, n, structuredEntry);
     }
 
     // 2. Structured chartEx entries — built programmatically via addChartEx()
@@ -7521,8 +7579,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       // mutated model (any stale `rawXml` from earlier mutations
       // would mask the rewrite).
       const xml = renderChartEx(entry.model, { forceStructural: true });
-      zip.append(xml, { name: chartExPath(n) });
-      this._appendChartExSidecars(zip, model, n, entry);
+      await this._appendToZip(zip, xml, { name: chartExPath(n) });
+      await this._appendChartExSidecars(zip, model, n, entry);
       const chartExRels = this._buildChartExRels(n, entry.rels, model, entry);
       if (chartExRels.length > 0) {
         await this._renderToZip(zip, chartExRelsPath(n), relsXform, chartExRels);
@@ -7530,25 +7588,25 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     }
   }
 
-  private _appendChartExSidecars(
+  private async _appendChartExSidecars(
     zip: IZipWriter,
     model: any,
     n: string,
     entry?: ChartExEntry
-  ): void {
+  ): Promise<void> {
     if (entry?.model.style) {
-      zip.append(new TextEncoder().encode(buildChartStyle(entry.model.style)), {
+      await this._appendToZip(zip, new TextEncoder().encode(buildChartStyle(entry.model.style)), {
         name: chartExStylePath(n)
       });
     } else if (model.chartExStyles?.[n]) {
-      zip.append(model.chartExStyles[n], { name: chartExStylePath(n) });
+      await this._appendToZip(zip, model.chartExStyles[n], { name: chartExStylePath(n) });
     }
     if (entry?.model.colors) {
-      zip.append(new TextEncoder().encode(buildChartColors(entry.model.colors)), {
+      await this._appendToZip(zip, new TextEncoder().encode(buildChartColors(entry.model.colors)), {
         name: chartExColorsPath(n)
       });
     } else if (model.chartExColors?.[n]) {
-      zip.append(model.chartExColors[n], { name: chartExColorsPath(n) });
+      await this._appendToZip(zip, model.chartExColors[n], { name: chartExColorsPath(n) });
     }
   }
 

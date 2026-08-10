@@ -23,8 +23,8 @@ export interface XlsxStreamOptions extends XlsxWriteOptions {
    * after which the writer is asked to pause. Defaults to the `@stream` default
    * (64 KB).
    *
-   * This is **not** a hard memory bound. Backpressure is sampled at selected
-   * ZIP-entry boundaries, and a worksheet is rendered in one pass, so peak
+   * This is **not** a hard memory bound. Backpressure is sampled after each ZIP
+   * entry, and a worksheet is rendered as one entry, so peak
    * buffering may substantially exceed this value and is usually driven by the
    * largest worksheet. Use `Stream.WorkbookWriter` when row-level flow control
    * is required.
