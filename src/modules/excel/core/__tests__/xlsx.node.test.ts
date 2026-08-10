@@ -374,25 +374,9 @@ describe("XLSX", () => {
       return wb;
     }
 
-    // The cross-platform `toStream` / `writeStream` contract lives in
-    // `xlsx-stream.test.ts`; what follows depends on Node's synchronous deflate
-    // and on real `stream.PassThrough` buffering thresholds.
-
-    it("toStream() buffers a whole worksheet regardless of highWaterMark", async () => {
-      // Documented limitation, pinned on purpose: the writer can only park at
-      // ZIP-entry boundaries, so `highWaterMark` decides when it is *asked* to
-      // pause, not how much may queue up. If flow control ever becomes finer
-      // grained, update `XlsxStreamOptions.highWaterMark`'s docs along with it.
-      const source = Workbook.toStream(buildStreamWorkbook(20_000), { highWaterMark: 1024 });
-
-      let peakBuffered = 0;
-      for await (const chunk of source) {
-        void chunk;
-        peakBuffered = Math.max(peakBuffered, source.readableLength);
-      }
-
-      expect(peakBuffered).toBeGreaterThan(64 * 1024);
-    });
+    // The cross-platform `toStream` / sink lifecycle contract lives in
+    // `xlsx-stream.test.ts`; these cases additionally exercise it through a
+    // real Node PassThrough.
 
     it("writeStream() rejects when the sink closes before the package is complete", async () => {
       const wb = buildStreamWorkbook(20_000);

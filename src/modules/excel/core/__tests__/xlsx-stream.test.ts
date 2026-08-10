@@ -1,3 +1,4 @@
+import { createXlsxByteStream } from "@excel/core/xlsx-stream";
 /**
  * `Workbook.toStream` / `Workbook.writeStream` contract.
  *
@@ -144,6 +145,30 @@ describe("Workbook.toStream", () => {
       source.once("error", reject);
     });
     expect(source.destroyed).toBe(true);
+  });
+
+  it("forwards readable backpressure to the serializer", async () => {
+    let accepted: boolean | void | Promise<boolean> | undefined;
+    let didWrite!: () => void;
+    const written = new Promise<void>(resolve => {
+      didWrite = resolve;
+    });
+    const source = createXlsxByteStream(
+      async sink => {
+        accepted = sink.write(new Uint8Array(1024));
+        didWrite();
+      },
+      { highWaterMark: 1 }
+    );
+
+    // Start the lazy serializer without taking bytes out of its queue. The
+    // chunk exceeds the 1-byte mark, so `Readable.push()` and therefore the
+    // sink handed to the serializer must return false.
+    source.read(0);
+    await written;
+    expect(accepted).toBe(false);
+
+    source.destroy();
   });
 
   it("uses the same buffer thresholds on every runtime", async () => {

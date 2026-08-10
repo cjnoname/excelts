@@ -220,8 +220,11 @@ export interface IStreamBuf extends XlsxWritable {
 
 export interface IZipWriter extends EmitterLike {
   append(data: string | Uint8Array, options: { name: string; base64?: boolean }): void;
-  /** Create a streaming entry: write chunks incrementally, then call end(). */
-  createEntry(name: string): { write(chunk: string): void; end(): void };
+  /**
+   * Create a streaming entry. `end()` resolves only after its compressed output
+   * has reached `ondata`, so callers can sample sink backpressure afterwards.
+   */
+  createEntry(name: string): { write(chunk: string): void; end(): Promise<void> };
   pipe(stream: XlsxWritable): void;
   finalize(): void;
   /** Wait for downstream backpressure to clear. Resolves immediately if no backpressure. */
@@ -471,7 +474,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
     file.push(buffer, true);
   }
 
-  createEntry(name: string): { write(chunk: string): void; end(): void } {
+  createEntry(name: string): { write(chunk: string): void; end(): Promise<void> } {
     if (this.finalized) {
       throw new ExcelStreamStateError("createEntry", "stream already finalized");
     }
@@ -486,8 +489,8 @@ class StreamingZipWriterAdapter implements IZipWriter {
       write(chunk: string): void {
         file.push(encoder.encode(chunk));
       },
-      end(): void {
-        file.push(new Uint8Array(0), true);
+      end(): Promise<void> {
+        return file.push(new Uint8Array(0), true);
       }
     };
   }
@@ -6837,7 +6840,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     const entry = zip.createEntry(path);
     const stream = new XmlStreamWriter(entry);
     xform.render(stream, model);
-    entry.end();
+    await entry.end();
     // Respect downstream backpressure between entries
     await zip.waitForDrain();
   }
@@ -7045,12 +7048,9 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     for (const worksheet of model.worksheets) {
       const { fileIndex } = worksheet;
 
-      // Worksheet XML: stream directly to zip entry (avoids holding entire XML in memory)
-      const wsEntry = zip.createEntry(worksheetPath(fileIndex));
-      const wsStream = new XmlStreamWriter(wsEntry);
-      worksheetXform.render(wsStream, worksheet);
-      wsEntry.end();
-      await zip.waitForDrain();
+      // Worksheet XML: stream directly to the zip entry (avoids holding the
+      // entire XML in memory) and use the shared completion/backpressure path.
+      await this._renderToZip(zip, worksheetPath(fileIndex), worksheetXform, worksheet);
 
       if (worksheet.rels && worksheet.rels.length) {
         await this._renderToZip(

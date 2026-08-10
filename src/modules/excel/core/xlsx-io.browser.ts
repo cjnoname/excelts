@@ -113,11 +113,11 @@ export function writeStream(
  * const response = new Response(Readable.toWeb(Workbook.toStream(wb) as Readable));
  * ```
  *
- * Buffering is bounded by ZIP-entry granularity rather than by
- * {@link XlsxStreamOptions.highWaterMark}: a worksheet is rendered in one
- * uninterruptible burst, so peak memory is roughly the compressed size of the
- * largest worksheet. Reach for `Stream.WorkbookWriter` when row-level flow
- * control matters.
+ * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
+ * backpressure is sampled at selected ZIP-entry boundaries, and a worksheet is
+ * rendered in one pass, so peak buffering may substantially exceed the
+ * configured value and is usually driven by the largest worksheet. Reach for
+ * `Stream.WorkbookWriter` when row-level flow control matters.
  *
  * Do not mutate the workbook until the stream ends. A consumer that abandons the
  * stream should `destroy()` it, which releases the parked writer; serialization
