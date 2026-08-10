@@ -11,6 +11,7 @@ import { DEFAULT_COMPRESS_LEVEL } from "@archive/core/defaults";
 import { collect } from "@archive/io/archive-sink";
 import type { ArchiveSource } from "@archive/io/archive-source";
 import { toUint8Array, isInMemoryArchiveSource, toAsyncIterable } from "@archive/io/archive-source";
+import { gzipTarChunks } from "@archive/tar/gzip-tar-stream";
 import type { TarArchiveOptions } from "@archive/tar/tar-archive";
 import { TarArchive, addEntries } from "@archive/tar/tar-archive";
 import type { TarEntry, TarParseOptions } from "@archive/tar/tar-parser";
@@ -49,47 +50,7 @@ export class TarGzArchive extends TarArchive {
    */
   override async *stream(): AsyncIterable<Uint8Array> {
     const gzipStream = createGzipStream({ level: this._gzLevel });
-    const chunks: Uint8Array[] = [];
-    let chunkHead = 0;
-
-    function clearConsumedChunks(): void {
-      if (chunkHead > 0) {
-        chunks.length = 0;
-        chunkHead = 0;
-      }
-    }
-
-    function* drainChunks(): Iterable<Uint8Array> {
-      while (chunkHead < chunks.length) {
-        yield chunks[chunkHead++]!;
-      }
-      clearConsumedChunks();
-    }
-
-    // Collect gzip output
-    gzipStream.on("data", (chunk: Uint8Array) => {
-      chunks.push(chunk);
-    });
-
-    // Pipe tar chunks through gzip
-    for await (const tarChunk of super.stream()) {
-      gzipStream.write(tarChunk);
-      // Yield any available gzip output
-      for (const chunk of drainChunks()) {
-        yield chunk;
-      }
-    }
-
-    // Finalize gzip stream
-    await new Promise<void>((resolve, reject) => {
-      gzipStream.on("error", reject);
-      gzipStream.end(() => resolve());
-    });
-
-    // Yield remaining chunks
-    for (const chunk of drainChunks()) {
-      yield chunk;
-    }
+    yield* gzipTarChunks(super.stream(), gzipStream);
   }
 }
 
