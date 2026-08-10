@@ -16,6 +16,7 @@
 
 import { Csv } from "@csv/index";
 import { CsvParserStream } from "@csv/stream";
+import type { ChunkMeta, Row } from "@csv/types";
 import { Readable } from "@stream";
 import { describe, it, expect } from "vitest";
 
@@ -104,6 +105,45 @@ describe("CsvParserStream - Basic Parsing", () => {
     expect(rows).toEqual([
       ["a", "b", "c"],
       ["1", "2", "3"]
+    ]);
+  });
+
+  it("should preserve chunk rows and callback semantics across readable backpressure", async () => {
+    const callbackChunks: { rows: Row[]; meta: ChunkMeta }[] = [];
+    const parser = new CsvParserStream({
+      chunkSize: 20,
+      chunk: (rows, meta) => {
+        callbackChunks.push({ rows: rows.map(row => [...(row as unknown[])] as Row), meta });
+      }
+    });
+    // The default object-mode readable HWM is 16, so ending 50 rows before
+    // consuming deterministically applies backpressure in the first chunk.
+    const expectedRows = Array.from({ length: 50 }, (_, index) => [
+      String(index),
+      `value-${index}`
+    ]);
+
+    parser.end(expectedRows.map(row => row.join(",")).join("\n"));
+
+    const rows: Row[] = [];
+    for await (const row of parser) {
+      rows.push(row as Row);
+    }
+
+    expect(rows).toEqual(expectedRows);
+    expect(callbackChunks).toEqual([
+      {
+        rows: expectedRows.slice(0, 20),
+        meta: { cursor: 0, rowCount: 20, isFirstChunk: true, isLastChunk: false }
+      },
+      {
+        rows: expectedRows.slice(20, 40),
+        meta: { cursor: 20, rowCount: 20, isFirstChunk: false, isLastChunk: false }
+      },
+      {
+        rows: expectedRows.slice(40),
+        meta: { cursor: 40, rowCount: 10, isFirstChunk: false, isLastChunk: true }
+      }
     ]);
   });
 });

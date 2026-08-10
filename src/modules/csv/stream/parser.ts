@@ -441,17 +441,26 @@ export class CsvParserStream extends Transform {
 
   /**
    * Push buffered rows to stream with backpressure support
-   * @returns false if backpressure is applied (downstream is full)
    */
-  private pushBufferedRows(rows: Row[]): boolean {
+  private pushBufferedRows(rows: Row[], callback: () => void): void {
     const useJson = this.options.objectMode === false;
-    for (const row of rows) {
-      const canContinue = this.push(useJson ? JSON.stringify(row) : row);
-      if (!canContinue) {
-        return false;
+
+    let index = 0;
+    const processNext = (): void => {
+      while (index < rows.length) {
+        const row = rows[index++];
+        const canContinue = this.push(useJson ? JSON.stringify(row) : row);
+        if (!canContinue) {
+          this.backpressure = true;
+          this.pendingCallback = processNext;
+          return;
+        }
       }
-    }
-    return true;
+
+      callback();
+    };
+
+    processNext();
   }
 
   /**
@@ -505,13 +514,9 @@ export class CsvParserStream extends Transform {
         isLastChunk: true
       };
 
-      // Push remaining rows to stream
-      this.pushBufferedRows(this.chunkBuffer);
-
-      // Call chunk callback
       const rows = this.chunkBuffer;
       this.chunkBuffer = [];
-      this.invokeChunkCallback(rows, meta, callback);
+      this.pushBufferedRows(rows, () => this.invokeChunkCallback(rows, meta, callback));
     } else {
       callback();
     }
@@ -1088,8 +1093,7 @@ export class CsvParserStream extends Transform {
     this.chunkBuffer = [];
 
     // Push rows to stream, then invoke callback
-    this.pushBufferedRows(rows);
-    this.invokeChunkCallback(rows, meta, callback);
+    this.pushBufferedRows(rows, () => this.invokeChunkCallback(rows, meta, callback));
   }
 
   private transformAndValidateRow(
