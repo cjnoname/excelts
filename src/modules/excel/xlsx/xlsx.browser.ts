@@ -70,6 +70,7 @@ import {
   getWorkbookModel,
   setWorkbookModel
 } from "@excel/core/workbook.browser";
+import type { XlsxEmitterLike, XlsxWritable } from "@excel/core/xlsx-io-types";
 import {
   ExcelStreamStateError,
   ExcelFileError,
@@ -196,11 +197,11 @@ import { XmlWriter } from "@xml/writer";
 
 type StreamListener = Parameters<IEventEmitter["on"]>[1];
 
-interface EmitterLike {
-  on(event: string, listener: StreamListener): this;
-  once(event: string, listener: StreamListener): this;
-  off(event: string, listener: StreamListener): this;
-}
+/**
+ * Event-emitter basics shared by every stream shape here. Aliased to the public
+ * IO contract so the serializer and `Workbook.writeStream` cannot drift apart.
+ */
+type EmitterLike = XlsxEmitterLike;
 
 export interface IParseStream extends EmitterLike {
   pipe(dest: any): any;
@@ -208,26 +209,11 @@ export interface IParseStream extends EmitterLike {
 }
 
 /**
- * Minimal write-side shape required to receive XLSX bytes. Anything that
- * behaves like a Node `WritableStream` (a `write()` method plus `end()` and
- * event emitter basics) satisfies this — including Node's `fs.WriteStream`,
- * `PassThrough`, and our `@stream` Writable class.
+ * An in-memory buffered stream. Extends {@link XlsxWritable} with `read()` and
+ * optional `toBuffer()` for callers that use the stream as a sink and then
+ * harvest the accumulated bytes (e.g. `writeBuffer()`'s internal buffer).
  */
-export interface IWritableStream extends EmitterLike {
-  write(data: string | Uint8Array): boolean | void | Promise<boolean>;
-  end(): void;
-  // `pipe` is the Node stream ecosystem's polymorphic dispatcher; its return
-  // type depends entirely on the destination. Typed as `any` so callers can
-  // freely chain `.pipe(next).pipe(another)` without forced type assertions.
-  pipe?(dest: any): any;
-}
-
-/**
- * An in-memory buffered stream. Extends the write-side shape with `read()`
- * and optional `toBuffer()` for callers that use the stream as a sink and
- * then harvest the accumulated bytes (e.g. `writeBuffer()`'s internal buffer).
- */
-export interface IStreamBuf extends IWritableStream {
+export interface IStreamBuf extends XlsxWritable {
   read(): Uint8Array | null;
   toBuffer?(): Uint8Array | null;
 }
@@ -236,7 +222,7 @@ export interface IZipWriter extends EmitterLike {
   append(data: string | Uint8Array, options: { name: string; base64?: boolean }): void;
   /** Create a streaming entry: write chunks incrementally, then call end(). */
   createEntry(name: string): { write(chunk: string): void; end(): void };
-  pipe(stream: IWritableStream): void;
+  pipe(stream: XlsxWritable): void;
   finalize(): void;
   /** Wait for downstream backpressure to clear. Resolves immediately if no backpressure. */
   waitForDrain(): Promise<void>;
@@ -247,7 +233,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
 
   private readonly zip: StreamingZip;
   private readonly events: Map<string, Set<StreamListener>> = new Map();
-  private pipedStream: Pick<IWritableStream, "write" | "end"> | null = null;
+  private pipedStream: Pick<XlsxWritable, "write" | "end"> | null = null;
   private level: number;
   private modTime: Date | undefined;
   private timestamps: ZipTimestampMode | undefined;
@@ -260,6 +246,8 @@ class StreamingZipWriterAdapter implements IZipWriter {
   // waitForDrain() must wait for this to reach 0 before checking _needsDrain.
   private _pendingWrites = 0;
   private _pendingWriteResolvers: Array<() => void> = [];
+  private _sinkTerminated = false;
+  private _sinkError: Error | null = null;
 
   // Buffer errors that occur before _finalize registers its error listener,
   // so async compression errors during writeToZip() are never silently lost.
@@ -375,7 +363,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
     return this;
   }
 
-  pipe(stream: IWritableStream): void {
+  pipe(stream: XlsxWritable): void {
     this.pipedStream = stream;
     // Listen for drain events to resolve backpressure waiters
     if (stream && typeof stream.on === "function") {
@@ -392,9 +380,31 @@ class StreamingZipWriterAdapter implements IZipWriter {
       // dead sink, but `_finalize`'s 'finish'/'error' listeners on the zip
       // adapter never fire because nothing tells the adapter the sink died.
       stream.on("error", (err: Error) => {
+        this._sinkTerminated = true;
+        this._sinkError = err;
         this._emit("error", err);
         // Wake any backpressure waiters so writeToZip's `await zip.waitForDrain()`
         // returns instead of hanging forever for a 'drain' that will never come.
+        this._needsDrain = false;
+        const resolvers = this._drainResolvers.splice(0);
+        for (const resolve of resolvers) {
+          resolve();
+        }
+        const asyncResolvers = this._pendingWriteResolvers.splice(0);
+        for (const resolve of asyncResolvers) {
+          resolve();
+        }
+      });
+      stream.on("close", () => {
+        if (this.finalized || this._sinkTerminated) {
+          return;
+        }
+        this._sinkTerminated = true;
+        this._sinkError = new ExcelStreamStateError(
+          "write",
+          "destination closed before XLSX serialization finished"
+        );
+        this._emit("error", this._sinkError);
         this._needsDrain = false;
         const resolvers = this._drainResolvers.splice(0);
         for (const resolve of resolvers) {
@@ -419,6 +429,9 @@ class StreamingZipWriterAdapter implements IZipWriter {
       await new Promise<void>(resolve => {
         this._pendingWriteResolvers.push(resolve);
       });
+    }
+    if (this._sinkError) {
+      throw this._sinkError;
     }
     if (!this._needsDrain || !this.pipedStream) {
       return;
@@ -5098,35 +5111,17 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
    * The returned promise resolves only after the sink has accepted the whole
    * package. This writer **respects downstream backpressure**: when
    * `stream.write()` returns `false` it waits for the sink's `'drain'` event at
-   * the next zip-entry boundary before producing more bytes.
+   * the next zip-entry boundary before producing more bytes. A sink that errors,
+   * or that closes before the package is complete, rejects the promise instead
+   * of parking on a `'drain'` that can never arrive.
    *
    * ⚠️ The sink must already be consumed (or be a real terminal sink such as
    * `fs.createWriteStream`, an HTTP response, or an upload body) *before* this
-   * call. Handing an unconsumed intermediate stream — most commonly a bare
-   * `stream.PassThrough` — will deadlock: once its internal buffers fill
-   * (`highWaterMark`, 64 KB per side on Node 22+, so roughly 128 KB of output)
-   * `write()` returns `false`, no `'drain'` will ever fire because nothing is
-   * reading, and this promise never settles. Small workbooks that fit inside
-   * those buffers appear to work, which makes the failure look size-dependent.
-   *
-   * ```ts
-   * // ❌ Deadlocks for any workbook larger than ~128 KB: the consumer is
-   * //    attached only after `write()` resolves, which never happens.
-   * const passThrough = new PassThrough();
-   * await Workbook.writeStream(wb, passThrough);
-   * await upload(passThrough);
-   *
-   * // ✅ Start the consumer first, then await the producer.
-   * const passThrough = new PassThrough();
-   * const uploading = upload(passThrough);
-   * await Workbook.writeStream(wb, passThrough);
-   * await uploading;
-   *
-   * // ✅ Or skip streaming entirely and buffer the package in memory.
-   * await upload(await Workbook.toBuffer(wb));
-   * ```
+   * call — an unconsumed intermediate stream deadlocks once its buffers fill.
+   * `Workbook.writeStream` documents that contract with worked examples, and
+   * `Workbook.toStream` removes it altogether by inverting the flow.
    */
-  async write(stream: IWritableStream, options?: XlsxWriteOptions): Promise<this> {
+  async write(stream: XlsxWritable, options?: XlsxWriteOptions): Promise<this> {
     options = options || {};
 
     options.zip = options.zip || {};

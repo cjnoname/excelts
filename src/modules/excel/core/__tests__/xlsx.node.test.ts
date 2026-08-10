@@ -363,6 +363,56 @@ describe("XLSX", () => {
   // ===========================================================================
 
   describe("write(stream) / read(stream)", () => {
+    /** Build a workbook whose package comfortably exceeds a stream buffer. */
+    function buildStreamWorkbook(rows: number): ReturnType<typeof Workbook.create> {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Stream");
+      const payload = "0123456789abcdef".repeat(32);
+      for (let row = 1; row <= rows; row++) {
+        Cell.setValue(ws, `A${row}`, `${row}-${payload}`);
+      }
+      return wb;
+    }
+
+    // The cross-platform `toStream` / `writeStream` contract lives in
+    // `xlsx-stream.test.ts`; what follows depends on Node's synchronous deflate
+    // and on real `stream.PassThrough` buffering thresholds.
+
+    it("toStream() buffers a whole worksheet regardless of highWaterMark", async () => {
+      // Documented limitation, pinned on purpose: the writer can only park at
+      // ZIP-entry boundaries, so `highWaterMark` decides when it is *asked* to
+      // pause, not how much may queue up. If flow control ever becomes finer
+      // grained, update `XlsxStreamOptions.highWaterMark`'s docs along with it.
+      const source = Workbook.toStream(buildStreamWorkbook(20_000), { highWaterMark: 1024 });
+
+      let peakBuffered = 0;
+      for await (const chunk of source) {
+        void chunk;
+        peakBuffered = Math.max(peakBuffered, source.readableLength);
+      }
+
+      expect(peakBuffered).toBeGreaterThan(64 * 1024);
+    });
+
+    it("writeStream() rejects when the sink closes before the package is complete", async () => {
+      const wb = buildStreamWorkbook(20_000);
+      const sink = new PassThrough();
+      // Nothing consumes `sink`, so the writer parks on backpressure; closing it
+      // used to leave that promise pending forever.
+      setTimeout(() => sink.destroy(), 10);
+
+      await expect(Workbook.writeStream(wb, sink)).rejects.toThrow(/destination closed/);
+    });
+
+    it("writeStream() rejects with the sink's own error", async () => {
+      const wb = buildStreamWorkbook(20_000);
+      const sink = new PassThrough();
+      sink.on("error", () => {});
+      setTimeout(() => sink.destroy(new Error("sink exploded")), 10);
+
+      await expect(Workbook.writeStream(wb, sink)).rejects.toThrow(/sink exploded/);
+    });
+
     it("write() pipes valid XLSX to a writable stream", async () => {
       const wb = Workbook.create();
       Cell.setValue(Workbook.addWorksheet(wb, "Stream"), "A1", "streamed");

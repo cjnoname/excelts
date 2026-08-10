@@ -41,7 +41,8 @@ export {
   createStreamReader
 } from "@excel/core/workbook.browser";
 
-export { toBuffer, read, readStream, writeStream, getXlsxIo } from "@excel/core/xlsx-io";
+export { toBuffer, toStream, read, readStream, writeStream, getXlsxIo } from "@excel/core/xlsx-io";
+export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
 
 /** A workbook handle (opaque to consumers). */
 export type { WorkbookData as Handle } from "@excel/core/workbook-core";

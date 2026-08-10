@@ -22,6 +22,7 @@ export * from "@excel/core/workbook.browser";
 // readStream / writeStream + getXlsxIo). Node binding via xlsx-io.ts.
 export {
   toBuffer,
+  toStream,
   read,
   readFile,
   writeFile,
@@ -29,6 +30,7 @@ export {
   writeStream,
   getXlsxIo
 } from "@excel/core/xlsx-io";
+export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
 
 /** Node streaming workbook writer factory (accepts `{ filename }`). */
 export function createStreamWriter(options?: WorkbookWriterOptions): WorkbookWriterBrowser {
