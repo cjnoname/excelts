@@ -274,6 +274,8 @@ export class StreamingDocxWriter {
    * `addAsync` / `finalize` await the chain.
    */
   private _pendingDrain: Promise<void> = Promise.resolve();
+  /** Completion of every ZipDeflate push registered so far. */
+  private _pendingCompression: Promise<void> = Promise.resolve();
   /**
    * Resolves when the `Zip` archive emits its terminal callback (`final`).
    * In the browser the deflate pipeline (CompressionStream) is asynchronous,
@@ -434,13 +436,10 @@ export class StreamingDocxWriter {
   async addAsync(element: BodyContent): Promise<this> {
     this.add(element);
     if (this._sinkAdapter) {
-      await this._pendingDrain;
-      if (this._streamError) {
-        throw new DocxWriteError(
-          `StreamingDocxWriter: sink write failed (${this._streamError.message})`,
-          { cause: this._streamError }
-        );
-      }
+      // ZipDeflate batches small inputs. A non-final empty push flushes that
+      // batch into the compressor without ending document.xml.
+      this._trackCompression(this._documentZipFile.push(EMPTY_U8));
+      await this._awaitOutputBoundary("sink write failed");
     }
     return this;
   }
@@ -588,6 +587,7 @@ export class StreamingDocxWriter {
     this._outputChunks = [];
     this._streamError = null;
     this._pendingDrain = Promise.resolve();
+    this._pendingCompression = Promise.resolve();
     if (this._options.sink && !this._sinkAdapter) {
       this._sinkAdapter = new SinkAdapter(this._options.sink);
     }
@@ -649,12 +649,35 @@ export class StreamingDocxWriter {
 
     this._documentStream = new StreamBuf({ bufSize: 65536 });
     this._documentStream.on("data", (chunk: Uint8Array) => {
-      this._documentZipFile.push(chunk);
+      this._trackCompression(this._documentZipFile.push(chunk));
     });
     this._documentStream.once("finish", () => {
-      this._documentZipFile.push(EMPTY_U8, true);
-      this._documentStream.emit("zipped");
+      void this._trackCompression(this._documentZipFile.push(EMPTY_U8, true)).then(() => {
+        this._documentStream.emit("zipped");
+      });
     });
+  }
+
+  private _trackCompression(completion: Promise<void>): Promise<void> {
+    const tracked = completion.catch((err: unknown) => {
+      if (!this._streamError) {
+        this._streamError = err instanceof Error ? err : new Error(String(err));
+      }
+    });
+    this._pendingCompression = Promise.all([this._pendingCompression, tracked]).then(() => {});
+    return tracked;
+  }
+
+  private async _awaitOutputBoundary(message: string): Promise<void> {
+    await this._pendingCompression;
+    // Compression callbacks enqueue sink writes synchronously. Capture the
+    // drain only after compression completes so browser output is included.
+    await this._pendingDrain;
+    if (this._streamError) {
+      throw new DocxWriteError(`StreamingDocxWriter: ${message} (${this._streamError.message})`, {
+        cause: this._streamError
+      });
+    }
   }
 
   private _write(text: string): void {
@@ -1083,13 +1106,15 @@ export class StreamingDocxWriter {
     const level = this._options.compressionLevel ?? 6;
 
     // Helper: add a complete XML file to the ZIP
+    const addFile = (path: string, data: Uint8Array, compressionLevel = level): void => {
+      const file = new ZipDeflate(path, { level: compressionLevel });
+      this._zip.add(file);
+      this._trackCompression(file.push(data, true));
+    };
     const addXmlFile = (path: string, renderFn: (xml: XmlWriter) => void): void => {
       const writer = new XmlWriter();
       renderFn(writer);
-      const data = utf8Encoder.encode(writer.xml);
-      const file = new ZipDeflate(path, { level });
-      this._zip.add(file);
-      file.push(data, true);
+      addFile(path, utf8Encoder.encode(writer.xml));
     };
 
     // Content types and relationships
@@ -1453,9 +1478,7 @@ export class StreamingDocxWriter {
 
         // Write the XML content
         const itemData = utf8Encoder.encode(part.xmlContent);
-        const itemFile = new ZipDeflate(itemPath, { level });
-        this._zip.add(itemFile);
-        itemFile.push(itemData, true);
+        addFile(itemPath, itemData);
 
         // Write itemProps*.xml
         const propsWriter = new XmlWriter();
@@ -1475,9 +1498,7 @@ export class StreamingDocxWriter {
         }
         propsWriter.closeNode();
         const propsData = utf8Encoder.encode(propsWriter.xml);
-        const propsFile = new ZipDeflate(propsPath, { level });
-        this._zip.add(propsFile);
-        propsFile.push(propsData, true);
+        addFile(propsPath, propsData);
 
         // Write item rels (links itemN.xml → itemPropsN.xml)
         const itemRels = createRelationships();
@@ -1504,9 +1525,7 @@ export class StreamingDocxWriter {
 
       for (const ef of this._options.embeddedFonts) {
         const partPath = `word/fonts/${ef.fileName}`;
-        const fontFile = new ZipDeflate(partPath, { level: 0 });
-        this._zip.add(fontFile);
-        fontFile.push(ef.data, true);
+        addFile(partPath, ef.data, 0);
 
         // Register relationship from fontTable.xml
         addRelationshipWithId(fontTableRels, ef.rId, RelType.Font, `fonts/${ef.fileName}`);
@@ -1544,9 +1563,7 @@ export class StreamingDocxWriter {
         if (dropSignatures && part.path.startsWith("_xmlsignatures/")) {
           continue;
         }
-        const opaqueFile = new ZipDeflate(part.path, { level });
-        this._zip.add(opaqueFile);
-        opaqueFile.push(part.data, true);
+        addFile(part.path, part.data);
 
         // Register content type
         if (part.contentType) {
@@ -1605,17 +1622,13 @@ export class StreamingDocxWriter {
 
     for (const part of commonParts) {
       const data = utf8Encoder.encode(part.content);
-      const file = new ZipDeflate(part.path, { level });
-      this._zip.add(file);
-      file.push(data, true);
+      addFile(part.path, data);
     }
 
     // Write images
     if (this._options.images) {
       for (const img of this._options.images) {
-        const file = new ZipDeflate(PartPath.media(img.fileName), { level: 0 });
-        this._zip.add(file);
-        file.push(img.data, true);
+        addFile(PartPath.media(img.fileName), img.data, 0);
       }
     }
 
@@ -1632,9 +1645,7 @@ export class StreamingDocxWriter {
       const w = new XmlWriter();
       renderChartPart(w, chartContent.chart);
       const data = utf8Encoder.encode(w.xml);
-      const file = new ZipDeflate(chartPath, { level });
-      this._zip.add(file);
-      file.push(data, true);
+      addFile(chartPath, data);
       addContentTypeOverride(contentTypes, `/${chartPath}`, ContentType.Chart);
     }
 
@@ -1646,9 +1657,7 @@ export class StreamingDocxWriter {
       }
       const cxPath = `word/charts/chartEx${num}.xml`;
       const data = utf8Encoder.encode(cxContent.chartExXml);
-      const file = new ZipDeflate(cxPath, { level });
-      this._zip.add(file);
-      file.push(data, true);
+      addFile(cxPath, data);
       addContentTypeOverride(contentTypes, `/${cxPath}`, ContentType.ChartEx);
     }
 
@@ -1660,6 +1669,10 @@ export class StreamingDocxWriter {
 
     // Write [Content_Types].xml
     addXmlFile(PartPath.ContentTypes, xml => renderContentTypes(contentTypes, xml));
+
+    // Every final push is asynchronous in browsers. Do not let finalize cross
+    // the auxiliary-part boundary until their compression and sink output do.
+    await this._awaitOutputBoundary("auxiliary part write failed");
   }
 
   private _endStream(stream: StreamBuf): Promise<void> {

@@ -9,9 +9,18 @@
  *  - `reset()` is rejected in sink mode.
  */
 
-import { describe, it, expect } from "vitest";
+import { ZipDeflate } from "@archive/zip/stream";
+import { describe, it, expect, vi } from "vitest";
 
 import { DocxWriteError, Build, Streaming } from "../index";
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 describe("StreamingDocxWriter — sink mode", () => {
   it("delivers byte-identical output through a Web WritableStream", async () => {
@@ -49,40 +58,111 @@ describe("StreamingDocxWriter — sink mode", () => {
     expect(sinkBytes[1]).toBe(0x4b);
   });
 
-  it("addAsync awaits actual sink writes (backpressure honoured)", async () => {
-    const writeOrder: number[] = [];
-    let counter = 0;
-    const ws = new WritableStream<Uint8Array>(
-      {
-        async write(_chunk): Promise<void> {
-          // Force every write to take a tick; record the order so we can
-          // assert addAsync waited for each one before resolving.
-          await new Promise(r => setTimeout(r, 5));
-          writeOrder.push(counter++);
+  it("addAsync awaits browser compression output and the corresponding sink write", async () => {
+    const writeStarted = deferred();
+    const releaseWrite = deferred();
+    let firstWrite = true;
+    const ws = new WritableStream<Uint8Array>({
+      write(): Promise<void> | undefined {
+        if (!firstWrite) {
+          return;
         }
-      },
-      // High-water mark of 1 byte forces backpressure on essentially
-      // every chunk; getWriter().ready resolves only after each drain.
-      new ByteLengthQueuingStrategy({ highWaterMark: 1 })
-    );
+        firstWrite = false;
+        writeStarted.resolve();
+        return releaseWrite.promise;
+      }
+    });
 
     const writer = Streaming.createDocxStream({ sink: ws });
-    for (let i = 0; i < 10; i++) {
-      // Each addAsync awaits everything queued so far. If backpressure
-      // were ignored the writes would all batch up at finalize time and
-      // writeOrder would only be populated then.
-      await writer.addAsync(Build.textParagraph(`P${i}`));
-    }
+    const adding = writer.addAsync(Build.textParagraph("async-output-boundary-".repeat(5000)));
+    await writeStarted.promise;
 
-    // Even without finalize, at least one chunk should have flowed
-    // through the sink because each addAsync forced a drain.
-    const drainedDuringAdd = writeOrder.length;
+    let settled = false;
+    void adding.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
 
+    releaseWrite.resolve();
+    await adding;
     await writer.finalize();
+  });
 
-    // After finalize all chunks must be visible.
-    expect(writeOrder.length).toBeGreaterThan(0);
-    expect(writeOrder.length).toBeGreaterThanOrEqual(drainedDuringAdd);
+  it("addAsync includes each non-final ZipDeflate push completion in its boundary", async () => {
+    const pushCompleted = deferred();
+    const releasePush = deferred();
+    const originalPush = ZipDeflate.prototype.push;
+    const pushSpy = vi
+      .spyOn(ZipDeflate.prototype, "push")
+      .mockImplementation(function (this: InstanceType<typeof ZipDeflate>, data, final, callback) {
+        const completion = originalPush.call(this, data, final, callback);
+        return final
+          ? completion
+          : completion.then(() => {
+              pushCompleted.resolve();
+              return releasePush.promise;
+            });
+      });
+
+    try {
+      const writer = Streaming.createDocxStream({
+        sink: new WritableStream<Uint8Array>({ write(): void {} })
+      });
+      const adding = writer.addAsync(Build.textParagraph("tracked compression"));
+      let settled = false;
+      void adding.then(() => {
+        settled = true;
+      });
+      await pushCompleted.promise;
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      releasePush.resolve();
+      await adding;
+      await writer.finalize();
+    } finally {
+      releasePush.resolve();
+      pushSpy.mockRestore();
+    }
+  });
+
+  it("finalize includes auxiliary final-push completion promises", async () => {
+    const auxiliaryPushStarted = deferred();
+    const releasePush = deferred();
+    const originalPush = ZipDeflate.prototype.push;
+    const pushSpy = vi
+      .spyOn(ZipDeflate.prototype, "push")
+      .mockImplementation(function (this: InstanceType<typeof ZipDeflate>, data, final, callback) {
+        const completion = originalPush.call(this, data, final, callback);
+        if (final && this.name === "word/styles.xml") {
+          auxiliaryPushStarted.resolve();
+          return completion.then(() => releasePush.promise);
+        }
+        return completion;
+      });
+
+    try {
+      const writer = Streaming.createDocxStream({
+        sink: new WritableStream<Uint8Array>({ write(): void {} })
+      });
+      writer.add(Build.textParagraph("auxiliary boundary"));
+      const finalizing = writer.finalize();
+      await auxiliaryPushStarted.promise;
+
+      let settled = false;
+      void finalizing.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      releasePush.resolve();
+      await finalizing;
+    } finally {
+      releasePush.resolve();
+      pushSpy.mockRestore();
+    }
   });
 
   it("surfaces sink errors from addAsync", async () => {
@@ -93,17 +173,9 @@ describe("StreamingDocxWriter — sink mode", () => {
     });
 
     const writer = Streaming.createDocxStream({ sink: ws });
-    let caught: unknown = null;
-    try {
-      // Push enough content that at least one ZIP chunk has been emitted
-      // by the time we await; the error then surfaces from addAsync.
-      for (let i = 0; i < 200; i++) {
-        await writer.addAsync(Build.textParagraph(`P${i}`));
-      }
-      await writer.finalize();
-    } catch (e) {
-      caught = e;
-    }
+    const caught = await writer
+      .addAsync(Build.textParagraph("sink-error-output-".repeat(5000)))
+      .catch((e: unknown) => e);
     expect(caught).toBeInstanceOf(DocxWriteError);
     expect(String(caught)).toMatch(/sink/i);
   });
