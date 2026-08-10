@@ -265,6 +265,10 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
   private _needsDrain = false;
   private _drainResolvers: Array<() => void> = [];
   private _drainListenerAttached = false;
+  private _drainGeneration = 0;
+  private _pendingSinkWrites = new Set<Promise<void>>();
+  private _pendingZipPushes = new Set<Promise<void>>();
+  private _worksheetZipCompletions = new WeakMap<InstanceType<typeof StreamBuf>, Promise<void>>();
   // Captured if the user sink fires 'error' before `_finalize()` attaches its
   // own listener. Replayed by `_finalize()` so the original error is what
   // rejects `commit()`, not a generic timeout.
@@ -367,19 +371,28 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
    * defensively handle the Promise shape but it's never exercised.
    */
   private _trackBackpressure(ok: boolean | void | Promise<boolean>): void {
-    if (ok instanceof Promise) {
-      // Defensive path: a hypothetical sink whose `write()` returns a
-      // Promise. Await its resolution and treat false as backpressure.
-      ok.then(
+    if (ok && typeof (ok as PromiseLike<boolean>).then === "function") {
+      // Do not let a drain check sample `_needsDrain` before an asynchronous
+      // write has reported whether it applied backpressure.
+      const generation = this._drainGeneration;
+      const pending = Promise.resolve(ok).then(
         result => {
-          if (!result) {
+          // If drain fired while the Promise was pending, it already cleared
+          // this write's backpressure; do not park waiting for a second event.
+          if (!result && generation === this._drainGeneration) {
             this._needsDrain = true;
           }
         },
-        () => {
-          // Errors surface via the sink's 'error' event; ignore here.
+        err => {
+          if (!this._sinkError) {
+            this._sinkError = err instanceof Error ? err : new Error(String(err));
+          }
+          this._wakeAllBackpressureWaiters();
         }
       );
+      this._pendingSinkWrites.add(pending);
+      pending.finally(() => this._pendingSinkWrites.delete(pending)).catch(() => {});
+      this._ensureDrainListener();
       return;
     }
     if (ok === false) {
@@ -400,6 +413,7 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     }
     this._drainListenerAttached = true;
     this.stream.on("drain", () => {
+      this._drainGeneration++;
       this._needsDrain = false;
       callAllResolvers(this._drainResolvers);
     });
@@ -468,6 +482,10 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
    * the producer instead of letting bytes accumulate unboundedly.
    */
   private async _waitForUserSinkDrain(): Promise<void> {
+    await this._waitForZipPushes();
+    while (this._pendingSinkWrites.size > 0) {
+      await Promise.all(this._pendingSinkWrites);
+    }
     // Short-circuit if the sink already errored — no point waiting for a
     // drain that will never come. The error itself surfaces from
     // `_finalize()` later.
@@ -478,6 +496,18 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       return;
     }
     return new Promise<void>(resolve => this._drainResolvers.push(resolve));
+  }
+
+  private _trackZipPush(push: Promise<void>): Promise<void> {
+    this._pendingZipPushes.add(push);
+    push.finally(() => this._pendingZipPushes.delete(push)).catch(() => {});
+    return push;
+  }
+
+  private async _waitForZipPushes(): Promise<void> {
+    while (this._pendingZipPushes.size > 0) {
+      await Promise.all(this._pendingZipPushes);
+    }
   }
 
   get definedNames(): DefinedNamesData {
@@ -522,13 +552,33 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     const zipFile = new ZipDeflate(path, { level: this.compressionLevel });
     this.zip.add(zipFile);
 
-    const onData = (chunk: Uint8Array) => zipFile.push(chunk);
+    let resolveZipCompletion!: () => void;
+    let rejectZipCompletion!: (err: Error) => void;
+    const zipCompletion = new Promise<void>((resolve, reject) => {
+      resolveZipCompletion = resolve;
+      rejectZipCompletion = reject;
+    });
+    // A user may synchronously call worksheet.commit() long before wb.commit()
+    // observes this promise. Keep a rejection handler attached in the interim.
+    zipCompletion.catch(() => {});
+    this._worksheetZipCompletions.set(stream, zipCompletion);
+
+    const onData = (chunk: Uint8Array) => {
+      this._trackZipPush(zipFile.push(chunk));
+    };
     stream.on("data", onData);
 
     stream.once("finish", () => {
       stream.removeListener("data", onData);
-      zipFile.push(EMPTY_U8, true);
-      stream.emit("zipped");
+      this._trackZipPush(zipFile.push(EMPTY_U8, true)).then(
+        () => {
+          resolveZipCompletion();
+          stream.emit("zipped");
+        },
+        err => {
+          rejectZipCompletion(err instanceof Error ? err : new Error(String(err)));
+        }
+      );
     });
 
     return stream;
@@ -548,7 +598,7 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       buffer = data;
     }
 
-    zipFile.push(buffer, true);
+    this._trackZipPush(zipFile.push(buffer, true));
   }
 
   private async _commitWorksheets(): Promise<void> {
@@ -561,13 +611,17 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     // sequential commit imposes no real CPU cost — measured throughput is
     // identical to parallel commit on multi-sheet workbooks.
     for (const worksheet of this._worksheets) {
-      if (!worksheet || worksheet.committed) {
+      if (!worksheet) {
         continue;
       }
-      await new Promise<void>(resolve => {
-        worksheet.stream.once("zipped", () => resolve());
+      const stream = worksheet.stream;
+      const zipCompletion = this._worksheetZipCompletions.get(stream)!;
+      if (!worksheet.committed) {
         worksheet.commit();
-      });
+      }
+      // This also covers a worksheet the user committed synchronously before
+      // wb.commit(): its async browser deflate work still belongs to the writer.
+      await zipCompletion;
       await this._waitForUserSinkDrain();
     }
   }

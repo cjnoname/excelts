@@ -1213,6 +1213,12 @@ sheet.commit();
 await workbook.commit();
 ```
 
+`WorksheetWriter.commit()` 特意保持同步并返回 `void`；它无法等待浏览器压缩或慢速目标流。
+异步完成由 `WorkbookWriter.commit()` 负责：它会提交尚未关闭的工作表、等待所有 ZIP push
+完成，并在返回前处理目标流背压。建议让最后一个工作表保持打开，直接调用并等待
+`workbook.commit()`。如果显式调用了 `sheet.commit()`，仍必须随后等待 `workbook.commit()`；
+工作表调用本身只关闭输入，并不表示其字节已写入目标流。
+
 ### Web Streams（Node.js 22+ 和浏览器）
 
 ```typescript
@@ -1230,7 +1236,7 @@ const writer = new Stream.WorkbookWriter({ stream: writable });
 const sheet = writer.addWorksheet("Sheet1");
 sheet.addRow(["Name", "Score"]).commit();
 sheet.addRow(["Alice", 98]).commit();
-await sheet.commit();
+sheet.commit();
 await writer.commit();
 
 // 从 Web ReadableStream 读取

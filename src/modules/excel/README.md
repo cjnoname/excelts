@@ -1233,6 +1233,13 @@ sheet.commit();
 await workbook.commit();
 ```
 
+`WorksheetWriter.commit()` is intentionally synchronous and returns `void`; it cannot wait for
+browser compression or a slow destination. `WorkbookWriter.commit()` owns that asynchronous work:
+it commits any open worksheets, waits for every ZIP push, and observes destination backpressure
+before resolving. Prefer leaving the final worksheet open and calling `await workbook.commit()`.
+If you explicitly call `sheet.commit()`, always follow it with and await `workbook.commit()`; the
+sheet call alone only closes input and does not mean that its bytes have reached the destination.
+
 ### Web Streams (Node.js 22+ and Browsers)
 
 ```typescript
@@ -1250,7 +1257,7 @@ const writer = new Stream.WorkbookWriter({ stream: writable });
 const sheet = writer.addWorksheet("Sheet1");
 sheet.addRow(["Name", "Score"]).commit();
 sheet.addRow(["Alice", 98]).commit();
-await sheet.commit();
+sheet.commit();
 await writer.commit();
 
 // Read from Web ReadableStream

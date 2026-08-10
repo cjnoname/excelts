@@ -250,6 +250,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
   // waitForDrain() must wait for this to reach 0 before checking _needsDrain.
   private _pendingWrites = 0;
   private _pendingWriteResolvers: Array<() => void> = [];
+  private _drainGeneration = 0;
   private _sinkTerminated = false;
   private _sinkError: Error | null = null;
   // Compressed output that has been requested but has not reached the sink yet.
@@ -313,24 +314,27 @@ class StreamingZipWriterAdapter implements IZipWriter {
    * Accepts both sync (boolean) and async (Promise<boolean>) return values.
    */
   private _checkBackpressure(ok: boolean | void | Promise<boolean>): void {
-    if (ok instanceof Promise) {
+    if (ok && typeof (ok as PromiseLike<boolean>).then === "function") {
       this._pendingWrites++;
-      ok.then(
-        result => {
-          if (!result) {
-            this._needsDrain = true;
+      const generation = this._drainGeneration;
+      Promise.resolve(ok)
+        .then(
+          result => {
+            if (!result && generation === this._drainGeneration) {
+              this._needsDrain = true;
+            }
+          },
+          () => {} // write errors surface via the stream's error event
+        )
+        .finally(() => {
+          this._pendingWrites--;
+          if (this._pendingWrites === 0) {
+            const resolvers = this._pendingWriteResolvers.splice(0);
+            for (const resolve of resolvers) {
+              resolve();
+            }
           }
-        },
-        () => {} // write errors surface via the stream's error event
-      ).finally(() => {
-        this._pendingWrites--;
-        if (this._pendingWrites === 0) {
-          const resolvers = this._pendingWriteResolvers.splice(0);
-          for (const resolve of resolvers) {
-            resolve();
-          }
-        }
-      });
+        });
       return;
     }
     if (ok === false) {
@@ -378,6 +382,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
     // Listen for drain events to resolve backpressure waiters
     if (stream && typeof stream.on === "function") {
       stream.on("drain", () => {
+        this._drainGeneration++;
         this._needsDrain = false;
         const resolvers = this._drainResolvers.splice(0);
         for (const resolve of resolvers) {

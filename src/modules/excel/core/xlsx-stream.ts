@@ -26,9 +26,9 @@ export interface XlsxStreamOptions extends XlsxWriteOptions {
    * This is **not** a hard memory bound. Backpressure is sampled after each ZIP
    * entry, and a worksheet is rendered as one entry, so peak
    * buffering may substantially exceed this value and is usually driven by the
-   * largest worksheet. `Stream.WorkbookWriter` emits a worksheet incrementally
-   * instead of in one pass, which lowers that peak on Node; it does not
-   * currently pace against a slow sink in the browser.
+   * largest worksheet. `Stream.WorkbookWriter` emits worksheets incrementally
+   * and observes sink backpressure when its asynchronous `commit()` is awaited,
+   * which lowers that peak when row-by-row production is practical.
    */
   highWaterMark?: number;
 }
