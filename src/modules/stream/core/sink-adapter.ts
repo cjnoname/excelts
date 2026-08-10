@@ -21,7 +21,7 @@
  *     emit callback can still feed the adapter without blocking.
  */
 
-import { onceEvent } from "@stream/core/event-utils";
+import { createEventWaiter } from "@stream/core/event-utils";
 import type { EventEmitterLike } from "@stream/types";
 
 /**
@@ -30,7 +30,7 @@ import type { EventEmitterLike } from "@stream/types";
  * `node:stream` so the adapter compiles in browsers.
  */
 export interface NodeWritableLike extends EventEmitterLike {
-  write(chunk: Uint8Array, cb?: (err?: Error | null) => void): boolean;
+  write(chunk: Uint8Array, cb?: (err?: Error | null) => void): boolean | PromiseLike<boolean>;
   end(cb?: () => void): unknown;
   destroyed?: boolean;
 }
@@ -41,7 +41,7 @@ export interface NodeWritableLike extends EventEmitterLike {
  * for legacy producers that don't fit either Node or Web streams.
  */
 export interface DuckSinkLike extends EventEmitterLike {
-  write(chunk: Uint8Array): boolean | Promise<boolean>;
+  write(chunk: Uint8Array): boolean | PromiseLike<boolean>;
   end(): unknown;
 }
 
@@ -123,24 +123,28 @@ export class SinkAdapter {
       return;
     }
 
-    if (this._kind === "node") {
-      const sink = this._nodeSink!;
-      const ok = sink.write(chunk);
-      if (!ok) {
-        await onceEvent(sink, "drain");
-        this._throwIfErrored();
-      }
-      return;
+    const sink = this._kind === "node" ? this._nodeSink! : this._duckSink!;
+    // Register before write(): a duck sink may emit drain synchronously and
+    // only resolve its Promise<boolean> afterwards.
+    const drain = hasEvents(sink)
+      ? createEventWaiter(sink, ["drain"], { keepErrorUntilCancel: true })
+      : null;
+    let result: boolean;
+    try {
+      result = await sink.write(chunk);
+    } catch (error) {
+      drain?.cancel();
+      throw error;
     }
-
-    // duck
-    const sink = this._duckSink!;
-    const result = sink.write(chunk);
-    if (result instanceof Promise) {
-      await result;
-    } else if (!result) {
-      await onceEvent(sink, "drain");
+    if (drain?.error()) {
+      throw drain.error()!;
+    }
+    if (!result && drain) {
+      await drain.promise;
+      drain.cancel();
       this._throwIfErrored();
+    } else {
+      drain?.cancel();
     }
   }
 
@@ -163,18 +167,32 @@ export class SinkAdapter {
       // Prefer the close event when available; some Node writables emit
       // 'finish' first and only emit 'close' on `destroy()`. We listen
       // for both.
-      const finished = onceEventAny(sink, ["close", "finish"]);
-      sink.end();
-      await finished;
+      const finished = createEventWaiter(sink, ["close", "finish"]);
+      try {
+        await sink.end();
+        await finished.promise;
+      } catch (error) {
+        finished.cancel();
+        throw error;
+      }
       this._throwIfErrored();
       return;
     }
 
     // duck
     const sink = this._duckSink!;
-    const finished = onceEventAny(sink, ["close", "finish"]);
-    sink.end();
-    await finished;
+    if (hasEvents(sink)) {
+      const finished = createEventWaiter(sink, ["close", "finish"]);
+      try {
+        await sink.end();
+        await finished.promise;
+      } catch (error) {
+        finished.cancel();
+        throw error;
+      }
+    } else {
+      await sink.end();
+    }
     this._throwIfErrored();
   }
 
@@ -205,40 +223,6 @@ export class SinkAdapter {
   }
 }
 
-/** Resolve on the first of `events` (or reject on `error`). */
-function onceEventAny(emitter: EventEmitterLike, events: readonly string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      const off = (e: string, l: (...a: any[]) => void): void => {
-        if (typeof emitter.off === "function") {
-          emitter.off(e, l);
-        } else if (typeof emitter.removeListener === "function") {
-          emitter.removeListener(e, l);
-        }
-      };
-      off("error", onError);
-      for (const e of events) {
-        off(e, onDone);
-      }
-    };
-    const onError = (err: unknown): void => {
-      cleanup();
-      reject(err instanceof Error ? err : new Error(String(err)));
-    };
-    const onDone = (): void => {
-      cleanup();
-      resolve();
-    };
-    if (typeof emitter.once === "function") {
-      emitter.once("error", onError);
-      for (const e of events) {
-        emitter.once(e, onDone);
-      }
-      return;
-    }
-    emitter.on?.("error", onError);
-    for (const e of events) {
-      emitter.on?.(e, onDone);
-    }
-  });
+function hasEvents(sink: EventEmitterLike): boolean {
+  return typeof sink.once === "function" || typeof sink.on === "function";
 }
