@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.6.0](https://github.com/documonster/documonster/compare/v0.5.1...v0.6.0) (2026-08-11)
+
+
+### Features
+
+* **excel:** Serialize a workbook as a pull source with Workbook.toStream ([128eea0](https://github.com/documonster/documonster/commit/128eea000c9630a5d8684294a9ee5b202655db05))
+
+
+### Bug Fixes
+
+* **archive:** Clear consumed async-queue slots ([d6765ca](https://github.com/documonster/documonster/commit/d6765caccbc2a39dd0dc931a6f4cfc9fdb58ac29))
+* **archive:** Pause TAR input while gzip is backpressured ([2e558b0](https://github.com/documonster/documonster/commit/2e558b00f4eeb8685fdbbb67a3779fa38c339754))
+* **archive:** Propagate ZIP output backpressure to input producers ([83a0324](https://github.com/documonster/documonster/commit/83a0324bcacc468964c384ca2bfea3b5f2e629ba))
+* **csv:** Resume chunk rows after readable backpressure ([a084674](https://github.com/documonster/documonster/commit/a0846746cb14ddb983e29a9bdb551a6bfc26c769))
+* **excel:** Honour backpressure for buffered ZIP parts ([3cf2d28](https://github.com/documonster/documonster/commit/3cf2d289f7bf531235014baf09924fe69ec59393))
+* **excel:** Sample sink backpressure after an entry's output is emitted ([63589cb](https://github.com/documonster/documonster/commit/63589cb584b9e5e8adc5d5bd4273dcff3f4a6e79))
+* **excel:** Wait for WorkbookWriter ZIP output before sampling drain ([56cebaa](https://github.com/documonster/documonster/commit/56cebaa0dffea574f214e7f9632fc10dadafc335))
+* **stream:** Make async sink writes obey the writable contract ([4c5aa01](https://github.com/documonster/documonster/commit/4c5aa0132eb358df606fd38e505f6cacfbf256c6))
+* **word:** Make addAsync wait for compressed sink output ([f69bc2a](https://github.com/documonster/documonster/commit/f69bc2a6b7156e67a2b46ee7b3ec5fffe1fe07a6))
+
+
+### Code Refactoring
+
+* **archive:** Restore queue O(n) dequeue and document output contracts ([e41bdb3](https://github.com/documonster/documonster/commit/e41bdb331c718967f20fc0e45a74b99fac971b2a))
+
 ## [0.5.1](https://github.com/documonster/documonster/compare/v0.5.0...v0.5.1) (2026-08-08)
 
 
