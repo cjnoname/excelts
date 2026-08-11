@@ -12,7 +12,12 @@ import type { PipelineOptions, PipelineCallback, FinishedOptions } from "@stream
 import { isPipelineOptions } from "@stream/core/options";
 import { isReadableStream, isTransformStream, isWritableStream } from "@stream/core/type-guards";
 import { createAbortError } from "@stream/errors";
-import type { EventEmitterLike, PipelineStreamLike } from "@stream/types";
+import type {
+  EventEmitterLike,
+  PipelineGeneratorStage,
+  PipelineStageLike,
+  PipelineStreamLike
+} from "@stream/types";
 
 // Re-export for consumers
 export type { PipelineOptions, FinishedOptions } from "@stream/core/options";
@@ -21,8 +26,6 @@ export { isPipelineOptions } from "@stream/core/options";
 // =============================================================================
 // Pipeline
 // =============================================================================
-
-type PipelineStream = PipelineStreamLike;
 
 /**
  * Structural view of the runtime stream-state properties this module inspects
@@ -115,7 +118,7 @@ function waitForClose(
   }
 }
 
-export function toBrowserPipelineStream(stream: PipelineStream): PipelineStream {
+export function toBrowserPipelineStream(stream: PipelineStageLike): PipelineStageLike {
   if (
     stream instanceof Readable ||
     stream instanceof Writable ||
@@ -135,16 +138,38 @@ export function toBrowserPipelineStream(stream: PipelineStream): PipelineStream 
     return Writable.fromWeb(stream);
   }
 
+  // A bare (async) iterable source — `pipeline([chunk], dest)`. Node's pipeline
+  // accepts one; without this the browser threw `current.pipe is not a
+  // function`. Generator STAGES are handled separately (they are functions, and
+  // consume the previous stage rather than being a source).
+  if (typeof stream !== "function" && isIterableSource(stream)) {
+    return Readable.from(stream as AsyncIterable<unknown>);
+  }
+
   return stream;
 }
 
-/**
- * A pipeline stage that is a generator/async generator transform function:
- * `fn(source) => AsyncIterable | Iterable`.
- */
-type GeneratorStage = (
-  source: AsyncIterable<unknown>
-) => AsyncIterable<unknown> | Iterable<unknown>;
+/** `true` for an (async) iterable that is not already one of our streams. */
+function isIterableSource(value: unknown): boolean {
+  if (value == null || (typeof value !== "object" && typeof value !== "string")) {
+    return false;
+  }
+  const probe = value as {
+    [Symbol.asyncIterator]?: unknown;
+    [Symbol.iterator]?: unknown;
+    pipe?: unknown;
+  };
+  if (typeof probe.pipe === "function") {
+    return false;
+  }
+  return (
+    typeof probe[Symbol.asyncIterator] === "function" ||
+    typeof probe[Symbol.iterator] === "function"
+  );
+}
+
+/** A generator/async-generator transform stage. */
+type GeneratorStage = PipelineGeneratorStage;
 
 /**
  * Check if a pipeline stage is a generator/async generator function.
@@ -186,10 +211,10 @@ function applyGeneratorStage(
  * });
  */
 export function pipeline(
-  ...args: [...PipelineStream[], PipelineOptions | PipelineCallback] | PipelineStream[]
+  ...args: [...PipelineStageLike[], PipelineOptions | PipelineCallback] | PipelineStageLike[]
 ): Promise<void> {
   // Parse arguments
-  let streams: PipelineStream[];
+  let streams: PipelineStageLike[];
   let options: PipelineOptions = {};
   let callback: PipelineCallback | undefined;
 
@@ -201,18 +226,18 @@ export function pipeline(
     const secondToLast = args[args.length - 2];
     if (isPipelineOptions(secondToLast)) {
       options = secondToLast as PipelineOptions;
-      streams = args.slice(0, -2) as PipelineStream[];
+      streams = args.slice(0, -2) as PipelineStageLike[];
     } else {
       // Callback only: pipeline(s1, s2, ..., callback)
-      streams = args.slice(0, -1) as PipelineStream[];
+      streams = args.slice(0, -1) as PipelineStageLike[];
     }
   } else if (isPipelineOptions(lastArg)) {
     // Options only: pipeline(s1, s2, ..., { signal })
     options = lastArg as PipelineOptions;
-    streams = args.slice(0, -1) as PipelineStream[];
+    streams = args.slice(0, -1) as PipelineStageLike[];
   } else {
     // No callback or options: pipeline(s1, s2, s3)
-    streams = args as PipelineStream[];
+    streams = args as PipelineStageLike[];
   }
 
   const promise = new Promise<void>((resolve, reject) => {

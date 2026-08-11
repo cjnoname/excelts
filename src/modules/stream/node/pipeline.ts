@@ -17,7 +17,7 @@ import { createFinishedAll } from "@stream/core/finished-all";
 import type { PipelineOptions, PipelineCallback, FinishedOptions } from "@stream/core/options";
 import { isPipelineOptions } from "@stream/core/options";
 import { isReadableStream, isTransformStream, isWritableStream } from "@stream/core/type-guards";
-import type { PipelineStreamLike } from "@stream/types";
+import type { PipelineStageLike, PipelineStreamLike } from "@stream/types";
 
 // Re-export for consumers
 export type { PipelineOptions, FinishedOptions } from "@stream/core/options";
@@ -27,9 +27,7 @@ export { isPipelineOptions } from "@stream/core/options";
 // Pipeline
 // =============================================================================
 
-type PipelineStream = PipelineStreamLike;
-
-export function toNodePipelineStream(stream: PipelineStream): unknown {
+export function toNodePipelineStream(stream: PipelineStageLike): unknown {
   // Node native streams (Readable/Transform/Duplex/Writable) are already compatible.
   if (
     stream instanceof Readable ||
@@ -60,9 +58,9 @@ export function toNodePipelineStream(stream: PipelineStream): unknown {
  * Node.js compatible with support for options and callbacks.
  */
 export function pipeline(
-  ...args: [...PipelineStream[], PipelineOptions | PipelineCallback] | PipelineStream[]
+  ...args: [...PipelineStageLike[], PipelineOptions | PipelineCallback] | PipelineStageLike[]
 ): Promise<void> {
-  let streams: PipelineStream[];
+  let streams: PipelineStageLike[];
   let options: PipelineOptions | undefined;
   let callback: PipelineCallback | undefined;
 
@@ -74,16 +72,16 @@ export function pipeline(
     const secondToLast = args[args.length - 2];
     if (isPipelineOptions(secondToLast)) {
       options = secondToLast;
-      streams = args.slice(0, -2) as PipelineStream[];
+      streams = args.slice(0, -2) as PipelineStageLike[];
     } else {
       // Callback only: pipeline(s1, s2, ..., callback)
-      streams = args.slice(0, -1) as PipelineStream[];
+      streams = args.slice(0, -1) as PipelineStageLike[];
     }
   } else if (isPipelineOptions(lastArg)) {
     options = lastArg;
-    streams = args.slice(0, -1) as PipelineStream[];
+    streams = args.slice(0, -1) as PipelineStageLike[];
   } else {
-    streams = args as PipelineStream[];
+    streams = args as PipelineStageLike[];
   }
 
   const normalizedStreams = streams.map(toNodePipelineStream);

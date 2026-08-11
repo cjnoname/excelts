@@ -40,7 +40,8 @@ function getDeps(): UtilsDeps {
 
 export { collect, isReadableStreamLike, readableStreamToAsyncIterable };
 
-type AsyncIterableStream = { [Symbol.asyncIterator](): AsyncIterator<Uint8Array> };
+/** The minimal shape {@link text} / {@link json} / {@link bytes} consume. */
+export type AsyncIterableStream = { [Symbol.asyncIterator](): AsyncIterator<Uint8Array> };
 
 let _text: ReturnType<typeof createText>;
 export function text(stream: AsyncIterableStream): Promise<string> {

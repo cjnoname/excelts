@@ -18,6 +18,11 @@ export type {
   WriteCallback,
   DestroyCallback,
   IEventEmitter,
+  ReadableLike,
+  WritableLike,
+  PipelineStreamLike,
+  PipelineStageLike,
+  PipelineGeneratorStage,
   IReadable,
   IWritable,
   ITransform,
@@ -41,7 +46,7 @@ export {
   setDefaultHighWaterMark,
   promisify
 } from "@stream/core/utils";
-export type { PipelineOptions, FinishedOptions } from "@stream/core/options";
+export type { PipelineOptions, FinishedOptions, PipelineCallback } from "@stream/core/options";
 
 export { ChunkedBuilder, TransactionalChunkedBuilder } from "@stream/chunked-builder";
 export type { ChunkedBuilderOptions, BuilderSnapshot } from "@stream/chunked-builder";
@@ -59,6 +64,7 @@ export {
   isReadableStreamLike,
   readableStreamToAsyncIterable
 } from "@stream/utils";
+export type { AsyncIterableStream } from "@stream/utils";
 
 export {
   StreamError,

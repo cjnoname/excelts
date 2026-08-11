@@ -134,8 +134,10 @@ export interface WritableLike extends IEventEmitter {
 }
 
 /**
- * Stream-like union accepted by `pipeline`/`finished` across Node and browser.
+ * Stream-like union accepted by `finished` across Node and browser.
  * Includes Web Streams to support browser-native and Node's WHATWG streams.
+ *
+ * `pipeline` accepts more — see {@link PipelineStageLike}.
  */
 export type PipelineStreamLike =
   | ReadableLike
@@ -144,6 +146,26 @@ export type PipelineStreamLike =
   | ReadableStream<any>
   | WritableStream<any>
   | TransformStream<any, any>;
+
+/**
+ * A generator/async-generator transform stage: `fn(source) => (Async)Iterable`.
+ *
+ * Only valid in the middle of a pipeline — a trailing function argument is
+ * always read as the completion callback.
+ */
+export type PipelineGeneratorStage = (
+  source: AsyncIterable<any>
+) => AsyncIterable<unknown> | Iterable<unknown>;
+
+/**
+ * Everything `pipeline` accepts as a stage: streams (including Web Streams),
+ * a bare (async) iterable as the source, and generator transform stages.
+ */
+export type PipelineStageLike =
+  | PipelineStreamLike
+  | Iterable<unknown>
+  | AsyncIterable<unknown>
+  | PipelineGeneratorStage;
 
 /**
  * Common readable stream interface
