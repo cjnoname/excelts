@@ -10,6 +10,7 @@
  */
 
 import { ZipDeflate } from "@archive/zip/stream";
+import { PartPath } from "@word/constants";
 import { describe, it, expect, vi } from "vitest";
 
 import { DocxWriteError, Build, Streaming } from "../index";
@@ -178,6 +179,35 @@ describe("StreamingDocxWriter — sink mode", () => {
       .catch((e: unknown) => e);
     expect(caught).toBeInstanceOf(DocxWriteError);
     expect(String(caught)).toMatch(/sink/i);
+  });
+
+  it("surfaces compression failures without an unhandled stream error", async () => {
+    const compressionError = new Error("deflate exploded");
+    const originalPush = ZipDeflate.prototype.push;
+    const pushSpy = vi
+      .spyOn(ZipDeflate.prototype, "push")
+      .mockImplementation(function (this: InstanceType<typeof ZipDeflate>, data, final, callback) {
+        if (this.name === PartPath.Document) {
+          return Promise.reject(compressionError);
+        }
+        return originalPush.call(this, data, final, callback);
+      });
+
+    try {
+      const writer = Streaming.createDocxStream({
+        sink: new WritableStream<Uint8Array>({ write(): void {} })
+      });
+      const caught = await writer
+        .addAsync(Build.textParagraph("compression failure"))
+        .catch((e: unknown) => e);
+
+      // Reported through the public writer contract rather than as an
+      // unhandled `error` event on the internal document stream.
+      expect(caught).toBeInstanceOf(DocxWriteError);
+      expect((caught as DocxWriteError).cause).toBe(compressionError);
+    } finally {
+      pushSpy.mockRestore();
+    }
   });
 
   it("rejects reset() in sink mode", async () => {
