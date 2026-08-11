@@ -50,7 +50,6 @@ import { CoreXform } from "@excel/xlsx/xform/core/core-xform";
 import { FeaturePropertyBagXform } from "@excel/xlsx/xform/core/feature-property-bag-xform";
 import { MetadataXform } from "@excel/xlsx/xform/core/metadata-xform";
 import { RelationshipsXform } from "@excel/xlsx/xform/core/relationships-xform";
-import { DrawingXform } from "@excel/xlsx/xform/drawing/drawing-xform";
 import { SharedStringsXform } from "@excel/xlsx/xform/strings/shared-strings-xform";
 import { StylesXform } from "@excel/xlsx/xform/style/styles-xform";
 import { theme1Xml } from "@excel/xlsx/xml/theme1";
@@ -630,7 +629,7 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     await this.promise;
     await this._commitWorksheets();
     await this.addMedia();
-    this.addDrawings();
+    await this.addDrawings();
     await this._waitForUserSinkDrain();
     await Promise.all([
       this.addThemes(),
@@ -871,18 +870,30 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
    * Generate drawing XML and drawing relationship files for worksheets that have images.
    * Must be called after _commitWorksheets() so that each WorksheetWriter has built its
    * drawing model, and after addMedia() so that media files are already in the ZIP.
+   *
+   * `DrawingXform` is imported on demand, matching how `XLSX` already reaches for
+   * it. A static import here defeated that: bundlers hoist a statically imported
+   * module into the main chunk, so every `await import()` of it elsewhere became
+   * ineffective (`INEFFECTIVE_DYNAMIC_IMPORT`) and ~49 KB of drawing transformers
+   * were pulled in even by a consumer that only ever writes cells.
+   *
+   * The emptiness check comes first so a workbook with no images does not load the
+   * module at all — the previous version constructed a `DrawingXform` even when
+   * there was nothing to write.
    */
-  protected addDrawings(): void {
+  protected async addDrawings(): Promise<void> {
+    const drawings = this._worksheets
+      .map(ws => ws?.drawing)
+      .filter((drawing): drawing is NonNullable<typeof drawing> => drawing != null);
+    if (drawings.length === 0) {
+      return;
+    }
+
+    const { DrawingXform } = await import("@excel/xlsx/xform/drawing/drawing-xform");
     const drawingXform = new DrawingXform();
     const relsXform = new RelationshipsXform();
 
-    for (const ws of this._worksheets) {
-      if (!ws?.drawing) {
-        continue;
-      }
-
-      const { drawing } = ws;
-
+    for (const drawing of drawings) {
       // Filter out invalid anchors using shared utility
       const filteredAnchors = filterDrawingAnchors(drawing.anchors);
       const drawingForWrite = { ...drawing, anchors: filteredAnchors };
