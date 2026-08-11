@@ -1,4 +1,4 @@
-import type { Alignment, Borders, Fill, Font, Protection } from "@excel/types";
+import type { Alignment, Borders, Fill, Font, NumFmt, Protection } from "@excel/types";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { AlignmentXform } from "@excel/xlsx/xform/style/alignment-xform";
 import { BorderXform } from "@excel/xlsx/xform/style/border-xform";
@@ -18,7 +18,14 @@ interface DxfModel {
   border?: Partial<Borders>;
   fill?: Fill;
   font?: Partial<Font>;
-  numFmt?: string;
+  /**
+   * Either the format code (what the writer is handed) or the parsed
+   * `{ id, formatCode }` pair (what {@link DxfXform.parseClose} produces when a
+   * `dxf` is read back from a file). {@link DxfXform.render} accepts both —
+   * before that it stringified the object into `formatCode="[object Object]"`,
+   * corrupting the number format of every conditional format on re-save.
+   */
+  numFmt?: string | NumFmt;
   numFmtId?: number;
   protection?: Partial<Protection>;
 }
@@ -54,8 +61,8 @@ class DxfXform extends BaseXform {
       this.map.font.render(xmlStream, model.font);
     }
     if (model.numFmt && model.numFmtId) {
-      const numFmtModel = { id: model.numFmtId, formatCode: model.numFmt };
-      this.map.numFmt.render(xmlStream, numFmtModel);
+      const formatCode = typeof model.numFmt === "string" ? model.numFmt : model.numFmt.formatCode;
+      this.map.numFmt.render(xmlStream, { id: model.numFmtId, formatCode });
     }
     if (model.fill) {
       this.map.fill.render(xmlStream, model.fill);
