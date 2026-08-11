@@ -22,8 +22,6 @@ function encodedBytesToString(this: Uint8Array, enc?: string): string {
   return decodeBytesToString(this, enc ?? "utf-8");
 }
 
-import type { Writable as NodeWritable } from "stream";
-
 // =============================================================================
 // Writable Stream Wrapper
 // =============================================================================
@@ -1507,10 +1505,12 @@ Writable.prototype._write = function _write(
 /**
  * Normalize a user-provided writable into this module's Writable.
  * Keeps Web/Node branching at the stream-module boundary.
+ *
+ * A Node `Writable` is accepted too — it satisfies the structural
+ * {@link WritableLike}. This variant deliberately does not name Node's class:
+ * doing so pulled `@types/node` into the browser declaration graph.
  */
-export function toWritable<T = Uint8Array>(
-  stream: WritableLike | WritableStream<T> | NodeWritable
-): WritableLike {
+export function toWritable<T = Uint8Array>(stream: WritableLike | WritableStream<T>): WritableLike {
   if (stream instanceof Writable) {
     return stream;
   }

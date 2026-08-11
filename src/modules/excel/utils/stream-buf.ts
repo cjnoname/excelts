@@ -19,8 +19,14 @@ import { StringBuf } from "@utils/string-buf";
 // Data Chunks - encapsulating incoming data
 // =============================================================================
 
-// Encoding type - simplified from Node.js BufferEncoding (TextEncoder only supports UTF-8)
-type TextEncoding = "utf-8" | "utf8" | BufferEncoding;
+/**
+ * Encoding label accepted by the buffer helpers. Writing always encodes UTF-8
+ * (that is all `TextEncoder` supports); reading goes through `TextDecoder`, so
+ * any WHATWG label works. Spelled as a widened string union rather than Node's
+ * `BufferEncoding` so the type does not drag `@types/node` into the browser
+ * declaration graph.
+ */
+type TextEncoding = "utf-8" | "utf8" | (string & {});
 
 // Node-style write/end completion callback. Invoked with an optional error;
 // the return value is ignored.

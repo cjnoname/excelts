@@ -128,10 +128,14 @@ export class Writable<T = Uint8Array> extends NodeWritable {
  * Normalize a user-provided writable into a Node.js-compatible Writable.
  *
  * This keeps Web/Node branching at the stream-module boundary.
+ *
+ * A Node `Writable` is accepted (and fast-pathed below) — it satisfies the
+ * structural {@link WritableLike}, so the signature does not name Node's class.
+ * Naming it made the browser variant's declaration require `@types/node`, and
+ * the two platforms' signatures must stay identical (see
+ * `excel/__tests__/type/stream-api-parity.typecheck.ts`).
  */
-export function toWritable<T = Uint8Array>(
-  stream: WritableLike | WritableStream<T> | NodeWritable
-): WritableLike {
+export function toWritable<T = Uint8Array>(stream: WritableLike | WritableStream<T>): WritableLike {
   if (stream instanceof Writable) {
     return stream;
   }

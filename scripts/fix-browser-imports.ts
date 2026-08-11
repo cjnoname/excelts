@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // Post-build script:
 // - rewrites relative imports/exports in a dist folder to prefer sibling `.browser.js` when present.
-// This mirrors src/utils/browser.ts (preferBrowserFilesPlugin) but works on emitted JS files.
+// This mirrors src/utils/browser.ts (preferBrowserFilesPlugin) but works on emitted files.
+//
+// Declaration files are rewritten as well as JS. Skipping them used to leave the
+// browser build's `.d.ts` graph pointing at the Node variants (e.g. csv's parser
+// typed `Transform` from `stream/index.d.ts`, the Node entry, while the JS loaded
+// `stream/index.browser.js`) — so browser consumers got Node types and needed
+// `@types/node`. `pnpm build:verify:browser` now guards this.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -34,6 +40,14 @@ function toPosixPath(p: string): string {
   return p.split(path.sep).join("/");
 }
 
+function isFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   let entries: fs.Dirent[];
   try {
@@ -45,7 +59,7 @@ function walk(dir: string, out: string[] = []): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       walk(full, out);
-    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+    } else if (entry.isFile() && (entry.name.endsWith(".js") || entry.name.endsWith(".d.ts"))) {
       out.push(full);
     }
   }
@@ -55,6 +69,15 @@ function walk(dir: string, out: string[] = []): string[] {
 interface PreferBrowserSpecifierOptions {
   filePath: string;
   specifier: string;
+}
+
+/** Relative specifier for `candidateAbs`, POSIX-style and always `./`-prefixed. */
+function relativeSpecifier(filePath: string, candidateAbs: string): string {
+  let rel = toPosixPath(path.relative(path.dirname(filePath), candidateAbs));
+  if (!rel.startsWith(".")) {
+    rel = `./${rel}`;
+  }
+  return rel;
 }
 
 function preferBrowserSpecifier({
@@ -67,33 +90,24 @@ function preferBrowserSpecifier({
   if (specifier.includes(".browser.")) {
     return null;
   }
+  // Declaration files also spell their specifiers `.js` (NodeNext), so the
+  // matching is identical; only the file we probe for differs.
   if (!specifier.endsWith(".js")) {
     return null;
   }
+  const emitExt = filePath.endsWith(".d.ts") ? ".d.ts" : ".js";
 
   const absTarget = path.resolve(path.dirname(filePath), specifier);
   const base = absTarget.slice(0, -".js".length);
-  const candidateAbs = `${base}.browser.js`;
-  if (fs.existsSync(candidateAbs) && fs.statSync(candidateAbs).isFile()) {
-    let rel = path.relative(path.dirname(filePath), candidateAbs);
-    rel = toPosixPath(rel);
-    if (!rel.startsWith(".")) {
-      rel = `./${rel}`;
-    }
-    return rel;
+  if (isFile(`${base}.browser${emitExt}`)) {
+    return relativeSpecifier(filePath, `${base}.browser.js`);
   }
 
   // Also support swapping `/index.js` to `/index.browser.js` if it exists.
   if (absTarget.endsWith(`${path.sep}index.js`)) {
     const indexBase = absTarget.slice(0, -"index.js".length);
-    const indexBrowserAbs = path.join(indexBase, "index.browser.js");
-    if (fs.existsSync(indexBrowserAbs) && fs.statSync(indexBrowserAbs).isFile()) {
-      let rel = path.relative(path.dirname(filePath), indexBrowserAbs);
-      rel = toPosixPath(rel);
-      if (!rel.startsWith(".")) {
-        rel = `./${rel}`;
-      }
-      return rel;
+    if (isFile(path.join(indexBase, `index.browser${emitExt}`))) {
+      return relativeSpecifier(filePath, path.join(indexBase, "index.browser.js"));
     }
   }
 

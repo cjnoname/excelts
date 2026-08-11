@@ -72,12 +72,12 @@ interface CollectResult {
  * Unified helper for both collectAsyncInput and parseCsvWithProgress.
  *
  * @param input - Async iterable of chunks
- * @param encoding - Text encoding (default: utf-8)
+ * @param encoding - `TextDecoder` label (default: utf-8)
  * @param onChunk - Optional callback for each chunk (for progress reporting)
  */
 async function collectText(
   input: AsyncIterable<string | Uint8Array>,
-  encoding?: BufferEncoding,
+  encoding?: string,
   onChunk?: (bytesProcessed: number) => void
 ): Promise<CollectResult> {
   const chunks: string[] = [];

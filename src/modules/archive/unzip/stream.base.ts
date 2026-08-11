@@ -169,8 +169,12 @@ export class PullStream<TRead = unknown> extends Duplex {
     (chunk: string, encoding?: string, callback?: (error?: Error | null) => void): boolean;
   };
 
-  // Improve public typing for consumers without relying on generic Duplex types.
-  declare push: (chunk: TRead | null) => boolean;
+  // Improve public typing for consumers without relying on generic Duplex
+  // types. The declared chunk type WIDENS the base signature (it includes the
+  // base's byte chunk) rather than replacing it: `Duplex` is Node's non-generic
+  // class on the Node build and `Duplex<Uint8Array, Uint8Array>` on the browser
+  // build, and dropping the byte arm was not assignable to the latter.
+  declare push: (chunk: TRead | Uint8Array | null, encoding?: string) => boolean;
 
   private _notifyPendingChunkWaiter(): void {
     if (!this._pendingChunkResolve) {

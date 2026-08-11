@@ -262,8 +262,15 @@ export interface CsvParseOptions extends CsvBaseOptions {
   groupColumnsByName?: boolean;
   /** Return records as object keyed by column value */
   objname?: string;
-  /** Character encoding (Node.js streams) */
-  encoding?: BufferEncoding;
+  /**
+   * Character encoding of the input bytes — any label `TextDecoder` accepts
+   * (`"utf-8"`, `"windows-1252"`, `"shift_jis"`, …). Defaults to `"utf-8"`.
+   *
+   * Deliberately not Node's `BufferEncoding`: decoding goes through
+   * `TextDecoder`, which speaks WHATWG labels (and rejects `"base64"`/`"hex"`),
+   * and this type is part of the browser surface.
+   */
+  encoding?: string;
   /** Synchronous row transform function */
   rowTransform?: (row: Row) => Row | null | undefined;
   /** Synchronous validate function */

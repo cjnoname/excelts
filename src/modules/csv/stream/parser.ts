@@ -94,8 +94,13 @@ export class CsvParserStream extends Transform {
   private backpressure: boolean = false;
   private pendingCallback: ((error?: Error | null) => void) | null = null;
 
-  // Improve public typing without relying on generic Transform types.
-  declare push: (chunk: Row | string | null) => boolean;
+  // Improve public typing without relying on generic Transform types. The
+  // declared chunk types WIDEN the base signature (they include the base's
+  // byte chunk) rather than replace it: `Transform` resolves to Node's
+  // non-generic class on the Node build and to the generic
+  // `Transform<Uint8Array, Uint8Array>` on the browser build, and a member that
+  // dropped the byte arm was not assignable to the latter.
+  declare push: (chunk: Row | string | Uint8Array | null, encoding?: string) => boolean;
   declare write: {
     (chunk: Uint8Array, callback?: (error?: Error | null) => void): boolean;
     (chunk: Uint8Array, encoding?: string, callback?: (error?: Error | null) => void): boolean;
@@ -206,7 +211,11 @@ export class CsvParserStream extends Transform {
   _transform(
     chunk: Uint8Array | string,
     _encoding: string,
-    callback: (error?: Error | null, data?: Row) => void
+    // `data` is `never`: this stream reports errors through the callback and
+    // emits rows through `this.push`, never through the callback's data channel.
+    // Typing it so also keeps the override assignable to the byte-typed base
+    // `_transform` on the browser build (see the note on `push` above).
+    callback: (error?: Error | null, data?: never) => void
   ): void {
     // If chunk callback aborted parsing or toLine reached, skip all further processing
     if (this.chunkAborted || this.toLineReached) {
