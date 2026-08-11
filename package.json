@@ -1,6 +1,6 @@
 {
   "name": "documonster",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Zero-dependency TypeScript toolkit for Excel, Word, PDF, CSV, Markdown, XML & ZIP — one API across Node.js, Bun & browsers.",
   "keywords": [
     "archive",

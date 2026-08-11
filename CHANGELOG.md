@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0](https://github.com/documonster/documonster/compare/v0.6.0...v0.7.0) (2026-08-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **excel:** `createCsvReadStream` emits `Uint8Array` chunks instead of `string`. Building a string by `+=`-ing chunks now breaks silently (`"" + new Uint8Array([97])` is `"97"`); decode with a streaming `TextDecoder`, or use `writeCsv()`. `Workbook.toBuffer` is declared `Promise<Buffer>` on Node and `Workbook.toStream` returns `XlsxReadable & Readable` there — both are narrowings, so existing code keeps compiling. See MIGRATION.md.
+* **excel:** `Cell` functions take `"A1"` or `(row, col)`, never a mix — `Cell.getValue(ws, "A1", 99)` and `Cell.getValue(ws, 5)` no longer compile (both were already wrong at runtime). `Worksheet.columns()` returns deeply read-only `ColumnView`s, so writing to a column record no longer compiles; use `setColumns` / `Column.set*`. The OOXML enums are constant objects, so the numeric-enum reverse mapping (`ValueType[2]`) is gone and the types are literal unions rather than `number`. Eleven unreferenced type declarations were removed and four types renamed at their declaration; §8.7 and §8.8 of the migration guide map every case.
+
+### Features
+
+* **excel:** Export the public type surface and unify cell addressing ([2c6b17d](https://github.com/documonster/documonster/commit/2c6b17dde91b4d20920b714c78d2cab43e4e1761))
+* **excel:** Make the IO types match the streams Node actually returns ([e80c214](https://github.com/documonster/documonster/commit/e80c2147b2c0362a0183014fe3631515bd4fe473))
+* **stream:** Accept iterables and generator stages in pipeline ([3237f0c](https://github.com/documonster/documonster/commit/3237f0cb76a1daf873590331e200a0eea05605c3))
+
+
+### Bug Fixes
+
+* **build:** Make IIFE bundles byte-reproducible ([44a274d](https://github.com/documonster/documonster/commit/44a274d95ff57e55378de35defa408a034605a5c))
+* **build:** Point browser declarations at the browser variants ([149170a](https://github.com/documonster/documonster/commit/149170a5d1d9ca9a5082f4935e5ef46826ae3667))
+* **excel:** Keep the conditional-format number format on re-save ([3cd39e1](https://github.com/documonster/documonster/commit/3cd39e1173b3dd2e3f0d42f5f80646f5e9280eda))
+
 ## [0.6.0](https://github.com/documonster/documonster/compare/v0.5.1...v0.6.0) (2026-08-11)
 
 
