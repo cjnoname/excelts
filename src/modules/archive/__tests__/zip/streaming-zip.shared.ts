@@ -477,14 +477,18 @@ export function runStreamingZipTests(imports: StreamingZipModuleImports): void {
     it("should emit data chunks progressively (true streaming)", async () => {
       const stream = createDeflateStream({ level: 1 });
       const dataEvents: number[] = [];
-      let endCalled = false;
 
-      stream.on("data", (chunk: Uint8Array) => {
-        dataEvents.push(chunk.length);
-      });
-
-      stream.on("end", () => {
-        endCalled = true;
+      // Await the actual `end` event rather than sleeping. Completing this
+      // stream costs six zlib round trips (a write + Z_SYNC_FLUSH per chunk,
+      // then Z_FINISH), so a fixed timer races the event loop: the outcome was a
+      // pure function of the sleep length, and a loaded machine failed it as
+      // `expected false to be true` instead of waiting a moment longer.
+      const ended = new Promise<void>((resolve, reject) => {
+        stream.on("data", (chunk: Uint8Array) => {
+          dataEvents.push(chunk.length);
+        });
+        stream.on("end", () => resolve());
+        stream.on("error", reject);
       });
 
       // Write multiple chunks
@@ -495,10 +499,10 @@ export function runStreamingZipTests(imports: StreamingZipModuleImports): void {
       }
       stream.end();
 
-      // Wait for all events
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await ended;
 
-      expect(endCalled).toBe(true);
+      // Chunks arrived before `end`, i.e. the compressor streamed rather than
+      // buffering everything until the final flush.
       expect(dataEvents.length).toBeGreaterThan(0);
     });
   });
