@@ -124,6 +124,18 @@ export function writeStream(
  * stream should `destroy()` it, which releases the parked writer; serialization
  * failures surface as an `'error'` event, so consume through `pipeline()` or
  * `for await` rather than a bare `.pipe()`.
+ *
+ * ### Leaving `for await` early
+ *
+ * Breaking out of the loop destroys the stream with no error, so `errored` stays
+ * `null` and no `'error'` listener fires. Use
+ * `stream.iterator({ destroyOnReturn: false })` to keep the stream alive past the
+ * loop — you then have to `destroy()` it yourself, or the serializer stays parked.
+ *
+ * Note this differs from the Node build, where Node's own async iterator destroys
+ * the stream with an `AbortError` on early exit and sets `errored`. `errored` is
+ * therefore not a portable way to distinguish "the consumer stopped" from
+ * "serialization failed"; track that yourself if the same code runs on both.
  */
 export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable {
   const io = getXlsxIo(wb);

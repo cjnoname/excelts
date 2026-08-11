@@ -151,6 +151,52 @@ export function writeStream(
  * stream should `destroy()` it, which releases the parked writer; serialization
  * failures surface as an `'error'` event, so consume through `stream.pipeline()`
  * or `for await` rather than a bare `.pipe()`.
+ *
+ * ### Leaving `for await` early
+ *
+ * Reading the first N chunks and `break`ing is Node's semantics, not this
+ * stream's, and the two teardown paths do **not** look alike:
+ *
+ * ```ts
+ * for await (const chunk of Workbook.toStream(wb)) break;
+ * // stream.errored === AbortError: The operation was aborted
+ * ```
+ *
+ * Node's async iterator destroys the stream with an `AbortError` on early exit
+ * (`createAsyncIterator` → `destroyer`), whereas calling `destroy()` yourself
+ * destroys it with no error. Nothing crashes — the iterator handles the event, so
+ * an absent `'error'` listener is not an unhandled error — but a listener that
+ * *is* attached receives a spurious `AbortError`, and `stream.errored` is set, so
+ * code that reports either as a serialization failure will report a false one.
+ *
+ * Two ways to leave early *silently*, both of which still release the parked
+ * writer:
+ *
+ * ```ts
+ * // 1. destroy first, then break
+ * const stream = Workbook.toStream(wb);
+ * for await (const chunk of stream) {
+ *   if (enough(chunk)) {
+ *     stream.destroy();
+ *     break;
+ *   }
+ * }
+ *
+ * // 2. opt out of the iterator's teardown — but then YOU must destroy it,
+ * //    or the serializer stays parked
+ * const stream = Workbook.toStream(wb);
+ * try {
+ *   for await (const chunk of stream.iterator({ destroyOnReturn: false })) {
+ *     if (enough(chunk)) break;
+ *   }
+ * } finally {
+ *   stream.destroy();
+ * }
+ * ```
+ *
+ * The browser build destroys silently on early exit instead, so `errored` is not
+ * a portable way to tell "the consumer stopped" from "serialization failed" —
+ * track that yourself if the same code runs on both platforms.
  */
 export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable & Readable {
   const io = getXlsxIo(wb);

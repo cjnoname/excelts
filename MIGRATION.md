@@ -108,3 +108,43 @@ const portable: Workbook.XlsxReadable = Workbook.toStream(wb);
 ```
 
 `for await` continues to yield `Uint8Array`.
+
+### Note: leaving `for await` early (no change, previously undocumented)
+
+Not a change in `documonster`, but it was never written down and it bites the
+common "read the first N chunks" shape.
+
+On **Node**, breaking out of a `for await` loop lets Node's own async iterator
+destroy the stream with an `AbortError`, so `stream.errored` is set and any
+attached `'error'` listener receives `The operation was aborted`. Calling
+`destroy()` yourself destroys it with no error. Nothing crashes either way — the
+iterator handles the event — but code that treats an `'error'` or a non-null
+`errored` as a serialization failure will report a false one.
+
+```ts
+// Sets errored to AbortError
+for await (const chunk of Workbook.toStream(wb)) break;
+
+// Silent: destroy first, then break
+const stream = Workbook.toStream(wb);
+for await (const chunk of stream) {
+  stream.destroy();
+  break;
+}
+
+// Silent: opt out of the iterator's teardown — but then you must destroy it,
+// or the serializer stays parked
+const stream = Workbook.toStream(wb);
+try {
+  for await (const chunk of stream.iterator({ destroyOnReturn: false })) break;
+} finally {
+  stream.destroy();
+}
+```
+
+The **browser** build destroys silently on early exit, so `errored` is not a
+portable way to distinguish "the consumer stopped" from "serialization failed".
+Track that yourself if the same code runs on both platforms.
+
+The same applies to `createCsvReadStream` on Node, which is also a
+`stream.Readable`.

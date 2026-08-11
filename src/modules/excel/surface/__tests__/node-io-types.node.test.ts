@@ -95,3 +95,77 @@ describe("Workbook.toStream (Node)", () => {
     await reader.cancel();
   });
 });
+
+// The `toStream` doc block describes these three teardown paths. They are Node's
+// async-iterator semantics rather than this stream's, which is exactly why they
+// need pinning: if Node ever changes, the documentation is wrong and this tells
+// us. A workbook large enough to trigger backpressure keeps the producer parked
+// at the break, so teardown is actually exercised.
+describe("Workbook.toStream early exit (Node semantics)", () => {
+  const settle = () => new Promise(resolve => setTimeout(resolve, 200));
+
+  it("break destroys with an AbortError, which a listener sees", async () => {
+    const stream = Workbook.toStream(buildWorkbook(40000));
+    const seen: Error[] = [];
+    stream.on("error", error => seen.push(error));
+
+    let chunks = 0;
+    for await (const _chunk of stream) {
+      if (++chunks >= 3) {
+        break;
+      }
+    }
+    await settle();
+
+    expect(stream.destroyed).toBe(true);
+    expect(stream.errored).toBeInstanceOf(Error);
+    expect((stream.errored as Error).name).toBe("AbortError");
+    expect(seen.map(error => error.message)).toEqual(["The operation was aborted"]);
+  });
+
+  it("destroying before the break is silent", async () => {
+    const stream = Workbook.toStream(buildWorkbook(40000));
+    const seen: Error[] = [];
+    stream.on("error", error => seen.push(error));
+
+    let chunks = 0;
+    for await (const _chunk of stream) {
+      if (++chunks >= 3) {
+        stream.destroy();
+        break;
+      }
+    }
+    await settle();
+
+    expect(stream.destroyed).toBe(true);
+    expect(stream.errored).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  it("destroyOnReturn:false is silent but leaves the stream open", async () => {
+    const stream = Workbook.toStream(buildWorkbook(40000));
+    const seen: Error[] = [];
+    stream.on("error", error => seen.push(error));
+
+    let chunks = 0;
+    try {
+      for await (const _chunk of stream.iterator({ destroyOnReturn: false })) {
+        if (++chunks >= 3) {
+          break;
+        }
+      }
+      await settle();
+      // The caller now owns teardown — this is the half of the contract that is
+      // easy to miss, and skipping it leaves the serializer parked.
+      expect(stream.destroyed).toBe(false);
+      expect(stream.errored).toBeNull();
+    } finally {
+      stream.destroy();
+    }
+    await settle();
+
+    expect(stream.destroyed).toBe(true);
+    expect(stream.errored).toBeNull();
+    expect(seen).toEqual([]);
+  });
+});

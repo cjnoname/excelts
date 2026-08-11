@@ -39,6 +39,13 @@ export { readCsvFile, writeCsvFile } from "@excel/bridge/csv-bridge.node";
  *
  * `IReadable<Uint8Array>` stays first in the intersection so `for await` keeps
  * yielding `Uint8Array` instead of the `any` Node's own declaration returns.
+ *
+ * Leaving `for await` early has the same Node-level caveat as
+ * `Workbook.toStream`: `break` lets Node's async iterator destroy the stream with
+ * an `AbortError`, which sets `errored` and reaches any attached `'error'`
+ * listener, while calling `destroy()` yourself is silent. Destroy before breaking,
+ * or iterate via `stream.iterator({ destroyOnReturn: false })` and destroy in a
+ * `finally`.
  */
 export function createCsvReadStream(
   workbook: Workbook,
