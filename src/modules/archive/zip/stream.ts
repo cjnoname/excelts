@@ -851,8 +851,13 @@ export class ZipDeflateFile {
   /**
    * Push data — compresses and outputs immediately.
    *
-   * Returns a Promise that resolves when the write is complete.
-   * If final=true, it resolves after the data descriptor is emitted.
+   * Returns a Promise that resolves once this input has been compressed **and**
+   * the resulting output has been handed to `ondata` (including any handoff the
+   * consumer returned to apply backpressure). If `final` is true it also covers
+   * the data descriptor. Awaiting it therefore means "the bytes produced so far
+   * have reached the destination", not merely "the input was accepted" — which
+   * is what lets callers sample downstream backpressure afterwards. Browser
+   * deflate is asynchronous, so the distinction is load-bearing there.
    *
    * When no async deflate stream is needed (the common case: smartStore without
    * encryption), data is compressed and emitted synchronously via SyncDeflater.
@@ -1102,7 +1107,15 @@ export class ZipDeflateFile {
     return this._ensureCompletePromise();
   }
 
-  /** @internal Wait until input accepted so far has emitted and handed off its output. */
+  /**
+   * @internal Flush batched input and wait until everything produced so far has
+   * reached `ondata`, so the caller can then observe downstream backpressure.
+   *
+   * Producers call this after each input chunk. `push()` already includes output
+   * delivery, but small inputs may still sit in the batch buffer; this drains
+   * that buffer first. Callers must not treat it as "all bytes emitted": smart
+   * STORE deliberately withholds output until it has sampled enough data.
+   */
   async outputCheckpoint(): Promise<void> {
     if (this._inputPos > 0) {
       const data = this._inputBuf!.slice(0, this._inputPos);
@@ -1350,6 +1363,19 @@ export class ZipRawFile implements ZipWritableFile {
     this._drainQueue();
   }
 
+  /**
+   * Chain one `ondata` handoff onto this entry's output tail so callers can
+   * await delivery. A consumer that applies backpressure returns a Promise;
+   * a synchronous consumer returns nothing and the tail is unchanged.
+   */
+  private _trackHandoff(handoff: void | Promise<void>): void {
+    if (!handoff) {
+      return;
+    }
+    this._outputTail = this._outputTail.then(() => handoff);
+    void this._outputTail.catch(() => undefined);
+  }
+
   private _drainQueue(): void {
     if (!this._ondata) {
       return;
@@ -1357,11 +1383,7 @@ export class ZipRawFile implements ZipWritableFile {
 
     while (this._dataQueueHead < this._dataQueue.length) {
       const chunk = this._dataQueue[this._dataQueueHead++]!;
-      const handoff = this._ondata(chunk, false);
-      if (handoff) {
-        this._outputTail = this._outputTail.then(() => handoff);
-        void this._outputTail.catch(() => undefined);
-      }
+      this._trackHandoff(this._ondata(chunk, false));
     }
 
     if (this._dataQueueHead > 0) {
@@ -1371,11 +1393,7 @@ export class ZipRawFile implements ZipWritableFile {
 
     if (this._finalQueued) {
       this._finalQueued = false;
-      const handoff = this._ondata(EMPTY_UINT8ARRAY, true);
-      if (handoff) {
-        this._outputTail = this._outputTail.then(() => handoff);
-        void this._outputTail.catch(() => undefined);
-      }
+      this._trackHandoff(this._ondata(EMPTY_UINT8ARRAY, true));
 
       // Emitting final means this file is fully written.
       void this._outputTail.then(

@@ -1,4 +1,17 @@
+/**
+ * Async producer/consumer queue.
+ *
+ * `push()` is asynchronous so a producer can be throttled by a slow consumer:
+ * with a bounded `capacity`, it resolves only once the value has been handed to
+ * a waiting consumer or has room in the buffer. It rejects when the queue has
+ * already been closed, failed, or cancelled — a producer must observe that
+ * instead of silently dropping data.
+ *
+ * All three FIFOs use a head index with periodic compaction rather than
+ * `Array.shift()`, so an unbounded queue that buffers many values stays linear.
+ */
 export type AsyncQueue<T> = {
+  /** Hand a value to the queue, waiting while a bounded queue is full. */
   push: (value: T) => Promise<void>;
   fail: (err: Error) => void;
   close: () => void;
@@ -16,8 +29,17 @@ type Producer<T> = {
   reject: (err: Error) => void;
 };
 
+/** Compact a FIFO once its consumed prefix dominates the backing array. */
+const COMPACT_THRESHOLD = 1024;
+
 export function createAsyncQueue<T>(
-  options: { capacity?: number; onCancel?: () => void; cancelError?: () => Error } = {}
+  options: {
+    /** Maximum buffered values before `push()` waits. Defaults to unbounded. */
+    capacity?: number;
+    onCancel?: () => void;
+    /** Error used to reject producers blocked when the consumer cancels. */
+    cancelError?: () => Error;
+  } = {}
 ): AsyncQueue<T> {
   const capacity = options.capacity ?? Number.POSITIVE_INFINITY;
   if (!(capacity > 0) || (capacity !== Number.POSITIVE_INFINITY && !Number.isInteger(capacity))) {
@@ -25,21 +47,86 @@ export function createAsyncQueue<T>(
   }
 
   const values: T[] = [];
-  const consumers: Consumer<T>[] = [];
-  const producers: Producer<T>[] = [];
+  let valuesHead = 0;
+  const consumers: Array<Consumer<T>> = [];
+  let consumersHead = 0;
+  const producers: Array<Producer<T>> = [];
+  let producersHead = 0;
   let done = false;
   let error: Error | null = null;
   let cancelled = false;
 
+  function bufferedCount(): number {
+    return values.length - valuesHead;
+  }
+
+  function compact<U>(items: U[], head: number): number {
+    if (head > COMPACT_THRESHOLD && head * 2 > items.length) {
+      items.splice(0, head);
+      return 0;
+    }
+    return head;
+  }
+
+  function takeValue(): T {
+    const value = values[valuesHead++]!;
+    valuesHead = compact(values, valuesHead);
+    return value;
+  }
+
+  function takeConsumer(): Consumer<T> | undefined {
+    if (consumersHead >= consumers.length) {
+      return undefined;
+    }
+    const consumer = consumers[consumersHead++]!;
+    consumersHead = compact(consumers, consumersHead);
+    return consumer;
+  }
+
+  function takeProducer(): Producer<T> | undefined {
+    if (producersHead >= producers.length) {
+      return undefined;
+    }
+    const producer = producers[producersHead++]!;
+    producersHead = compact(producers, producersHead);
+    return producer;
+  }
+
+  function drainConsumers(settle: (consumer: Consumer<T>) => void): void {
+    while (true) {
+      const consumer = takeConsumer();
+      if (!consumer) {
+        break;
+      }
+      settle(consumer);
+    }
+  }
+
+  function rejectProducers(err: Error): void {
+    while (true) {
+      const producer = takeProducer();
+      if (!producer) {
+        break;
+      }
+      producer.reject(err);
+    }
+  }
+
+  function clearValues(): void {
+    values.length = 0;
+    valuesHead = 0;
+  }
+
+  /** Admit one blocked producer now that a slot is free. */
   function admitProducer(): void {
-    if (done || error || values.length >= capacity) {
+    if (done || error || bufferedCount() >= capacity) {
       return;
     }
-    const producer = producers.shift();
+    const producer = takeProducer();
     if (!producer) {
       return;
     }
-    const consumer = consumers.shift();
+    const consumer = takeConsumer();
     if (consumer) {
       consumer.resolve({ value: producer.value, done: false });
     } else {
@@ -48,22 +135,14 @@ export function createAsyncQueue<T>(
     producer.resolve();
   }
 
-  function rejectProducers(err: Error): void {
-    for (const producer of producers.splice(0)) {
-      producer.reject(err);
-    }
-  }
-
   function cancel(): void {
     if (cancelled) {
       return;
     }
     cancelled = true;
     done = true;
-    values.length = 0;
-    for (const consumer of consumers.splice(0)) {
-      consumer.resolve({ value: undefined, done: true });
-    }
+    clearValues();
+    drainConsumers(consumer => consumer.resolve({ value: undefined, done: true }));
     rejectProducers(options.cancelError?.() ?? new Error("Async queue was cancelled"));
     try {
       options.onCancel?.();
@@ -79,12 +158,12 @@ export function createAsyncQueue<T>(
     if (done) {
       return Promise.reject(new Error("Async queue is closed"));
     }
-    const consumer = consumers.shift();
+    const consumer = takeConsumer();
     if (consumer) {
       consumer.resolve({ value, done: false });
       return Promise.resolve();
     }
-    if (values.length < capacity) {
+    if (bufferedCount() < capacity) {
       values.push(value);
       return Promise.resolve();
     }
@@ -96,11 +175,9 @@ export function createAsyncQueue<T>(
       return;
     }
     error = err;
-    values.length = 0;
+    clearValues();
     rejectProducers(err);
-    for (const consumer of consumers.splice(0)) {
-      consumer.reject(err);
-    }
+    drainConsumers(consumer => consumer.reject(err));
   }
 
   function close(): void {
@@ -109,9 +186,7 @@ export function createAsyncQueue<T>(
     }
     done = true;
     rejectProducers(new Error("Async queue is closed"));
-    for (const consumer of consumers.splice(0)) {
-      consumer.resolve({ value: undefined, done: true });
-    }
+    drainConsumers(consumer => consumer.resolve({ value: undefined, done: true }));
   }
 
   const iterable: AsyncIterable<T> = {
@@ -121,8 +196,8 @@ export function createAsyncQueue<T>(
           if (error) {
             return Promise.reject(error);
           }
-          if (values.length > 0) {
-            const value = values.shift()!;
+          if (bufferedCount() > 0) {
+            const value = takeValue();
             admitProducer();
             return Promise.resolve({ value, done: false });
           }
