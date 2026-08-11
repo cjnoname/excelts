@@ -655,15 +655,57 @@ export async function writeCsvBuffer(
 // Streaming surfaces
 // =============================================================================
 
-/** Create a readable stream that outputs the worksheet as CSV. */
+/**
+ * Create a readable stream that outputs the worksheet as CSV.
+ *
+ * This is a **byte stream**: chunks are `Uint8Array` (a `Buffer` on Node) and
+ * `objectMode` is off on the readable side, so it can be piped or handed
+ * straight to anything that consumes bytes — `stream.pipeline()` into a file,
+ * an HTTP response, an SDK upload body, `Readable.toWeb()`, `Buffer.concat`.
+ *
+ * It used to emit `string` chunks from an object-mode readable side, which is
+ * what a CSV *formatter* produces internally. That leaked an implementation
+ * detail into a public API and made this stream indistinguishable by type from
+ * `Workbook.toStream()` while behaving completely differently: every byte
+ * consumer silently received strings instead. Use {@link writeCsv} when a
+ * `string` is what you want.
+ *
+ * The return type is deliberately read-only. The concrete object is a
+ * `CsvFormatterStream`, i.e. a `Transform`, but exposing that would put `write()`
+ * / `end()` on a stream this function has already wired to a producer: a caller
+ * who wrote a row would inject it into the output (or trip `write after end`,
+ * depending on where the producer had got to). The Node entry re-narrows the
+ * concrete stream to a nominal `stream.Readable`, which adds only read-side
+ * members — see {@link createCsvByteStream}.
+ */
 export function createCsvReadStream(
   workbook: Workbook,
   options?: CsvOptions
-): IReadable<Uint8Array | string> {
+): IReadable<Uint8Array> {
+  return createCsvByteStream(workbook, options);
+}
+
+/**
+ * The concrete stream behind {@link createCsvReadStream}.
+ *
+ * Exists so the Node entry can type its return as the platform's nominal
+ * `stream.Readable` without an `as` assertion: on the Node build
+ * `CsvFormatterStream extends Transform extends Readable`, so returning the
+ * concrete type is enough for the compiler to check the narrowing itself.
+ * Consumers get the read-only {@link createCsvReadStream} signature instead.
+ *
+ * @internal
+ */
+export function createCsvByteStream(workbook: Workbook, options?: CsvOptions): CsvFormatterStream {
   const worksheet = getWorksheet(workbook, options?.sheetName || options?.sheetId);
   const map = options?.map || createDefaultWriteMapper(options?.dateFormat, options?.dateUTC);
   const includeEmptyRows = options?.includeEmptyRows !== false;
-  const formatter = new CsvFormatterStream(buildFormatterOptions(options));
+  // Rows in, bytes out: the writable side stays object-mode so `write(row)`
+  // keeps taking arrays, while the readable side encodes the CSV text it pushes.
+  const formatter = new CsvFormatterStream({
+    ...buildFormatterOptions(options),
+    readableObjectMode: false
+  });
 
   if (!worksheet) {
     setTimeout(() => formatter.end(), 0);

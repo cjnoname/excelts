@@ -61,9 +61,14 @@ export class CsvFormatterStream extends Transform {
   };
 
   constructor(options: CsvFormatOptions = {}) {
+    const rowsIn = options.objectMode !== false;
     super({
-      objectMode: options.objectMode !== false,
-      writableObjectMode: options.objectMode !== false
+      // The two sides are set independently: rows arrive on the writable side,
+      // while the readable side may be asked to produce bytes instead of
+      // strings (see `CsvFormatOptions.readableObjectMode`). Defaults to the
+      // writable setting, so existing callers keep getting string chunks.
+      readableObjectMode: options.readableObjectMode ?? rowsIn,
+      writableObjectMode: rowsIn
     });
     this.options = options;
 

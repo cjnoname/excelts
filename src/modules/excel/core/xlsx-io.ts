@@ -1,3 +1,5 @@
+import type { Readable } from "node:stream";
+
 /**
  * Node xlsx IO handle accessor and the canonical public IO surface (Node).
  *
@@ -26,9 +28,25 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // Cross-platform flat IO functions (canonical public surface, Node binding).
 // =============================================================================
 
-/** Serialize a workbook to xlsx bytes. */
-export function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Uint8Array> {
-  return getXlsxIo(wb).writeBuffer(options);
+/**
+ * Serialize a workbook to xlsx bytes.
+ *
+ * Returns a `Buffer` on Node — the same nominal type `fs.writeFile`, `res.end`,
+ * and SDK upload bodies ask for — so callers do not need the defensive
+ * `Buffer.from(bytes)` that a `Uint8Array` declaration invites, and which really
+ * does copy the whole package.
+ *
+ * The guarantee is structural, not a re-label: `StreamBuf.read()` already hands
+ * back a `Buffer` view on Node, so the common path returns that value untouched,
+ * and the fallback wraps the existing memory (`Buffer.from(buffer, byteOffset,
+ * byteLength)` is a view, never a copy). Either way no bytes are duplicated, and
+ * the declared type cannot silently drift from the runtime one.
+ */
+export async function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Buffer> {
+  const bytes = await getXlsxIo(wb).writeBuffer(options);
+  return Buffer.isBuffer(bytes)
+    ? bytes
+    : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
 /** Read xlsx bytes into a workbook (mutates and returns `wb`). */
@@ -112,9 +130,15 @@ export function writeStream(
  *   // …
  * }
  * // SDKs that demand a nominal `stream.Readable` (upload bodies, `toWeb`)
- * // accept it through the async-iterable adapter:
- * const body = Readable.from(Workbook.toStream(wb));
+ * // take it directly — no `Readable.from()` adapter, no cast:
+ * const body = Workbook.toStream(wb);
+ * const web = Readable.toWeb(Workbook.toStream(wb));
  * ```
+ *
+ * The return type refines {@link XlsxReadable} rather than replacing it: it is
+ * still assignable to `XlsxReadable`, which is identical in both builds, so
+ * cross-platform code written against that name keeps compiling while Node code
+ * gets the nominal `stream.Readable`.
  *
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
  * backpressure is sampled after each ZIP entry, and a worksheet is rendered as
@@ -128,9 +152,18 @@ export function writeStream(
  * failures surface as an `'error'` event, so consume through `stream.pipeline()`
  * or `for await` rather than a bare `.pipe()`.
  */
-export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable {
+export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable & Readable {
   const io = getXlsxIo(wb);
-  return createXlsxByteStream((sink, writeOptions) => io.write(sink, writeOptions), options);
+  // `createXlsxByteStream` is shared with the browser build, so it is typed as
+  // the portable `XlsxReadable`. On Node the stream it builds is a real
+  // `stream.Readable` — `@stream`'s `createReadable` constructs one — which is
+  // what this narrowing states. Asserted at runtime by
+  // `surface/__tests__/node-io-types.node.test.ts` ("is a byte-mode
+  // stream.Readable"), so the claim cannot rot silently.
+  return createXlsxByteStream(
+    (sink, writeOptions) => io.write(sink, writeOptions),
+    options
+  ) as XlsxReadable & Readable;
 }
 
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";

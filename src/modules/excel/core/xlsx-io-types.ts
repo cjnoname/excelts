@@ -40,11 +40,21 @@ export interface XlsxWritable extends XlsxEmitterLike {
 }
 
 /**
- * Cross-platform readable XLSX byte source returned by `Workbook.toStream`.
+ * Cross-platform readable XLSX byte source.
  *
- * On Node the concrete instance is a `stream.Readable`, so it can be handed to
- * `stream.pipeline()`, `Readable.toWeb()`, or an SDK upload body; in the browser
- * it is the `@stream` `Readable`. Both are async-iterable, which is the
- * cast-free way to consume it.
+ * Identical in the Node and browser builds on purpose: this is the name a
+ * cross-platform program writes against, so it must mean the same thing in both.
+ * An earlier revision intersected it with the platform `Readable`, which made the
+ * two builds' `XlsxReadable` mutually unassignable — an isomorphic helper typed
+ * `XlsxReadable` silently got a different, incompatible type per platform.
+ *
+ * The platform refinement lives on `toStream`'s return type instead: on Node it
+ * returns `XlsxReadable & Readable`, which is *assignable to* `XlsxReadable`, so
+ * Node callers get a nominal `stream.Readable` for `stream.pipeline()`,
+ * `Readable.toWeb()`, or an SDK upload body while portable code keeps compiling
+ * unchanged against this type.
+ *
+ * Both platforms' concrete streams are async-iterable and byte-mode
+ * (`objectMode` is off), so every chunk really is bytes.
  */
 export type XlsxReadable = IReadable<Uint8Array>;

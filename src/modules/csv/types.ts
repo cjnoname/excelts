@@ -305,6 +305,22 @@ export interface CsvParseOptions extends CsvBaseOptions {
  * CSV formatting options
  */
 export interface CsvFormatOptions extends CsvBaseOptions {
+  /**
+   * Emit bytes instead of strings on the readable side (default: follows
+   * {@link CsvBaseOptions.objectMode}, i.e. strings).
+   *
+   * A formatter is asymmetric: the writable side takes rows (objects/arrays) and
+   * the readable side produces CSV. `objectMode` sets *both* sides, so leaving
+   * the readable side in object mode makes the stream emit `string` chunks —
+   * which cannot be piped into anything expecting bytes (an upload body,
+   * `Readable.toWeb()`, `Buffer.concat`) even though it otherwise looks like a
+   * normal byte stream.
+   *
+   * Set this to `false` to keep rows on the writable side but produce a real
+   * byte stream: the pushed CSV text is encoded as UTF-8 by the stream itself,
+   * on both Node and the browser.
+   */
+  readableObjectMode?: boolean;
   /** Line ending character(s) (default: "\n") */
   lineEnding?: string;
   /** Decimal separator for numbers (default: ".") */
