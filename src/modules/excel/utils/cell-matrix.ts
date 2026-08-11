@@ -1,4 +1,4 @@
-/* oxlint-disable typescript/no-redundant-type-constituents -- Cell is intentionally `CellAddress & any` */
+import type { DecodedAddress, Location } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
 
 // Safe deep clone that filters out prototype pollution keys
@@ -20,22 +20,14 @@ function safeDeepClone<T>(obj: T): T {
   return result as T;
 }
 
-interface CellAddress {
-  sheetName?: string;
-  address: string;
-  row: number;
-  col: number;
-  top?: number;
-  bottom?: number;
-  left?: number;
-  right?: number;
-}
+/** A decoded address, plus the optional range bounds a range decode carries. */
+interface MatrixAddress extends DecodedAddress, Partial<Location> {}
 
 /**
  * A matrix cell: the fixed address fields plus any extra template-derived
  * properties (callers attach arbitrary metadata via the constructor template).
  */
-interface Cell extends CellAddress {
+interface Cell extends MatrixAddress {
   [key: string]: unknown;
 }
 /** Rows are sparse: holes appear as `null` (column splice) or `undefined` (removal). */
@@ -52,15 +44,15 @@ class CellMatrix {
   }
 
   addCell(addressStr: string): void {
-    this.addCellEx(colCache.decodeEx(addressStr) as CellAddress);
+    this.addCellEx(colCache.decodeEx(addressStr) as MatrixAddress);
   }
 
   getCell(addressStr: string): Cell {
-    return this.findCellEx(colCache.decodeEx(addressStr) as CellAddress, true);
+    return this.findCellEx(colCache.decodeEx(addressStr) as MatrixAddress, true);
   }
 
   findCell(addressStr: string): Cell | undefined {
-    return this.findCellEx(colCache.decodeEx(addressStr) as CellAddress, false);
+    return this.findCellEx(colCache.decodeEx(addressStr) as MatrixAddress, false);
   }
 
   findCellAt(sheetName: string, rowNumber: number, colNumber: number): Cell | undefined {
@@ -69,7 +61,7 @@ class CellMatrix {
     return (row && row[colNumber]) || undefined;
   }
 
-  addCellEx(address: CellAddress): void {
+  addCellEx(address: MatrixAddress): void {
     if (address.top !== undefined) {
       for (let row = address.top; row <= address.bottom!; row++) {
         for (let col = address.left!; col <= address.right!; col++) {
@@ -81,13 +73,13 @@ class CellMatrix {
     }
   }
 
-  getCellEx(address: CellAddress): Cell {
+  getCellEx(address: MatrixAddress): Cell {
     return this.findCellEx(address, true);
   }
 
-  findCellEx(address: CellAddress, create: true): Cell;
-  findCellEx(address: CellAddress, create: boolean): Cell | undefined;
-  findCellEx(address: CellAddress, create: boolean): Cell | undefined {
+  findCellEx(address: MatrixAddress, create: true): Cell;
+  findCellEx(address: MatrixAddress, create: boolean): Cell | undefined;
+  findCellEx(address: MatrixAddress, create: boolean): Cell | undefined {
     const sheet = this.findSheet(address, create);
     const row = this.findSheetRow(sheet, address, create);
     return this.findRowCell(row, address, create);
@@ -114,7 +106,7 @@ class CellMatrix {
     return cell;
   }
 
-  removeCellEx(address: CellAddress): void {
+  removeCellEx(address: MatrixAddress): void {
     const sheet = this.findSheet(address, false);
     if (!sheet) {
       return;
@@ -158,9 +150,9 @@ class CellMatrix {
     return results;
   }
 
-  findSheet(address: CellAddress, create: true): Sheet;
-  findSheet(address: CellAddress, create: boolean): Sheet | undefined;
-  findSheet(address: CellAddress, create: boolean): Sheet | undefined {
+  findSheet(address: MatrixAddress, create: true): Sheet;
+  findSheet(address: MatrixAddress, create: boolean): Sheet | undefined;
+  findSheet(address: MatrixAddress, create: boolean): Sheet | undefined {
     const name = address.sheetName!;
     if (this.sheets.has(name)) {
       return this.sheets.get(name);
@@ -173,9 +165,9 @@ class CellMatrix {
     return undefined;
   }
 
-  findSheetRow(sheet: Sheet | undefined, address: CellAddress, create: true): Row;
-  findSheetRow(sheet: Sheet | undefined, address: CellAddress, create: boolean): Row | undefined;
-  findSheetRow(sheet: Sheet | undefined, address: CellAddress, create: boolean): Row | undefined {
+  findSheetRow(sheet: Sheet | undefined, address: MatrixAddress, create: true): Row;
+  findSheetRow(sheet: Sheet | undefined, address: MatrixAddress, create: boolean): Row | undefined;
+  findSheetRow(sheet: Sheet | undefined, address: MatrixAddress, create: boolean): Row | undefined {
     const safeRow = address.row >>> 0;
     if (sheet && sheet[safeRow]) {
       return sheet[safeRow];
@@ -186,9 +178,9 @@ class CellMatrix {
     return undefined;
   }
 
-  findRowCell(row: Row | undefined, address: CellAddress, create: true): Cell;
-  findRowCell(row: Row | undefined, address: CellAddress, create: boolean): Cell | undefined;
-  findRowCell(row: Row | undefined, address: CellAddress, create: boolean): Cell | undefined {
+  findRowCell(row: Row | undefined, address: MatrixAddress, create: true): Cell;
+  findRowCell(row: Row | undefined, address: MatrixAddress, create: boolean): Cell | undefined;
+  findRowCell(row: Row | undefined, address: MatrixAddress, create: boolean): Cell | undefined {
     const safeCol = address.col >>> 0;
     const existing = row && row[safeCol];
     if (existing) {

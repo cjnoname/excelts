@@ -67,7 +67,7 @@ export interface SparklineGroup {
   /** Date axis source (reference range of dates) */
   dateAxis?: string;
   /** Sparklines in this group */
-  sparklines: Sparkline[];
+  sparklines: SparklineItem[];
 }
 
 export type SparklineType = "line" | "column" | "stacked";
@@ -77,7 +77,7 @@ export type SparklineAxisType = "individual" | "group" | "custom";
 /**
  * A single sparkline within a group.
  */
-export interface Sparkline {
+export interface SparklineItem {
   /** Data reference (e.g. "Sheet1!B2:G2") */
   dataRef: string;
   /** Anchor cell reference (e.g. "H2") */
@@ -109,7 +109,7 @@ export interface AddSparklineGroupOptions {
   /** Chart type */
   type: SparklineType;
   /** List of sparklines (data + anchor) */
-  sparklines: Sparkline[];
+  sparklines: SparklineItem[];
   /** Line weight in points */
   lineWeight?: number;
   /** Show markers (line type) */

@@ -11,7 +11,7 @@ import { decodeZipPath, decodeZipComment, resolveZipStringCodec } from "@archive
 import type { AesKeyStrength } from "@archive/crypto/aes";
 import { BinaryReader } from "@archive/zip-spec/binary";
 import { resolveZipLastModifiedDateFromUnixSeconds } from "@archive/zip-spec/timestamps";
-import type { ZipEntryInfo, ZipEntryEncryptionMethod } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord, ZipEntryEncryptionMethod } from "@archive/zip-spec/zip-entry-info";
 import { parseZipExtraFields } from "@archive/zip-spec/zip-extra-fields";
 import {
   CENTRAL_DIR_HEADER_SIG,
@@ -308,7 +308,7 @@ export function parseCentralDirectoryEntry(
   reader: BinaryReader,
   decodeStrings: boolean,
   decoder?: Pick<ZipStringCodec, "decode">
-): ZipEntryInfo {
+): ZipEntryRecord {
   const versionMadeBy = reader.readUint16();
   reader.skip(2); // version needed
   const flags = reader.readUint16();
@@ -430,7 +430,7 @@ export function parseCentralDirectory(
   data: Uint8Array,
   totalEntries: number,
   options: CentralDirectoryParseOptions = {}
-): ZipEntryInfo[] {
+): ZipEntryRecord[] {
   return parseCentralDirectoryAt(data, 0, totalEntries, options);
 }
 
@@ -448,7 +448,7 @@ export function parseCentralDirectoryAt(
   offset: number,
   totalEntries: number,
   options: CentralDirectoryParseOptions = {}
-): ZipEntryInfo[] {
+): ZipEntryRecord[] {
   const decodeStrings = options.decodeStrings ?? true;
   const decoder = resolveDecoder(options);
 
@@ -456,7 +456,7 @@ export function parseCentralDirectoryAt(
     return [];
   }
 
-  const entries: ZipEntryInfo[] = new Array(totalEntries);
+  const entries: ZipEntryRecord[] = new Array(totalEntries);
   const reader = new BinaryReader(data, offset);
 
   for (let i = 0; i < totalEntries; i++) {
@@ -487,7 +487,7 @@ export function parseCentralDirectoryAt(
 export function parseZipArchiveFromBuffer(
   data: Uint8Array,
   options: CentralDirectoryParseOptions = {}
-): { entries: ZipEntryInfo[]; comment: string } {
+): { entries: ZipEntryRecord[]; comment: string } {
   const decodeStrings = options.decodeStrings ?? true;
   const decoder = resolveDecoder(options);
 

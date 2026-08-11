@@ -1,4 +1,4 @@
-import type { DataValidation, DataValidationWithFormulae } from "@excel/types";
+import type { DataValidationRule, DataValidationWithFormulae } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { deepEqual } from "@utils/object";
@@ -6,11 +6,11 @@ import { parseBoolean, dateToExcel, excelToDate } from "@utils/utils";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
 
 /** A validation stored in the model, optionally with a serialised range key. */
-type StoredValidation = DataValidation;
+type StoredValidation = DataValidationRule;
 /** The data-validations model: a map of cell address (or `range:` key) → validation. */
 type DataValidationModel = Record<string, StoredValidation>;
 /** A validation ready to render: the validation plus the sqref it applies to. */
-type RenderedValidation = DataValidation & { sqref: string };
+type RenderedValidation = DataValidationRule & { sqref: string };
 
 function assign(
   target: Record<string, unknown>,
@@ -59,7 +59,7 @@ function optimiseDataValidations(model: DataValidationModel | undefined): Render
     if (key.startsWith("range:")) {
       // Large range stored during parsing - output directly
       const rangeStr = key.slice(6); // Remove "range:" prefix
-      const { sqref: _sqref, ...rest } = value as DataValidation & { sqref?: string };
+      const { sqref: _sqref, ...rest } = value as DataValidationRule & { sqref?: string };
       rangeValidations.push({
         ...rest,
         sqref: rangeStr
@@ -163,7 +163,7 @@ function optimiseDataValidations(model: DataValidationModel | undefined): Render
 
 class DataValidationsXform extends BaseXform<DataValidationModel> {
   declare private _address: string;
-  declare private _dataValidation: DataValidation;
+  declare private _dataValidation: DataValidationRule;
   declare private _formula: string[] | undefined;
 
   get tag(): string {
@@ -260,7 +260,7 @@ class DataValidationsXform extends BaseXform<DataValidationModel> {
         assign(dataValidation, node.attributes, "errorTitle");
         assign(dataValidation, node.attributes, "error");
 
-        this._dataValidation = dataValidation as unknown as DataValidation;
+        this._dataValidation = dataValidation as unknown as DataValidationRule;
         return true;
       }
 
@@ -285,7 +285,7 @@ class DataValidationsXform extends BaseXform<DataValidationModel> {
       case "dataValidations":
         return false;
       case "dataValidation": {
-        const dv = this._dataValidation as DataValidation & {
+        const dv = this._dataValidation as DataValidationRule & {
           formulae?: (string | number | Date)[];
           operator?: unknown;
         };

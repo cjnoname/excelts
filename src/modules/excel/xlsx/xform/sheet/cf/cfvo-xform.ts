@@ -1,13 +1,13 @@
-import type { Cvfo } from "@excel/types";
+import type { Cfvo } from "@excel/types";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
 
-class CfvoXform extends BaseXform<Cvfo> {
+class CfvoXform extends BaseXform<Cfvo> {
   get tag(): string {
     return "cfvo";
   }
 
-  render(xmlStream: XmlSink, model?: Cvfo): void {
+  render(xmlStream: XmlSink, model?: Cfvo): void {
     xmlStream.leafNode(this.tag, {
       type: model?.type,
       val: model?.value
@@ -16,7 +16,7 @@ class CfvoXform extends BaseXform<Cvfo> {
 
   parseOpen(node: ParseOpenTag): void {
     this.model = {
-      type: node.attributes.type as Cvfo["type"],
+      type: node.attributes.type as Cfvo["type"],
       value: BaseXform.toFloatValue(node.attributes.val)
     };
   }

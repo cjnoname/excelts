@@ -6,7 +6,7 @@
 
 import { ImageError } from "@excel/errors";
 import type {
-  WorkbookWriterOptions as BaseOptions,
+  WorkbookWriterOptions,
   WorkbookZipOptions,
   ZlibOptions
 } from "@excel/stream/workbook-writer.browser";
@@ -16,14 +16,8 @@ import { isExternalImage } from "@excel/utils/drawing-utils";
 import { mediaPath } from "@excel/utils/ooxml-paths";
 import { readFileBytes, createWriteStream } from "@utils/fs";
 
-export type { WorkbookZipOptions, ZlibOptions };
+export type { WorkbookWriterOptions, WorkbookZipOptions, ZlibOptions };
 export type { Medium } from "@excel/stream/workbook-writer.browser";
-
-// Node.js version also supports filename option for output
-export interface WorkbookWriterOptions extends BaseOptions {
-  /** If stream not specified, this field specifies the path to a file to write the XLSX workbook to */
-  filename?: string;
-}
 
 // Interface for output stream
 interface OutputStreamLike {

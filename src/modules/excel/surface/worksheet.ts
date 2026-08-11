@@ -44,6 +44,7 @@ export {
   getSheetName as getName,
   setColumns,
   getColumns as columns,
+  getColumnDefinitions as columnDefinitions,
   getLastColumn as lastColumn,
   getLastRow as lastRow
 } from "@excel/core/worksheet";

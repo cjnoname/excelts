@@ -23,4 +23,4 @@ export {
 } from "@excel/core/image";
 
 /** An image handle. */
-export type { ImageData as Handle } from "@excel/core/image";
+export type { WorksheetImage as Handle } from "@excel/core/image";

@@ -22,7 +22,7 @@ import {
   processEntryDataStream,
   readEntryCompressedData
 } from "@archive/unzip/zip-extract-core";
-import type { ZipEntryInfo, ZipParseOptions } from "@archive/unzip/zip-parser";
+import type { ZipEntryRecord, ZipParseOptions } from "@archive/unzip/zip-parser";
 import { ZipParser } from "@archive/unzip/zip-parser";
 import type { ZipEntryEncryptionMethod, ZipEntryType } from "@archive/zip-spec/zip-entry-info";
 import { isSymlink } from "@archive/zip-spec/zip-entry-info";
@@ -63,10 +63,10 @@ function attachAbortToParseEntry(entry: ParseZipEntry, signal: AbortSignal): voi
 }
 
 /**
- * Build a ZipEntryInfo from a streaming ParseZipEntry's local file header data.
+ * Build a ZipEntryRecord from a streaming ParseZipEntry's local file header data.
  * This enables processEntryData (decrypt + decompress) for streaming-mode entries.
  */
-function buildEntryInfoFromParseEntry(entry: ParseZipEntry): ZipEntryInfo {
+function buildEntryInfoFromParseEntry(entry: ParseZipEntry): ZipEntryRecord {
   const vars = entry.vars;
   const flags = vars.flags ?? 0;
   const compressionMethod = vars.compressionMethod ?? 0;
@@ -194,7 +194,7 @@ export class UnzipEntry {
   readonly isEncrypted: boolean;
 
   private readonly _data?: Uint8Array;
-  private readonly _info?: ZipEntryInfo;
+  private readonly _info?: ZipEntryRecord;
   private readonly _password?: string | Uint8Array;
   private readonly _parseEntry?: ParseZipEntry;
   private readonly _onBytesOut?: (path: string, type: ZipEntryType, bytes: number) => void;
@@ -202,7 +202,7 @@ export class UnzipEntry {
 
   constructor(
     args:
-      | { kind: "buffer"; data: Uint8Array; info: ZipEntryInfo; password?: string | Uint8Array }
+      | { kind: "buffer"; data: Uint8Array; info: ZipEntryRecord; password?: string | Uint8Array }
       | { kind: "stream"; entry: ParseZipEntry; password?: string | Uint8Array },
     hooks: {
       onBytesOut?: (path: string, type: ZipEntryType, bytes: number) => void;
@@ -228,7 +228,7 @@ export class UnzipEntry {
       this.isEncrypted = (flags & 0x01) !== 0 || args.entry.vars.compressionMethod === 99;
 
       // For encrypted entries the streaming parser passes through raw ciphertext
-      // (inflate is skipped). Build a ZipEntryInfo so processEntryData can
+      // (inflate is skipped). Build a ZipEntryRecord so processEntryData can
       // handle decryption + decompression in bytes()/stream().
       if (this.isEncrypted) {
         this._info = buildEntryInfoFromParseEntry(args.entry);

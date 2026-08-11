@@ -29,7 +29,7 @@ import {
   getAesKeyStrength
 } from "@archive/crypto";
 import type { ZipTimestampMode } from "@archive/zip-spec/timestamps";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import type { ZipPathOptions } from "@archive/zip-spec/zip-path";
 import { normalizeZipPath } from "@archive/zip-spec/zip-path";
 import type { Zip64Mode } from "@archive/zip-spec/zip-records";
@@ -1135,7 +1135,7 @@ export class ZipDeflateFile {
    * Get entry metadata in the same shape as unzip parser outputs.
    * This is best-effort: writer-only fields like encryption are always false.
    */
-  getEntryInfo(): ZipEntryInfo | null {
+  getEntryInfo(): ZipEntryRecord | null {
     if (!this._centralDirEntryInfo) {
       return null;
     }

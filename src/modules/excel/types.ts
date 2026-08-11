@@ -3,29 +3,34 @@
  * This file exports all public types used by the library
  */
 
-// ============================================================================
-// Buffer type for cross-platform compatibility
-// Node.js Buffer extends Uint8Array, so Uint8Array is the common interface
-// ============================================================================
-export type Buffer = Uint8Array;
+import type { ErrorValue } from "@excel/core/enums";
 
 // ============================================================================
-// Paper Size Enum
+// Paper Size
 // ============================================================================
-export enum PaperSize {
-  Legal = 5,
-  Executive = 7,
-  A4 = 9,
-  A5 = 11,
-  B5 = 13,
-  Envelope_10 = 20,
-  Envelope_DL = 27,
-  Envelope_C5 = 28,
-  Envelope_B5 = 34,
-  Envelope_Monarch = 37,
-  Double_Japan_Postcard_Rotated = 82,
-  K16_197x273_mm = 119
-}
+/**
+ * Common OOXML paper-size codes, as convenience constants.
+ *
+ * `PageSetup.paperSize` stays a plain `number` on purpose: OOXML defines ~120
+ * codes and this list is only the handful people ask for by name, so typing the
+ * field as this union would reject perfectly valid codes (Letter = 1, A3 = 8, …).
+ * A constant object rather than a TS `enum` so it tree-shakes when unused.
+ */
+export const PaperSize = {
+  Legal: 5,
+  Executive: 7,
+  A4: 9,
+  A5: 11,
+  B5: 13,
+  Envelope_10: 20,
+  Envelope_DL: 27,
+  Envelope_C5: 28,
+  Envelope_B5: 34,
+  Envelope_Monarch: 37,
+  Double_Japan_Postcard_Rotated: 82,
+  K16_197x273_mm: 119
+} as const;
+export type PaperSize = (typeof PaperSize)[keyof typeof PaperSize];
 
 // ============================================================================
 // Color Types
@@ -186,21 +191,15 @@ interface StyleBase {
   fill: Fill;
 }
 
-// Input style - used when setting styles (accepts string for numFmt)
-export interface StyleInput extends StyleBase {
-  numFmt: string;
-  /** Name of a workbook-level named cell style (e.g. "Heading 1") to apply. */
-  styleName?: string;
-}
-
-// Output style - returned when reading styles (numFmt is an object with id)
-export interface StyleOutput extends StyleBase {
-  numFmt: NumFmt;
-  /** Name of the workbook-level named cell style this cell references, if any. */
-  styleName?: string;
-}
-
-// Combined style type for backwards compatibility
+/**
+ * A cell style.
+ *
+ * `numFmt` is a format-code string (`"#,##0.00"`) — both when you set it and
+ * when you read it back, including from a parsed workbook (the reader resolves
+ * `numFmtId` to its format code). The `NumFmt` arm exists because styles.xml
+ * carries the `{ id, formatCode }` pair; it is accepted by the setters and by
+ * the writer, but the library itself never stores one on a cell.
+ */
 export interface Style extends StyleBase {
   numFmt: string | NumFmt;
   /** Name of the workbook-level named cell style this cell references, if any. */
@@ -218,8 +217,8 @@ export interface Style extends StyleBase {
  * are used by accessibility software to identify document structure.
  *
  * All visual facets are optional; a named style may set only the properties it
- * needs (e.g. just a font). `numFmt` accepts a format-code string like
- * {@link StyleInput}.
+ * needs (e.g. just a font). `numFmt` accepts a format-code string (the same
+ * form as {@link Style.numFmt}).
  */
 export interface NamedStyle {
   font?: Partial<Font>;
@@ -426,16 +425,7 @@ export interface CalculationProperties {
 // Cell Value Types
 // ============================================================================
 export interface CellErrorValue {
-  error:
-    | "#N/A"
-    | "#REF!"
-    | "#NAME?"
-    | "#DIV/0!"
-    | "#NULL!"
-    | "#VALUE!"
-    | "#NUM!"
-    | "#SPILL!"
-    | "#CALC!";
+  error: ErrorValue;
 }
 
 export interface RichText {
@@ -720,7 +710,7 @@ export interface DataValidationAny extends DataValidationBase {
   type: "any";
 }
 
-export type DataValidation = DataValidationWithFormulae | DataValidationAny;
+export type DataValidationRule = DataValidationWithFormulae | DataValidationAny;
 
 // ============================================================================
 // Image Types
@@ -729,7 +719,7 @@ export interface ImageData {
   extension: "jpeg" | "png" | "gif";
   base64?: string;
   filename?: string;
-  buffer?: Buffer;
+  buffer?: Uint8Array;
   /**
    * Reference the image as an **external link** instead of embedding its bytes.
    *
@@ -759,17 +749,12 @@ export interface ImageData {
    */
   svg?: {
     /** SVG bytes (mutually use one of buffer/base64/filename). */
-    buffer?: Buffer;
+    buffer?: Uint8Array;
     /** Base64-encoded SVG. */
     base64?: string;
     /** Path to an `.svg` file (Node only). */
     filename?: string;
   };
-}
-
-export interface ImagePosition {
-  tl: { col: number; row: number };
-  ext: { width: number; height: number };
 }
 
 /** Anchor position for image placement */
@@ -805,11 +790,6 @@ export type AddImageRange =
       /** Hyperlink for the image */
       hyperlinks?: { hyperlink?: string; tooltip?: string };
     };
-
-export interface ImageHyperlinkValue {
-  hyperlink: string;
-  tooltip?: string;
-}
 
 // ============================================================================
 // Shape Types
@@ -1003,7 +983,12 @@ export type Location = {
   right: number;
 };
 
-export type Address = {
+/**
+ * A decoded cell address: the A1 string plus its resolved 1-based row/column,
+ * optionally qualified by sheet name. This is what `colCache.decodeAddress`
+ * produces and what `Cell.getFullAddress` / `Range.containsCell` speak.
+ */
+export type DecodedAddress = {
   sheetName?: string;
   address: string;
   col: number;
@@ -1015,12 +1000,24 @@ export type Address = {
 // Row and Column Types
 // ============================================================================
 /**
- * Row data: either positional cell values, or a key→value bag consumed by
- * column keys. The keyed form intentionally allows arbitrary nested values
- * (`unknown`) because column keys may be dotted paths (e.g. `address.city`)
- * that `resolveColumnKeyValue` walks before the leaf is coerced to a cell value.
+ * A keyed row: every column's `key` (set via `Worksheet.setColumns` or
+ * `Column.setKey`) is looked up on this object, so only the keyed properties are
+ * read. Dotted keys (`"address.city"`) walk nested objects.
+ *
+ * Declared `object` rather than `Record<string, unknown>` on purpose: a TS
+ * `interface` (and any generic `T extends object`) has no index signature, so
+ * `Record<string, unknown>` would reject every domain type and force callers to
+ * write `rows as Record<string, unknown>[]`.
  */
-export type RowValues = CellValue[] | Record<string, unknown> | undefined | null;
+export type RowObject = object;
+
+/**
+ * Row data: either positional cell values, or a {@link RowObject} consumed by
+ * the column keys. Nested values are read as `unknown` because column keys may
+ * be dotted paths (e.g. `address.city`) that `resolveColumnKeyValue` walks
+ * before the leaf is coerced to a cell value.
+ */
+export type RowValues = CellValue[] | RowObject | undefined | null;
 
 // ============================================================================
 // Conditional Formatting Types
@@ -1079,7 +1076,7 @@ export type CfvoTypes =
   | "autoMin"
   | "autoMax";
 
-export interface Cvfo {
+export interface Cfvo {
   type: CfvoTypes;
   value?: number | string;
 }
@@ -1114,7 +1111,7 @@ export interface AboveAverageRuleType extends ConditionalFormattingBaseRule {
 
 export interface ColorScaleRuleType extends ConditionalFormattingBaseRule {
   type: "colorScale";
-  cfvo?: Cvfo[];
+  cfvo?: Cfvo[];
   color?: Partial<Color>[];
 }
 
@@ -1124,7 +1121,7 @@ export interface IconSetRuleType extends ConditionalFormattingBaseRule {
   reverse?: boolean;
   custom?: boolean;
   iconSet?: IconSetTypes;
-  cfvo?: Cvfo[];
+  cfvo?: Cfvo[];
 }
 
 export interface ContainsTextRuleType extends ConditionalFormattingBaseRule {
@@ -1149,7 +1146,7 @@ export interface DataBarRuleType extends ConditionalFormattingBaseRule {
   negativeBarBorderColorSameAsPositive?: boolean;
   axisPosition?: "auto" | "middle" | "none";
   direction?: "context" | "leftToRight" | "rightToLeft";
-  cfvo?: Cvfo[];
+  cfvo?: Cfvo[];
   color?: Partial<Color>;
   negativeFillColor?: Partial<Color>;
   borderColor?: Partial<Color>;
@@ -1233,18 +1230,6 @@ export interface TableProperties {
   rows: Array<Array<CellValue | CellFormulaValue>>;
 }
 
-export type TableColumn = Required<TableColumnProperties>;
-
-// ============================================================================
-// Media Types
-// ============================================================================
-export interface Media {
-  type: string;
-  name: string;
-  extension: string;
-  buffer: Buffer;
-}
-
 // ============================================================================
 // Worksheet Options
 // ============================================================================
@@ -1259,16 +1244,6 @@ export interface AddWorksheetOptions {
   /** Apply an auto filter to the worksheet */
   autoFilter?: AutoFilter;
 }
-
-// ============================================================================
-// Defined Names Types
-// ============================================================================
-export interface DefinedNamesRanges {
-  name: string;
-  ranges: string[];
-}
-
-export type DefinedNamesModel = DefinedNamesRanges[];
 
 // ============================================================================
 // Row Break Types

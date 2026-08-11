@@ -12,6 +12,7 @@ import type {
 } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
 import { deepEqual } from "@utils/object";
+import type { DeepReadonly } from "@utils/types";
 
 /** Header value type - can be a single value or array for multi-row headers */
 export type ColumnHeaderValue = CellValue | CellValue[];
@@ -55,6 +56,21 @@ export interface ColumnData {
   bestFit?: boolean;
   style: Partial<Style>;
 }
+
+/**
+ * A **read-only view** of a column record, as handed out by `Worksheet.columns`
+ * / `Worksheet.lastColumn`.
+ *
+ * The same live object as the {@link ColumnData} handle, minus the `worksheet`
+ * back-reference and with every field (including the nested `style`) readonly:
+ * columns are declared through `Worksheet.setColumns` and changed through the
+ * `Column` namespace, both of which keep the column numbering, the key registry
+ * and the cells' styles in sync. Writing to the object directly does not.
+ *
+ * `worksheet` is omitted rather than made readonly on purpose — recursing into
+ * it would drag the whole worksheet → workbook graph into the type.
+ */
+export type ColumnView = Omit<DeepReadonly<ColumnData>, "worksheet">;
 
 /**
  * Column namespace — free functions over the plain-data {@link ColumnData}.
@@ -200,7 +216,7 @@ export function columnFill(c: ColumnData): Fill | undefined {
   return c.style.fill;
 }
 
-export function columnToModel(columns: ColumnData[]): ColumnModel[] | undefined {
+export function columnToModel(columns: readonly ColumnData[]): ColumnModel[] | undefined {
   const cols: ColumnModel[] = [];
   let col: ColumnModel | null = null;
   columns.forEach((column, index) => {

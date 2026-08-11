@@ -42,6 +42,14 @@ export type {
 
 // High-level ZIP API types
 export type { ArchiveFormat } from "@archive/core/types";
+export type { ZipEntryRecord, ZipEntryType } from "@archive/zip-spec/zip-entry-info";
+export type { ZipCryptoState } from "@archive/crypto/zip-crypto";
+export type { Zip64Mode } from "@archive/zip-spec/zip-records";
+export type { ZipPathOptions } from "@archive/zip-spec/zip-path";
+export type { ZipTimestampMode } from "@archive/zip-spec/timestamps";
+export type { ZipStringEncoding } from "@archive/core/text";
+export type { EOCDInfo, ZIP64EOCDInfo } from "@archive/zip-spec/zip-parser-core";
+export type { SerializedZipEditOp, SerializedZipEditPlan } from "@archive/zip/zip-edit-plan";
 export type {
   ZipOptions,
   ZipEntryOptions,
@@ -59,6 +67,8 @@ export type {
   UnzipProgress,
   UnzipStreamOptions
 } from "@archive/unzip";
+export type { UnzipOptionsTar } from "@archive/unzip/zip-reader";
+export type { ZipOptionsTar } from "@archive/zip/zip-archive";
 
 // TAR archive types
 export type {
@@ -77,6 +87,7 @@ export type {
   TarReaderStreamOptions,
   TarReaderOperation
 } from "@archive/tar/index.browser";
+export type { TarEntryInput } from "@archive/tar/tar-archive";
 
 // Encryption types
 export type {

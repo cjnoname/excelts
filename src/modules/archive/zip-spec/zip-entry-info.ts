@@ -23,7 +23,7 @@ export function isSymlink(type: ZipEntryType): boolean {
   return type === "symlink";
 }
 
-export interface ZipEntryInfo {
+export interface ZipEntryRecord {
   /** File path within the ZIP */
   path: string;
   /** Entry type: file, directory, or symlink */

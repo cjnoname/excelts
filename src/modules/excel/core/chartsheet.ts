@@ -11,6 +11,8 @@ import type { ChartHandle, WorksheetData } from "@excel/core/worksheet-core";
 import type { HeaderFooter } from "@excel/types";
 import type { ChartsheetModel } from "@excel/xlsx/xform/sheet/chartsheet-xform";
 
+export type { ChartsheetModel } from "@excel/xlsx/xform/sheet/chartsheet-xform";
+
 /**
  * Nominal anchor range for the full-sheet chart in a chartsheet.
  * Chartsheet charts fill the entire sheet viewport; the anchor value is

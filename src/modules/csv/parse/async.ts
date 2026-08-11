@@ -32,17 +32,35 @@ import type {
 import { isReadableStreamLike, readableStreamToAsyncIterable } from "@stream/utils.base";
 import { toError } from "@utils/errors";
 
-type ReadableStreamLike = { getReader: () => any };
 type AsyncInput = AsyncIterable<string | Uint8Array>;
-type AnyAsyncInput = AsyncInput | ReadableStreamLike;
-type CsvAsyncInput = string | AnyAsyncInput;
 
-/** A single row produced by the streaming parser (array, object, or with-info variants). */
-type ParsedRow =
+/**
+ * Everything the async / streaming CSV parsers accept as input: a whole CSV
+ * string, any async iterable of text or bytes (a Node `Readable`, an async
+ * generator, …), or a WHATWG `ReadableStream` of bytes.
+ *
+ * Narrower than the runtime guard (`isReadableStreamLike` accepts any object
+ * with a `getReader`), because these are the chunk shapes `collectText` can
+ * actually decode.
+ */
+export type CsvAsyncInput =
+  | string
+  | AsyncIterable<string | Uint8Array>
+  | ReadableStream<Uint8Array>;
+
+/**
+ * A single row produced by the streaming parser.
+ *
+ * The object / array / with-info variants are the normal (object-mode) output.
+ * The `string` arm only occurs with `objectMode: false`, where the parser emits
+ * each row as a JSON string.
+ */
+export type ParsedRow =
   | Record<string, unknown>
   | string[]
   | RecordWithInfo<Record<string, unknown>>
-  | RecordWithInfo<string[]>;
+  | RecordWithInfo<string[]>
+  | string;
 
 function isAsyncIterable(value: unknown): value is AsyncInput {
   return Boolean(
@@ -228,7 +246,7 @@ export async function parseCsvAsync(
  * ```
  */
 export async function* parseCsvRows(
-  input: string | AnyAsyncInput,
+  input: CsvAsyncInput,
   options: CsvParseOptions = {}
 ): AsyncGenerator<ParsedRow, void, unknown> {
   // objname produces a map output in the sync parser, which cannot be produced
@@ -398,7 +416,7 @@ export async function* parseCsvRows(
  * @param onProgress - Called periodically with progress info
  */
 export async function parseCsvWithProgress(
-  input: string | AnyAsyncInput,
+  input: CsvAsyncInput,
   options: CsvParseOptions = {},
   onProgress?: (info: { rowsProcessed: number; bytesProcessed?: number }) => void
 ): Promise<

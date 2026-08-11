@@ -4,10 +4,10 @@ import {
   dataValidationFind,
   dataValidationRemove
 } from "@excel/core/data-validations";
-import type { DataValidation } from "@excel/types";
+import type { DataValidationRule } from "@excel/types";
 import { describe, it, expect } from "vitest";
 
-const listRule: DataValidation = {
+const listRule: DataValidationRule = {
   type: "list",
   allowBlank: true,
   formulae: ['"One,Two,Three"']

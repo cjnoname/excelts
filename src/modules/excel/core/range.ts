@@ -1,5 +1,5 @@
 import { ExcelError } from "@excel/errors";
-import type { Address } from "@excel/types";
+import type { DecodedAddress } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
 
 /**
@@ -289,7 +289,7 @@ export function rangeContains(r: RangeData, addressStr: string): boolean {
   return false;
 }
 
-export function rangeContainsEx(r: RangeData, address: Address): boolean {
+export function rangeContainsEx(r: RangeData, address: DecodedAddress): boolean {
   if (address.sheetName && r.sheetName && address.sheetName !== r.sheetName) {
     return false;
   }

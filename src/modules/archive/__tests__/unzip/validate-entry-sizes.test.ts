@@ -2,7 +2,7 @@ import { EntrySizeMismatchError } from "@archive/core/errors";
 import { processEntryDataStream, readLocalHeaderDataOffset } from "@archive/unzip/zip-extract-core";
 import { ZipParser } from "@archive/unzip/zip-parser";
 import { BinaryReader } from "@archive/zip-spec/binary";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import type { ZipEntry } from "@archive/zip/zip-bytes";
 import { createZipSync } from "@archive/zip/zip-bytes";
 /**
@@ -35,7 +35,7 @@ async function collect(iterable: AsyncIterable<Uint8Array>): Promise<Uint8Array>
 function getEntryAndData(
   zipData: Uint8Array,
   entryPath: string
-): { entry: ZipEntryInfo; compressedData: Uint8Array } {
+): { entry: ZipEntryRecord; compressedData: Uint8Array } {
   const parser = new ZipParser(zipData);
   const entry = parser.getEntries().find(e => e.path === entryPath);
   if (!entry) {

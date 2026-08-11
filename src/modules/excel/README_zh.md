@@ -1298,6 +1298,168 @@ const url = URL.createObjectURL(blob);
 - 支持 CSV 和 Markdown 操作
 - 带密码的工作表保护使用纯 JS SHA-512
 
+## 类型
+
+### 单元格寻址
+
+每个 `Cell` 函数只接受两种形式——`"A1"` 地址，或 1-based 的 `(row, col)`：
+
+```typescript
+Cell.setValue(ws, "B3", 42);
+Cell.setValue(ws, 3, 2, 42);
+Cell.setFont(ws, 3, 2, { bold: true }); // facet 设置器同样支持两种形式
+```
+
+混用会直接编译报错，而不是静默读错单元格：`Cell.getValue(ws, "A1", 99)` 以前能编译，
+实际读的是 `"CUA1"`；`Cell.getValue(ws, 5)` 以前能编译，运行时抛异常。两者现在都被拒绝。
+
+### 按 key 定位列
+
+`Column.*` 接受 key、列字母或 1-based 列号。`Column.getNumber` 把 key 桥接到
+`(row, col)` 形式，`Worksheet.columnDefinitions` 则是 `Worksheet.setColumns` 的反函数：
+
+```typescript
+Worksheet.setColumns(ws, [{ header: "Total", key: "total", width: 12 }]);
+
+const col = Column.getNumber(ws, "total"); // 1
+Cell.setValue(ws, 2, col, 99);
+
+// 追加一列并保留既有定义——不需要手抄字段。
+Worksheet.setColumns(ws, [...Worksheet.columnDefinitions(ws), { header: "Error", key: "error" }]);
+```
+
+`Worksheet.columns(ws)` 交出的是活的、但**深只读**的 `ColumnView`——数组、列本身、以及
+嵌套的 `style` 都不可赋值，因此列的修改一律走 `setColumns` / `Column.set*`，由它们维护列号、
+key 注册表和单元格样式的一致性。
+
+`Worksheet.columnCount(ws)` 测的是另一件事：行里实际存在的 cell 数；而 `columns` /
+`columnDefinitions` 列出的是列**记录**——包括仅被声明的列，以及因某个 cell 被访问而被补齐
+出来的列。两者不可互换。
+
+### 用你自己的类型写行
+
+行对象按列的 key 取值，所以任何对象都可以——普通 interface 无需 cast：
+
+```typescript
+interface Invoice {
+  invoiceId: string;
+  total: number;
+}
+
+const invoices: Invoice[] = await load();
+Worksheet.setColumns(ws, [
+  { header: "Invoice", key: "invoiceId", width: 20 },
+  { header: "Total", key: "total", width: 12 }
+]);
+Worksheet.addRows(ws, invoices); // 按 key 从每个对象取值
+```
+
+### 单元格句柄
+
+`Row.eachCell` / `Row.getCell` / `Worksheet.getRow` 交出 `CellData` 句柄。句柄本身可直接
+读地址和样式，其余内容用 `Cell.view` 读、用 `Stream` 的句柄操作写（它们并非仅限流式）：
+
+```typescript
+Row.eachCell(ws, 1, cell => {
+  const header = Cell.view(cell).text.trim();
+  Stream.setCellFont(cell, { bold: true });
+});
+```
+
+公开 API 涉及的每一个类型都以**声明处的名字**从 `documonster/excel` 导出——也就是
+TypeScript 在报错和悬浮提示里显示的那个名字。没有别名要记，也不需要绕路：可以直接
+标注变量、编写样式辅助函数、保存列定义。
+
+```typescript
+import type {
+  Style,
+  Alignment,
+  Border,
+  Borders,
+  Color,
+  Font,
+  NumFmt,
+  PageSetup,
+  ColumnDefn,
+  RowValues,
+  CellValue,
+  DataValidationRule,
+  ConditionalFormattingOptions,
+  TableProperties,
+  WorksheetModel,
+  XlsxWriteOptions
+} from "documonster/excel";
+
+// 样式值可以被声明，因此样式能够组合与复用。
+const HEADER: Partial<Style> = {
+  font: { bold: true, size: 11 },
+  alignment: { vertical: "middle", horizontal: "center" },
+  fill: { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEEEEE" } }
+};
+const THIN: Partial<Border> = { style: "thin", color: { argb: "FF000000" } };
+const BOX: Partial<Borders> = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+
+export const mergeStyle = (base: Partial<Style>, ...rest: (Partial<Style> | undefined)[]) =>
+  rest.reduce<Partial<Style>>((acc, s) => ({ ...acc, ...(s ?? {}) }), base);
+
+// 供 `Worksheet.setColumns` 使用的列定义。
+export const REPORT_COLUMNS: ColumnDefn[] = [
+  { header: "Invoice", key: "invoiceId", width: 20, style: HEADER },
+  { header: "Amount", key: "amount", width: 14, style: { numFmt: "#,##0.00" } }
+];
+```
+
+句柄（API 交给你的不透明对象）既有声明名，也可以通过所属命名空间上的 `Handle`
+访问，按可读性任选：
+
+```typescript
+import type { Workbook, Worksheet, WorkbookData, WorksheetData } from "documonster/excel";
+
+const render = (ws: Worksheet.Handle) => {
+  /* … */
+};
+const save = (wb: WorkbookData) => {
+  /* … */
+};
+```
+
+流式 API 的类型挂在 `Stream` 命名空间上，与流式类放在一起：
+
+```typescript
+import { Stream } from "documonster/excel";
+
+const options: Stream.WorkbookWriterOptions = { filename: "big.xlsx", useSharedStrings: true };
+const writer = new Stream.WorkbookWriter(options);
+const sheet: Stream.WorksheetWriter = writer.addWorksheet("Data");
+```
+
+单元格值类型、公式类型、Excel 错误字符串以及常用纸张尺寸都是既可当值又可当类型的常量
+对象，未使用时会被 tree-shaking 移除（TS `enum` 做不到这一点）：
+
+```typescript
+import { Cell, ErrorValue, PaperSize, ValueType } from "documonster/excel";
+import type { CellErrorValue } from "documonster/excel";
+
+if (Cell.getType(ws, "A1") === ValueType.Number) {
+  /* … */
+}
+const na: CellErrorValue = { error: ErrorValue.NotApplicable };
+ws.pageSetup.paperSize = PaperSize.A4;
+```
+
+一个类型只有一个公开名字，句柄也一样。凡是命名空间提供了 `Handle` 别名的
+（`Worksheet.Handle`、`Workbook.Handle`、`Table.Handle`…），该别名就是公开名，底层的
+`WorksheetData` / `WorkbookData` 等声明名**不再**在顶层重复导出。单元格、行、列句柄
+没有这种别名，因此它们的声明名就是公开名：
+
+```typescript
+import type { CellData, ColumnData, RowData } from "documonster/excel";
+
+const cellText = (cell: CellData) => cell.address;
+const rowNumber = (row: RowData) => row.number;
+const columnWidth = (column: ColumnData) => column.width;
+```
+
 ## 工具导出
 
 Documonster 以子路径入口点发布——不存在裸 `"documonster"` 导出。

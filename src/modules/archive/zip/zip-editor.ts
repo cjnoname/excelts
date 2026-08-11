@@ -23,7 +23,7 @@ import { RemoteZipReader } from "@archive/unzip/remote-zip-reader";
 import type { ZipEntryOptions } from "@archive/zip";
 import type { ZipTimestampMode } from "@archive/zip-spec/timestamps";
 import { dateToZipDos } from "@archive/zip-spec/timestamps";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import type { ZipPathOptions } from "@archive/zip-spec/zip-path";
 import type { Zip64Mode } from "@archive/zip-spec/zip-records";
 import { FLAG_ENCRYPTED } from "@archive/zip-spec/zip-records";
@@ -139,7 +139,7 @@ export interface ZipEditUrlOptions extends ZipEditOptions, HttpRangeReaderOption
  */
 interface PreservedEntry {
   outName: string;
-  info: ZipEntryInfo;
+  info: ZipEntryRecord;
 }
 
 // -----------------------------------------------------------------------------
@@ -155,7 +155,7 @@ function isRandomAccessReader(value: unknown): value is RandomAccessReader {
   );
 }
 
-function getPreservedBaseFlags(info: ZipEntryInfo): number {
+function getPreservedBaseFlags(info: ZipEntryRecord): number {
   // Preserve only bits that must match the raw payload.
   // Writer-controlled bits (e.g. UTF-8, data descriptor) are intentionally not preserved.
   return info.isEncrypted ? FLAG_ENCRYPTED : 0;
@@ -163,7 +163,7 @@ function getPreservedBaseFlags(info: ZipEntryInfo): number {
 
 function buildPreservedRawEntry(
   outName: string,
-  info: ZipEntryInfo,
+  info: ZipEntryRecord,
   compressedData: Uint8Array,
   encoding?: ZipStringEncoding
 ): ZipRawEntry {
@@ -218,10 +218,10 @@ export class ZipEditor {
   private readonly _onWarning?: (warning: ZipEditWarning) => void;
 
   /** Original entries for quick lookup (never mutated). */
-  private readonly _baseEntries: Map<string, ZipEntryInfo>;
+  private readonly _baseEntries: Map<string, ZipEntryRecord>;
 
   /** Final output view managed by ZipEditView. */
-  private readonly _view: ZipEditView<ZipEntryInfo>;
+  private readonly _view: ZipEditView<ZipEntryRecord>;
 
   private readonly _options: {
     level: number;
@@ -355,7 +355,7 @@ export class ZipEditor {
    *
    * Use this to inspect the archive before making changes.
    */
-  getEntries(): ZipEntryInfo[] {
+  getEntries(): ZipEntryRecord[] {
     return Array.from(this._baseEntries.values());
   }
 
@@ -488,7 +488,7 @@ export class ZipEditor {
 
   private _buildPreservedRawFile(
     outName: string,
-    info: ZipEntryInfo,
+    info: ZipEntryRecord,
     compressedData: AsyncIterable<Uint8Array>,
     zip64: Zip64Mode
   ): ZipRawFile {
@@ -513,7 +513,7 @@ export class ZipEditor {
 
   private _buildPreservedRawEntry(
     outName: string,
-    info: ZipEntryInfo,
+    info: ZipEntryRecord,
     compressedData: Uint8Array
   ): ZipRawEntry {
     return buildPreservedRawEntry(outName, info, compressedData, this._options.encoding);
@@ -596,7 +596,7 @@ export class ZipEditor {
           [];
         const preservedRecompressed: Array<{
           name: string;
-          info: ZipEntryInfo;
+          info: ZipEntryRecord;
         }> = [];
 
         for (const p of preservedMeta) {

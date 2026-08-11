@@ -37,7 +37,7 @@ const decoder = new TextDecoder();
 // NOTE: AES key strength is selected through the `encryptionMethod` string
 // itself — "aes-128" | "aes-192" | "aes-256". The ArchiveFile/ZipFileOptions
 // layer does NOT expose a separate `aesKeyStrength` option (that field only
-// appears on *read* results in ZipEntryInfo). See report for details.
+// appears on *read* results in ZipEntryRecord). See report for details.
 
 console.log("1. AES-encrypted ZIP (high-level ArchiveFile):");
 

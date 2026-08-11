@@ -1319,6 +1319,174 @@ const url = URL.createObjectURL(blob);
 - CSV and Markdown operations are supported
 - Sheet protection with passwords uses pure JS SHA-512
 
+## Types
+
+### Addressing cells
+
+Every `Cell` function takes exactly two forms — an `"A1"` address, or a 1-based
+`(row, col)` pair — and nothing else:
+
+```typescript
+Cell.setValue(ws, "B3", 42);
+Cell.setValue(ws, 3, 2, 42);
+Cell.setFont(ws, 3, 2, { bold: true }); // facet setters take both forms too
+```
+
+Mixing them is a compile error rather than a silent misread: `Cell.getValue(ws,
+"A1", 99)` used to type-check and read `"CUA1"`, and `Cell.getValue(ws, 5)` used
+to type-check and throw at runtime. Both are now rejected.
+
+### Columns by key
+
+`Column.*` accepts a key, a letter or a 1-based number. `Column.getNumber`
+bridges a key to the `(row, col)` form, and `Worksheet.columnDefinitions` is the
+inverse of `Worksheet.setColumns`:
+
+```typescript
+Worksheet.setColumns(ws, [{ header: "Total", key: "total", width: 12 }]);
+
+const col = Column.getNumber(ws, "total"); // 1
+Cell.setValue(ws, 2, col, 99);
+
+// Append a column while keeping the existing definitions — no hand-copying.
+Worksheet.setColumns(ws, [...Worksheet.columnDefinitions(ws), { header: "Error", key: "error" }]);
+```
+
+`Worksheet.columns(ws)` returns the live, **read-only** column handles; declare
+columns through `setColumns` and change them through `Column.set*`. Note that
+`Worksheet.columnCount(ws)` is unrelated: it measures the _used_ range (the
+largest cell count over all rows), not how many columns were declared.
+
+### Rows from your own types
+
+Row objects are matched against the column keys, so any object works — a plain
+interface needs no cast:
+
+```typescript
+interface Invoice {
+  invoiceId: string;
+  total: number;
+}
+
+const invoices: Invoice[] = await load();
+Worksheet.setColumns(ws, [
+  { header: "Invoice", key: "invoiceId", width: 20 },
+  { header: "Total", key: "total", width: 12 }
+]);
+Worksheet.addRows(ws, invoices); // keys are read off each object
+```
+
+### Cell handles
+
+`Row.eachCell` / `Row.getCell` / `Worksheet.getRow` hand out `CellData` handles.
+A handle exposes its address and style directly; read the rest with `Cell.view`
+and write through the `Stream` handle operations (they are not streaming-only):
+
+```typescript
+Row.eachCell(ws, 1, cell => {
+  const header = Cell.view(cell).text.trim();
+  Stream.setCellFont(cell, { bold: true });
+});
+```
+
+Every type the public API speaks is exported from `documonster/excel` under its
+**declared** name — the same name TypeScript prints in errors and hovers. There
+are no aliases to learn, and no `import type` gymnastics: annotate a value, build
+a style helper, or store a column definition directly.
+
+```typescript
+import type {
+  Style,
+  Alignment,
+  Border,
+  Borders,
+  Color,
+  Font,
+  NumFmt,
+  PageSetup,
+  ColumnDefn,
+  RowValues,
+  CellValue,
+  DataValidationRule,
+  ConditionalFormattingOptions,
+  TableProperties,
+  WorksheetModel,
+  XlsxWriteOptions
+} from "documonster/excel";
+
+// Style values are now declarable, so styles can be composed and shared.
+const HEADER: Partial<Style> = {
+  font: { bold: true, size: 11 },
+  alignment: { vertical: "middle", horizontal: "center" },
+  fill: { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEEEEE" } }
+};
+const THIN: Partial<Border> = { style: "thin", color: { argb: "FF000000" } };
+const BOX: Partial<Borders> = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+
+export const mergeStyle = (base: Partial<Style>, ...rest: (Partial<Style> | undefined)[]) =>
+  rest.reduce<Partial<Style>>((acc, s) => ({ ...acc, ...(s ?? {}) }), base);
+
+// Column definitions for `Worksheet.setColumns`.
+export const REPORT_COLUMNS: ColumnDefn[] = [
+  { header: "Invoice", key: "invoiceId", width: 20, style: HEADER },
+  { header: "Amount", key: "amount", width: 14, style: { numFmt: "#,##0.00" } }
+];
+```
+
+Handles (the opaque objects the API hands out) are available both under their
+declared names and as `Handle` on the namespace that owns them — use whichever
+reads better:
+
+```typescript
+import type { Workbook, Worksheet, WorkbookData, WorksheetData } from "documonster/excel";
+
+const render = (ws: Worksheet.Handle) => {
+  /* … */
+};
+const save = (wb: WorkbookData) => {
+  /* … */
+};
+```
+
+Streaming types live on the `Stream` namespace, next to the streaming classes:
+
+```typescript
+import { Stream } from "documonster/excel";
+
+const options: Stream.WorkbookWriterOptions = { filename: "big.xlsx", useSharedStrings: true };
+const writer = new Stream.WorkbookWriter(options);
+const sheet: Stream.WorksheetWriter = writer.addWorksheet("Data");
+```
+
+The cell-value kinds, formula kinds, Excel error strings and the common paper
+sizes are constant lookup objects that double as types, so they work in both
+positions and tree-shake away when unused (a TS `enum` cannot):
+
+```typescript
+import { Cell, ErrorValue, PaperSize, ValueType } from "documonster/excel";
+import type { CellErrorValue } from "documonster/excel";
+
+if (Cell.getType(ws, "A1") === ValueType.Number) {
+  /* … */
+}
+const na: CellErrorValue = { error: ErrorValue.NotApplicable };
+ws.pageSetup.paperSize = PaperSize.A4;
+```
+
+One type, one public name — including for handles. Where a namespace publishes a
+`Handle` alias (`Worksheet.Handle`, `Workbook.Handle`, `Table.Handle`, …) that
+alias is the public name, and the underlying `WorksheetData` / `WorkbookData` /
+… interfaces are deliberately not re-exported flat. The cell, row and column
+handles have no such alias, so their declared names are the public ones:
+
+```typescript
+import type { CellData, ColumnData, RowData } from "documonster/excel";
+
+const cellText = (cell: CellData) => cell.address;
+const rowNumber = (row: RowData) => row.number;
+const columnWidth = (column: ColumnData) => column.width;
+```
+
 ## Utility Exports
 
 Documonster is published as subpath entry points — there is no bare

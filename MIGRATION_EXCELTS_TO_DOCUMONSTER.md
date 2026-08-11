@@ -377,6 +377,25 @@ All operations take `(ws, rowNumber)`.
 > **0-based** dense array (column A is index 0). Old `row.values` was 1-based
 > and old `row.getValues()` was 0-based — same semantics, now as functions.
 
+**Is there still a row object?** Yes, but you never need one to call `Row.*`.
+`Worksheet.addRow` / `addRows` / `getRow` / `getRows` / `findRow` / `findRows` /
+`eachRow` still hand out row handles, whose type is `RowData` (also reachable as
+`Stream.RowHandle` in streaming code). The handle is opaque — read and mutate it
+through `Row.*` by row number. So a signature that used to be
+`(ws: Worksheet, row: Row)` becomes:
+
+```typescript
+import { Row } from "documonster/excel";
+import type { RowData, WorksheetData } from "documonster/excel";
+
+// preferred — address by number
+const stripe = (ws: WorksheetData, rowNumber: number) =>
+  Row.setFill(ws, rowNumber, { type: "pattern", pattern: "solid", fgColor: { argb: "FFF7F7F7" } });
+
+// when you already hold a handle from Worksheet.eachRow / addRow
+const rowNumberOf = (row: RowData) => row.number;
+```
+
 ### 4.5 `Column`
 
 All operations take `(ws, colRef)` where `colRef` is a key string, letter
@@ -952,6 +971,136 @@ low-level helpers. These are **no longer exported from `documonster/excel`**
 If you depended on any of these, replace them with the namespace equivalent
 above or inline a small implementation — they were never intended as a stable
 public surface and are not re-exported by the per-module entries.
+
+### 8.7 Signature and handle changes on the `Cell` / `Column` / `Worksheet` namespaces
+
+Five things that used to need a workaround, or worked by accident:
+
+| Old (excelts, or the first documonster surface)                                                 | Now                                                                                                                         |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `Worksheet.addRows(ws, data as Record<string, unknown>[])`                                      | `Worksheet.addRows(ws, data)` — the keyed row type is `RowObject` (`object`), so a plain `interface` no longer needs a cast |
+| `ws.getColumn("total").number`, or `Worksheet.columns(ws).find(c => c.key === "total")!.number` | `Column.getNumber(ws, "total")` (and `Column.getLetter`)                                                                    |
+| `[...ws.columns.map(c => c.defn), extra]`, or hand-copying 7 fields                             | `[...Worksheet.columnDefinitions(ws), extra]` (single column: `Column.getDefinition(ws, ref)`)                              |
+| `cell.value` on a handle from `Row.eachCell`                                                    | `Cell.view(cell).value` / `.text` / `.numFmt` / `.font` / `.alignment`; write with `Stream.setCell*(cell, …)`               |
+| `Cell.setFont(ws, "B3", …)` only                                                                | `Cell.setFont(ws, 3, 2, …)` too — every cell function takes `"A1"` **or** `(row, col)`                                      |
+
+Two deliberate compile-time breaks:
+
+- **Mixed addressing is rejected.** `Cell.getValue(ws, "A1", 99)` used to
+  type-check and silently read `"CUA1"` (`n2l(99) + "A1"`); `Cell.getValue(ws, 5)`
+  used to type-check and throw `InvalidAddressError`. Both are now errors. Pass
+  `"A1"` alone, or `(row, col)` together.
+- **`Worksheet.columns(ws)` is read-only.** It returns the live column handles as
+  `readonly Readonly<ColumnData>[]`, so `ws.columns[0].header = "X"` (which used
+  to work, unadvertised, and bypassed the key registry and cell styles) no longer
+  compiles. Declare columns with `Worksheet.setColumns`, change them with
+  `Column.set*`, and read them with `Worksheet.columnDefinitions`. The elements
+  are `ColumnView`s — deeply readonly, so nested writes such as
+  `ws.columns[0].style.numFmt = "0"` are rejected too.
+
+`Worksheet.columnCount(ws)` is **not** `Worksheet.columns(ws).length`: it counts
+the cells actually present in rows, while `columns` / `columnDefinitions` list
+the column _records_, which also exist for columns that were merely declared or
+padded into being by a cell access. Both are documented as such now.
+
+Style getters (`Cell.getStyle`, `Cell.getFont`, `Column.getStyle`, `Row.getStyle`
+and the `font` / `alignment` on `Cell.view`) still return the cell's **live**
+style objects, unchanged: read-modify-write
+(`Cell.setStyle(ws, a, { ...Cell.getStyle(ws, b) })`) is a supported pattern, so
+copy before editing if you do not mean to touch the source.
+
+Cell and row **handles** stay mutable on purpose — `Stream.setCellValue(cell, …)`
+and friends take a `CellData` / `RowData`, and that is the supported way to write
+through a handle in streaming and non-streaming code alike.
+
+### 8.8 Type imports (`Style`, `ColumnDefn`, `PageSetup`, …)
+
+The old root entry did `export * from "@excel/types"`, so the whole style /
+worksheet / table vocabulary was importable by name. `documonster/excel` exports
+the same vocabulary, flat and under the same **declared** names — so in almost
+all cases only the specifier changes:
+
+```typescript
+// before
+import type { Style, Alignment, Border, ColumnDefn, PageSetup } from "@cj-tech-master/excelts";
+// after
+import type { Style, Alignment, Border, ColumnDefn, PageSetup } from "documonster/excel";
+```
+
+Three names changed, because the namespaces introduced in documonster took them,
+or to fix a typo:
+
+| Old type (excelts)                          | New type (documonster/excel) | Why                                                                        |
+| ------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------- |
+| `DataValidation` (the rule object)          | `DataValidationRule`         | `DataValidation` is now the namespace (`DataValidation.add(dv, …)`)        |
+| `Address` (decoded `{ address, row, col }`) | `DecodedAddress`             | `Address` is now the namespace (`Address.decodeCell(…)`)                   |
+| `Cvfo`                                      | `Cfvo`                       | Spelling fix — OOXML calls it a _conditional format value object_ (`cfvo`) |
+
+`CellAddress` (the 0-indexed `{ c, r }` pair returned by `Address.decodeCell`),
+`SheetRange` and `Origin` keep their names. `Cell.getFullAddress` now returns
+`DecodedAddress` as well, so the three near-duplicate address types excelts
+carried internally are down to two.
+
+Removed, because they were unreferenced dead declarations:
+
+| Old type                                   | Replacement                                                                                                                                                                                                                                                |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StyleInput` / `StyleOutput`               | `Style`. The split was never wired up and `StyleOutput` was wrong: the reader resolves `numFmtId` to its **format-code string**, so a style read back from a workbook has `numFmt: string`, not `{ id, formatCode }`                                       |
+| `Media`                                    | `WorkbookMedia` (what the workbook actually stores)                                                                                                                                                                                                        |
+| `ImagePosition` / `ImageHyperlinkValue`    | Use `AddImageRange` — the range/position/hyperlink shape `Image.place` accepts. Note `documonster/excel` also exports `ImageAbsolutePosition` (`{ x, y }`, for absolute anchors); it is a different concept and deliberately **not** named `ImagePosition` |
+| `TableColumn`                              | `Required<TableColumnProperties>`                                                                                                                                                                                                                          |
+| `DefinedNamesRanges` / `DefinedNamesModel` | `DefinedNameModel[]` — one entry per defined name (`DefinedNames.model(dn)` returns the array)                                                                                                                                                             |
+| `Buffer` (alias of `Uint8Array`)           | `Uint8Array`                                                                                                                                                                                                                                               |
+
+Streaming types moved onto the `Stream` namespace, next to the streaming classes:
+
+```typescript
+// before
+import type {
+  WorkbookWriterOptions,
+  WorksheetReaderOptions,
+  RowEvent
+} from "@cj-tech-master/excelts";
+// after
+import { Stream } from "documonster/excel";
+type Options = Stream.WorkbookWriterOptions;
+type SheetOptions = Stream.WorksheetReaderOptions;
+type Row = Stream.RowEvent;
+```
+
+`NodeInput` (the streaming reader input) is now `Stream.WorkbookReaderInput` on
+both entries — the Node variant still adds the file-path form.
+
+`PaperSize` is still a value, and so are the enums — but all of them are now
+plain constant objects rather than TS `enum`s, so they tree-shake away when
+unused. Member access is unchanged:
+
+```typescript
+import { Cell, ErrorValue, PaperSize, ValueType } from "documonster/excel";
+
+if (Cell.getType(ws, "A1") === ValueType.Number) {
+  /* … */
+}
+ws.pageSetup.paperSize = PaperSize.A4;
+```
+
+Two consequences of dropping `enum`:
+
+- the **reverse mapping is gone** (`ValueType[2]` no longer yields `"Number"`);
+  map the numbers yourself if you relied on it, e.g.
+  `Object.entries(ValueType).find(([, v]) => v === t)?.[0]`.
+- the types are literal unions now, so an arbitrary `number` is no longer
+  silently assignable to `ValueType` — a cast is required where you genuinely
+  have an unchecked number. `PageSetup.paperSize` stays `number`, so passing a
+  code that `PaperSize` does not name (Letter = `1`, A3 = `8`, …) still works.
+
+`ErrorValueType` is now simply `ErrorValue` (the constant object and its derived
+union share one name), and it gained the two members the old type union had but
+the old constant lacked (`Spill` = `#SPILL!`, `Calc` = `#CALC!`), so
+`CellErrorValue.error` and `ErrorValue` are finally the same set of strings.
+
+`RelationshipType` / `ReadingOrder` / `DocumentType` are no longer public — they
+described internal OOXML plumbing.
 
 ---
 

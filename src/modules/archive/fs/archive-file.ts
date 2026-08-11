@@ -72,7 +72,7 @@ import { collectUint8ArrayStream, toAsyncIterable } from "@archive/io/archive-so
 import { TarArchive, TarReader } from "@archive/tar/tar-archive";
 import { TAR_TYPE } from "@archive/tar/tar-constants";
 import { isDirectory as isTarDirectory } from "@archive/tar/tar-entry-info";
-import type { ZipEntryInfo as ParserEntryInfo } from "@archive/unzip/zip-parser";
+import type { ZipEntryRecord } from "@archive/unzip/zip-parser";
 import { ZipParser } from "@archive/unzip/zip-parser";
 import type { ZipPathOptions } from "@archive/zip-spec/zip-path";
 import { joinZipPath, normalizeZipPath } from "@archive/zip-spec/zip-path";
@@ -523,7 +523,7 @@ function wrapFilter(
 /**
  * Map a ZipParser entry to ArchiveEntryInfo format.
  */
-function mapZipEntryToInfo(e: ParserEntryInfo): ZipEntryInfo {
+function mapZipEntryToInfo(e: ZipEntryRecord): ZipEntryInfo {
   return {
     path: e.path,
     isDirectory: e.type === "directory",
@@ -960,7 +960,7 @@ interface ArchiveZipState {
   _zipData: Uint8Array | null;
   _zipParser: ZipParser | null;
   _zipPassword: string | Uint8Array | undefined;
-  _zipEditView: ZipEditView<ParserEntryInfo> | null;
+  _zipEditView: ZipEditView<ZipEntryRecord> | null;
   _zipAbortController: AbortController | null;
   _zipBytesWritten: number;
   _zipPendingEntries: ZipPendingEntry[];
@@ -986,7 +986,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
   private _zipParser: F extends "zip" ? ZipParser | null : null;
   private _zipSourcePath: F extends "zip" ? string | null : null;
   private _zipPassword: F extends "zip" ? string | Uint8Array | undefined : null;
-  private _zipEditView: F extends "zip" ? ZipEditView<ParserEntryInfo> | null : null;
+  private _zipEditView: F extends "zip" ? ZipEditView<ZipEntryRecord> | null : null;
   private _zipAbortController: F extends "zip" ? AbortController | null : null;
   private _zipBytesWritten: F extends "zip" ? number : null;
 
@@ -1029,7 +1029,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
       this._zipPassword = zipOptions.password as F extends "zip"
         ? string | Uint8Array | undefined
         : null;
-      this._zipEditView = null as F extends "zip" ? ZipEditView<ParserEntryInfo> | null : null;
+      this._zipEditView = null as F extends "zip" ? ZipEditView<ZipEntryRecord> | null : null;
       this._zipAbortController = null as F extends "zip" ? AbortController | null : null;
       this._zipBytesWritten = 0 as F extends "zip" ? number : null;
 
@@ -1053,7 +1053,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
       this._zipParser = null as F extends "zip" ? ZipParser | null : null;
       this._zipSourcePath = null as F extends "zip" ? string | null : null;
       this._zipPassword = null as F extends "zip" ? string | Uint8Array | undefined : null;
-      this._zipEditView = null as F extends "zip" ? ZipEditView<ParserEntryInfo> | null : null;
+      this._zipEditView = null as F extends "zip" ? ZipEditView<ZipEntryRecord> | null : null;
       this._zipAbortController = null as F extends "zip" ? AbortController | null : null;
       this._zipBytesWritten = null as F extends "zip" ? number : null;
     }
@@ -1106,8 +1106,8 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
   }
 
   /** Get ZIP edit view (may be null) */
-  private get _zip_editView(): ZipEditView<ParserEntryInfo> | null {
-    return this._zipEditView as ZipEditView<ParserEntryInfo> | null;
+  private get _zip_editView(): ZipEditView<ZipEntryRecord> | null {
+    return this._zipEditView as ZipEditView<ZipEntryRecord> | null;
   }
 
   /** Get TAR pending entries array */
@@ -1181,10 +1181,10 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
       this._setZipState("_zipSourcePath", sourcePath);
     }
     // Initialize edit view with existing entries
-    const editView = new ZipEditView<ParserEntryInfo>({
+    const editView = new ZipEditView<ZipEntryRecord>({
       path: resolveZipPathOptions(this._zip_options)
     });
-    editView.initFromEntries(this._zip_parser!.getEntries(), (e: ParserEntryInfo) => e.path);
+    editView.initFromEntries(this._zip_parser!.getEntries(), (e: ZipEntryRecord) => e.path);
     this._setZipState("_zipEditView", editView);
   }
 
@@ -2320,7 +2320,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
       // Re-initialize edit view from the new zip data (all changes applied)
       const newParser = new ZipParser(zipData, { password: globalPassword });
       this._setZipState("_zipParser", newParser);
-      this._zip_editView.initFromEntries(newParser.getEntries(), (e: ParserEntryInfo) => e.path);
+      this._zip_editView.initFromEntries(newParser.getEntries(), (e: ZipEntryRecord) => e.path);
     }
     this._setZipState("_zipAbortController", null);
 
@@ -2407,7 +2407,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
       // Re-initialize edit view from the new zip data (all changes applied)
       const newParser = new ZipParser(zipData, { password: globalPassword });
       this._setZipState("_zipParser", newParser);
-      this._zip_editView.initFromEntries(newParser.getEntries(), (e: ParserEntryInfo) => e.path);
+      this._zip_editView.initFromEntries(newParser.getEntries(), (e: ZipEntryRecord) => e.path);
     }
 
     return zipData;
@@ -2570,7 +2570,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
 
     // Deferred symlinks - process after all files/dirs to ensure targets exist
     const deferredSymlinks: Array<{
-      entry: ParserEntryInfo;
+      entry: ZipEntryRecord;
       targetPath: string;
       linkTarget: string;
     }> = [];
@@ -2818,7 +2818,7 @@ export class ArchiveFile<F extends ArchiveFormat = "zip"> {
 
     // Deferred symlinks - process after all files/dirs to ensure targets exist
     const deferredSymlinks: Array<{
-      entry: ParserEntryInfo;
+      entry: ZipEntryRecord;
       targetPath: string;
       linkTarget: string;
     }> = [];

@@ -4,7 +4,7 @@ import { ChartOptionsError } from "@excel/errors";
 
 type PresetSeriesDefaults = Partial<Pick<AddChartSeriesOptions, "bubble3D" | "explosion">>;
 
-interface PresetConfig {
+export interface ChartPresetConfig {
   /**
    * Partial options merged on top of the caller-supplied options. `type` is
    * mandatory so callers get a runtime-usable `AddChartOptions` even when
@@ -28,7 +28,7 @@ function barPreset(
   >,
   shape?: NonNullable<AddChartOptions["shape"]>,
   type: "bar" | "bar3D" = "bar"
-): PresetConfig {
+): ChartPresetConfig {
   return {
     options: shape ? { type: "bar3D", barDir, grouping, shape } : { type, barDir, grouping }
   };
@@ -41,7 +41,7 @@ function bar3DPreset(
     "clustered" | "stacked" | "percentStacked"
   >,
   shape?: NonNullable<AddChartOptions["shape"]>
-): PresetConfig {
+): ChartPresetConfig {
   return barPreset(barDir, grouping, shape, "bar3D");
 }
 
@@ -176,13 +176,13 @@ export const CHART_PRESETS = {
   topViewWireframe: {
     options: { type: "surface3D", wireframe: true, view3D: { rotX: 90, rotY: 0 } }
   }
-} satisfies Readonly<Record<string, PresetConfig>>;
+} satisfies Readonly<Record<string, ChartPresetConfig>>;
 
 export type ExcelChartPreset = keyof typeof CHART_PRESETS;
 
 export const EXCEL_CHART_PRESETS = Object.keys(CHART_PRESETS) as ExcelChartPreset[];
 
-interface ChartExPresetConfig {
+export interface ChartExPresetConfig {
   options: Partial<AddChartExOptions> & { type: ChartExType };
 }
 
@@ -207,11 +207,11 @@ export function applyChartPreset(
   preset: ExcelChartPreset,
   options: Omit<AddChartOptions, "type"> & Partial<Pick<AddChartOptions, "type">>
 ): AddChartOptions {
-  const config: PresetConfig | undefined = CHART_PRESETS[preset];
+  const config: ChartPresetConfig | undefined = CHART_PRESETS[preset];
   if (!config) {
     throw new ChartOptionsError(`Unknown chart preset: ${preset}.`);
   }
-  // `type` is required on `PresetConfig.options`, so this assignment is
+  // `type` is required on `ChartPresetConfig.options`, so this assignment is
   // type-safe without a non-null assertion.
   const merged = {
     ...config.options,

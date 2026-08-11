@@ -55,7 +55,7 @@ export type { DocxToPdfOptions } from "@pdf/word-bridge";
 // Types — Writing
 // =============================================================================
 
-export type { PdfCell, PdfRow, PdfColumn, PdfSheet, PdfBook, PdfImage } from "@pdf/pdf";
+export type { PdfCell, PdfRow, PdfColumn, PdfSheet, PdfBook, PdfImage, PdfInput } from "@pdf/pdf";
 
 export type {
   PdfExportOptions,
@@ -114,6 +114,8 @@ export type {
   PdfSignatureOptions
 } from "@pdf/builder/document-builder";
 export type { LoadOptions } from "@pdf/builder/pdf-editor";
+/** What `page.getContentStream()` returns. */
+export type { PdfContentStream } from "@pdf/core/pdf-stream";
 
 // =============================================================================
 // Types — Digital Signatures

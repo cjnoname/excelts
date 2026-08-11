@@ -4,7 +4,7 @@ import { getRow, getSheetWorkbook, rowGetCell } from "@excel/core/worksheet-core
 import type { WorksheetData as Worksheet } from "@excel/core/worksheet-core";
 import { TableError } from "@excel/errors";
 import type {
-  Address,
+  DecodedAddress,
   CellFormulaValue,
   CellValue,
   Style,
@@ -18,7 +18,8 @@ interface LoadedTableColumnProperties extends TableColumnProperties {
   namespaceAttributes?: Record<string, string>;
 }
 
-interface TableModel {
+/** The round-trip table model — `Table.model` / `Table.setModel`. */
+export interface TableModel {
   ref: string;
   name: string;
   displayName?: string;
@@ -28,7 +29,7 @@ interface TableModel {
   totalsRow?: boolean;
   qualifyImplicitStructuredReferences?: boolean;
   style?: TableStyleProperties;
-  tl?: Address;
+  tl?: DecodedAddress;
   autoFilterRef?: string;
   tableRef?: string;
   sortStateXml?: string;
@@ -787,4 +788,4 @@ export function tableColumnSetTotalsRowFormula(
   tableColumnSet(view, "totalsRowFormula", value);
 }
 
-export { sanitizeTableName, type TableModel };
+export { sanitizeTableName };

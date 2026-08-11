@@ -4,7 +4,7 @@
  * Works in both Node.js and browser environments
  */
 
-import type { ZipEntryInfo } from "@archive/unzip/zip-parser";
+import type { ZipEntryRecord } from "@archive/unzip/zip-parser";
 import { ZipParser } from "@archive/unzip/zip-parser";
 import type { ZipEntryType } from "@archive/zip-spec/zip-entry-info";
 import { isSymlink as isSymlinkType } from "@archive/zip-spec/zip-entry-info";
@@ -147,7 +147,7 @@ export async function forEachEntry(
   callback: (
     path: string,
     getData: () => Promise<Uint8Array>,
-    entry: ZipEntryInfo
+    entry: ZipEntryRecord
   ) => Promise<boolean | void>
 ): Promise<void> {
   const parser = new ZipParser(zipData);
@@ -157,4 +157,4 @@ export async function forEachEntry(
 }
 
 // Re-export ZipParser for advanced usage
-export { ZipParser, type ZipEntryInfo, type ZipParseOptions } from "@archive/unzip/zip-parser";
+export { ZipParser, type ZipEntryRecord, type ZipParseOptions } from "@archive/unzip/zip-parser";

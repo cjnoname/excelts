@@ -33,7 +33,7 @@ import {
 } from "@archive/crypto";
 import { collect } from "@archive/io/archive-sink";
 import { BinaryReader } from "@archive/zip-spec/binary";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import {
   COMPRESSION_DEFLATE,
   COMPRESSION_STORE,
@@ -85,7 +85,7 @@ const DEFAULT_MAX_ENTRY_SIZE = 512 * 1024 * 1024;
  * @returns Decompressed entry content
  */
 export async function processEntryData(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   compressedData: Uint8Array,
   password?: string | Uint8Array,
   checkCrc32 = false,
@@ -177,7 +177,7 @@ export async function processEntryData(
  * @throws Error if the entry uses AES encryption
  */
 export function processEntryDataSync(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   compressedData: Uint8Array,
   password?: string | Uint8Array,
   validateEntrySizes = true
@@ -255,7 +255,7 @@ async function decompressData(
 }
 
 async function* decryptZipCryptoStream(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   encrypted: AsyncIterable<Uint8Array>,
   password: string | Uint8Array,
   options: { signal?: AbortSignal } = {}
@@ -471,7 +471,7 @@ function* chunkUint8Array(data: Uint8Array, size: number): Generator<Uint8Array>
  * Throws at the end if too few bytes are produced (corruption detection).
  */
 async function* validateSizeStream(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   source: AsyncIterable<Uint8Array>,
   options: { signal?: AbortSignal } = {}
 ): AsyncIterable<Uint8Array> {
@@ -498,7 +498,7 @@ async function* validateSizeStream(
 }
 
 async function* validateCrc32Stream(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   source: AsyncIterable<Uint8Array>,
   options: { signal?: AbortSignal } = {}
 ): AsyncIterable<Uint8Array> {
@@ -522,7 +522,7 @@ async function* validateCrc32Stream(
  * This centralizes the common pattern of chaining validation streams.
  */
 function applyValidationStreams(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   source: AsyncIterable<Uint8Array>,
   options: {
     validateEntrySizes: boolean;
@@ -555,7 +555,7 @@ function applyValidationStreams(
  * requires the full ciphertext; this function falls back to buffering for AES.
  */
 export function processEntryDataStream(
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   compressedData: AsyncIterable<Uint8Array>,
   options: ExtractCoreOptions & { signal?: AbortSignal } = {}
 ): AsyncIterable<Uint8Array> {
@@ -714,7 +714,7 @@ export function readLocalHeaderDataOffset(reader: BinaryReader, expectedOffset: 
  * @param entry - Entry to read
  * @returns Compressed data for the entry
  */
-export function readEntryCompressedData(data: Uint8Array, entry: ZipEntryInfo): Uint8Array {
+export function readEntryCompressedData(data: Uint8Array, entry: ZipEntryRecord): Uint8Array {
   const reader = new BinaryReader(data, entry.localHeaderOffset);
   const dataOffset = readLocalHeaderDataOffset(reader, entry.localHeaderOffset);
   return data.subarray(dataOffset, dataOffset + entry.compressedSize);

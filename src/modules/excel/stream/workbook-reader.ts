@@ -9,7 +9,7 @@ import { join } from "path";
 import type { ZipEntry } from "@archive/unzip/stream";
 import { HyperlinkReader } from "@excel/stream/hyperlink-reader";
 import type {
-  CommonInput,
+  WorkbookReaderInput as CrossPlatformInput,
   WorkbookReaderOptions,
   WorksheetReadyEvent
 } from "@excel/stream/workbook-reader.browser";
@@ -39,7 +39,8 @@ export type {
   ParseEvent
 } from "@excel/stream/workbook-reader.browser";
 
-export type NodeInput = string | CommonInput;
+/** What the Node streaming reader accepts — adds a file path. */
+export type WorkbookReaderInput = string | CrossPlatformInput;
 
 interface WaitingWorksheet {
   sheetNo: string;
@@ -49,21 +50,21 @@ interface WaitingWorksheet {
 }
 
 class WorkbookReader extends WorkbookReaderBase<
-  NodeInput,
+  WorkbookReaderInput,
   WorksheetReader,
   HyperlinkReader,
   WaitingWorksheet
 > {
-  constructor(input: NodeInput, options: WorkbookReaderOptions = {}) {
-    super(input as CommonInput, options, WorksheetReader, HyperlinkReader);
-    this.input = input as NodeInput;
+  constructor(input: WorkbookReaderInput, options: WorkbookReaderOptions = {}) {
+    super(input as CrossPlatformInput, options, WorksheetReader, HyperlinkReader);
+    this.input = input as WorkbookReaderInput;
   }
 
-  _getStream(input: NodeInput): Readable {
+  _getStream(input: WorkbookReaderInput): Readable {
     if (typeof input === "string") {
       return createReadStream(input);
     }
-    return super._getStream(input as CommonInput);
+    return super._getStream(input as CrossPlatformInput);
   }
 
   async _storeWaitingWorksheet(sheetNo: string, entry: ZipEntry): Promise<WaitingWorksheet> {

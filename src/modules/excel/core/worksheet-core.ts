@@ -25,7 +25,7 @@ import type { AnchorData } from "@excel/core/anchor";
  *
  * No file below this one imports the heavy `worksheet.ts`.
  */
-import type { CellData, CellAddress, CellValueType } from "@excel/core/cell";
+import type { CellData, CellValueType } from "@excel/core/cell";
 import {
   CellTypes,
   cellComment,
@@ -49,7 +49,7 @@ import { columnHeaders } from "@excel/core/column";
 import type { DataValidationsData } from "@excel/core/data-validations";
 import { Enums } from "@excel/core/enums";
 import type { FormCheckboxData } from "@excel/core/form-control";
-import type { ImageData } from "@excel/core/image";
+import type { WorksheetImage } from "@excel/core/image";
 import type { PivotTable } from "@excel/core/pivot-table";
 import type { RangeData } from "@excel/core/range";
 import { rangeCreate, rangeRange } from "@excel/core/range";
@@ -72,6 +72,7 @@ import type {
   CellValue,
   ColBreak,
   ConditionalFormattingOptions,
+  DecodedAddress,
   Fill,
   Font,
   HeaderFooter,
@@ -186,7 +187,7 @@ export interface WorksheetData {
   _worksheetNamespaceAttributes?: Record<string, string>;
   _worksheetMcIgnorable?: string;
   _sortStateAutoFilterRef?: string;
-  _media: ImageData[];
+  _media: WorksheetImage[];
   _shapes: ShapeModel[];
   _charts: ChartHandle[];
   _sparklineGroups: SparklineGroup[];
@@ -201,7 +202,7 @@ export interface WorksheetData {
   _drawing: unknown;
   _watermark: WatermarkOptions | null;
   /** The exact media entry created by the watermark API, for precise removal. */
-  _watermarkMedia: ImageData | null;
+  _watermarkMedia: WorksheetImage | null;
   /**
    * Optional streaming-writer hook. Present on streaming worksheet writers,
    * absent on plain record worksheets; `_commitRow` dispatches to it when set.
@@ -471,7 +472,7 @@ export function getRangeValues(ws: WorksheetData, range: string | RangeData): Ce
 // Row cell access (need the worksheet container to resolve columns)
 // =============================================================================
 
-export function rowGetCellEx(r: RowData, address: CellAddress): CellData {
+export function rowGetCellEx(r: RowData, address: DecodedAddress): CellData {
   let cell = r.cells[address.col - 1];
   if (!cell) {
     const column = getColumn(r.worksheet, address.col);
@@ -521,8 +522,11 @@ export function rowSetValues(r: RowData, value: RowValues): void {
       }
     });
   } else {
+    // `RowObject` is `object` so that plain interfaces are accepted without a
+    // cast at every call site; key lookup is read-only, hence the local widening.
+    const keyed = value as Record<string, unknown>;
     eachColumnKey(r.worksheet, (column: ColumnData, key: string) => {
-      const resolved = resolveColumnKeyValue(value, key);
+      const resolved = resolveColumnKeyValue(keyed, key);
       if (resolved !== undefined) {
         cellSetValue(
           rowGetCellEx(r, {
@@ -759,13 +763,13 @@ export function rowSetModel(r: RowData, value: RowModel): void {
     throw new ExcelError("Invalid row number in model");
   }
   r.cells = [];
-  let previousAddress: CellAddress | undefined;
+  let previousAddress: DecodedAddress | undefined;
   value.cells.forEach(cellModel => {
     switch (cellModel.type) {
       case CellTypes.Merge:
         break;
       default: {
-        let address: CellAddress | undefined;
+        let address: DecodedAddress | undefined;
         if (cellModel.address) {
           address = colCache.decodeAddress(cellModel.address);
         } else if (previousAddress) {

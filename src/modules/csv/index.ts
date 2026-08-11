@@ -88,6 +88,9 @@ export type {
 } from "@csv/utils/generate";
 export type { DecimalSeparator } from "@csv/utils/number";
 
+// Streaming/async parser input + row shapes.
+export type { CsvAsyncInput, ParsedRow } from "@csv/parse/async";
+
 // =============================================================================
 // Errors
 // =============================================================================

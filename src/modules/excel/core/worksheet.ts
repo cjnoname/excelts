@@ -48,8 +48,9 @@ import {
   cellUnmerge,
   cellView
 } from "@excel/core/cell";
-import type { ColumnData, ColumnModel, ColumnDefn } from "@excel/core/column";
+import type { ColumnData, ColumnModel, ColumnDefn, ColumnView } from "@excel/core/column";
 import { columnDefn, columnToModel } from "@excel/core/column";
+import type { DataValidationModel } from "@excel/core/data-validations";
 import { createDataValidations } from "@excel/core/data-validations";
 import { definedNamesSpliceColumns, definedNamesSpliceRows } from "@excel/core/defined-names";
 import { Enums } from "@excel/core/enums";
@@ -60,7 +61,7 @@ import type {
   FormControlRange
 } from "@excel/core/form-control";
 import { formCheckboxCreate, formCheckboxFromModel } from "@excel/core/form-control";
-import type { ImageData, ImageModel } from "@excel/core/image";
+import type { WorksheetImage, ImageModel } from "@excel/core/image";
 import { imageClone, imageCreate, imageModel } from "@excel/core/image";
 import { withPivotChartSource } from "@excel/core/pivot-chart";
 import type { PivotTable, PivotTableModel } from "@excel/core/pivot-table";
@@ -126,7 +127,6 @@ import type {
   CellValue,
   ColBreak,
   ConditionalFormattingOptions,
-  DataValidation,
   HeaderFooter,
   HeaderFooterImagePosition,
   IgnoredError,
@@ -160,7 +160,6 @@ import {
 } from "@excel/utils/text-metrics";
 
 // Type for data validation model - maps address to validation
-type DataValidationModel = { [address: string]: DataValidation | undefined };
 
 interface WorksheetOptions {
   workbook?: Workbook;
@@ -175,7 +174,8 @@ interface WorksheetOptions {
   autoFilter?: AutoFilter | null;
 }
 
-interface WorksheetModel {
+/** The round-trip worksheet model — `Worksheet.getModel` / `Worksheet.setModel`. */
+export interface WorksheetModel {
   id: number;
   name: string;
   dataValidations: DataValidationModel;
@@ -500,7 +500,7 @@ export function duplicateRow(
 
   // Collect images anchored to the source row before splicing
   // (images whose top-left anchor is on the source row)
-  const srcImages: ImageData[] = [];
+  const srcImages: WorksheetImage[] = [];
   const srcRow0 = rowNum - 1; // 0-based source row
   for (const image of ws._media) {
     if (image.type === "image" && image.range) {
@@ -1040,7 +1040,7 @@ export function _resolveShapeModel(ws: WorksheetData, shape: ShapeModel): ShapeM
   };
 }
 
-export function getImages(ws: WorksheetData): ImageData[] {
+export function getImages(ws: WorksheetData): WorksheetImage[] {
   return ws._media.filter(m => m.type === "image");
 }
 
@@ -2359,14 +2359,56 @@ export function getSheetDimensions(ws: WorksheetData): RangeData {
   return dimensions;
 }
 
-export function getColumns(ws: WorksheetData): ColumnData[] {
+/**
+ * The worksheet's **materialised** column records, in column order.
+ *
+ * A column record exists once it has been declared ({@link setColumns} or
+ * `Column.*`) *or* once any cell in that column has been touched — reading or
+ * writing `C1` pads the array up to column 3, with columns 1-2 as defaults. So
+ * this length tracks the highest column ever addressed, not the number of
+ * configured columns, and it is not {@link getColumnCount} either (that counts
+ * cells actually present in rows).
+ *
+ * Read-only: the elements are {@link ColumnView}s, so neither the array nor any
+ * column (nor its nested `style`) can be written to. Declare columns through
+ * {@link setColumns} and change them through the `Column` namespace — both keep
+ * the column numbering, the key registry and the cells' styles in sync. Use
+ * {@link getColumnDefinitions} to read the definitions as detached copies.
+ */
+export function getColumns(ws: WorksheetData): readonly ColumnView[] {
   return ws._columns;
 }
 
-export function getLastColumn(ws: WorksheetData): ColumnData {
+/**
+ * The column definitions as plain, detached copies — the inverse of
+ * {@link setColumns}. Mirrors {@link getColumns}, so it includes default
+ * placeholder entries for columns that exist only because a cell in them was
+ * touched; those round-trip as defaults.
+ *
+ * This is the safe way to clone a sheet's column layout, e.g. to append one:
+ * `setColumns(ws, [...getColumnDefinitions(ws), { header: "Error", key: "error" }])`.
+ * Copying fields off {@link getColumns} by hand re-implements the `hidden` /
+ * `outlineLevel` normalisation and silently drifts when it changes.
+ */
+export function getColumnDefinitions(ws: WorksheetData): ColumnDefn[] {
+  return ws._columns.map(columnDefn);
+}
+
+/** The last **declared** column, as a read-only {@link ColumnView}. */
+export function getLastColumn(ws: WorksheetData): ColumnView {
   return getColumn(ws, getColumnCount(ws));
 }
 
+/**
+ * The width of the **used** range: the largest cell count over all rows.
+ *
+ * Unrelated to {@link getColumns} / {@link getColumnDefinitions}, which describe
+ * the materialised column records — this counts the cells actually present in
+ * rows, so `getColumns(ws).length` and `getColumnCount(ws)` are not
+ * interchangeable (a column padded into existence by a cell read has a record
+ * but no cells).
+ * O(rows); {@link getActualColumnCount} additionally ignores gaps.
+ */
 export function getColumnCount(ws: WorksheetData): number {
   let maxCount = 0;
   eachRow(ws, row => {
@@ -2488,7 +2530,7 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
 
   // =================================================
   // columns
-  model.cols = columnToModel(getColumns(ws));
+  model.cols = columnToModel(ws._columns);
 
   // ==========================================================
   // Rows
@@ -2717,7 +2759,6 @@ function _resolveOrigin(origin: Origin, rowCount: number): { row: number; col: n
   return { row: origin.r + 1, col: origin.c + 1 };
 }
 
-export { type WorksheetModel };
 export type Worksheet = WorksheetData;
 
 // Re-export the worksheet-core container layer so `@excel/worksheet` remains the

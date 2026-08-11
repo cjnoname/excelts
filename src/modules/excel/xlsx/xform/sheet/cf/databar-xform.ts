@@ -1,4 +1,4 @@
-import type { Color, Cvfo } from "@excel/types";
+import type { Color, Cfvo } from "@excel/types";
 import type { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { CompositeXform } from "@excel/xlsx/xform/composite-xform";
 import { CfvoXform } from "@excel/xlsx/xform/sheet/cf/cfvo-xform";
@@ -6,7 +6,7 @@ import { ColorXform } from "@excel/xlsx/xform/style/color-xform";
 import type { XmlSink } from "@xml/types";
 
 interface DatabarModel {
-  cfvo: Cvfo[];
+  cfvo: Cfvo[];
   color?: Partial<Color>;
 }
 
@@ -47,7 +47,7 @@ class DatabarXform extends CompositeXform<DatabarModel> {
   onParserClose(name: string, parser: BaseXform): void {
     switch (name) {
       case "cfvo":
-        this.model!.cfvo.push(parser.model as Cvfo);
+        this.model!.cfvo.push(parser.model as Cfvo);
         break;
       case "color":
         this.model!.color = parser.model as Partial<Color>;

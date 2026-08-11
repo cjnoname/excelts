@@ -131,12 +131,12 @@ describe("extract", () => {
       expect(paths.length).toBe(2);
     });
 
-    it("should provide ZipEntryInfo for advanced use", async () => {
+    it("should provide ZipEntryRecord for advanced use", async () => {
       const zipData = readFileSync(testFilePath);
       let hasEntryInfo = false;
 
       await forEachEntry(zipData, async (_path, _getData, entry) => {
-        // ZipEntryInfo provides detailed info about the entry
+        // ZipEntryRecord provides detailed info about the entry
         if (entry.compressedSize !== undefined && entry.uncompressedSize !== undefined) {
           hasEntryInfo = true;
           return false;

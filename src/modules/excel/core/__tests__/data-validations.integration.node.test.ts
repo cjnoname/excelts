@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { expectValidXlsx } from "@excel/__tests__/helpers/expect-valid-xlsx";
 import { getWorksheets } from "@excel/core/workbook";
 import { DataValidation, Workbook } from "@excel/index";
-import type { DataValidation as DataValidationRule } from "@excel/types";
+import type { DataValidationRule } from "@excel/types";
 import { makeTestDataPath, testFilePath } from "@test/utils";
 import { describe, it, expect } from "vitest";
 

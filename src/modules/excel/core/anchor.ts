@@ -2,19 +2,19 @@ import { columnIsCustomWidth } from "@excel/core/column";
 import type { WorksheetData as Worksheet } from "@excel/core/worksheet-core";
 import { colCache } from "@excel/utils/col-cache";
 
-interface AnchorModel {
+/** The persisted OOXML anchor coordinates (native col/row plus EMU offsets). */
+export interface AnchorModel {
   nativeCol: number;
   nativeRow: number;
   nativeColOff: number;
   nativeRowOff: number;
 }
 
-interface SimpleAddress {
-  col: number;
-  row: number;
-}
-
-type AddressInput = string | AnchorModel | SimpleAddress;
+/**
+ * What {@link anchorCreate} / {@link anchorAsInstance} accept: an `"A1"`
+ * string, a persisted {@link AnchorModel}, or a plain 1-based col/row pair.
+ */
+export type AnchorInput = string | AnchorModel | { col: number; row: number };
 
 /**
  * Plain-data drawing anchor (de-classed domain model).
@@ -31,7 +31,7 @@ export interface AnchorData {
   worksheet?: Worksheet;
 }
 
-function isAnchorModel(value: AddressInput): value is AnchorModel {
+function isAnchorModel(value: AnchorInput): value is AnchorModel {
   return (
     typeof value === "object" &&
     "nativeCol" in value &&
@@ -41,7 +41,7 @@ function isAnchorModel(value: AddressInput): value is AnchorModel {
   );
 }
 
-function isSimpleAddress(value: AddressInput): value is SimpleAddress {
+function isSimpleAddress(value: AnchorInput): value is { col: number; row: number } {
   return typeof value === "object" && "col" in value && "row" in value;
 }
 
@@ -108,7 +108,7 @@ export function anchorSetRow(a: AnchorData, v: number): void {
  */
 export function anchorCreate(
   worksheet?: Worksheet,
-  address?: AddressInput | null,
+  address?: AnchorInput | null,
   offset: number = 0
 ): AnchorData {
   const a: AnchorData = {
@@ -140,7 +140,7 @@ export function anchorCreate(
 
 /** Coerce an anchor model / existing anchor record into an {@link AnchorData}. */
 export function anchorAsInstance(
-  model: AddressInput | AnchorData | null | undefined
+  model: AnchorInput | AnchorData | null | undefined
 ): AnchorData | null {
   if (model == null) {
     return null;
@@ -173,5 +173,3 @@ export function anchorSetModel(a: AnchorData, value: AnchorModel): void {
 export function anchorClone(a: AnchorData, worksheet?: Worksheet): AnchorData {
   return anchorCreate(worksheet ?? a.worksheet, anchorModel(a));
 }
-
-export type { AnchorModel };

@@ -65,7 +65,12 @@ export type {
   AddChartFromTableOptions,
   SeriesFromColumnsOptions
 } from "@excel/chart/build/chart-api";
-export type { ExcelChartExPreset, ExcelChartPreset } from "@excel/chart/model/chart-presets";
+export type {
+  ChartExPresetConfig,
+  ChartPresetConfig,
+  ExcelChartExPreset,
+  ExcelChartPreset
+} from "@excel/chart/model/chart-presets";
 export {
   applyAxisTransform,
   buildChartScene,

@@ -1,10 +1,10 @@
 import { ColumnOutOfBoundsError, InvalidAddressError } from "@excel/errors";
-import type { Address, Location } from "@excel/types";
+import type { DecodedAddress, Location } from "@excel/types";
 
 const addressRegex = /^[A-Z]+\d+$/;
 
 // Internal type with required $col$row for caching
-type CachedAddress = Address & { $col$row: string };
+type CachedAddress = DecodedAddress & { $col$row: string };
 
 export type DecodedRange = Location & {
   tl: string | CachedAddress;

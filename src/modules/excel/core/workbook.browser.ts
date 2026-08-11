@@ -66,7 +66,10 @@ import {
   getSheetWorkbook,
   setSheetModel
 } from "@excel/core/worksheet";
-import type { WorkbookReaderOptions, CommonInput } from "@excel/stream/workbook-reader.browser";
+import type {
+  WorkbookReaderOptions,
+  WorkbookReaderInput
+} from "@excel/stream/workbook-reader.browser";
 import { WorkbookReader } from "@excel/stream/workbook-reader.browser";
 import type { WorkbookWriterOptions } from "@excel/stream/workbook-writer.browser";
 import { WorkbookWriter } from "@excel/stream/workbook-writer.browser";
@@ -77,8 +80,7 @@ import type {
   ThreadedCommentPerson,
   WorkbookProperties,
   WorkbookProtection,
-  WorkbookView,
-  Buffer as ExcelBuffer
+  WorkbookView
 } from "@excel/types";
 import { synthGuid } from "@excel/utils/guid";
 import { buildWorkbookProtection } from "@excel/utils/workbook-protection";
@@ -91,12 +93,12 @@ import { BLANK, rvBoolean, rvNumber, rvString } from "@formula/runtime/values";
 // Internal Types
 // =============================================================================
 
-/** Internal media type - more flexible than public Media type */
+/** Workbook-level media entry (looser than the public `ImageData` input shape). */
 export interface WorkbookMedia {
   type: string;
   extension: string;
   filename?: string;
-  buffer?: ExcelBuffer | Uint8Array;
+  buffer?: Uint8Array;
   base64?: string;
   name?: string;
   /** External link target — when set, the image is referenced, not embedded. */
@@ -1381,7 +1383,7 @@ export function createStreamWriter(options?: WorkbookWriterOptions): WorkbookWri
 }
 
 export function createStreamReader(
-  input: CommonInput,
+  input: WorkbookReaderInput,
   options?: WorkbookReaderOptions
 ): WorkbookReader {
   return new WorkbookReader(input, options);

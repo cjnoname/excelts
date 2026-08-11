@@ -16,6 +16,7 @@ import type { Worksheet } from "@excel/core/worksheet";
 import { ExcelError, InvalidValueTypeError } from "@excel/errors";
 import type {
   Style,
+  DecodedAddress,
   NumFmt,
   Font,
   Alignment,
@@ -24,7 +25,7 @@ import type {
   Fill,
   CellRichTextValue,
   CellErrorValue,
-  DataValidation,
+  DataValidationRule,
   CellValue,
   CellValueInput,
   CellHyperlinkValue,
@@ -48,20 +49,6 @@ export interface FormulaValueData {
   result?: FormulaResult;
   date1904?: boolean;
   isDynamicArray?: boolean;
-}
-
-interface FullAddress {
-  sheetName: string;
-  address: string;
-  row: number;
-  col: number;
-}
-
-export interface CellAddress {
-  address: string;
-  row: number;
-  col: number;
-  $col$row?: string;
 }
 
 export interface NoteText {
@@ -528,14 +515,33 @@ export function cellHtml(c: CellData): string {
   return cellText(c).replace(HTML_ESCAPE_RE, ch => HTML_ESCAPE_MAP[ch]);
 }
 
-export function cellView(c: CellData): {
+/**
+ * A read-only projection of a cell handle: the fields a `CellData` does not
+ * expose directly (`value`, `text` and the effective type live behind the
+ * internal `_value` box).
+ *
+ * Every property is a live getter, so reading it reflects the cell's current
+ * state. The properties themselves cannot be assigned, but `font` / `alignment`
+ * are the cell's **live style objects** — the same references `Cell.getFont` /
+ * `Cell.getStyle` return, so writing into them mutates the cell. Copy before
+ * editing (`{ ...view.font }`), and write through `Cell.set*` or the `Stream`
+ * handle operations.
+ *
+ * (These facets are deliberately not deeply readonly: every style getter in the
+ * library hands back a live reference, and read-modify-write —
+ * `Cell.setStyle(ws, a, { ...Cell.getStyle(ws, b) })` — is a supported pattern.
+ * Freezing one projection while the rest stay live would be inconsistent.)
+ */
+export interface CellView {
   readonly value: CellValueType;
   readonly numFmt: string | NumFmt | undefined;
   readonly text: string;
   readonly effectiveType: ValueType;
   readonly font: Partial<Font> | undefined;
   readonly alignment: Partial<Alignment> | undefined;
-} {
+}
+
+export function cellView(c: CellData): CellView {
   return {
     get value() {
       return c._value.value;
@@ -604,7 +610,7 @@ export function cellFormulaType(c: CellData): FormulaType {
   return c._value.formulaType ?? Enums.FormulaType.None;
 }
 
-export function cellFullAddress(c: CellData): FullAddress {
+export function cellFullAddress(c: CellData): DecodedAddress {
   const { worksheet } = c.row;
   return {
     sheetName: worksheet._name,
@@ -646,11 +652,11 @@ export function cellRemoveAllNames(c: CellData): void {
   definedNamesRemoveAllNames(cellWorkbook(c)._definedNames, cellFullAddress(c));
 }
 
-export function cellDataValidation(c: CellData): DataValidation | undefined {
+export function cellDataValidation(c: CellData): DataValidationRule | undefined {
   return dataValidationFind(cellWorksheet(c).dataValidations, c.address);
 }
 
-export function cellSetDataValidation(c: CellData, value: DataValidation): void {
+export function cellSetDataValidation(c: CellData, value: DataValidationRule): void {
   dataValidationAdd(cellWorksheet(c).dataValidations, c.address, value);
 }
 

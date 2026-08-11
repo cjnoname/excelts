@@ -26,8 +26,7 @@ import {
   columnValues,
   getCell,
   getColumn,
-  rowSetValues,
-  getColumns
+  rowSetValues
 } from "@excel/core/worksheet";
 import { Cell, Column, Workbook, Worksheet } from "@excel/index";
 import { describe, it, expect } from "vitest";
@@ -92,7 +91,7 @@ describe("Column", () => {
     columnSetDefn(getColumn(sheet, 2), { header: "Col 2", key: "name", width: 10 });
     columnSetDefn(getColumn(sheet, 3), { header: "Col 2", key: "dob", width: 10, outlineLevel: 1 });
 
-    const model = columnToModel(getColumns(sheet));
+    const model = columnToModel(sheet._columns);
     expect(model!.length).toBe(2);
 
     expect(model![0].width).toBe(10);
@@ -187,7 +186,7 @@ describe("Column", () => {
     });
     columnSetNumFmt(getColumn(sheet, 3), "0.00%");
 
-    const model = columnToModel(getColumns(sheet));
+    const model = columnToModel(sheet._columns);
     expect(model!.length).toBe(3);
     expect(model![0].width).toBe(9); // default
     expect(model![1].width).toBe(10); // explicit

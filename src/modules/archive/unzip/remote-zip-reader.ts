@@ -34,7 +34,7 @@ import {
   LOCAL_HEADER_FIXED_SIZE
 } from "@archive/unzip/zip-extract-core";
 import { BinaryReader } from "@archive/zip-spec/binary";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import type { EOCDInfo, ZIP64EOCDInfo } from "@archive/zip-spec/zip-parser-core";
 import {
   EOCD_MAX_SEARCH_SIZE,
@@ -176,13 +176,13 @@ import {
 export class RemoteZipReader {
   private readonly reader: RandomAccessReader;
   private readonly options: RemoteZipReaderOptions;
-  private entries: ZipEntryInfo[] = [];
-  private entryMap: Map<string, ZipEntryInfo> = new Map();
+  private entries: ZipEntryRecord[] = [];
+  private entryMap: Map<string, ZipEntryRecord> = new Map();
   private archiveComment = "";
   private initialized = false;
   private httpReader?: HttpRangeReader;
 
-  private readonly dataOffsetCache = new WeakMap<ZipEntryInfo, number>();
+  private readonly dataOffsetCache = new WeakMap<ZipEntryRecord, number>();
   private _hasEncryptedEntries: boolean | null = null;
   private _decoder?: ReturnType<typeof resolveZipStringCodec>;
 
@@ -349,14 +349,14 @@ export class RemoteZipReader {
   /**
    * Get all entries in the ZIP file.
    */
-  getEntries(): readonly ZipEntryInfo[] {
+  getEntries(): readonly ZipEntryRecord[] {
     return this.entries;
   }
 
   /**
    * Get entry by path.
    */
-  getEntry(path: string): ZipEntryInfo | undefined {
+  getEntry(path: string): ZipEntryRecord | undefined {
     return this.entryMap.get(path);
   }
 
@@ -383,7 +383,7 @@ export class RemoteZipReader {
    * - For large entries, prefer {@link getRawCompressedStream}.
    */
   async getRawCompressedData(
-    pathOrEntry: string | ZipEntryInfo,
+    pathOrEntry: string | ZipEntryRecord,
     options: RawEntryReadOptions = {}
   ): Promise<Uint8Array | null> {
     const entry = typeof pathOrEntry === "string" ? this.entryMap.get(pathOrEntry) : pathOrEntry;
@@ -410,7 +410,7 @@ export class RemoteZipReader {
    * This is the most memory-efficient way to read raw entry bytes.
    */
   getRawCompressedStream(
-    pathOrEntry: string | ZipEntryInfo,
+    pathOrEntry: string | ZipEntryRecord,
     options: RawEntryStreamOptions = {}
   ): AsyncIterable<Uint8Array> | null {
     const entry = typeof pathOrEntry === "string" ? this.entryMap.get(pathOrEntry) : pathOrEntry;
@@ -450,7 +450,7 @@ export class RemoteZipReader {
   async getRawEntry(
     path: string,
     options: RawEntryReadOptions = {}
-  ): Promise<{ entry: ZipEntryInfo; compressedData: Uint8Array } | null> {
+  ): Promise<{ entry: ZipEntryRecord; compressedData: Uint8Array } | null> {
     const entry = this.entryMap.get(path);
     if (!entry) {
       return null;
@@ -468,7 +468,7 @@ export class RemoteZipReader {
   getRawEntryStream(
     path: string,
     options: RawEntryStreamOptions = {}
-  ): { entry: ZipEntryInfo; compressedData: AsyncIterable<Uint8Array> } | null {
+  ): { entry: ZipEntryRecord; compressedData: AsyncIterable<Uint8Array> } | null {
     const entry = this.entryMap.get(path);
     if (!entry) {
       return null;
@@ -519,8 +519,8 @@ export class RemoteZipReader {
    * @param predicate - Function to test each entry
    * @returns Array of entries that pass the test
    */
-  filterEntries(predicate: (entry: ZipEntryInfo) => boolean): ZipEntryInfo[] {
-    const results: ZipEntryInfo[] = [];
+  filterEntries(predicate: (entry: ZipEntryRecord) => boolean): ZipEntryRecord[] {
+    const results: ZipEntryRecord[] = [];
     for (let i = 0; i < this.entries.length; i++) {
       const entry = this.entries[i]!;
       if (predicate(entry)) {
@@ -537,7 +537,7 @@ export class RemoteZipReader {
    * @param pattern - Glob pattern (e.g., "*.txt", "folder/*", "**\/data.json")
    * @returns Array of matching entries
    */
-  findEntries(pattern: string): ZipEntryInfo[] {
+  findEntries(pattern: string): ZipEntryRecord[] {
     const regex = new RegExp(
       "^" +
         pattern
@@ -548,7 +548,7 @@ export class RemoteZipReader {
           .replace(/\{\{GLOBSTAR\}\}/g, ".*") +
         "$"
     );
-    const results: ZipEntryInfo[] = [];
+    const results: ZipEntryRecord[] = [];
     for (let i = 0; i < this.entries.length; i++) {
       const entry = this.entries[i]!;
       if (regex.test(entry.path)) {
@@ -603,7 +603,7 @@ export class RemoteZipReader {
    * @returns File data
    */
   async extractEntry(
-    entry: ZipEntryInfo,
+    entry: ZipEntryRecord,
     options?: ExtractOptions | string | Uint8Array
   ): Promise<Uint8Array> {
     const opts = this.normalizeExtractOptions(options);
@@ -628,7 +628,7 @@ export class RemoteZipReader {
   }
 
   private async processEntryCompressedData(
-    entry: ZipEntryInfo,
+    entry: ZipEntryRecord,
     compressedData: Uint8Array,
     password: string | Uint8Array | undefined,
     shouldCheckCrc: boolean
@@ -686,7 +686,7 @@ export class RemoteZipReader {
     const opts = this.normalizeExtractOptions(options);
 
     // Get entries and sort by offset for efficient sequential reading
-    const entriesToExtract: Array<{ path: string; entry: ZipEntryInfo }> = [];
+    const entriesToExtract: Array<{ path: string; entry: ZipEntryRecord }> = [];
     for (let i = 0; i < paths.length; i++) {
       const path = paths[i]!;
       const entry = this.entryMap.get(path);
@@ -856,7 +856,10 @@ export class RemoteZipReader {
    * @param options - Extract options or password
    */
   async forEach(
-    callback: (entry: ZipEntryInfo, getData: () => Promise<Uint8Array>) => Promise<boolean | void>,
+    callback: (
+      entry: ZipEntryRecord,
+      getData: () => Promise<Uint8Array>
+    ) => Promise<boolean | void>,
     options?: ExtractOptions | string | Uint8Array
   ): Promise<void> {
     for await (const { entry, getData } of this.entriesGenerator(options)) {
@@ -883,7 +886,7 @@ export class RemoteZipReader {
    */
   async *entriesGenerator(
     options?: ExtractOptions | string | Uint8Array
-  ): AsyncGenerator<{ entry: ZipEntryInfo; getData: () => Promise<Uint8Array> }> {
+  ): AsyncGenerator<{ entry: ZipEntryRecord; getData: () => Promise<Uint8Array> }> {
     const opts = this.normalizeExtractOptions(options);
 
     for (let i = 0; i < this.entries.length; i++) {
@@ -924,7 +927,7 @@ export class RemoteZipReader {
    * @returns true if password is correct, false if incorrect, null if not encrypted
    */
   async checkEntryPassword(
-    entry: ZipEntryInfo,
+    entry: ZipEntryRecord,
     password: string | Uint8Array
   ): Promise<boolean | null> {
     if (!entry.isEncrypted) {
@@ -953,7 +956,7 @@ export class RemoteZipReader {
     return null;
   }
 
-  private async getEntryDataOffset(entry: ZipEntryInfo): Promise<number> {
+  private async getEntryDataOffset(entry: ZipEntryRecord): Promise<number> {
     const cached = this.dataOffsetCache.get(entry);
     if (cached !== undefined) {
       return cached;

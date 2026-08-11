@@ -1,6 +1,6 @@
 import type { RangeData } from "@excel/core/range";
 import { rangeAbsoluteShort, rangeCreate } from "@excel/core/range";
-import type { Address } from "@excel/types";
+import type { DecodedAddress } from "@excel/types";
 import { CellMatrix } from "@excel/utils/cell-matrix";
 import type { DecodedRange } from "@excel/utils/col-cache";
 import { colCache } from "@excel/utils/col-cache";
@@ -50,9 +50,10 @@ interface DefinedNameCell {
 }
 
 // Location can be a single cell address or a range
-type CellLocation = Address | DecodedRange;
+type CellLocation = DecodedAddress | DecodedRange;
 
-interface DefinedNameModel {
+/** A defined name as persisted: its key plus the ranges it covers. */
+export interface DefinedNameModel {
   name: string;
   ranges: string[];
   localSheetId?: number;
@@ -509,7 +510,7 @@ export function definedNamesGetNames(dn: DefinedNamesData, addressStr: string): 
   return definedNamesGetNamesEx(dn, location);
 }
 
-export function definedNamesGetNamesEx(dn: DefinedNamesData, address: Address): string[] {
+export function definedNamesGetNamesEx(dn: DefinedNamesData, address: DecodedAddress): string[] {
   return Object.entries(dn.matrixMap)
     .map(([sKey, matrix]) => matrix.findCellEx(address, false) && (dn.nameForKey[sKey] ?? sKey))
     .filter((name): name is string => Boolean(name));
@@ -851,5 +852,3 @@ export function definedNamesSetModel(dn: DefinedNamesData, value: DefinedNameMod
     }
   }
 }
-
-export { type DefinedNameModel };

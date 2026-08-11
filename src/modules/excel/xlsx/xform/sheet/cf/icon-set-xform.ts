@@ -1,4 +1,4 @@
-import type { Cvfo, IconSetTypes } from "@excel/types";
+import type { Cfvo, IconSetTypes } from "@excel/types";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { CompositeXform } from "@excel/xlsx/xform/composite-xform";
 import { CfvoXform } from "@excel/xlsx/xform/sheet/cf/cfvo-xform";
@@ -8,7 +8,7 @@ interface IconSetModel {
   iconSet?: IconSetTypes;
   reverse?: boolean;
   showValue?: boolean;
-  cfvo: Cvfo[];
+  cfvo: Cfvo[];
 }
 
 class IconSetXform extends CompositeXform<IconSetModel> {

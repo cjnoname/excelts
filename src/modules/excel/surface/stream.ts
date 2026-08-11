@@ -17,8 +17,6 @@
  */
 export { WorkbookWriter } from "@excel/stream/workbook-writer";
 export { WorkbookReader } from "@excel/stream/workbook-reader";
-export type { WorkbookWriterOptions } from "@excel/stream/workbook-writer.browser";
-export type { WorkbookReaderOptions } from "@excel/stream/workbook-reader.browser";
 
 // --- streaming cell handle operations (operate on a `CellData`) ---
 export {
@@ -43,7 +41,41 @@ export {
 } from "@excel/core/row";
 export { rowGetCell as rowCell, rowCommit as commitRow } from "@excel/core/worksheet-core";
 
+// --- streaming types ---
 /** A streaming cell handle. */
 export type { CellData as CellHandle } from "@excel/core/cell";
 /** A streaming row handle. */
 export type { RowData as RowHandle } from "@excel/core/row";
+
+/** The worksheet writer handed out by `WorkbookWriter.addWorksheet`. */
+export type { WorksheetWriter } from "@excel/stream/worksheet-writer";
+/** The worksheet reader yielded by `WorkbookReader.read`. */
+export type { WorksheetReader } from "@excel/stream/worksheet-reader";
+/** The hyperlink reader yielded by `WorkbookReader.read`. */
+export type { HyperlinkReader } from "@excel/stream/hyperlink-reader";
+
+export type {
+  WorkbookWriterOptions,
+  WorkbookZipOptions,
+  ZlibOptions,
+  Medium
+} from "@excel/stream/workbook-writer";
+export type { WorkbookReaderInput } from "@excel/stream/workbook-reader";
+export type {
+  WorkbookReaderOptions,
+  ParseEvent,
+  ParseEventType,
+  SharedStringEvent,
+  SharedStringValue,
+  WorksheetReadyEvent,
+  HyperlinksEvent
+} from "@excel/stream/workbook-reader.browser";
+export type {
+  WorksheetReaderOptions,
+  WorksheetEvent,
+  WorksheetEventType,
+  WorksheetHyperlink,
+  RowEvent,
+  HyperlinkEvent
+} from "@excel/stream/worksheet-reader";
+export type { Hyperlink, HyperlinkReaderOptions } from "@excel/stream/hyperlink-reader";

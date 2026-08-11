@@ -120,7 +120,8 @@ export interface WaitingWorksheetEntry {
   entry: ZipEntry;
 }
 
-export type CommonInput = Uint8Array | ArrayBuffer | Readable | ReadableStream<Uint8Array>;
+/** What a streaming workbook reader accepts (all platforms). */
+export type WorkbookReaderInput = Uint8Array | ArrayBuffer | Readable | ReadableStream<Uint8Array>;
 
 /**
  * Structural view of the optional cross-platform statics/constructor on
@@ -250,7 +251,7 @@ export abstract class WorkbookReaderBase<
     this.styles.init();
   }
 
-  // Default implementation for CommonInput types
+  // Default implementation for the cross-platform input types
   protected _getStream(input: TInput): Readable {
     if (input instanceof Readable) {
       return input;
@@ -862,12 +863,12 @@ interface WaitingWorksheet {
 }
 
 class WorkbookReader extends WorkbookReaderBase<
-  CommonInput,
+  WorkbookReaderInput,
   WorksheetReader,
   HyperlinkReader,
   WaitingWorksheet
 > {
-  constructor(input: CommonInput, options: WorkbookReaderOptions = {}) {
+  constructor(input: WorkbookReaderInput, options: WorkbookReaderOptions = {}) {
     super(input, options, WorksheetReader, HyperlinkReader);
   }
 

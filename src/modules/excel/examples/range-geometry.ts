@@ -19,7 +19,7 @@
  *   npx tsx src/modules/excel/examples/range-geometry.ts
  */
 import { Cell, Range, Workbook } from "@excel/index";
-import type { Address } from "@excel/types";
+import type { DecodedAddress } from "@excel/types";
 
 // 1. Create + serialise + count
 const r = Range.create("B2:D5");
@@ -31,7 +31,7 @@ console.log("contains C3:", Range.contains(r, "C3")); // true
 console.log("contains A1:", Range.contains(r, "A1")); // false
 
 // 3. containsCell (by an Address object: 1-based col/row)
-const cell: Address = { address: "D5", col: 4, row: 5 };
+const cell: DecodedAddress = { address: "D5", col: 4, row: 5 };
 console.log("containsCell D5:", Range.containsCell(r, cell)); // true
 
 // 4. intersects (two ranges)

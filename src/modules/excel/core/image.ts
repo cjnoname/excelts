@@ -4,45 +4,52 @@ import type { Worksheet } from "@excel/core/worksheet";
 import { ImageError } from "@excel/errors";
 import { colCache } from "@excel/utils/col-cache";
 
-interface ImageHyperlinks {
+export interface ImageHyperlinks {
   hyperlink?: string;
   tooltip?: string;
 }
 
-interface ImageExt {
+export interface ImageExtent {
   width?: number;
   height?: number;
 }
 
-/** Absolute position in pixels (for absoluteAnchor). */
-interface ImagePos {
+/**
+ * Absolute position in pixels (OOXML `absoluteAnchor`).
+ *
+ * Named `ImageAbsolutePosition` rather than `ImagePosition`: excelts published an
+ * unrelated public `ImagePosition` (`{ tl, ext }`), and silently reusing that
+ * name for a different shape would still compile in a migrated codebase and
+ * then misbehave at runtime.
+ */
+export interface ImageAbsolutePosition {
   x: number;
   y: number;
 }
 
-interface ImageRange {
+export interface ImageRange {
   tl: AnchorData;
   br?: AnchorData;
-  ext?: ImageExt;
+  ext?: ImageExtent;
   editAs?: string;
   hyperlinks?: ImageHyperlinks;
   /** Absolute position — mutually exclusive with tl/br cell anchors. */
-  pos?: ImagePos;
+  pos?: ImageAbsolutePosition;
 }
 
-interface BackgroundModel {
+export interface BackgroundImageModel {
   type: "background";
   imageId: string;
 }
 
-interface WatermarkModel {
+export interface WatermarkImageModel {
   type: "watermark";
   imageId: string;
   /** Opacity 0-1 for overlay mode */
   opacity?: number;
 }
 
-interface HeaderImageModel {
+export interface HeaderImageModel {
   type: "headerImage";
   imageId: string;
   headerWidth?: number;
@@ -52,21 +59,21 @@ interface HeaderImageModel {
   position?: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
 }
 
-interface ImageRangeModel {
+export interface ImageRangeModel {
   tl: AnchorModel;
   br?: AnchorModel;
-  ext?: ImageExt;
+  ext?: ImageExtent;
   editAs?: string;
   /** Absolute position — when present, tl/br are ignored. */
-  pos?: ImagePos;
+  pos?: ImageAbsolutePosition;
 }
 
-interface ImageModel {
+export interface PlacedImageModel {
   type: "image";
   imageId: string;
   hyperlinks?: ImageHyperlinks;
   range: ImageRangeModel;
-  /** See `xfrmOffX` on {@link ModelInput}. */
+  /** See `xfrmOffX` on {@link ImageModelInput}. */
   xfrmOffX?: number;
   xfrmOffY?: number;
   xfrmExtCx?: number;
@@ -74,23 +81,26 @@ interface ImageModel {
   rawSpPr?: unknown;
 }
 
-type Model = BackgroundModel | ImageModel | WatermarkModel | HeaderImageModel;
-type ImageModelInput = ModelInput;
+export type ImageModel =
+  | BackgroundImageModel
+  | PlacedImageModel
+  | WatermarkImageModel
+  | HeaderImageModel;
 
-interface RangeInput {
+export interface ImageRangeInput {
   tl?: AnchorModel | { col: number; row: number } | string;
   br?: AnchorModel | { col: number; row: number } | string;
-  ext?: ImageExt;
+  ext?: ImageExtent;
   editAs?: string;
   hyperlinks?: ImageHyperlinks;
   /** Absolute position — when present, tl/br are ignored. */
-  pos?: ImagePos;
+  pos?: ImageAbsolutePosition;
 }
 
-interface ModelInput {
+export interface ImageModelInput {
   type: string;
   imageId: string;
-  range?: string | RangeInput | ImageRangeModel;
+  range?: string | ImageRangeInput | ImageRangeModel;
   hyperlinks?: ImageHyperlinks;
   opacity?: number;
   headerWidth?: number;
@@ -116,7 +126,7 @@ interface ModelInput {
  * fields; serialization (`imageModel`) and (re)hydration (`applyImageModel`)
  * are flat helpers, mirroring the former getter/setter + clone.
  */
-export interface ImageData {
+export interface WorksheetImage {
   readonly worksheet: Worksheet;
   type?: string;
   imageId?: string;
@@ -131,7 +141,7 @@ export interface ImageData {
   applyTo?: "all" | "odd" | "even" | "first";
   /** Excel header/footer image section. */
   position?: "LH" | "CH" | "RH" | "LF" | "CF" | "RF";
-  /** See `xfrmOffX` on {@link ModelInput}. */
+  /** See `xfrmOffX` on {@link ImageModelInput}. */
   xfrmOffX?: number;
   xfrmOffY?: number;
   xfrmExtCx?: number;
@@ -140,16 +150,16 @@ export interface ImageData {
 }
 
 /** Create an image record, optionally hydrating it from a model input. */
-export function imageCreate(worksheet: Worksheet, model?: ModelInput): ImageData {
-  const img: ImageData = { worksheet };
+export function imageCreate(worksheet: Worksheet, model?: ImageModelInput): WorksheetImage {
+  const img: WorksheetImage = { worksheet };
   if (model) {
     applyImageModel(img, model);
   }
   return img;
 }
 
-/** Serialize an image record to its persisted {@link Model}. */
-export function imageModel(img: ImageData): Model {
+/** Serialize an image record to its persisted {@link ImageModel}. */
+export function imageModel(img: WorksheetImage): ImageModel {
   switch (img.type) {
     case "background":
       return {
@@ -213,7 +223,7 @@ export function imageModel(img: ImageData): Model {
 
 /** Hydrate an image record from a model input (mutates in place). */
 export function applyImageModel(
-  img: ImageData,
+  img: WorksheetImage,
   {
     type,
     imageId,
@@ -229,7 +239,7 @@ export function applyImageModel(
     xfrmExtCx,
     xfrmExtCy,
     rawSpPr
-  }: ModelInput
+  }: ImageModelInput
 ): void {
   img.type = type;
   img.imageId = imageId;
@@ -286,9 +296,9 @@ export function applyImageModel(
 }
 
 /** Clone an image record, optionally rebinding it to a different worksheet. */
-export function imageClone(img: ImageData, worksheet?: Worksheet): ImageData {
+export function imageClone(img: WorksheetImage, worksheet?: Worksheet): WorksheetImage {
   const target = worksheet ?? img.worksheet;
-  const cloned: ImageData = { worksheet: target };
+  const cloned: WorksheetImage = { worksheet: target };
   cloned.type = img.type;
   cloned.imageId = img.imageId;
   cloned.opacity = img.opacity;
@@ -314,5 +324,3 @@ export function imageClone(img: ImageData, worksheet?: Worksheet): ImageData {
 
   return cloned;
 }
-
-export { type Model as ImageModel, type ImageModelInput };

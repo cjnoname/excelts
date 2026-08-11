@@ -131,4 +131,5 @@ export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxRea
 }
 
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
+export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser";
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";

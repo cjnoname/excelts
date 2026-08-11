@@ -1,10 +1,11 @@
 import { InvalidAddressError } from "@excel/errors";
-import type { DataValidation } from "@excel/types";
+import type { DataValidationRule } from "@excel/types";
 import type { DecodedRange } from "@excel/utils/col-cache";
 import { colCache } from "@excel/utils/col-cache";
 
-interface ValidationModel {
-  [address: string]: DataValidation | undefined;
+/** The sheet-level data-validation map: A1 address (or `range:` key) → rule. */
+export interface DataValidationModel {
+  [address: string]: DataValidationRule | undefined;
 }
 
 /**
@@ -14,11 +15,11 @@ interface ValidationModel {
  * are unaffected); add/find/remove become flat helpers.
  */
 export interface DataValidationsData {
-  model: ValidationModel;
+  model: DataValidationModel;
 }
 
 /** Create a data-validation registry, optionally seeded from a parsed model. */
-export function createDataValidations(model?: ValidationModel): DataValidationsData {
+export function createDataValidations(model?: DataValidationModel): DataValidationsData {
   return { model: model || {} };
 }
 
@@ -32,8 +33,8 @@ export function createDataValidations(model?: ValidationModel): DataValidationsD
 export function dataValidationAdd(
   dv: DataValidationsData,
   ref: string,
-  validation: DataValidation
-): DataValidation {
+  validation: DataValidationRule
+): DataValidationRule {
   return (dv.model[validationModelKey(ref)] = validation);
 }
 
@@ -137,7 +138,7 @@ function validationModelKey(ref: string): string {
 export function dataValidationFind(
   dv: DataValidationsData,
   address: string
-): DataValidation | undefined {
+): DataValidationRule | undefined {
   // First check direct address match
   const direct = dv.model[address];
   if (direct !== undefined) {

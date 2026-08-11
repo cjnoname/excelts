@@ -36,11 +36,23 @@ describe("documonster/excel namespace surface", () => {
       "Workbook",
       "Worksheet"
     ];
-    // Object exports (namespaces) — must be exactly these 22.
-    const namespaceKeys = Object.keys(Excel)
+    /**
+     * Constant lookup objects (not namespaces): each doubles as its own type,
+     * e.g. `Cell.getType(ws, "A1") === ValueType.Number`.
+     */
+    const CONSTANTS = ["ErrorValue", "FormulaType", "PaperSize", "ValueType"];
+    // Object exports — must be exactly the 22 namespaces plus the lookups.
+    const objectKeys = Object.keys(Excel)
       .filter(k => typeof (Excel as Record<string, unknown>)[k] === "object")
       .sort();
-    expect(namespaceKeys).toEqual([...NAMESPACES].sort());
+    expect(objectKeys).toEqual([...NAMESPACES, ...CONSTANTS].sort());
+  });
+
+  it("exposes the value-kind lookups as usable values", () => {
+    expect(Excel.ValueType.Number).toBe(2);
+    expect(Excel.FormulaType.Master).toBe(1);
+    expect(Excel.ErrorValue.NotApplicable).toBe("#N/A");
+    expect(Excel.PaperSize.A4).toBe(9);
   });
 
   it("exposes error classes consistently with other modules", () => {

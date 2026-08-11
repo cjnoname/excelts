@@ -9,12 +9,10 @@
  * bundles.
  */
 
-import type { WorkbookReaderOptions, NodeInput } from "@excel/stream/workbook-reader";
+import type { WorkbookReaderOptions, WorkbookReaderInput } from "@excel/stream/workbook-reader";
 import { WorkbookReader } from "@excel/stream/workbook-reader";
-import type { WorkbookReader as WorkbookReaderBrowser } from "@excel/stream/workbook-reader.browser";
 import type { WorkbookWriterOptions } from "@excel/stream/workbook-writer";
 import { WorkbookWriter } from "@excel/stream/workbook-writer";
-import type { WorkbookWriter as WorkbookWriterBrowser } from "@excel/stream/workbook-writer.browser";
 
 export * from "@excel/core/workbook.browser";
 
@@ -32,17 +30,24 @@ export {
 } from "@excel/core/xlsx-io";
 export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
 
-/** Node streaming workbook writer factory (accepts `{ filename }`). */
-export function createStreamWriter(options?: WorkbookWriterOptions): WorkbookWriterBrowser {
-  return new WorkbookWriter(options) as unknown as WorkbookWriterBrowser;
+/**
+ * Node streaming workbook writer factory (accepts `{ filename }`).
+ *
+ * Returns the Node `WorkbookWriter` it constructs — the same class the `Stream`
+ * namespace exports on this entry, so callers can name the result
+ * (`Stream.WorkbookWriter`). It used to be cast to the browser class, which left
+ * the return type unnameable from `documonster/excel`.
+ */
+export function createStreamWriter(options?: WorkbookWriterOptions): WorkbookWriter {
+  return new WorkbookWriter(options);
 }
 
 /** Node streaming workbook reader factory (accepts a file-path string). */
 export function createStreamReader(
-  input: NodeInput,
+  input: WorkbookReaderInput,
   options?: WorkbookReaderOptions
-): WorkbookReaderBrowser {
-  return new WorkbookReader(input, options) as unknown as WorkbookReaderBrowser;
+): WorkbookReader {
+  return new WorkbookReader(input, options);
 }
 
 export type { CsvOptions, CsvInput } from "@excel/bridge/csv-bridge";

@@ -12,12 +12,12 @@ import {
   processEntryDataSync,
   readEntryCompressedData
 } from "@archive/unzip/zip-extract-core";
-import type { ZipEntryInfo } from "@archive/zip-spec/zip-entry-info";
+import type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 import { parseZipArchiveFromBuffer } from "@archive/zip-spec/zip-parser-core";
 
 const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
-function assertEntryExtractableInMemory(entry: ZipEntryInfo): void {
+function assertEntryExtractableInMemory(entry: ZipEntryRecord): void {
   // This parser extracts into memory. If ZIP64 values exceed JS safe integers,
   // callers need a random-access + streaming extraction path (not implemented here).
   if (
@@ -37,7 +37,7 @@ function assertEntryExtractableInMemory(entry: ZipEntryInfo): void {
   }
 }
 
-export type { ZipEntryInfo };
+export type { ZipEntryRecord } from "@archive/zip-spec/zip-entry-info";
 
 /**
  * ZIP parsing options
@@ -57,7 +57,7 @@ export interface ZipParseOptions {
  * Result of parsing a ZIP archive.
  */
 interface ZipArchiveParseResult {
-  entries: ZipEntryInfo[];
+  entries: ZipEntryRecord[];
   comment: string;
 }
 
@@ -84,7 +84,7 @@ export interface ExtractOptions {
  */
 async function extractEntryData(
   data: Uint8Array,
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   options: ExtractOptions = {}
 ): Promise<Uint8Array> {
   if (entry.type === "directory") {
@@ -102,7 +102,7 @@ async function extractEntryData(
  */
 function extractEntryDataSync(
   data: Uint8Array,
-  entry: ZipEntryInfo,
+  entry: ZipEntryRecord,
   options: ExtractOptions = {}
 ): Uint8Array {
   if (entry.type === "directory") {
@@ -120,8 +120,8 @@ function extractEntryDataSync(
  */
 export class ZipParser {
   private data: Uint8Array;
-  private entries: ZipEntryInfo[];
-  private entryMap: Map<string, ZipEntryInfo>;
+  private entries: ZipEntryRecord[];
+  private entryMap: Map<string, ZipEntryRecord>;
   private password?: string | Uint8Array;
   private archiveComment: string;
 
@@ -144,14 +144,14 @@ export class ZipParser {
   /**
    * Get all entries in the ZIP file
    */
-  getEntries(): ZipEntryInfo[] {
+  getEntries(): ZipEntryRecord[] {
     return this.entries;
   }
 
   /**
    * Get entry by path
    */
-  getEntry(path: string): ZipEntryInfo | undefined {
+  getEntry(path: string): ZipEntryRecord | undefined {
     return this.entryMap.get(path);
   }
 
@@ -175,7 +175,7 @@ export class ZipParser {
   /**
    * Get raw (compressed) payload together with its parsed entry info.
    */
-  getRawEntry(path: string): { info: ZipEntryInfo; compressedData: Uint8Array } | null {
+  getRawEntry(path: string): { info: ZipEntryRecord; compressedData: Uint8Array } | null {
     const entry = this.entryMap.get(path);
     if (!entry) {
       return null;
@@ -240,7 +240,7 @@ export class ZipParser {
   /**
    * Get all encrypted entries
    */
-  getEncryptedEntries(): ZipEntryInfo[] {
+  getEncryptedEntries(): ZipEntryRecord[] {
     return this.entries.filter(e => e.isEncrypted);
   }
 
@@ -319,7 +319,10 @@ export class ZipParser {
    * @param password - Optional password for encrypted entries (overrides constructor password)
    */
   async forEach(
-    callback: (entry: ZipEntryInfo, getData: () => Promise<Uint8Array>) => Promise<boolean | void>,
+    callback: (
+      entry: ZipEntryRecord,
+      getData: () => Promise<Uint8Array>
+    ) => Promise<boolean | void>,
     password?: string | Uint8Array
   ): Promise<void> {
     const pw = password ?? this.password;
