@@ -9,6 +9,9 @@
  *
  * All three FIFOs use a head index with periodic compaction rather than
  * `Array.shift()`, so an unbounded queue that buffers many values stays linear.
+ * Consumed slots are cleared as they are taken: the head index alone would keep
+ * every value — and every producer/consumer closure — reachable until the next
+ * compaction, which for a bounded queue can be a thousand chunks of output.
  */
 export type AsyncQueue<T> = {
   /** Hand a value to the queue, waiting while a bounded queue is full. */
@@ -46,11 +49,13 @@ export function createAsyncQueue<T>(
     throw new RangeError("Async queue capacity must be a positive integer");
   }
 
-  const values: T[] = [];
+  // Consumed entries are set to `undefined` rather than left in place, so the
+  // slots below each head index hold no references between compactions.
+  const values: Array<T | undefined> = [];
   let valuesHead = 0;
-  const consumers: Array<Consumer<T>> = [];
+  const consumers: Array<Consumer<T> | undefined> = [];
   let consumersHead = 0;
-  const producers: Array<Producer<T>> = [];
+  const producers: Array<Producer<T> | undefined> = [];
   let producersHead = 0;
   let done = false;
   let error: Error | null = null;
@@ -60,7 +65,7 @@ export function createAsyncQueue<T>(
     return values.length - valuesHead;
   }
 
-  function compact<U>(items: U[], head: number): number {
+  function compact<U>(items: Array<U | undefined>, head: number): number {
     if (head > COMPACT_THRESHOLD && head * 2 > items.length) {
       items.splice(0, head);
       return 0;
@@ -69,8 +74,9 @@ export function createAsyncQueue<T>(
   }
 
   function takeValue(): T {
-    const value = values[valuesHead++]!;
-    valuesHead = compact(values, valuesHead);
+    const value = values[valuesHead] as T;
+    values[valuesHead] = undefined;
+    valuesHead = compact(values, valuesHead + 1);
     return value;
   }
 
@@ -78,8 +84,9 @@ export function createAsyncQueue<T>(
     if (consumersHead >= consumers.length) {
       return undefined;
     }
-    const consumer = consumers[consumersHead++]!;
-    consumersHead = compact(consumers, consumersHead);
+    const consumer = consumers[consumersHead];
+    consumers[consumersHead] = undefined;
+    consumersHead = compact(consumers, consumersHead + 1);
     return consumer;
   }
 
@@ -87,8 +94,9 @@ export function createAsyncQueue<T>(
     if (producersHead >= producers.length) {
       return undefined;
     }
-    const producer = producers[producersHead++]!;
-    producersHead = compact(producers, producersHead);
+    const producer = producers[producersHead];
+    producers[producersHead] = undefined;
+    producersHead = compact(producers, producersHead + 1);
     return producer;
   }
 
