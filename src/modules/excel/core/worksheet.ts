@@ -2499,31 +2499,29 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
     ignoredErrors: ws.ignoredErrors,
     watermark: ws._watermark,
     drawing: ws._drawing,
-    charts: ws._charts.map(
-      (c): ChartAnchorModel => ({
-        chartNumber: c.chartNumber,
-        chartExNumber: c.chartExNumber,
-        range: {
-          tl: {
-            nativeCol: c.range.tl.nativeCol,
-            nativeColOff: c.range.tl.nativeColOff,
-            nativeRow: c.range.tl.nativeRow,
-            nativeRowOff: c.range.tl.nativeRowOff
-          },
-          br: c.range.br
-            ? {
-                nativeCol: c.range.br.nativeCol,
-                nativeColOff: c.range.br.nativeColOff,
-                nativeRow: c.range.br.nativeRow,
-                nativeRowOff: c.range.br.nativeRowOff
-              }
-            : undefined,
-          editAs: c.range.editAs,
-          pos: c.range.pos,
-          ext: c.range.ext
-        } as ChartAnchorModel["range"]
-      })
-    ),
+    charts: ws._charts.map((c): ChartAnchorModel => ({
+      chartNumber: c.chartNumber,
+      chartExNumber: c.chartExNumber,
+      range: {
+        tl: {
+          nativeCol: c.range.tl.nativeCol,
+          nativeColOff: c.range.tl.nativeColOff,
+          nativeRow: c.range.tl.nativeRow,
+          nativeRowOff: c.range.tl.nativeRowOff
+        },
+        br: c.range.br
+          ? {
+              nativeCol: c.range.br.nativeCol,
+              nativeColOff: c.range.br.nativeColOff,
+              nativeRow: c.range.br.nativeRow,
+              nativeRowOff: c.range.br.nativeRowOff
+            }
+          : undefined,
+        editAs: c.range.editAs,
+        pos: c.range.pos,
+        ext: c.range.ext
+      } as ChartAnchorModel["range"]
+    })),
     sparklineGroups: ws._sparklineGroups,
     threadedComments: ws.threadedComments
   };

@@ -40,11 +40,9 @@ function makeRun(text: string, props?: RunProperties): Run {
 
 function makeTable(cells: Paragraph[][]): Table {
   const rows: TableRow[] = cells.map(cellParagraphs => ({
-    cells: cellParagraphs.map(
-      (para): TableCell => ({
-        content: [para]
-      })
-    )
+    cells: cellParagraphs.map((para): TableCell => ({
+      content: [para]
+    }))
   }));
   return { type: "table", rows };
 }

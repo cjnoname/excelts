@@ -59,6 +59,9 @@ const common = (input: string) => ({
   input,
   platform: "browser" as const,
   tsconfig: "./tsconfig.json",
+  treeshake: {
+    moduleSideEffects: false
+  },
   plugins: [preferBrowserFilesPlugin()]
 });
 
