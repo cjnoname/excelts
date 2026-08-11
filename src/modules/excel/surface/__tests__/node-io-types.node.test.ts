@@ -99,8 +99,19 @@ describe("Workbook.toStream (Node)", () => {
 // The `toStream` doc block describes these three teardown paths. They are Node's
 // async-iterator semantics rather than this stream's, which is exactly why they
 // need pinning: if Node ever changes, the documentation is wrong and this tells
-// us. A workbook large enough to trigger backpressure keeps the producer parked
-// at the break, so teardown is actually exercised.
+// us.
+//
+// Every case leaves after the *first* chunk. How many bytes one chunk carries is
+// a Node implementation detail, not a property of this stream: Node <= 25 hands
+// the whole readable buffer over per `read()`, Node >= 26 hands over one pushed
+// buffer at a time. So "stop after N chunks" reads a few hundred bytes on one
+// version and the entire package on another — which ends the stream and destroys
+// it via `autoDestroy`, making an early-exit assertion fail for a reason that has
+// nothing to do with early exit. One chunk is the only count that keeps the
+// serializer parked mid-package everywhere, because the workbook below is large
+// enough that its worksheet entry alone overshoots the readable high-water mark:
+// the writer must park before it can finish, so bytes are always still owed when
+// the consumer walks away.
 describe("Workbook.toStream early exit (Node semantics)", () => {
   const settle = () => new Promise(resolve => setTimeout(resolve, 200));
 
@@ -109,11 +120,8 @@ describe("Workbook.toStream early exit (Node semantics)", () => {
     const seen: Error[] = [];
     stream.on("error", error => seen.push(error));
 
-    let chunks = 0;
     for await (const _chunk of stream) {
-      if (++chunks >= 3) {
-        break;
-      }
+      break;
     }
     await settle();
 
@@ -128,12 +136,9 @@ describe("Workbook.toStream early exit (Node semantics)", () => {
     const seen: Error[] = [];
     stream.on("error", error => seen.push(error));
 
-    let chunks = 0;
     for await (const _chunk of stream) {
-      if (++chunks >= 3) {
-        stream.destroy();
-        break;
-      }
+      stream.destroy();
+      break;
     }
     await settle();
 
@@ -147,14 +152,15 @@ describe("Workbook.toStream early exit (Node semantics)", () => {
     const seen: Error[] = [];
     stream.on("error", error => seen.push(error));
 
-    let chunks = 0;
     try {
       for await (const _chunk of stream.iterator({ destroyOnReturn: false })) {
-        if (++chunks >= 3) {
-          break;
-        }
+        break;
       }
       await settle();
+      // Premise of this case: the package is unfinished, so "still open" means
+      // the iterator declined to tear down rather than the stream having simply
+      // run to its end.
+      expect(stream.readableEnded).toBe(false);
       // The caller now owns teardown — this is the half of the contract that is
       // easy to miss, and skipping it leaves the serializer parked.
       expect(stream.destroyed).toBe(false);
