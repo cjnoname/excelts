@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/documonster/documonster/compare/v0.7.0...v0.8.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pdf:** six defaults change. Narrow sheets start at the left margin rather than centered; page order follows Excel's `downThenOver`; `pageSetup.scale` is applied; `fitToPage` no longer compounds with `scale`; EMU-sized charts render at their true size; and print titles are absolute rather than the first N tracks of the print area. MIGRATION.md lists each one with the option that restores the previous appearance.
+
+### Features
+
+* **pdf:** Honor Excel's page setup when exporting ([9a1324a](https://github.com/documonster/documonster/commit/9a1324aeaa2c30a6b665e0c4c53710e9768fe279)), closes [#203](https://github.com/documonster/documonster/issues/203)
+
+
+### Bug Fixes
+
+* **ci:** Stop a failed canary comment from failing the release ([7e2bda5](https://github.com/documonster/documonster/commit/7e2bda5e981e4bd8031f6bb322f1fc45e00d0f08))
+
 ## [0.7.0](https://github.com/documonster/documonster/compare/v0.6.0...v0.7.0) (2026-08-11)
 
 
