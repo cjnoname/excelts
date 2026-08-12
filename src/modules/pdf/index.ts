@@ -60,6 +60,8 @@ export type { PdfCell, PdfRow, PdfColumn, PdfSheet, PdfBook, PdfImage, PdfInput 
 export type {
   PdfExportOptions,
   PdfOrientation,
+  PdfPageOrder,
+  PdfCellErrorMode,
   PdfPageSize,
   PdfMargins,
   PdfColor,

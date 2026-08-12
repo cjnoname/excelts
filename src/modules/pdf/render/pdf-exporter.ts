@@ -26,7 +26,7 @@ import {
   resolveHeaderFooterRunText,
   selectHeaderFooter
 } from "@pdf/render/page-renderer";
-import { argbToPdfColor } from "@pdf/render/style-converter";
+import { argbToPdfColor, toGrayscale } from "@pdf/render/style-converter";
 import type {
   PdfWorkbook,
   PdfWorkbookSheet,
@@ -36,6 +36,11 @@ import type {
   PdfMargins,
   PdfColor,
   PdfOrientation,
+  PdfPageOrder,
+  PdfCellErrorMode,
+  PdfCellCommentMode,
+  PdfPageSetupData,
+  PdfRepeatBand,
   LayoutPage,
   LayoutChart,
   PdfWatermark
@@ -227,7 +232,14 @@ function preflightCharts(allPages: LayoutPage[], fontManager: FontManager): Char
       }
       const stream = new PdfContentStream();
       const alphaValues = new Set<number>();
-      const surface = createChartSurface(stream, fontManager, alphaValues);
+      // Black-and-white is a per-sheet print option, and each page carries the
+      // options of the sheet that produced it.
+      const surface = createChartSurface(
+        stream,
+        fontManager,
+        alphaValues,
+        page.options.blackAndWhite
+      );
       chart.drawVector(surface, constrainChartAspectRatio(chart.rect));
       cache.set(chart, { stream, alphaValues });
     }
@@ -358,7 +370,11 @@ interface RenderResult {
   pagesTreeObjNum: number;
 }
 
-type ImageObjectCache = WeakMap<Uint8Array, number>;
+/**
+ * Reuses one image XObject per distinct payload. Keyed twice over because the
+ * same bytes yield a different object in black-and-white mode.
+ */
+type ImageObjectCache = WeakMap<Uint8Array, Map<boolean, number>>;
 
 async function renderAllPages(
   allPages: LayoutPage[],
@@ -419,6 +435,10 @@ function renderSinglePage(
 
     // Handle images: create XObject Image entries and draw them
     const imageXObjects = new Map<string, number>();
+    // Raster payloads are converted when the XObject is written — a real pixel
+    // conversion for PNG, a `/DeviceN` luma space for JPEG — so no overlay is
+    // painted and transparency is preserved.
+    const grayscaleRaster = page.options.blackAndWhite;
     let headerImageContentObjNum: number | undefined;
     const headerContent = selectHeaderFooter(page, "header");
     const footerContent = selectHeaderFooter(page, "footer");
@@ -434,6 +454,9 @@ function renderSinglePage(
       const rightEdge = alignWithMargins
         ? page.width - page.options.margins.right
         : page.width - 18;
+      // `scaleWithDoc` governs the whole header/footer, not just its text, so a
+      // logo has to shrink with the grid the same way the runs do.
+      const hfScale = page.headerFooter?.scaleWithDoc === false ? 1 : page.scaleFactor;
       for (let index = 0; index < headerImages.length; index++) {
         const headerImage = headerImages[index];
         if (!activePositions.has(headerImage.position)) {
@@ -442,20 +465,28 @@ function renderSinglePage(
         const imageName = `HfIm${index + 1}`;
         imageXObjects.set(
           imageName,
-          getOrWriteImageObject(writer, imageObjectCache, headerImage.data, headerImage.format)
+          getOrWriteImageObject(
+            writer,
+            imageObjectCache,
+            headerImage.data,
+            headerImage.format,
+            grayscaleRaster
+          )
         );
+        const drawWidth = headerImage.width * hfScale;
+        const drawHeight = headerImage.height * hfScale;
         const placement = headerFooterImagePlacement(headerImage.position);
         const imageX =
           placement.section === "left"
             ? leftEdge
             : placement.section === "right"
-              ? rightEdge - headerImage.width
-              : (page.width - headerImage.width) / 2;
+              ? rightEdge - drawWidth
+              : (page.width - drawWidth) / 2;
         const imageY =
           placement.kind === "header"
-            ? page.height - page.options.headerMargin - headerImage.height
+            ? page.height - page.options.headerMargin - drawHeight
             : page.options.footerMargin;
-        imageStream.drawImage(imageName, imageX, imageY, headerImage.width, headerImage.height);
+        imageStream.drawImage(imageName, imageX, imageY, drawWidth, drawHeight);
       }
       headerImageContentObjNum = writer.allocObject();
       writer.addStreamObject(headerImageContentObjNum, new PdfDict(), imageStream);
@@ -464,7 +495,13 @@ function renderSinglePage(
       for (let imgIdx = 0; imgIdx < page.images.length; imgIdx++) {
         const img = page.images[imgIdx];
         const imgName = `Im${imgIdx + 1}`;
-        const imgObjNum = getOrWriteImageObject(writer, imageObjectCache, img.data, img.format);
+        const imgObjNum = getOrWriteImageObject(
+          writer,
+          imageObjectCache,
+          img.data,
+          img.format,
+          grayscaleRaster
+        );
         imageXObjects.set(imgName, imgObjNum);
         contentStream.drawImage(imgName, img.rect.x, img.rect.y, img.rect.width, img.rect.height);
       }
@@ -498,7 +535,8 @@ function renderSinglePage(
             writer,
             imageObjectCache,
             chart.raster.data,
-            chart.raster.format
+            chart.raster.format,
+            grayscaleRaster
           );
           imageXObjects.set(imgName, imgObjNum);
           contentStream.drawImage(
@@ -528,7 +566,13 @@ function renderSinglePage(
 
       // Register watermark image XObjects
       for (const wmImg of wmResult.imageXObjects) {
-        const imgObjNum = getOrWriteImageObject(writer, imageObjectCache, wmImg.data, wmImg.format);
+        const imgObjNum = getOrWriteImageObject(
+          writer,
+          imageObjectCache,
+          wmImg.data,
+          wmImg.format,
+          grayscaleRaster
+        );
         imageXObjects.set(wmImg.name, imgObjNum);
       }
 
@@ -616,6 +660,8 @@ function renderSinglePage(
       height: page.height,
       contentsRef: contentsRef,
       resourcesRef: resourcesObjNum,
+      // Constant alpha needs a defined backdrop.
+      transparencyGroup: alphaValues.size > 0,
       annotRefs: annotRefs.length > 0 ? annotRefs : undefined
     });
 
@@ -635,14 +681,20 @@ function getOrWriteImageObject(
   writer: PdfWriter,
   cache: ImageObjectCache,
   data: Uint8Array,
-  format: "png" | "jpeg"
+  format: "png" | "jpeg",
+  grayscale = false
 ): number {
-  const existing = cache.get(data);
+  let variants = cache.get(data);
+  if (variants === undefined) {
+    variants = new Map();
+    cache.set(data, variants);
+  }
+  const existing = variants.get(grayscale);
   if (existing !== undefined) {
     return existing;
   }
-  const objectNumber = writeImageXObject(writer, data, format);
-  cache.set(data, objectNumber);
+  const objectNumber = writeImageXObject(writer, data, format, grayscale);
+  variants.set(grayscale, objectNumber);
   return objectNumber;
 }
 
@@ -755,6 +807,128 @@ function selectSheets(workbook: PdfWorkbook, sheets?: (string | number)[]): PdfW
 // =============================================================================
 
 /**
+ * Parse an Excel "Columns to repeat at left" reference (`printTitlesColumn`)
+ * into an absolute column band, e.g. `"A:B"` → `{ first: 1, last: 2 }`.
+ *
+ * Returns `null` for anything that is not a column range.
+ */
+function parseTitlesColumnBand(ref: string): PdfRepeatBand | null {
+  const match = ref
+    .replace(/\$/g, "")
+    .toUpperCase()
+    .match(/^([A-Z]+)(?::([A-Z]+))?$/);
+  if (!match) {
+    return null;
+  }
+  const first = columnLettersToNumber(match[1]);
+  const last = match[2] ? columnLettersToNumber(match[2]) : first;
+  if (last < first) {
+    return null;
+  }
+  return { first, last };
+}
+
+/**
+ * Parse an Excel "Rows to repeat at top" reference (`printTitlesRow`) into an
+ * absolute row band, e.g. `"1:3"` → `{ first: 1, last: 3 }`.
+ */
+function parseTitlesRowBand(ref: string): PdfRepeatBand | null {
+  const match = ref.replace(/\$/g, "").match(/^(\d+)(?::(\d+))?$/);
+  if (!match) {
+    return null;
+  }
+  const first = parseInt(match[1], 10);
+  const last = match[2] ? parseInt(match[2], 10) : first;
+  if (first < 1 || last < first) {
+    return null;
+  }
+  return { first, last };
+}
+
+function columnLettersToNumber(letters: string): number {
+  let n = 0;
+  for (let i = 0; i < letters.length; i++) {
+    n = n * 26 + (letters.charCodeAt(i) - 64);
+  }
+  return n;
+}
+
+function normalizePageOrder(value: string | undefined): PdfPageOrder {
+  return value === "overThenDown" ? "overThenDown" : "downThenOver";
+}
+
+/** Excel writes `None` / `asDisplayed` / `atEnd`. */
+function normalizeCommentMode(value: string | undefined): PdfCellCommentMode {
+  if (value === "atEnd" || value === "asDisplayed") {
+    return value;
+  }
+  return "none";
+}
+
+function normalizeErrorMode(value: string | undefined): PdfCellErrorMode {
+  switch (value) {
+    case "blank":
+    case "dash":
+    case "NA":
+      return value;
+    default:
+      return "displayed";
+  }
+}
+
+/**
+ * Reconcile documonster's scaling options with Excel's two mutually exclusive
+ * scaling modes (Page Setup → Scaling):
+ *
+ *  - **"Adjust to N %"** — `pageSetup.scale`, with `pageSetup.fitToPage` off.
+ *  - **"Fit to N pages wide by M tall"** — `pageSetup.fitToWidth` /
+ *    `fitToHeight`, with `pageSetup.fitToPage` on. Excel ignores `scale` here.
+ *
+ * Neither mode ever enlarges: Excel caps fit-to-page scaling at 100%.
+ *
+ * `PdfExportOptions.fitToPage` is documonster's own convenience default
+ * ("shrink to one page wide"). It only applies when neither the caller nor the
+ * sheet expresses a scaling intent, so a sheet that asks for 80% is not
+ * shrunk twice.
+ */
+function resolveScaling(
+  options: PdfExportOptions | undefined,
+  ps: PdfPageSetupData | undefined
+): { fitToPage: boolean; scale: number; fitToWidth: number; fitToHeight: number } {
+  const clampPages = (n: number | undefined): number =>
+    n === undefined || !Number.isFinite(n) || n <= 0 ? 0 : Math.floor(n);
+
+  const callerFit = options?.fitToWidth !== undefined || options?.fitToHeight !== undefined;
+  const sheetFitMode = ps?.fitToPage === true;
+
+  let fitToWidth = 0;
+  let fitToHeight = 0;
+  if (callerFit) {
+    fitToWidth = clampPages(options?.fitToWidth);
+    fitToHeight = clampPages(options?.fitToHeight);
+  } else if (sheetFitMode && options?.scale === undefined && options?.fitToPage !== false) {
+    // `fitToPage: false` is the caller saying "do not auto-scale"; it has to
+    // beat the sheet's own fit-to-N mode, or an explicit option would lose to
+    // the workbook it is meant to override.
+    fitToWidth = clampPages(ps?.fitToWidth);
+    fitToHeight = clampPages(ps?.fitToHeight);
+  }
+
+  // A sheet in "Adjust to N %" mode with a non-default percentage.
+  const sheetScalePercent =
+    !sheetFitMode && ps?.scale !== undefined && ps.scale !== 100 ? ps.scale / 100 : undefined;
+
+  // Excel's Page Setup allows 10–400%, so the ceiling is 4.0 rather than 3.0.
+  const scale = Math.max(0.1, Math.min(4.0, options?.scale ?? sheetScalePercent ?? 1.0));
+
+  const hasFitConstraint = fitToWidth > 0 || fitToHeight > 0;
+  const fitToPage =
+    options?.fitToPage ?? !(hasFitConstraint || sheetScalePercent !== undefined || callerFit);
+
+  return { fitToPage, scale, fitToWidth, fitToHeight };
+}
+
+/**
  * Resolve user options with defaults.
  */
 function resolveOptions(
@@ -780,48 +954,64 @@ function resolveOptions(
     (ps?.orientation === "landscape" ? "landscape" : "portrait");
   const margins = resolveMargins(options?.margins, ps?.margins);
 
+  const blackAndWhite = options?.blackAndWhite ?? ps?.blackAndWhite ?? false;
+
   const gridLineColorStr = options?.gridLineColor ?? "FFD0D0D0";
-  const gridLineColor: PdfColor = argbToPdfColor(gridLineColorStr) ?? {
+  const gridLineColorRaw: PdfColor = argbToPdfColor(gridLineColorStr) ?? {
     r: 0.816,
     g: 0.816,
     b: 0.816
   };
+  const gridLineColor = blackAndWhite ? toGrayscale(gridLineColorRaw) : gridLineColorRaw;
 
-  // Use sheet's printTitlesRow as fallback for repeatRows. Only
-  // PdfSheetData carries `printTitlesRow` — chartsheets never have
-  // repeated header rows.
-  let repeatRows: number | false = options?.repeatRows ?? false;
-  if (repeatRows === false && sheet && !isPdfChartsheet(sheet) && ps?.printTitlesRow) {
-    // printTitlesRow format: "1:3" (repeat rows 1-3) or "1" (repeat row 1)
-    const match = ps.printTitlesRow.match(/^(\d+)(?::(\d+))?$/);
-    if (match) {
-      repeatRows = parseInt(match[2] ?? match[1], 10);
-    }
+  // Repeated title rows/columns fall back to the sheet's print titles. Only
+  // PdfSheetData carries them — chartsheets have no repeated bands. An
+  // explicitly passed `false` suppresses the sheet setting, so "not provided"
+  // (undefined) and "provided as off" must stay distinguishable.
+  const isWorksheet = Boolean(sheet) && !isPdfChartsheet(sheet!);
+  // A caller-supplied count means "the first N rows/columns of the sheet"; the
+  // sheet's own print titles are absolute ranges that may sit outside the print
+  // area, so both normalise to an absolute band.
+  const countToBand = (n: number | false): PdfRepeatBand | false =>
+    typeof n === "number" && n > 0 ? { first: 1, last: n } : false;
+
+  let repeatRows: PdfRepeatBand | false = false;
+  if (options?.repeatRows !== undefined) {
+    repeatRows = countToBand(options.repeatRows);
+  } else if (isWorksheet && ps?.printTitlesRow) {
+    repeatRows = parseTitlesRowBand(ps.printTitlesRow) ?? false;
   }
+
+  let repeatCols: PdfRepeatBand | false = false;
+  if (options?.repeatCols !== undefined) {
+    repeatCols = countToBand(options.repeatCols);
+  } else if (isWorksheet && ps?.printTitlesColumn) {
+    repeatCols = parseTitlesColumnBand(ps.printTitlesColumn) ?? false;
+  }
+
+  const { fitToPage, scale, fitToWidth, fitToHeight } = resolveScaling(options, ps);
 
   return {
     pageSize,
     orientation,
     margins,
     ignorePrintArea: options?.ignorePrintArea ?? false,
-    fitToPage: options?.fitToPage !== undefined ? options.fitToPage : true,
-    scale: Math.max(
-      0.1,
-      Math.min(
-        3.0,
-        options?.scale ??
-          // When fitToPage is active (default), ignore sheet's pageSetup.scale
-          // to avoid double-scaling. Only apply sheet scale when fitToPage is off.
-          ((options?.fitToPage !== undefined ? options.fitToPage : true)
-            ? 1.0
-            : ps?.scale
-              ? ps.scale / 100
-              : 1.0)
-      )
-    ),
+    fitToPage,
+    scale,
+    fitToWidth,
+    fitToHeight,
     showGridLines: options?.showGridLines ?? ps?.showGridLines ?? false,
     gridLineColor,
+    showRowColHeaders: options?.showRowColHeaders ?? ps?.showRowColHeaders ?? false,
+    horizontalCentered: options?.horizontalCentered ?? ps?.horizontalCentered ?? false,
+    verticalCentered: options?.verticalCentered ?? ps?.verticalCentered ?? false,
+    pageOrder: options?.pageOrder ?? normalizePageOrder(ps?.pageOrder),
+    blackAndWhite,
+    draft: options?.draft ?? ps?.draft ?? false,
+    errors: options?.errors ?? normalizeErrorMode(ps?.errors),
+    cellComments: options?.cellComments ?? normalizeCommentMode(ps?.cellComments),
     repeatRows,
+    repeatCols,
     defaultFontFamily: options?.defaultFontFamily ?? "Helvetica",
     defaultFontSize: options?.defaultFontSize ?? 11,
     showSheetNames: options?.showSheetNames ?? false,

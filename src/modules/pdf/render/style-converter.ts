@@ -190,6 +190,33 @@ export function applyTint(color: PdfColor, tint: number): PdfColor {
 }
 
 /**
+ * Convert a color to its luminance-preserving grayscale equivalent, using the
+ * Rec. 601 luma weights. Backs Excel's "Black and white" print option: hues are
+ * discarded while relative lightness — and therefore contrast — is kept.
+ *
+ * Opacity is carried through untouched; dropping it would make transparent
+ * chart fills opaque.
+ */
+export function toGrayscale(color: PdfColor): PdfColor {
+  const luma = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+  return color.a === undefined
+    ? { r: luma, g: luma, b: luma }
+    : { r: luma, g: luma, b: luma, a: color.a };
+}
+
+/** Grayscale every edge of a border set, preserving `null` edges. */
+export function grayscaleBorders(borders: LayoutBorders): LayoutBorders {
+  const convert = (b: LayoutBorder | null): LayoutBorder | null =>
+    b === null ? null : { ...b, color: toGrayscale(b.color) };
+  return {
+    top: convert(borders.top),
+    right: convert(borders.right),
+    bottom: convert(borders.bottom),
+    left: convert(borders.left)
+  };
+}
+
+/**
  * Default colors used in PDF rendering.
  */
 export const DEFAULT_COLORS = {

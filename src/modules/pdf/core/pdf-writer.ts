@@ -227,6 +227,14 @@ export class PdfWriter {
     contentsRef: number | string;
     resourcesRef: number;
     annotRefs?: number[];
+    /**
+     * Declare a transparency group for the page. Required whenever the content
+     * uses transparency features (constant alpha, soft masks, blend modes):
+     * without it the backdrop a blend composites against is implementation
+     * defined, and a consumer that ignores the blend mode can paint a
+     * `/Saturation` overlay as opaque black.
+     */
+    transparencyGroup?: boolean;
   }): number {
     const objNum = this.allocObject();
     const mediaBox = `[0 0 ${pdfNumber(options.width)} ${pdfNumber(options.height)}]`;
@@ -238,6 +246,9 @@ export class PdfWriter {
       .set("MediaBox", mediaBox)
       .set("Contents", contentsValue)
       .set("Resources", pdfRef(options.resourcesRef));
+    if (options.transparencyGroup) {
+      dict.set("Group", "<< /S /Transparency /CS /DeviceRGB /I false /K false >>");
+    }
     if (options.annotRefs && options.annotRefs.length > 0) {
       dict.set("Annots", "[" + options.annotRefs.map(r => pdfRef(r)).join(" ") + "]");
     }

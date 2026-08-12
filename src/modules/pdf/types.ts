@@ -135,11 +135,52 @@ export interface PdfPageSetupData {
     header?: number;
     footer?: number;
   };
+  /** Excel's scaling percentage (10–400, where 100 = actual size). */
   scale?: number;
+  /**
+   * Whether Excel's "Fit to N page(s) wide by M tall" scaling mode is active
+   * (`<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`). When true,
+   * {@link fitToWidth} / {@link fitToHeight} drive the scale and
+   * {@link scale} is ignored — the two are mutually exclusive in Excel's UI.
+   */
+  fitToPage?: boolean;
+  /** Pages wide to fit into. `0` means "unlimited" (no width constraint). */
+  fitToWidth?: number;
+  /** Pages tall to fit into. `0` means "unlimited" (no height constraint). */
+  fitToHeight?: number;
   printTitlesRow?: string;
+  /** Repeated columns, e.g. `"A:B"` or `"A"` (Excel's "Columns to repeat at left"). */
+  printTitlesColumn?: string;
   showGridLines?: boolean;
+  /** Print row numbers and column letters (`<printOptions headings="1"/>`). */
+  showRowColHeaders?: boolean;
   printArea?: string;
   firstPageNumber?: number;
+  /**
+   * Order in which pages of a multi-page sheet are emitted.
+   * Excel's default is `"downThenOver"`.
+   */
+  pageOrder?: string;
+  /** Render the sheet without color (Excel's "Black and white" print option). */
+  blackAndWhite?: boolean;
+  /** Draft quality — skips graphics (images and charts). */
+  draft?: boolean;
+  /** How error values are printed: `displayed` | `blank` | `dash` | `NA`. */
+  errors?: string;
+  /** How comments print: `None` | `asDisplayed` | `atEnd`. */
+  cellComments?: string;
+  /**
+   * Excel's "Center on page → Horizontally" print option
+   * (`<printOptions horizontalCentered="1"/>`). When false/absent the
+   * printed grid starts at the left margin.
+   */
+  horizontalCentered?: boolean;
+  /**
+   * Excel's "Center on page → Vertically" print option
+   * (`<printOptions verticalCentered="1"/>`). When false/absent the
+   * printed grid starts at the top margin.
+   */
+  verticalCentered?: boolean;
 }
 
 export type PdfHeaderFooterField =
@@ -370,6 +411,8 @@ export interface PdfSheetData {
   images?: PdfSheetImage[];
   /** Embedded charts (classic + ChartEx) */
   charts?: PdfSheetChart[];
+  /** Cell comments and notes, in row-major order. */
+  comments?: PdfSheetComment[];
 }
 
 /**
@@ -478,6 +521,74 @@ export const PageSizes: Record<PageSizeName, PdfPageSize> = {
 export type PdfOrientation = "portrait" | "landscape";
 
 /**
+ * Order in which the pages of a multi-page sheet are emitted, mirroring
+ * Excel's "Page order" setting.
+ */
+export type PdfPageOrder = "downThenOver" | "overThenDown";
+
+/**
+ * How cells holding an error value are printed, mirroring Excel's
+ * "Cell errors as" setting.
+ */
+export type PdfCellErrorMode = "displayed" | "blank" | "dash" | "NA";
+
+/**
+ * How cell comments are printed, mirroring Excel's "Comments and notes"
+ * print option.
+ */
+export type PdfCellCommentMode = "none" | "atEnd" | "asDisplayed";
+
+/**
+ * Comment box placement, in fractional sheet coordinates.
+ *
+ * Excel stores this as a VML anchor: eight integers giving a column/row plus an
+ * offset in 1/68 of a column and 1/18 of a row. Those are pre-divided here so
+ * the layout engine only has to interpolate against its own track geometry.
+ * All values are 0-based, matching the VML convention.
+ */
+export interface PdfCommentAnchor {
+  /** Left edge, in columns. `2.5` is halfway across the third column. */
+  left: number;
+  /** Top edge, in rows. */
+  top: number;
+  /** Right edge, in columns. */
+  right: number;
+  /** Bottom edge, in rows. */
+  bottom: number;
+}
+
+/** A single printed cell comment. */
+export interface PdfSheetComment {
+  /** Cell address the comment is attached to, e.g. `"B7"`. */
+  ref: string;
+  /** Plain-text body. */
+  text: string;
+  /** Author, when the source recorded one. */
+  author?: string;
+  /**
+   * Where the comment box sits on the sheet, when the source recorded a VML
+   * anchor. Consumed by `cellComments: "asDisplayed"`; absent comments fall back
+   * to Excel's default offset from their cell.
+   */
+  anchor?: PdfCommentAnchor;
+}
+
+/**
+ * An inclusive band of repeated title rows or columns, in absolute 1-based
+ * sheet coordinates.
+ *
+ * Absolute rather than a count, because Excel's "Rows/Columns to repeat" are
+ * independent of the print area: a sheet printing `C5:H50` can still repeat
+ * `A:B` at the left of every page.
+ */
+export interface PdfRepeatBand {
+  /** First row/column of the band (1-based, inclusive). */
+  first: number;
+  /** Last row/column of the band (1-based, inclusive). */
+  last: number;
+}
+
+/**
  * Excel header/footer rendering options.
  *
  * Excel resolves `&F`, `&Z`, `&D`, and `&T` against the host application's
@@ -540,17 +651,126 @@ export interface PdfExportOptions {
   ignorePrintArea?: boolean;
 
   /**
-   * Whether to auto-fit column widths to page width.
-   * When true, columns are scaled proportionally to fit the page.
+   * Whether to shrink column widths so the grid fits the page width.
+   * Never enlarges — content narrower than the page is left at actual size,
+   * matching Excel's fit-to-page behaviour.
+   *
+   * This is the fallback used when neither the caller nor the sheet expresses a
+   * fit-to-N or percentage scaling intent, so a sheet asking for 80% is not
+   * shrunk twice. Passing it explicitly always wins, including over the sheet's
+   * own fit-to-N mode.
+   *
+   * Note that {@link scale} is a *multiplier applied on top* of this and does
+   * not disable it: `{ scale: 0.8 }` on an over-wide grid yields
+   * `0.8 × fit-to-width`. Pass `fitToPage: false` alongside it for a plain 80%.
    * @default true
    */
   fitToPage?: boolean;
 
   /**
-   * Scale factor (0.1 to 3.0). Applied after fitToPage.
-   * @default 1.0
+   * Scale factor (0.1 to 4.0), where `1.0` is actual size, multiplied with any
+   * fit-to-page shrinking (see {@link fitToPage}). Overrides the sheet's
+   * `pageSetup.scale`, which Excel stores as a 10–400 percentage.
+   *
+   * When omitted, the sheet's own scaling is used; see {@link fitToPage}.
    */
   scale?: number;
+
+  /**
+   * Shrink the grid so it spans at most this many pages horizontally,
+   * mirroring Excel's "Fit to N page(s) wide". `0` removes the constraint.
+   *
+   * Like Excel, this only ever shrinks. When omitted, the sheet's
+   * `pageSetup.fitToWidth` is used if its `fitToPage` mode is on.
+   */
+  fitToWidth?: number;
+
+  /**
+   * Shrink the grid so it spans at most this many pages vertically,
+   * mirroring Excel's "Fit to M page(s) tall". `0` removes the constraint.
+   *
+   * Like Excel, this only ever shrinks. When omitted, the sheet's
+   * `pageSetup.fitToHeight` is used if its `fitToPage` mode is on.
+   */
+  fitToHeight?: number;
+
+  /**
+   * Number of leading columns to repeat on every horizontal page, the
+   * counterpart of {@link repeatRows}.
+   *
+   * When omitted, the sheet's `pageSetup.printTitlesColumn` ("Columns to
+   * repeat at left", e.g. `"A:B"`) is used.
+   * @default false
+   */
+  repeatCols?: number | false;
+
+  /**
+   * Print row numbers and column letters around the grid, mirroring Excel's
+   * "Row and column headings" print option.
+   *
+   * When omitted, the sheet's `pageSetup.showRowColHeaders` is used.
+   * @default false
+   */
+  showRowColHeaders?: boolean;
+
+  /**
+   * Order in which the pages of a multi-page sheet are emitted, mirroring
+   * Excel's "Page order". `"downThenOver"` finishes each column band top to
+   * bottom before moving right; `"overThenDown"` finishes each row band left
+   * to right before moving down.
+   *
+   * When omitted, the sheet's `pageSetup.pageOrder` is used.
+   * @default "downThenOver"
+   */
+  pageOrder?: PdfPageOrder;
+
+  /**
+   * Render vector content without color, mirroring Excel's "Black and white"
+   * print option. Colors are converted to their luminance-preserving grayscale
+   * equivalent, preserving opacity.
+   *
+   * Covers vector content (cell text, fills and borders, gridlines, the
+   * row/column heading bands, chart vectors, `&K`-colored header/footer runs and
+   * text watermarks) as well as raster content: PNG samples are converted to a
+   * single luma component, and JPEG keeps its DCTDecode data but is reinterpreted
+   * through a `/DeviceN` luma color space, so neither needs an overlay and
+   * transparency is preserved.
+   *
+   * When omitted, the sheet's `pageSetup.blackAndWhite` is used.
+   * @default false
+   */
+  blackAndWhite?: boolean;
+
+  /**
+   * Draft quality — omit images and charts, mirroring Excel's "Draft quality"
+   * print option.
+   *
+   * When omitted, the sheet's `pageSetup.draft` is used.
+   * @default false
+   */
+  draft?: boolean;
+
+  /**
+   * How cells holding an error value are printed, mirroring Excel's
+   * "Cell errors as" print option.
+   *
+   * When omitted, the sheet's `pageSetup.errors` is used.
+   * @default "displayed"
+   */
+  errors?: PdfCellErrorMode;
+
+  /**
+   * Whether cell comments and notes are printed, mirroring Excel's
+   * "Comments and notes" print option.
+   *
+   * `"atEnd"` appends a list of every comment after the sheet's pages.
+   * `"asDisplayed"` draws each comment as a box where it sits on the sheet,
+   * plus the red corner marker Excel puts on the commented cell.
+   *
+   * When omitted, the sheet's `pageSetup.cellComments` is used.
+   * @default "none"
+   */
+  cellComments?: PdfCellCommentMode;
 
   /**
    * Whether to show grid lines on the page.
@@ -563,6 +783,26 @@ export interface PdfExportOptions {
    * @default "FFD0D0D0"
    */
   gridLineColor?: string;
+
+  /**
+   * Center the printed grid horizontally within the page's content area,
+   * mirroring Excel's "Page Setup → Margins → Center on page → Horizontally".
+   *
+   * When omitted, the source sheet's `pageSetup.horizontalCentered` is used;
+   * if that is unset too, content starts at the left margin.
+   * @default false
+   */
+  horizontalCentered?: boolean;
+
+  /**
+   * Center the printed grid vertically within the page's content area,
+   * mirroring Excel's "Page Setup → Margins → Center on page → Vertically".
+   *
+   * When omitted, the source sheet's `pageSetup.verticalCentered` is used;
+   * if that is unset too, content starts at the top margin.
+   * @default false
+   */
+  verticalCentered?: boolean;
 
   /**
    * Whether to repeat row headers on each page.
@@ -932,9 +1172,22 @@ export interface ResolvedPdfOptions {
   ignorePrintArea: boolean;
   fitToPage: boolean;
   scale: number;
+  /** Pages wide to shrink into; `0` means unconstrained. */
+  fitToWidth: number;
+  /** Pages tall to shrink into; `0` means unconstrained. */
+  fitToHeight: number;
   showGridLines: boolean;
   gridLineColor: PdfColor;
-  repeatRows: number | false;
+  showRowColHeaders: boolean;
+  horizontalCentered: boolean;
+  verticalCentered: boolean;
+  pageOrder: PdfPageOrder;
+  blackAndWhite: boolean;
+  draft: boolean;
+  errors: PdfCellErrorMode;
+  cellComments: PdfCellCommentMode;
+  repeatRows: PdfRepeatBand | false;
+  repeatCols: PdfRepeatBand | false;
   defaultFontFamily: string;
   defaultFontSize: number;
   showSheetNames: boolean;
@@ -1115,7 +1368,48 @@ export interface LayoutPage {
   charts: LayoutChart[];
   /** Scale factor applied to this page (for fitToPage) */
   scaleFactor: number;
+  /**
+   * Geometry of the printed row/column heading bands, when
+   * {@link ResolvedPdfOptions.showRowColHeaders} is on. Absent otherwise.
+   */
+  headings?: LayoutHeadings;
+  /**
+   * Comment boxes to draw on this page, for
+   * `cellComments: "asDisplayed"`. Empty otherwise.
+   */
+  commentBoxes?: LayoutCommentBox[];
   headerFooter?: PdfHeaderFooterData;
+}
+
+/**
+ * A comment box positioned on the sheet, as Excel's "Comments: as displayed"
+ * prints it, together with the corner marker on the commented cell.
+ */
+export interface LayoutCommentBox {
+  /** Box outline in page coordinates. */
+  rect: PdfRect;
+  /** Comment body, already prefixed with the author when one is known. */
+  text: string;
+  /** Font size in points. */
+  fontSize: number;
+  /**
+   * Corner marker on the commented cell, when that cell is on this page. Excel
+   * draws a small red triangle in its top-right corner.
+   */
+  marker?: { x: number; y: number; size: number };
+}
+
+/**
+ * Row-number gutter and column-letter band geometry for a page printed with
+ * Excel's "Row and column headings" option.
+ */
+export interface LayoutHeadings {
+  /** Width of the row-number gutter to the left of the grid, in points. */
+  gutterWidth: number;
+  /** Height of the column-letter band above the grid, in points. */
+  bandHeight: number;
+  /** Font size used for the heading labels, in points. */
+  fontSize: number;
 }
 
 /**

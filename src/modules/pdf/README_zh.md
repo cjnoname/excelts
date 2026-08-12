@@ -31,7 +31,7 @@ import { Pdf } from "documonster/pdf";
 - **AES-256 加密** —— 使用 AES-256(V=5, R=5)进行密码保护并控制权限
 - **字体嵌入** —— TrueType 字体子集化以支持 Unicode/CJK 文本
 - **水印** —— 文本和图像水印,支持透明度、旋转、平铺以及按页/按表过滤
-- **页面设置** —— 按表设置纸张大小、方向、边距、打印区域
+- **页面设置** —— 完整还原打印设置:纸张大小、方向、边距、打印区域、缩放、打印顺序、打印标题、行号列标、居中方式、单色、草稿、错误单元格
 - **可摇树优化** —— 不导入即不进入打包产物
 - **非阻塞** —— 在页面之间让出事件循环以避免阻塞
 
@@ -499,13 +499,26 @@ interface PdfExportOptions {
   pageSize?: PageSizeName | PdfPageSize; // "A4"、"LETTER"、"A3" 等,或 { width, height }
   orientation?: "portrait" | "landscape";
   margins?: Partial<PdfMargins>; // { top, right, bottom, left },单位为点(72pt = 1in)
-  fitToPage?: boolean; // 缩放列以适应页宽(默认:true)
-  scale?: number; // 额外缩放因子(默认:1.0)
+  horizontalCentered?: boolean; // 水平居中(默认:取工作表 pageSetup)
+  verticalCentered?: boolean; // 垂直居中(默认:取工作表 pageSetup)
+  pageOrder?: "downThenOver" | "overThenDown"; // 多页遍历顺序(默认:取工作表 pageSetup,否则 "downThenOver")
+
+  // 缩放 —— 见下文"缩放"。
+  fitToPage?: boolean; // 无其他缩放意图时缩到一页宽(默认:true)
+  scale?: number; // 显式缩放因子 0.1–4.0(对应 Excel 10–400%;可放大)
+  fitToWidth?: number; // 最多缩到 N 页宽;0 表示不限制
+  fitToHeight?: number; // 最多缩到 M 页高;0 表示不限制
 
   // 内容
   showGridLines?: boolean; // 渲染单元格网格线
   gridLineColor?: string; // 网格线的 ARGB 颜色(例如 "FF3366CC")
-  repeatRows?: number | false; // 在每页重复的表头行数
+  showRowColHeaders?: boolean; // 打印行号与列标(默认:取工作表 pageSetup)
+  repeatRows?: number | false; // 每页重复的表头行数(默认:取工作表 printTitlesRow)
+  repeatCols?: number | false; // 每页重复的左侧列数(默认:取工作表 printTitlesColumn)
+  blackAndWhite?: boolean; // 矢量内容转灰度(默认:取工作表 pageSetup)
+  draft?: boolean; // 省略图片与图表(默认:取工作表 pageSetup)
+  errors?: "displayed" | "blank" | "dash" | "NA"; // 错误单元格的打印方式(默认:取工作表 pageSetup)
+  cellComments?: "none" | "atEnd" | "asDisplayed"; // 批注打印方式(默认:取工作表 pageSetup)
   sheets?: (string | number)[]; // 按名称或 1 基索引选择特定工作表
   ignorePrintArea?: boolean; // 导出整个已用区域,忽略每个工作表的打印区域(默认:false)
 
@@ -670,19 +683,150 @@ PDF 写入器渲染所有标准单元格样式:
 
 - 行超出页高:自动垂直分页
 - 列超出页宽:自动水平分页
-- `fitToPage: true`(默认):缩放所有列以适应页宽
+- 比页面更窄或更矮的内容从左上边距开始 —— 与 Excel 一致
 
-### 重复表头行
+### 缩放
+
+Excel 有两种互斥的缩放模式,两者都已支持:
+
+| Excel 页面设置           | 工作表字段                                      | 导出选项                     |
+| ------------------------ | ----------------------------------------------- | ---------------------------- |
+| **缩放比例 N %**         | `scale`、`fitToPage: false`                     | `scale`(0.1–4.0 的倍数)      |
+| **调整为 N 页宽 M 页高** | `fitToWidth` / `fitToHeight`、`fitToPage: true` | `fitToWidth` / `fitToHeight` |
 
 ```typescript
-await Pdf.fromExcel(workbook, { repeatRows: 2 }); // 在每页重复前 2 行
+// 显式指定
+await Pdf.fromExcel(workbook, { fitToWidth: 1, fitToHeight: 0 });
+await Pdf.fromExcel(workbook, { scale: 0.8 });
+
+// 或交由工作表决定
+worksheet.pageSetup.fitToPage = true;
+worksheet.pageSetup.fitToWidth = 1;
+```
+
+与 Excel 一致,**`fitToWidth` / `fitToHeight` 只缩小、不放大**:小于目标的表格按实际
+大小打印。`scale` 不同 —— 它是纯乘数,**可以放大**(Excel 允许 10–400%)。
+
+`fitToPage`(默认 `true`)是 documonster 自己的兜底 —— "缩到一页宽" —— 仅在调用方
+与工作表都没有表达缩放意图时生效,因此设了 80% 的工作表不会被二次缩小。注意 `scale`
+不会关闭它:`{ scale: 2 }` 仍会限制在一页宽,结果为 `min(scale, 内容区宽 / 表格宽)`。
+需要纯乘数请同时传 `fitToPage: false`。
+
+两个 fit 约束都通过二分法针对真实分页器求解,因此不可拆分的行列、手动分页符和重复
+标题带都被计入 —— 仅按总面积求比例会缩得不够(三列各占页宽 60%,按面积是"1.8 页",
+实际仍需三页)。
+
+> **页数目标是在 Excel 缩放范围内的尽力而为。** 缩放止于 Excel 的 10% 下限,若目标在
+> 该下限也无法达成(例如手动分页符本身就强制超过 N 页),结果会超过 N 页,而不是把表格
+> 缩到无法阅读。
+>
+> 行高只在未缩放时测量一次,二分时按线性缩放。这对**所有**单元格都是精确的,包括换行
+> 单元格:换行计算会同步缩放列宽、内边距与字号,因此换行行数不随打印缩放变化。
+
+### 重复表头行与列
+
+```typescript
+await Pdf.fromExcel(workbook, { repeatRows: 2, repeatCols: 1 });
 ```
 
 或通过工作表的页面设置:
 
 ```typescript
-worksheet.pageSetup.printTitlesRow = "1:2"; // 重复第 1-2 行
+worksheet.pageSetup.printTitlesRow = "1:2"; // 每页重复第 1-2 行
+worksheet.pageSetup.printTitlesColumn = "A"; // 每页重复 A 列
 ```
+
+显式传 `false` 可抑制工作表的打印标题。
+
+打印标题是**绝对**的,与打印区域无关(与 Excel 一致):打印 `E1:T3` 的工作表仍会在每页
+左侧重复 `A:B`。若标题带**位于打印范围内部**,它仍会在第一页之后的每页重复,只是不会被
+提到最左侧 —— 那样会打乱第一页的列序。
+
+### 页顺序
+
+对应 Excel 的**页面设置 → 工作表 → 打印顺序**,用于同时纵横分页的工作表。默认与
+Excel 相同,为 `downThenOver`:先自上而下打完一个列带,再向右移动。
+
+```typescript
+await Pdf.fromExcel(workbook, { pageOrder: "overThenDown" });
+```
+
+### 行号与列标
+
+对应 Excel 的**工作表 → 行号列标**。标题带保持固定字号,不随打印缩放变化,
+因此在缩小的输出上依然清晰。
+
+```typescript
+await Pdf.fromExcel(workbook, { showRowColHeaders: true });
+worksheet.pageSetup.showRowColHeaders = true; // 或通过工作表设置
+```
+
+### 单色、草稿与错误单元格
+
+```typescript
+await Pdf.fromExcel(workbook, {
+  blackAndWhite: true, // 矢量内容转灰度(见下方说明)
+  draft: true, // 省略图片与图表
+  errors: "dash" // 打印 "--" 而不是 #DIV/0! 等
+});
+```
+
+`blackAndWhite` 按亮度转换为灰度,保留相对明暗(即对比度),而不是一律压成黑色,
+并保留不透明度。
+
+矢量内容 —— 单元格文本、填充与边框、网格线、标题带、图表矢量、`&K` 着色的页眉页脚 run、
+文本水印 —— 的颜色在布局阶段就已转换。
+
+**光栅内容同样会被转换**,是逐像素转换而非叠加覆盖:
+
+- **PNG** 在嵌入时本来就已解码,因此其 RGB 采样会合并为单个 `/DeviceGray` 亮度分量。
+  Alpha 存放在独立的 `SMask` 中,不受影响,透明区域仍保持透明。
+- **JPEG** 保留其 `DCTDecode` 数据(无需解码器),通过
+  `[/DeviceN [...] /DeviceGray <luma>]` 色彩空间重新解释,其 tint transform 即
+  Rec. 601 亮度公式。
+
+看似便捷的 `/BM /Saturation` 叠加层**刻意没有采用**:其源色是不透明黑色,在透明 PNG
+区域会直接涂黑而不是起滤镜作用。
+
+`draft` 省略图片与图表。图表工作表仍会输出其页面(空白),因此页码不受影响 —— 与 Excel 一致。
+
+`errors` 接受 `"displayed"`(默认)、`"blank"`、`"dash"` 和 `"NA"`,对纯错误单元格
+和结果为错误的公式同样生效。
+
+### 单元格批注
+
+对应 Excel 的**工作表 → 注释和批注**。默认关闭;Excel 的两种模式都已支持:
+
+```typescript
+// 在工作表页面之后追加批注清单,每条标注其所属单元格
+await Pdf.fromExcel(workbook, { cellComments: "atEnd" });
+
+// 在工作表上的实际位置绘制批注框,并带 Excel 的红色角标
+await Pdf.fromExcel(workbook, { cellComments: "asDisplayed" });
+
+worksheet.pageSetup.cellComments = "atEnd"; // 或通过工作表设置
+```
+
+经典批注与线程批注都包含。`asDisplayed` 会解码批注的 VML anchor 来定位批注框;若批注
+没有 anchor,则回退到 Excel 相对单元格的默认偏移。anchor 落在当前页之外的批注框会被
+跳过,而不是从页缝处切开。
+
+### 页面居中
+
+对应 Excel 的**页面设置 → 页边距 → 居中方式**。默认关闭,因此窄表保持贴靠左/上边距:
+
+```typescript
+await Pdf.fromExcel(workbook, { horizontalCentered: true, verticalCentered: true });
+```
+
+或通过工作表的页面设置(对应 XLSX 中的 `<printOptions horizontalCentered="1"/>`):
+
+```typescript
+worksheet.pageSetup.horizontalCentered = true;
+worksheet.pageSetup.verticalCentered = true;
+```
+
+显式导出选项始终优先于工作表设置;选项按工作表逐个解析,因此同一工作簿内各表可以不同。
 
 ### 手动分页
 

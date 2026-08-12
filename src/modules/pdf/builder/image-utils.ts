@@ -93,45 +93,101 @@ export function parseJpegDimensions(data: Uint8Array): { width: number; height: 
 export function writeImageXObject(
   writer: PdfWriter,
   data: Uint8Array,
-  format: "jpeg" | "png"
+  format: "jpeg" | "png",
+  grayscale = false
 ): number {
   if (format === "png") {
-    return writePngImageXObject(writer, data);
+    return writePngImageXObject(writer, data, grayscale);
   }
-  return writeJpegImageXObject(writer, data);
+  return writeJpegImageXObject(writer, data, grayscale);
+}
+
+/**
+ * Write the PostScript calculator function that converts an RGB triple to its
+ * Rec. 601 luma, and return its object number.
+ *
+ * Used as the tint transform of a `/DeviceN` space so a JPEG can be recoloured
+ * without decoding it: the samples stay untouched and the consumer applies the
+ * transform per pixel. Unlike painting a blend on top, this cannot darken
+ * transparent areas, because it *is* the color space rather than an overlay.
+ */
+function writeLumaTintTransform(writer: PdfWriter): number {
+  const objNum = writer.allocObject();
+  const dict = new PdfDict()
+    .set("FunctionType", "4")
+    .set("Domain", "[0 1 0 1 0 1]")
+    .set("Range", "[0 1]");
+  // Stack on entry is R G B (B on top):
+  //   0.114 mul  -> R G 0.114B
+  //   exch       -> R 0.114B G
+  //   0.587 mul  -> R 0.114B 0.587G
+  //   add        -> R (0.114B + 0.587G)
+  //   exch       -> (0.114B + 0.587G) R
+  //   0.299 mul  -> (0.114B + 0.587G) 0.299R
+  //   add        -> luma
+  const program = "{ 0.114 mul exch 0.587 mul add exch 0.299 mul add }";
+  writer.addStreamObject(objNum, dict, new TextEncoder().encode(program));
+  return objNum;
 }
 
 /**
  * Write a JPEG image using DCTDecode (raw JPEG data embedded directly).
  */
-function writeJpegImageXObject(writer: PdfWriter, data: Uint8Array): number {
-  const objNum = writer.allocObject();
+function writeJpegImageXObject(writer: PdfWriter, data: Uint8Array, grayscale = false): number {
   const dims = parseJpegDimensions(data);
+  // Grayscale without a JPEG decoder: keep the DCTDecode samples and reinterpret
+  // the three components through a `/DeviceN` space whose tint transform is the
+  // luma formula. Component count still matches the JPEG, as PDF requires.
+  const tintRef = grayscale ? writeLumaTintTransform(writer) : undefined;
+  const objNum = writer.allocObject();
   const dict = new PdfDict()
     .set("Type", "/XObject")
     .set("Subtype", "/Image")
     .set("Width", pdfNumber(dims.width))
     .set("Height", pdfNumber(dims.height))
-    .set("ColorSpace", "/DeviceRGB")
+    .set(
+      "ColorSpace",
+      tintRef === undefined
+        ? "/DeviceRGB"
+        : `[/DeviceN [/C1 /C2 /C3] /DeviceGray ${pdfRef(tintRef)}]`
+    )
     .set("BitsPerComponent", "8")
     .set("Filter", "/DCTDecode");
   writer.addStreamObject(objNum, dict, data);
   return objNum;
 }
 
+/** Rec. 601 luma of an 8-bit RGB triple. */
+function lumaByte(r: number, g: number, b: number): number {
+  return Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+}
+
 /**
  * Write a PNG image: decode to raw RGB, create SMask for alpha if needed.
  */
-function writePngImageXObject(writer: PdfWriter, data: Uint8Array): number {
+function writePngImageXObject(writer: PdfWriter, data: Uint8Array, grayscale = false): number {
   const png = decodePng(data);
   const objNum = writer.allocObject();
+
+  // PNG is already decoded to raw samples here, so grayscale is a real pixel
+  // conversion: collapse RGB to one luma component and switch to DeviceGray.
+  // The alpha channel lives in a separate SMask and is untouched, so transparent
+  // regions stay transparent.
+  let pixels = png.pixels;
+  if (grayscale) {
+    const gray = new Uint8Array(png.width * png.height);
+    for (let i = 0, p = 0; i < gray.length; i++, p += 3) {
+      gray[i] = lumaByte(pixels[p], pixels[p + 1], pixels[p + 2]);
+    }
+    pixels = gray;
+  }
 
   const dict = new PdfDict()
     .set("Type", "/XObject")
     .set("Subtype", "/Image")
     .set("Width", pdfNumber(png.width))
     .set("Height", pdfNumber(png.height))
-    .set("ColorSpace", "/DeviceRGB")
+    .set("ColorSpace", grayscale ? "/DeviceGray" : "/DeviceRGB")
     .set("BitsPerComponent", pdfNumber(png.bitsPerComponent));
 
   if (png.alpha) {
@@ -147,6 +203,6 @@ function writePngImageXObject(writer: PdfWriter, data: Uint8Array): number {
     dict.set("SMask", pdfRef(smaskObjNum));
   }
 
-  writer.addStreamObject(objNum, dict, png.pixels);
+  writer.addStreamObject(objNum, dict, pixels);
   return objNum;
 }

@@ -31,7 +31,7 @@ import { Pdf } from "documonster/pdf";
 - **AES-256 Encryption** — Password protection with AES-256 (V=5, R=5) and permission controls
 - **Font Embedding** — TrueType font subsetting for Unicode/CJK text
 - **Watermarks** — Text and image watermarks with opacity, rotation, tiling, per-page/per-sheet filtering
-- **Page Setup** — Per-sheet paper size, orientation, margins, print area
+- **Page Setup** — Full print-setting fidelity: paper size, orientation, margins, print area, scaling, page order, print titles, headings, center-on-page, black and white, draft, cell errors
 - **Tree-Shakeable** — Not imported? Not in your bundle
 - **Non-Blocking** — Yields to the event loop between pages to avoid blocking
 
@@ -501,13 +501,26 @@ interface PdfExportOptions {
   pageSize?: PageSizeName | PdfPageSize; // "A4", "LETTER", "A3", etc. or { width, height }
   orientation?: "portrait" | "landscape";
   margins?: Partial<PdfMargins>; // { top, right, bottom, left } in points (72pt = 1in)
-  fitToPage?: boolean; // Scale columns to fit page width (default: true)
-  scale?: number; // Additional scale factor (default: 1.0)
+  horizontalCentered?: boolean; // Center the grid horizontally (default: sheet's pageSetup)
+  verticalCentered?: boolean; // Center the grid vertically (default: sheet's pageSetup)
+  pageOrder?: "downThenOver" | "overThenDown"; // Multi-page traversal (default: sheet's pageSetup, else "downThenOver")
+
+  // Scaling — see "Scaling" below.
+  fitToPage?: boolean; // Shrink to one page wide when nothing else sets a scale (default: true)
+  scale?: number; // Explicit factor, 0.1–4.0 (matches Excel's 10–400%; may enlarge)
+  fitToWidth?: number; // Shrink to at most N pages wide; 0 = unconstrained
+  fitToHeight?: number; // Shrink to at most M pages tall; 0 = unconstrained
 
   // Content
   showGridLines?: boolean; // Render cell grid lines
   gridLineColor?: string; // ARGB color for grid lines (e.g. "FF3366CC")
-  repeatRows?: number | false; // Number of header rows to repeat on each page
+  showRowColHeaders?: boolean; // Print row numbers and column letters (default: sheet's pageSetup)
+  repeatRows?: number | false; // Header rows to repeat on each page (default: sheet's printTitlesRow)
+  repeatCols?: number | false; // Leading columns to repeat on each page (default: sheet's printTitlesColumn)
+  blackAndWhite?: boolean; // Grayscale vector content (default: sheet's pageSetup)
+  draft?: boolean; // Omit images and charts (default: sheet's pageSetup)
+  errors?: "displayed" | "blank" | "dash" | "NA"; // How error cells print (default: sheet's pageSetup)
+  cellComments?: "none" | "atEnd" | "asDisplayed"; // Print comments (default: sheet's pageSetup)
   sheets?: (string | number)[]; // Select specific sheets by name or 1-based index
   ignorePrintArea?: boolean; // Export the full used range, ignoring each sheet's print area (default: false)
 
@@ -672,18 +685,167 @@ The PDF writer renders all standard cell styles:
 
 - Rows overflow the page height: automatic vertical page breaks
 - Columns overflow the page width: automatic horizontal page splitting
-- `fitToPage: true` (default): scales all columns to fit within page width
+- Content that is narrower or shorter than the page starts at the top-left margin — same as Excel
 
-### Repeat Header Rows
+### Scaling
+
+Excel offers two mutually exclusive scaling modes, and both are honored:
+
+| Excel Page Setup                    | Sheet fields                                    | Export option                 |
+| ----------------------------------- | ----------------------------------------------- | ----------------------------- |
+| **Adjust to N %**                   | `scale`, `fitToPage: false`                     | `scale` (as a 0.1–4.0 factor) |
+| **Fit to N page(s) wide by M tall** | `fitToWidth` / `fitToHeight`, `fitToPage: true` | `fitToWidth` / `fitToHeight`  |
 
 ```typescript
-await Pdf.fromExcel(workbook, { repeatRows: 2 }); // Repeat first 2 rows on every page
+// Explicit
+await Pdf.fromExcel(workbook, { fitToWidth: 1, fitToHeight: 0 });
+await Pdf.fromExcel(workbook, { scale: 0.8 });
+
+// Or let the sheet decide
+worksheet.pageSetup.fitToPage = true;
+worksheet.pageSetup.fitToWidth = 1;
+```
+
+**`fitToWidth` / `fitToHeight` only ever shrink**, like Excel: a grid smaller
+than the target is printed at actual size. `scale` is different — it is a plain
+multiplier and _can_ enlarge (Excel allows 10–400%).
+
+`fitToPage` (default `true`) is documonster's own fallback — "shrink to one page
+wide" — and applies only when neither the caller nor the sheet expresses a
+scaling intent, so a sheet asking for 80% is never shrunk twice. Note that
+`scale` does not disable it: `{ scale: 2 }` still fits one page wide, resolving
+to `min(scale, contentWidth / tableWidth)`. Pass `fitToPage: false` for a plain
+multiplier.
+
+Both fit constraints are solved against the real paginator by bisection, so
+indivisible columns/rows, manual page breaks and repeated title bands are all
+accounted for — a total-area ratio alone would under-shrink (three columns at
+60% of the page width occupy "1.8 pages" by area but still need three).
+
+> **The page target is best-effort within Excel's scaling range.** Scaling stops
+> at Excel's 10% floor, so a target that is unreachable there — manual page
+> breaks alone can force more pages than requested — yields more than N pages
+> rather than an illegible grid.
+>
+> Row heights are measured once unscaled and then scaled linearly while
+> bisecting. That is exact for every cell, wrapped ones included: the wrap
+> calculation scales the column width, padding and font size together, so the
+> number of wrapped lines does not depend on the print scale.
+
+### Row and Column Headings
+
+Mirrors Excel's **Sheet → Row and column headings**. The bands keep a fixed size
+regardless of the print scale so they stay legible on shrunken output.
+
+```typescript
+await Pdf.fromExcel(workbook, { showRowColHeaders: true });
+worksheet.pageSetup.showRowColHeaders = true; // or via the sheet
+```
+
+### Black and White, Draft, Cell Errors
+
+```typescript
+await Pdf.fromExcel(workbook, {
+  blackAndWhite: true, // grayscale vector content (see note below)
+  draft: true, // omit images and charts
+  errors: "dash" // print "--" instead of #DIV/0! etc.
+});
+```
+
+`blackAndWhite` converts colors to their luminance-preserving grayscale
+equivalent, so relative lightness — and therefore contrast — is kept rather than
+flattening everything to black. Opacity is preserved.
+
+Vector content — cell text, fills and borders, gridlines, the heading bands,
+chart vectors, `&K`-colored header/footer runs, text watermarks — has its colors
+converted up-front.
+
+**Raster content is converted too**, per pixel rather than by painting over it:
+
+- **PNG** is already decoded when it is embedded, so its RGB samples collapse to
+  one `/DeviceGray` luma component. Alpha lives in a separate `SMask` and is
+  untouched, so transparent regions stay transparent.
+- **JPEG** keeps its `DCTDecode` data — no decoder required — and is
+  reinterpreted through a `[/DeviceN [...] /DeviceGray <luma>]` color space whose
+  tint transform is the Rec. 601 formula.
+
+The tempting shortcut of a `/BM /Saturation` overlay is deliberately _not_ used:
+its source is opaque black, so it paints transparent PNG regions solid black
+instead of filtering them.
+
+`draft` omits images and charts. A chartsheet still emits its page — blank — so
+page numbering is unaffected, as in Excel.
+
+`errors` accepts `"displayed"` (default), `"blank"`, `"dash"` and `"NA"`, and
+applies both to plain error cells and to formulas whose result is an error.
+
+### Cell Comments
+
+Mirrors Excel's **Sheet → Comments and notes**. Off by default; both of Excel's
+modes are supported:
+
+```typescript
+// A list after the sheet's pages, each entry addressed back to its cell
+await Pdf.fromExcel(workbook, { cellComments: "atEnd" });
+
+// Boxes drawn where they sit on the sheet, with Excel's red corner marker
+await Pdf.fromExcel(workbook, { cellComments: "asDisplayed" });
+
+worksheet.pageSetup.cellComments = "atEnd"; // or via the sheet
+```
+
+Classic notes and threaded comments are both included. `asDisplayed` decodes the
+note's VML anchor to place the box, falling back to Excel's default offset from
+the commented cell when a note has no anchor; a box whose anchor lies outside the
+current page is skipped rather than sliced across the page seam.
+
+### Center on Page
+
+Mirrors Excel's **Page Setup → Margins → Center on page**. Off by default, so a
+narrow sheet stays anchored to the left/top margin:
+
+```typescript
+await Pdf.fromExcel(workbook, { horizontalCentered: true, verticalCentered: true });
+```
+
+Or via worksheet page setup (`<printOptions horizontalCentered="1"/>` in the XLSX):
+
+```typescript
+worksheet.pageSetup.horizontalCentered = true;
+worksheet.pageSetup.verticalCentered = true;
+```
+
+An explicit export option always wins over the worksheet setting, and options
+are resolved per sheet, so sheets in one workbook can differ.
+
+### Repeat Header Rows and Columns
+
+```typescript
+await Pdf.fromExcel(workbook, { repeatRows: 2, repeatCols: 1 });
 ```
 
 Or via worksheet page setup:
 
 ```typescript
-worksheet.pageSetup.printTitlesRow = "1:2"; // Repeat rows 1-2
+worksheet.pageSetup.printTitlesRow = "1:2"; // Repeat rows 1-2 on every page
+worksheet.pageSetup.printTitlesColumn = "A"; // Repeat column A on every page
+```
+
+Pass `false` explicitly to suppress a sheet's print titles.
+
+Print titles are **absolute** and independent of the print area, as in Excel: a
+sheet printing `E1:T3` still repeats `A:B` down the left of every page. A band
+that lies _inside_ the printed range still repeats on every page after the first,
+but is not hoisted to the left edge — that would reorder the first page's grid.
+
+### Page Order
+
+Mirrors Excel's **Page Setup → Sheet → Page order** for sheets that paginate in
+both directions. The default, like Excel's, is `downThenOver`: each column band
+is printed top to bottom before moving right.
+
+```typescript
+await Pdf.fromExcel(workbook, { pageOrder: "overThenDown" });
 ```
 
 ### Manual Page Breaks

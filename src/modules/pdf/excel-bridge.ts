@@ -41,6 +41,7 @@ import { drawChartPdf, renderChartPng } from "@excel/chart/render/chart-renderer
 import { anchorCol, anchorRow } from "@excel/core/anchor";
 import {
   cellCol,
+  cellComment,
   cellGetValue,
   cellHyperlink,
   cellResult,
@@ -60,6 +61,7 @@ import {
   chartsheetState
 } from "@excel/core/chartsheet";
 import { ValueType } from "@excel/core/enums";
+import type { NoteData } from "@excel/core/note";
 import type { RowData } from "@excel/core/row";
 import { computeSparklineGeometry } from "@excel/core/sparkline";
 import type { SparklineGroup } from "@excel/core/sparkline";
@@ -121,6 +123,8 @@ import type {
   PdfHeaderFooterRun,
   PdfSheetImage,
   PdfSheetChart,
+  PdfSheetComment,
+  PdfCommentAnchor,
   PdfAnchorRange,
   PdfExportOptions,
   PdfCellTypeValue
@@ -185,7 +189,7 @@ export async function excelToPdf(
   // export already-computed workbooks — no host-registry needed.
   options?.recalculate?.(workbook);
 
-  const pdfWorkbook = await excelWorkbookToPdf(workbook);
+  const pdfWorkbook = await excelWorkbookToPdf(workbook, options);
   return exportPdf(pdfWorkbook, options);
 }
 
@@ -356,12 +360,15 @@ export async function chartToPdf(
  * Chartsheets without an orderNo fall to the end, mirroring how Excel
  * treats sheets with missing tab positions.
  */
-async function excelWorkbookToPdf(workbook: Workbook): Promise<PdfWorkbook> {
+async function excelWorkbookToPdf(
+  workbook: Workbook,
+  options?: PdfExportOptions
+): Promise<PdfWorkbook> {
   const worksheetResults = await Promise.all(
-    getWorksheets(workbook).map(ws => convertSheet(ws, workbook))
+    getWorksheets(workbook).map(ws => convertSheet(ws, workbook, options))
   );
   const chartsheetResults = await Promise.all(
-    getChartsheets(workbook).map(cs => convertChartsheet(cs, workbook))
+    getChartsheets(workbook).map(cs => convertChartsheet(cs, workbook, options))
   );
 
   const combined: PdfWorkbookSheet[] = [...worksheetResults, ...chartsheetResults];
@@ -384,7 +391,11 @@ async function excelWorkbookToPdf(workbook: Workbook): Promise<PdfWorkbook> {
 // Sheet Conversion
 // =============================================================================
 
-async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheetData> {
+async function convertSheet(
+  ws: Worksheet,
+  workbook: Workbook,
+  options?: PdfExportOptions
+): Promise<PdfSheetData> {
   const dimensions = getSheetDimensions(ws);
   const hasData = dimensions && dimensions.top > 0 && dimensions.left > 0;
 
@@ -509,10 +520,22 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
             }
           : undefined,
         scale: ps.scale,
+        fitToPage: ps.fitToPage,
+        fitToWidth: ps.fitToWidth,
+        fitToHeight: ps.fitToHeight,
         printTitlesRow: ps.printTitlesRow,
+        printTitlesColumn: ps.printTitlesColumn,
         showGridLines: ps.showGridLines,
+        showRowColHeaders: ps.showRowColHeaders,
         printArea: ps.printArea,
-        firstPageNumber: ps.useFirstPageNumber === false ? undefined : ps.firstPageNumber
+        firstPageNumber: ps.useFirstPageNumber === false ? undefined : ps.firstPageNumber,
+        pageOrder: ps.pageOrder,
+        blackAndWhite: ps.blackAndWhite,
+        draft: ps.draft,
+        errors: ps.errors,
+        cellComments: ps.cellComments,
+        horizontalCentered: ps.horizontalCentered,
+        verticalCentered: ps.verticalCentered
       }
     : undefined;
 
@@ -523,9 +546,18 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
   // Convert images and charts. Both are floating objects anchored to
   // cells, and both need to participate in bounds expansion so the
   // layout engine allocates pages that cover their anchor rows/cols.
-  const images = collectImages(ws, workbook);
-  const charts = await collectCharts(ws);
-  const sparklineCharts = collectSparklineCharts(ws);
+  //
+  // Draft quality prints no graphics, so skip collection entirely rather than
+  // gathering (and rasterizing ChartEx layouts) only to drop the result during
+  // layout: draft exists to be cheap, and a rasterizer failure must not sink an
+  // export that would not have shown the graphic anyway. The precedence here
+  // mirrors `resolveOptions`; the layout engine still gates on the resolved
+  // flag, so this stays a pure optimization.
+  const comments = collectComments(ws);
+  const draftQuality = options?.draft ?? ws.pageSetup?.draft ?? false;
+  const images = draftQuality ? undefined : collectImages(ws, workbook);
+  const charts = draftQuality ? undefined : await collectCharts(ws);
+  const sparklineCharts = draftQuality ? undefined : collectSparklineCharts(ws);
 
   // Merge sparkline micro-charts with regular charts
   const allCharts = charts
@@ -603,12 +635,95 @@ async function convertSheet(ws: Worksheet, workbook: Workbook): Promise<PdfSheet
     rows,
     merges,
     pageSetup,
-    headerFooter: convertHeaderFooter(ws, workbook),
+    headerFooter: convertHeaderFooter(ws, workbook, draftQuality),
     rowBreaks,
     colBreaks,
     images,
-    charts: allCharts
+    charts: allCharts,
+    comments
   };
+}
+
+/**
+ * Collect every comment on a worksheet, in row-major order.
+ *
+ * Two sources are merged: classic notes stored on the cell (`_comment`, the
+ * VML-backed kind) and Office 365 threaded comments held on the sheet. Only the
+ * text and author are needed — the printed form is an end-of-sheet list, not a
+ * positioned box — so the VML geometry is deliberately ignored.
+ */
+function collectComments(ws: Worksheet): PdfSheetComment[] | undefined {
+  const collected: PdfSheetComment[] = [];
+
+  for (const row of ws._rows ?? []) {
+    if (!row) {
+      continue;
+    }
+    for (const cell of row.cells ?? []) {
+      if (!cell) {
+        continue;
+      }
+      const note = cellComment(cell);
+      const text = noteText(note?.note);
+      if (text) {
+        collected.push({
+          ref: cell.address,
+          text,
+          author: note?.author,
+          anchor: parseVmlAnchor(note?.note)
+        });
+      }
+    }
+  }
+
+  for (const entry of ws.threadedComments ?? []) {
+    const text = entry.comment.text?.trim();
+    if (text) {
+      collected.push({ ref: entry.ref, text, author: entry.comment.personId });
+    }
+  }
+
+  return collected.length > 0 ? collected : undefined;
+}
+
+/**
+ * Decode a VML comment anchor into fractional sheet coordinates.
+ *
+ * `<x:Anchor>` holds eight integers: for each edge a column/row index followed
+ * by an offset into it, measured in 1/68 of a column and 1/18 of a row (the
+ * reciprocals Excel uses when it writes the value). Returns `undefined` when the
+ * note has no anchor, so callers fall back to Excel's default placement.
+ */
+function parseVmlAnchor(note: NoteData["note"]): PdfCommentAnchor | undefined {
+  if (!note || typeof note === "string" || typeof note.anchor !== "string") {
+    return undefined;
+  }
+  const parts = note.anchor.split(",").map(p => Number(p.trim()));
+  if (parts.length !== 8 || parts.some(n => !Number.isFinite(n))) {
+    return undefined;
+  }
+  const [l, lf, t, tf, r, rf, b, bf] = parts;
+  return {
+    left: l + lf / 68,
+    top: t + tf / 18,
+    right: r + rf / 68,
+    bottom: b + bf / 18
+  };
+}
+
+/** Flatten a note body, which may be plain text or a rich `NoteConfig`. */
+function noteText(note: NoteData["note"]): string | undefined {
+  if (typeof note === "string") {
+    return note.trim() || undefined;
+  }
+  if (note && typeof note === "object" && Array.isArray(note.texts)) {
+    const joined = note.texts
+      .map(t => (typeof t === "string" ? t : (t.text ?? "")))
+      .join("")
+      .trim();
+    return joined || undefined;
+  }
+  return undefined;
 }
 
 // =============================================================================
@@ -630,7 +745,11 @@ interface HeaderFooterStyle {
   color?: { r: number; g: number; b: number };
 }
 
-function convertHeaderFooter(ws: Worksheet, workbook: Workbook): PdfHeaderFooterData | undefined {
+function convertHeaderFooter(
+  ws: Worksheet,
+  workbook: Workbook,
+  draftQuality = false
+): PdfHeaderFooterData | undefined {
   const source = ws.headerFooter;
   const fields = [
     source.oddHeader,
@@ -640,7 +759,9 @@ function convertHeaderFooter(ws: Worksheet, workbook: Workbook): PdfHeaderFooter
     source.firstHeader,
     source.firstFooter
   ];
-  const images = convertHeaderFooterImages(ws, workbook);
+  // Draft quality prints no graphics, header pictures included, so skip
+  // collecting them rather than embedding XObjects nothing will draw.
+  const images = draftQuality ? [] : convertHeaderFooterImages(ws, workbook);
   if (!fields.some(Boolean) && images.length === 0) {
     return undefined;
   }
@@ -1571,7 +1692,7 @@ function chartAnchorRange(chart: ChartHandle): PdfAnchorRange | undefined {
       : undefined,
     // Chart anchors store ext as EMU (`cx`, `cy`). Pass the values
     // through unchanged; the layout engine converts EMU→pt for charts
-    // (×1/9525) and px→pt for images (×0.75) based on `extUnit`.
+    // (÷12700) and px→pt for images (×0.75) based on `extUnit`.
     ext: r.ext ? { width: r.ext.cx, height: r.ext.cy } : undefined,
     extUnit: r.ext ? "emu" : undefined
   };
@@ -1664,14 +1785,21 @@ const CHARTSHEET_RASTER_PX = { width: 1280, height: 720 } as const;
  */
 async function convertChartsheet(
   cs: ChartsheetData,
-  workbook: Workbook
+  workbook: Workbook,
+  options?: PdfExportOptions
 ): Promise<PdfChartsheetData> {
   const classicModel = chartsheetChartModel(cs);
   const chartExModel = chartsheetChartExModel(cs);
 
+  // Resolve draft before touching the chart: a ChartEx outside the vector
+  // whitelist would otherwise be rasterised at cost — and could fail — for a
+  // page that prints no graphics at all. Precedence mirrors `resolveOptions`.
+  const draftQuality = options?.draft ?? chartsheetPageSetup(cs)?.draft ?? false;
+
+  // Draft quality prints no graphics, so the chart is simply never built.
   let chart: PdfChartsheetData["chart"] = {};
 
-  if (classicModel) {
+  if (!draftQuality && classicModel) {
     const model = classicModel;
     chart = {
       drawVector: (surface, rect) => {
@@ -1683,7 +1811,7 @@ async function convertChartsheet(
         });
       }
     };
-  } else if (chartExModel) {
+  } else if (!draftQuality && chartExModel) {
     if (canRenderChartExAsVectorPdf(chartExModel)) {
       const model = chartExModel;
       chart = {
@@ -1727,6 +1855,8 @@ async function convertChartsheet(
           orientation: ps?.orientation,
           paperSize: ps?.paperSize,
           showGridLines: false,
+          blackAndWhite: ps?.blackAndWhite,
+          draft: ps?.draft,
           firstPageNumber: ps?.useFirstPageNumber === false ? undefined : ps?.firstPageNumber,
           margins: margins
             ? {
@@ -1751,7 +1881,7 @@ async function convertChartsheet(
     pageSetup,
     headerFooter: convertHeaderFooterModel(
       chartsheetModel(cs).headerFooter,
-      convertChartsheetHeaderImages(chartsheetModel(cs).headerImages, workbook)
+      draftQuality ? [] : convertChartsheetHeaderImages(chartsheetModel(cs).headerImages, workbook)
     )
   };
 }

@@ -18,8 +18,15 @@ import {
   CELL_PADDING_H,
   CELL_PADDING_V,
   LINE_HEIGHT_FACTOR,
-  INDENT_WIDTH
+  INDENT_WIDTH,
+  HEADING_FILL,
+  HEADING_RULE,
+  HEADING_TEXT,
+  COMMENT_FILL,
+  COMMENT_BORDER,
+  COMMENT_MARKER_COLOR
 } from "@pdf/render/constants";
+import { toGrayscale } from "@pdf/render/style-converter";
 import type {
   LayoutPage,
   LayoutCell,
@@ -166,6 +173,16 @@ export function renderPage(
     if (cell.text || cell.richText) {
       drawCellText(stream, cell, fontManager, alphaValues, sf);
     }
+  }
+
+  // --- Step 5b: Draw printed row/column headings ---
+  if (options.showRowColHeaders) {
+    drawRowColHeadings(stream, page, options, fontManager);
+  }
+
+  // --- Step 5c: Draw comment boxes over the grid ---
+  if (page.commentBoxes?.length) {
+    drawCommentBoxes(stream, page, options, fontManager);
   }
 
   // --- Step 5: Draw page header (sheet name) ---
@@ -1990,7 +2007,11 @@ function drawHeaderFooterSection(
         : run.subscript
           ? -fontSize * HEADER_FOOTER_METRICS.SUBSCRIPT_DROP
           : 0;
-      const color = run.color ?? { r: 0, g: 0, b: 0 };
+      // Header/footer runs carry their own `&K` colors, which bypass the cell
+      // style pipeline — apply black-and-white here.
+      const bw = page.options.blackAndWhite;
+      const rawColor = run.color ?? { r: 0, g: 0, b: 0 };
+      const color = bw ? toGrayscale(rawColor) : rawColor;
       stream.save();
       stream.setFillColor(color);
       stream.setStrokeColor(color);
@@ -2052,6 +2073,199 @@ function resolveLineRuns(
     const width = fontManager.measureText(text, resourceName, fontSize);
     return { run, text, resourceName, fontSize, width };
   });
+}
+
+// =============================================================================
+// Row / Column Headings
+// =============================================================================
+
+/** Convert a 1-based column number to its Excel letters (1 → "A", 27 → "AA"). */
+function columnNumberToLetters(col: number): string {
+  let n = col;
+  let out = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+/**
+ * Draw Excel's printed row numbers and column letters around the grid.
+ *
+ * The bands occupy space reserved by the layout engine (see
+ * `computeHeadingMetrics`), so the grid origin already accounts for them and
+ * nothing here can push content off the page.
+ */
+function drawRowColHeadings(
+  stream: PdfContentStream,
+  page: LayoutPage,
+  options: ResolvedPdfOptions,
+  fontManager: FontManager
+): void {
+  const headings = page.headings;
+  if (!headings || page.columnWidths.length === 0 || page.rowHeights.length === 0) {
+    return;
+  }
+
+  const { gutterWidth, bandHeight, fontSize } = headings;
+  const resourceName = fontManager.hasEmbeddedFont()
+    ? fontManager.getEmbeddedResourceName()
+    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+
+  // The heading palette is already neutral gray, so black-and-white needs no
+  // conversion here.
+  const fill = HEADING_FILL;
+  const rule = HEADING_RULE;
+  const textColor = HEADING_TEXT;
+
+  const gridLeft = page.columnOffsets[0];
+  const lastCol = page.columnWidths.length - 1;
+  const gridRight = page.columnOffsets[lastCol] + page.columnWidths[lastCol];
+  const gridTop = page.rowYPositions[0];
+  const lastRow = page.rowHeights.length - 1;
+  const gridBottom = page.rowYPositions[lastRow] - page.rowHeights[lastRow];
+
+  stream.save();
+
+  // Band backgrounds: column letters above the grid, row numbers to its left,
+  // plus the corner square where the two meet.
+  stream.fillRect(gridLeft, gridTop, gridRight - gridLeft, bandHeight, fill);
+  stream.fillRect(gridLeft - gutterWidth, gridBottom, gutterWidth, gridTop - gridBottom, fill);
+  stream.fillRect(gridLeft - gutterWidth, gridTop, gutterWidth, bandHeight, fill);
+
+  // Rules: one per column boundary through the top band, one per row boundary
+  // through the gutter, and the two outer edges.
+  stream.setStrokeColor(rule);
+  stream.setLineWidth(0.25);
+  for (let i = 0; i <= page.columnWidths.length; i++) {
+    const x =
+      i < page.columnWidths.length
+        ? page.columnOffsets[i]
+        : page.columnOffsets[i - 1] + page.columnWidths[i - 1];
+    stream.moveTo(x, gridTop);
+    stream.lineTo(x, gridTop + bandHeight);
+  }
+  for (let i = 0; i <= page.rowYPositions.length; i++) {
+    const y =
+      i < page.rowYPositions.length
+        ? page.rowYPositions[i]
+        : page.rowYPositions[i - 1] - page.rowHeights[i - 1];
+    stream.moveTo(gridLeft - gutterWidth, y);
+    stream.lineTo(gridLeft, y);
+  }
+  stream.moveTo(gridLeft - gutterWidth, gridTop + bandHeight);
+  stream.lineTo(gridRight, gridTop + bandHeight);
+  stream.moveTo(gridLeft - gutterWidth, gridBottom);
+  stream.lineTo(gridLeft - gutterWidth, gridTop + bandHeight);
+  stream.stroke();
+
+  // Labels, centered in their band cell.
+  stream.setFillColor(textColor);
+  const baselineOffset = (bandHeight - fontSize) / 2 + fontSize * 0.2;
+
+  for (let i = 0; i < page.sheetCols.length; i++) {
+    const label = columnNumberToLetters(page.sheetCols[i]);
+    fontManager.trackText(label);
+    const w = fontManager.measureText(label, resourceName, fontSize);
+    const x = page.columnOffsets[i] + (page.columnWidths[i] - w) / 2;
+    emitTextWithMatrix(stream, fontManager, {
+      text: label,
+      matrix: [1, 0, 0, 1, x, gridTop + baselineOffset],
+      resourceName,
+      fontSize
+    });
+  }
+
+  for (let i = 0; i < page.sheetRows.length; i++) {
+    const label = String(page.sheetRows[i]);
+    fontManager.trackText(label);
+    const w = fontManager.measureText(label, resourceName, fontSize);
+    const rowH = page.rowHeights[i];
+    const x = gridLeft - gutterWidth + (gutterWidth - w) / 2;
+    const y = page.rowYPositions[i] - rowH + (rowH - fontSize) / 2 + fontSize * 0.2;
+    emitTextWithMatrix(stream, fontManager, {
+      text: label,
+      matrix: [1, 0, 0, 1, x, y],
+      resourceName,
+      fontSize
+    });
+  }
+
+  stream.restore();
+}
+
+/**
+ * Draw Excel's on-sheet comment boxes and their cell corner markers.
+ *
+ * Positioned by the layout engine, so this only has to paint: a pale note-yellow
+ * box with a thin border, the wrapped body inside it, and the small red triangle
+ * Excel puts in the commented cell's top-right corner.
+ */
+function drawCommentBoxes(
+  stream: PdfContentStream,
+  page: LayoutPage,
+  options: ResolvedPdfOptions,
+  fontManager: FontManager
+): void {
+  const boxes = page.commentBoxes;
+  if (!boxes?.length) {
+    return;
+  }
+
+  const bw = options.blackAndWhite;
+  const fill = bw ? toGrayscale(COMMENT_FILL) : COMMENT_FILL;
+  const border = bw ? toGrayscale(COMMENT_BORDER) : COMMENT_BORDER;
+  const markerColor = bw ? toGrayscale(COMMENT_MARKER_COLOR) : COMMENT_MARKER_COLOR;
+  const resourceName = fontManager.hasEmbeddedFont()
+    ? fontManager.getEmbeddedResourceName()
+    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+
+  for (const box of boxes) {
+    const { rect } = box;
+    stream.save();
+    stream.fillRect(rect.x, rect.y, rect.width, rect.height, fill);
+    stream.setStrokeColor(border);
+    stream.setLineWidth(0.5);
+    stream.rect(rect.x, rect.y, rect.width, rect.height);
+    stream.stroke();
+
+    // Body text, wrapped to the box and clipped by simply stopping once the
+    // remaining height is used up.
+    const lineHeight = box.fontSize * LINE_HEIGHT_FACTOR;
+    const innerWidth = Math.max(rect.width - 2 * CELL_PADDING_H, 1);
+    const measure = (t: string) => fontManager.measureText(t, resourceName, box.fontSize);
+    const lines = box.text.split("\n").flatMap(part => wrapTextLines(part, measure, innerWidth));
+    stream.setFillColor(bw ? toGrayscale({ r: 0, g: 0, b: 0 }) : { r: 0, g: 0, b: 0 });
+    let baseline = rect.y + rect.height - CELL_PADDING_V - box.fontSize;
+    for (const line of lines) {
+      if (baseline < rect.y + CELL_PADDING_V) {
+        break;
+      }
+      fontManager.trackText(line);
+      emitTextWithMatrix(stream, fontManager, {
+        text: line,
+        matrix: [1, 0, 0, 1, rect.x + CELL_PADDING_H, baseline],
+        resourceName,
+        fontSize: box.fontSize
+      });
+      baseline -= lineHeight;
+    }
+    stream.restore();
+
+    if (box.marker) {
+      const { x, y, size } = box.marker;
+      stream.save();
+      stream.setFillColor(markerColor);
+      stream.moveTo(x - size, y);
+      stream.lineTo(x, y);
+      stream.lineTo(x, y - size);
+      stream.closePath();
+      stream.fill();
+      stream.restore();
+    }
+  }
 }
 
 function drawPageHeader(
@@ -2218,7 +2432,8 @@ function renderTextWatermark(
   fontManager: FontManager
 ): WatermarkRenderResult {
   const fontSize = watermark.fontSize ?? TEXT_WM_DEFAULTS.fontSize;
-  const color = watermark.color ?? TEXT_WM_DEFAULTS.color;
+  const rawColor = watermark.color ?? TEXT_WM_DEFAULTS.color;
+  const color = page.options.blackAndWhite ? toGrayscale(rawColor) : rawColor;
   const opacity = watermark.opacity ?? TEXT_WM_DEFAULTS.opacity;
   const rotation = watermark.rotation ?? TEXT_WM_DEFAULTS.rotation;
   const fontFamily = watermark.fontFamily ?? TEXT_WM_DEFAULTS.fontFamily;

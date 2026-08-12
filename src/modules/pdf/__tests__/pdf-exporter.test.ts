@@ -1,5 +1,3 @@
-import { inflateSync } from "node:zlib";
-
 import {
   cellSetAlignment,
   cellSetBorder,
@@ -15,6 +13,8 @@ import { PdfError } from "@pdf/errors";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { resetFontDiscoveryCache, _setCandidatesForTest } from "@pdf/font/system-fonts";
 import { pdf as standalonePdf } from "@pdf/pdf";
+import { extractTextFromPage } from "@pdf/reader/content-interpreter";
+import { PdfDocument } from "@pdf/reader/pdf-document";
 import { readPdf } from "@pdf/reader/pdf-reader";
 import { exportPdf } from "@pdf/render/pdf-exporter";
 /**
@@ -24,29 +24,8 @@ import { exportPdf } from "@pdf/render/pdf-exporter";
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
-import { pdfToString, expectValidPdf } from "./test-helpers";
+import { TINY_PNG, decompressPdfContent, expectValidPdf, pdfToString } from "./test-helpers";
 import { buildMinimalTtf, buildTtfWithCmap } from "./ttf-test-utils";
-
-const TINY_PNG = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1,
-  0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44, 0x41, 0x54, 8, 0xd7,
-  0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0, 0, 0, 0, 0x49, 0x45, 0x4e,
-  0x44, 0xae, 0x42, 0x60, 0x82
-]);
-
-function decompressPdfContent(pdfBytes: Uint8Array): string {
-  const pdfStr = Buffer.from(pdfBytes).toString("latin1");
-  const parts: string[] = [];
-  for (const match of pdfStr.matchAll(/stream\r?\n([\s\S]*?)endstream/g)) {
-    const raw = Buffer.from(match[1], "latin1");
-    try {
-      parts.push(inflateSync(raw).toString("latin1"));
-    } catch {
-      parts.push(raw.toString("latin1"));
-    }
-  }
-  return parts.join("\n");
-}
 
 describe("excelToPdf", () => {
   describe("Basic Export", () => {
@@ -1269,6 +1248,120 @@ describe("excelToPdf", () => {
       // The top margin should come from worksheet (1.0 * 72 = 72pt), not reset to default
       // Just verify valid PDF produced without crash
       expect(text).toContain("%PDF");
+    });
+  });
+
+  describe("Center on page", () => {
+    /** X coordinate of the left-most text fragment on the first page. */
+    function leftMostTextX(pdfBytes: Uint8Array): number {
+      const doc = new PdfDocument(pdfBytes);
+      const fragments = extractTextFromPage(doc.getPages()[0], doc);
+      expect(fragments.length).toBeGreaterThan(0);
+      return Math.min(...fragments.map(f => f.x));
+    }
+
+    function narrowSheet(): ReturnType<typeof Workbook.create> {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Narrow");
+      Column.setWidth(ws, 1, 12);
+      Column.setWidth(ws, 2, 12);
+      for (let r = 1; r <= 5; r++) {
+        Cell.setValue(ws, `A${r}`, `Row ${r}`);
+        Cell.setValue(ws, `B${r}`, r);
+      }
+      return wb;
+    }
+
+    it("should left-align a narrow sheet by default (issue #203)", async () => {
+      const pdf = await excelToPdf(narrowSheet());
+      expectValidPdf(pdf);
+      // Default margin is 72pt; text sits just inside the first cell.
+      expect(leftMostTextX(pdf)).toBeLessThan(80);
+    });
+
+    it("should center horizontally when the option is set", async () => {
+      const left = leftMostTextX(await excelToPdf(narrowSheet()));
+      const centered = leftMostTextX(await excelToPdf(narrowSheet(), { horizontalCentered: true }));
+      expect(centered).toBeGreaterThan(left + 100);
+    });
+
+    it("should center horizontally from the worksheet print options", async () => {
+      const wb = narrowSheet();
+      const plain = leftMostTextX(await excelToPdf(narrowSheet()));
+      Workbook.getWorksheet(wb, "Narrow")!.pageSetup.horizontalCentered = true;
+      expect(leftMostTextX(await excelToPdf(wb))).toBeGreaterThan(plain + 100);
+    });
+
+    it("should let an explicit option override the worksheet print options", async () => {
+      const wb = narrowSheet();
+      Workbook.getWorksheet(wb, "Narrow")!.pageSetup.horizontalCentered = true;
+      const pdf = await excelToPdf(wb, { horizontalCentered: false });
+      expect(leftMostTextX(pdf)).toBeLessThan(80);
+    });
+
+    it("should left-align a narrow sheet that follows a wide one (issue #203)", async () => {
+      // The reported scenario: a wide sheet paginates to full width while a
+      // second, two-column sheet is emitted on its own page. Both must start
+      // at the left margin.
+      const wb = Workbook.create();
+      const wide = Workbook.addWorksheet(wb, "Wide");
+      for (let c = 1; c <= 12; c++) {
+        Column.setWidth(wide, c, 12);
+        Cell.setValue(wide, 1, c, `Header ${c}`);
+        Cell.setValue(wide, 2, c, c * 10);
+      }
+      const narrow = Workbook.addWorksheet(wb, "Narrow");
+      Column.setWidth(narrow, 1, 12);
+      Column.setWidth(narrow, 2, 12);
+      Cell.setValue(narrow, "A1", "Key");
+      Cell.setValue(narrow, "B1", "Value");
+
+      const doc = new PdfDocument(await excelToPdf(wb));
+      const pages = doc.getPages();
+      expect(pages.length).toBeGreaterThanOrEqual(2);
+      for (const page of pages) {
+        const fragments = extractTextFromPage(page, doc);
+        expect(fragments.length).toBeGreaterThan(0);
+        expect(Math.min(...fragments.map(f => f.x))).toBeLessThan(80);
+      }
+    });
+
+    it("should center only the sheet whose print options ask for it", async () => {
+      // resolveOptions() runs per sheet, so centering must not leak across
+      // sheets in the same workbook.
+      const wb = Workbook.create();
+      const plain = Workbook.addWorksheet(wb, "Plain");
+      const centered = Workbook.addWorksheet(wb, "Centered");
+      for (const ws of [plain, centered]) {
+        Column.setWidth(ws, 1, 12);
+        Column.setWidth(ws, 2, 12);
+        Cell.setValue(ws, "A1", "Key");
+        Cell.setValue(ws, "B1", "Value");
+      }
+      centered.pageSetup.horizontalCentered = true;
+
+      const doc = new PdfDocument(await excelToPdf(wb));
+      const pages = doc.getPages();
+      expect(pages).toHaveLength(2);
+      const xs = pages.map(p =>
+        Math.min(...extractTextFromPage(p, doc).map((f: { x: number }) => f.x))
+      );
+      expect(xs[0]).toBeLessThan(80);
+      expect(xs[1]).toBeGreaterThan(xs[0] + 100);
+    });
+
+    it("should center vertically from the worksheet print options", async () => {
+      function topMostTextY(pdfBytes: Uint8Array): number {
+        const doc = new PdfDocument(pdfBytes);
+        const fragments = extractTextFromPage(doc.getPages()[0], doc);
+        return Math.max(...fragments.map(f => f.y));
+      }
+
+      const plain = topMostTextY(await excelToPdf(narrowSheet()));
+      const wb = narrowSheet();
+      Workbook.getWorksheet(wb, "Narrow")!.pageSetup.verticalCentered = true;
+      // Vertical centering pushes content down the page (smaller PDF y).
+      expect(topMostTextY(await excelToPdf(wb))).toBeLessThan(plain - 100);
     });
   });
 

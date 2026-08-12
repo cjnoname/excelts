@@ -25,7 +25,14 @@ import {
   LINE_HEIGHT_FACTOR,
   INDENT_WIDTH,
   MAX_DIGIT_WIDTH_PX,
-  PX_TO_PT
+  PX_TO_PT,
+  HEADING_FONT_SIZE,
+  HEADING_PADDING,
+  COMMENT_MARKER_SIZE,
+  COLUMN_FIT_EPSILON,
+  SHEET_NAME_BAND_HEIGHT,
+  PAGE_NUMBER_BAND_HEIGHT,
+  FIT_MIN_SCALE
 } from "@pdf/render/constants";
 import { wrapTextLines } from "@pdf/render/page-renderer";
 import {
@@ -34,7 +41,9 @@ import {
   excelBordersToPdf,
   excelHAlignToPdf,
   excelVAlignToPdf,
-  borderStyleToLineWidth
+  borderStyleToLineWidth,
+  toGrayscale,
+  grayscaleBorders
 } from "@pdf/render/style-converter";
 import type {
   PdfSheetData,
@@ -49,6 +58,12 @@ import type {
   PdfAlignmentData,
   PdfCellTypeValue,
   ResolvedPdfOptions,
+  PdfCellErrorMode,
+  PdfRepeatBand,
+  PdfSheetComment,
+  PdfCommentAnchor,
+  LayoutCommentBox,
+  LayoutHeadings,
   LayoutPage,
   LayoutChart,
   LayoutCell,
@@ -56,7 +71,7 @@ import type {
   LayoutRichTextRun
 } from "@pdf/types";
 import { PdfCellType } from "@pdf/types";
-import { emuToPt, emuToPx, charWidthToPixel } from "@utils/units";
+import { emuToPt, charWidthToPixel } from "@utils/units";
 import { yieldToEventLoop } from "@utils/utils.base";
 
 // =============================================================================
@@ -135,8 +150,18 @@ export async function layoutSheet(
   const layoutPages: LayoutPage[] = [];
   const totalOutputPages = ctx.rowPages.length * ctx.colGroups.length;
 
-  for (const rowPage of ctx.rowPages) {
-    for (const colGroup of ctx.colGroups) {
+  // Excel's "Page order". `downThenOver` (Excel's default) walks each column
+  // band top to bottom before moving right; `overThenDown` walks each row band
+  // left to right before moving down. Only the nesting differs, so pick which
+  // axis is outer rather than materialising every pair.
+  const overThenDown = options.pageOrder === "overThenDown";
+  const outer: number[][] = overThenDown ? ctx.rowPages : ctx.colGroups;
+  const inner: number[][] = overThenDown ? ctx.colGroups : ctx.rowPages;
+
+  for (const outerTracks of outer) {
+    for (const innerTracks of inner) {
+      const rowPage = overThenDown ? outerTracks : innerTracks;
+      const colGroup = overThenDown ? innerTracks : outerTracks;
       layoutPages.push(
         buildPageLayout(ctx, rowPage, colGroup, layoutPages.length, sheet, options, fontManager)
       );
@@ -146,18 +171,24 @@ export async function layoutSheet(
     }
   }
 
-  if (layoutPages.length > 0 && sheet.images) {
+  // Draft quality omits graphics, matching Excel's "Draft quality" option.
+  if (layoutPages.length > 0 && sheet.images && !options.draft) {
     assignImagesToPages(sheet.images, layoutPages, ctx.scaleFactor);
   }
-  if (layoutPages.length > 0 && sheet.charts) {
+  if (layoutPages.length > 0 && sheet.charts && !options.draft) {
     assignChartsToPages(sheet.charts, layoutPages, ctx.scaleFactor);
   }
 
-  const firstPageNumber = sheet.pageSetup?.firstPageNumber ?? 1;
+  // Excel's "Comments: at end of sheet" — appended after the grid so the page
+  // numbering below covers them too.
+  if (options.cellComments === "atEnd" && sheet.comments?.length) {
+    layoutPages.push(...buildCommentPages(sheet, sheet.comments, options, fontManager));
+  }
+
+  // Only the per-sheet index is settled here; `fixPageNumbers` in the exporter
+  // owns `pageNumber`, `sheetPageNumber` and the document-wide `sheetPageCount`.
   for (let i = 0; i < layoutPages.length; i++) {
-    layoutPages[i].sheetPageNumber = firstPageNumber + i;
     layoutPages[i].sheetPageIndex = i + 1;
-    layoutPages[i].sheetPageCount = layoutPages.length;
   }
 
   return layoutPages;
@@ -194,15 +225,11 @@ export function layoutChartsheet(
     sheet.orientation ?? documentOptions.orientation;
   const options: ResolvedPdfOptions = { ...documentOptions, orientation };
 
-  let pageWidth = options.pageSize.width;
-  let pageHeight = options.pageSize.height;
-  if (options.orientation === "landscape") {
-    [pageWidth, pageHeight] = [pageHeight, pageWidth];
-  }
+  const { width: pageWidth, height: pageHeight } = pageDimensions(options);
 
   const margins = options.margins;
-  const headerHeight = options.showSheetNames ? 20 : 0;
-  const footerHeight = options.showPageNumbers ? 20 : 0;
+  const headerHeight = options.showSheetNames ? SHEET_NAME_BAND_HEIGHT : 0;
+  const footerHeight = options.showPageNumbers ? PAGE_NUMBER_BAND_HEIGHT : 0;
   const contentX = margins.left;
   const contentY = margins.bottom + footerHeight;
   const contentWidth = pageWidth - margins.left - margins.right;
@@ -219,7 +246,44 @@ export function layoutChartsheet(
     raster: sheet.chart.raster
   };
 
-  const page: LayoutPage = {
+  return [
+    {
+      ...blankPage(sheet, options),
+      // Draft quality omits graphics. A chartsheet is nothing but a graphic, so
+      // the page is still emitted — Excel likewise prints a blank sheet rather
+      // than dropping it from the page count.
+      charts: options.draft ? [] : [chart]
+    }
+  ];
+}
+
+// =============================================================================
+// Internal — Shared Layout Pipeline
+// =============================================================================
+
+/**
+ * Page dimensions for the resolved options, with landscape applied.
+ *
+ * `pageSize` is always stored portrait-wise, so every consumer has to swap the
+ * axes itself; centralised here so the four layout entry points cannot disagree.
+ */
+function pageDimensions(options: ResolvedPdfOptions): { width: number; height: number } {
+  const { width, height } = options.pageSize;
+  return options.orientation === "landscape" ? { width: height, height: width } : { width, height };
+}
+
+/**
+ * A `LayoutPage` with every field at its empty value.
+ *
+ * The shape has ~20 members and four construction sites; building them from one
+ * skeleton means a new field cannot be forgotten in three of them.
+ */
+function blankPage(
+  sheet: PdfSheetData | PdfChartsheetData,
+  options: ResolvedPdfOptions
+): LayoutPage {
+  const { width, height } = pageDimensions(options);
+  return {
     pageNumber: 1,
     sheetPageNumber: sheet.pageSetup?.firstPageNumber ?? 1,
     sheetPageIndex: 1,
@@ -227,8 +291,8 @@ export function layoutChartsheet(
     firstPageNumber: sheet.pageSetup?.firstPageNumber,
     options,
     cells: [],
-    width: pageWidth,
-    height: pageHeight,
+    width,
+    height,
     sheetName: sheet.name,
     sheetCols: [],
     columnOffsets: [],
@@ -237,23 +301,19 @@ export function layoutChartsheet(
     rowYPositions: [],
     rowHeights: [],
     images: [],
-    charts: [chart],
+    charts: [],
     scaleFactor: 1,
     headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
   };
-
-  return [page];
 }
-
-// =============================================================================
-// Internal — Shared Layout Pipeline
-// =============================================================================
 
 /** Pre-computed layout context for the layout pipeline. */
 interface LayoutContext {
   pageWidth: number;
   pageHeight: number;
   contentWidth: number;
+  /** Vertical space left for the cell grid after header/footer bands. */
+  availableHeight: number;
   headerHeight: number;
   scaleFactor: number;
   scaledColumnWidths: number[];
@@ -264,6 +324,8 @@ interface LayoutContext {
   rowPages: number[][];
   colGroups: number[][];
   margins: { top: number; right: number; bottom: number; left: number };
+  /** Row/column heading band geometry, when printing headings. */
+  headings?: LayoutHeadings;
 }
 
 /**
@@ -277,58 +339,135 @@ function prepareLayout(
 ): LayoutContext | null {
   const { margins } = options;
 
-  let pageWidth = options.pageSize.width;
-  let pageHeight = options.pageSize.height;
-  if (options.orientation === "landscape") {
-    [pageWidth, pageHeight] = [pageHeight, pageWidth];
-  }
+  const { width: pageWidth, height: pageHeight } = pageDimensions(options);
 
-  const contentWidth = pageWidth - margins.left - margins.right;
-  const contentHeight = pageHeight - margins.top - margins.bottom;
-  const headerHeight = options.showSheetNames ? 20 : 0;
+  const headerHeight = options.showSheetNames ? SHEET_NAME_BAND_HEIGHT : 0;
   const printRange = getPrintRange(sheet, options);
 
-  // --- Step 1: Visible columns and widths ---
-  const { columnWidths, visibleCols } = computeColumnWidths(sheet, printRange);
+  // Excel's "Row and column headings". The bands are deliberately *not*
+  // scaled with the grid: they are a print aid rather than content, and a
+  // fixed size stays legible at small print scales while letting us reserve
+  // exactly the space we later draw into.
+  const headings = options.showRowColHeaders
+    ? computeHeadingMetrics(sheet, printRange, fontManager, options)
+    : undefined;
+  const gutterWidth = headings?.gutterWidth ?? 0;
+  const bandHeight = headings?.bandHeight ?? 0;
+
+  const contentWidth = pageWidth - margins.left - margins.right - gutterWidth;
+  const contentHeight = pageHeight - margins.top - margins.bottom - bandHeight;
+
+  // --- Step 1: Visible columns and widths (title columns lead) ---
+  const { columnWidths, visibleCols, repeatColIndices } = computeColumnWidths(
+    sheet,
+    printRange,
+    options.repeatCols
+  );
   if (visibleCols.length === 0) {
     return null;
   }
 
   // --- Step 2: Scale ---
+  // Rows are measured once, unscaled: heights are linear in the print scale, so
+  // the fit solver can probe by multiplying instead of re-measuring.
+  const natural = computeRowHeights(sheet, printRange, fontManager, options, options.repeatRows);
+  // Break sets are derived once: the fit solver paginates ~25 times per axis.
+  const rowBreaks = buildBreakSet(sheet.rowBreaks ?? [], natural.visibleRows);
+  const colBreaks = buildBreakSet(sheet.colBreaks ?? [], visibleCols);
   const totalTableWidth = columnWidths.reduce((sum, w) => sum + w, 0);
+  const footerHeight = options.showPageNumbers ? PAGE_NUMBER_BAND_HEIGHT : 0;
+  const availableHeight = contentHeight - headerHeight - footerHeight;
   let scaleFactor = options.scale;
-  if (options.fitToPage && totalTableWidth > 0) {
-    const fitScale = contentWidth / totalTableWidth;
+
+  if (options.fitToWidth > 0 || options.fitToHeight > 0) {
+    // Excel's "Fit to N page(s) wide by M tall". Like Excel, this only ever
+    // shrinks — a grid smaller than the target is left at actual size.
+    //
+    // A total-size ratio alone does not deliver the promise: pagination packs
+    // indivisible columns/rows greedily, and repeated title bands consume space
+    // on every page after the first. Three columns at 60% of the page width fit
+    // "1.8 pages" by area yet still need three pages. So the ratio is only a
+    // starting upper bound, which we then tighten against the real packer.
+    let fit = 1;
+    // Excel's 10% floor applies to the *final* scale, so express it relative to
+    // the factor already in play.
+    const minFit = Math.min(1, FIT_MIN_SCALE / scaleFactor);
+    if (options.fitToWidth > 0 && totalTableWidth > 0) {
+      fit = Math.min(fit, (contentWidth * options.fitToWidth) / (totalTableWidth * scaleFactor));
+      fit = tightenToPageCount(
+        candidate =>
+          paginateTracks(
+            columnWidths.map(w => w * scaleFactor * candidate),
+            contentWidth,
+            repeatColIndices,
+            colBreaks,
+            COLUMN_FIT_EPSILON
+          ).length,
+        options.fitToWidth,
+        fit,
+        minFit
+      );
+    }
+    if (options.fitToHeight > 0 && availableHeight > 0) {
+      const totalTableHeight = natural.rowHeights.reduce((sum, h) => sum + h, 0);
+      if (totalTableHeight > 0) {
+        let heightFit = Math.min(
+          fit,
+          (availableHeight * options.fitToHeight) / (totalTableHeight * scaleFactor)
+        );
+        heightFit = tightenToPageCount(
+          candidate =>
+            paginateTracks(
+              natural.rowHeights.map(h => h * scaleFactor * candidate),
+              availableHeight,
+              natural.repeatRowIndices,
+              rowBreaks
+            ).length,
+          options.fitToHeight,
+          heightFit,
+          minFit
+        );
+        fit = Math.min(fit, heightFit);
+      }
+    }
+    if (fit < 1) {
+      scaleFactor = Math.max(scaleFactor * fit, FIT_MIN_SCALE);
+    }
+  } else if (options.fitToPage && totalTableWidth > 0) {
+    // Same contract as `fitToWidth: 1`: it is the *final* width that must fit
+    // one page, so `scale` belongs inside the ratio rather than multiplied on
+    // top of it. Dividing by the running factor makes this `min(scale,
+    // contentWidth / totalTableWidth)`, which neither overflows when `scale`
+    // enlarges nor shrinks twice when it already reduces.
+    const fitScale = contentWidth / (totalTableWidth * scaleFactor);
     if (fitScale < 1) {
       scaleFactor *= fitScale;
     }
   }
   const scaledColumnWidths = columnWidths.map(w => w * scaleFactor);
-  const footerHeight = options.showPageNumbers ? 20 : 0;
-  const availableHeight = contentHeight - headerHeight - footerHeight;
 
-  // --- Step 3: Visible rows and heights ---
-  const { rowHeights, visibleRows } = computeRowHeights(
-    sheet,
-    scaleFactor,
-    printRange,
-    fontManager,
-    options
-  );
+  // --- Step 3: Apply the final scale to the measured heights ---
+  const rowHeights = natural.rowHeights.map(h => h * scaleFactor);
+  const { visibleRows, repeatRowIndices } = natural;
 
   // --- Step 4: Merge map ---
   const mergeMap = buildMergeMap(sheet);
 
   // --- Step 5: Paginate ---
-  const repeatRowCount = typeof options.repeatRows === "number" ? options.repeatRows : 0;
-  const rowBreakSet = buildRowBreakSet(sheet, visibleRows);
-  const rowPages = paginateRows(rowHeights, availableHeight, repeatRowCount, rowBreakSet);
-  const colGroups = paginateColumns(scaledColumnWidths, contentWidth, sheet, visibleCols);
+  const rowPages = paginateTracks(rowHeights, availableHeight, repeatRowIndices, rowBreaks);
+  const colGroups = paginateTracks(
+    scaledColumnWidths,
+    contentWidth,
+    repeatColIndices,
+    colBreaks,
+    COLUMN_FIT_EPSILON
+  );
 
   return {
     pageWidth,
     pageHeight,
     contentWidth,
+    availableHeight,
     headerHeight,
     scaleFactor,
     scaledColumnWidths,
@@ -338,8 +477,169 @@ function prepareLayout(
     mergeMap,
     rowPages,
     colGroups,
-    margins
+    margins,
+    headings
   };
+}
+
+/**
+ * Size the row-number gutter and column-letter band for Excel's "Row and
+ * column headings" print option.
+ *
+ * The gutter is sized from the widest row label that can appear in the printed
+ * range, so the grid origin is stable across pages instead of jittering as row
+ * numbers gain digits.
+ */
+function computeHeadingMetrics(
+  sheet: PdfSheetData,
+  printRange: PrintRange | null,
+  fontManager: FontManager,
+  options: ResolvedPdfOptions
+): LayoutHeadings {
+  const fontSize = HEADING_FONT_SIZE;
+  const resourceName = fontManager.hasEmbeddedFont()
+    ? fontManager.getEmbeddedResourceName()
+    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+
+  const lastRow = printRange?.endRow ?? sheet.bounds.bottom;
+  const widestLabel = String(Math.max(1, lastRow));
+  fontManager.trackText(widestLabel);
+  const labelWidth = fontManager.measureText(widestLabel, resourceName, fontSize);
+
+  return {
+    gutterWidth: labelWidth + 2 * HEADING_PADDING,
+    bandHeight: fontSize + 2 * HEADING_PADDING,
+    fontSize
+  };
+}
+
+/**
+ * Largest scale ≤ `startScale` whose real pagination lands within `target`
+ * pages, found by bisection.
+ *
+ * The caller passes a closure that re-paginates at a candidate scale, so the
+ * answer respects indivisible columns/rows, manual breaks and repeated title
+ * bands instead of trusting a total-size ratio. Returns `startScale` untouched
+ * when it already fits, so nothing is shrunk needlessly.
+ *
+ * `minScale` is the floor the result may not go below. When the target is
+ * unreachable even there — manual page breaks alone can force more pages than
+ * requested — the floor is returned and the sheet simply spans more than
+ * `target` pages, which is preferable to shrinking it into illegibility.
+ */
+function tightenToPageCount(
+  pageCountAt: (scale: number) => number,
+  target: number,
+  startScale: number,
+  minScale: number
+): number {
+  const start = Math.max(startScale, minScale);
+  if (pageCountAt(start) <= target || start <= minScale) {
+    return start;
+  }
+  let lo = minScale;
+  let hi = start;
+  if (pageCountAt(lo) > target) {
+    return lo;
+  }
+  // 24 halvings resolve the scale to ~6e-8 of the starting bound, far below one
+  // device pixel, and each probe is pure arithmetic over the track sizes.
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (pageCountAt(mid) <= target) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/**
+ * Lay out Excel's "Comments at end of sheet" as extra pages.
+ *
+ * Each entry becomes an ordinary {@link LayoutCell} spanning the content width,
+ * so the existing page renderer draws them with no special casing — including
+ * word wrapping, which long comment bodies need. Pages are filled top to bottom
+ * and a new one starts when the next entry would overflow.
+ */
+function buildCommentPages(
+  sheet: PdfSheetData,
+  comments: PdfSheetComment[],
+  options: ResolvedPdfOptions,
+  fontManager: FontManager
+): LayoutPage[] {
+  const { width: pageWidth, height: pageHeight } = pageDimensions(options);
+
+  const { margins } = options;
+  const headerHeight = options.showSheetNames ? SHEET_NAME_BAND_HEIGHT : 0;
+  const footerHeight = options.showPageNumbers ? PAGE_NUMBER_BAND_HEIGHT : 0;
+  const contentWidth = pageWidth - margins.left - margins.right;
+  const top = pageHeight - margins.top - headerHeight;
+  const bottom = margins.bottom + footerHeight;
+
+  const fontSize = options.defaultFontSize;
+  const resourceName = fontManager.hasEmbeddedFont()
+    ? fontManager.getEmbeddedResourceName()
+    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const measure = (text: string) => fontManager.measureText(text, resourceName, fontSize);
+  const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
+  const textColor = { r: 0, g: 0, b: 0 };
+
+  const pages: LayoutPage[] = [];
+  let cells: LayoutCell[] = [];
+  let cursor = top;
+
+  const flush = () => {
+    if (cells.length > 0) {
+      pages.push({ ...blankPage(sheet, options), cells });
+      cells = [];
+      cursor = top;
+    }
+  };
+
+  const push = (text: string, bold: boolean) => {
+    fontManager.trackText(text);
+    const lines = wrapTextLines(text, measure, Math.max(contentWidth - 2 * CELL_PADDING_H, 1));
+    const height = Math.max(lines.length, 1) * lineHeight + 2 * CELL_PADDING_V;
+    if (cursor - height < bottom) {
+      flush();
+    }
+    cells.push({
+      text,
+      rect: { x: margins.left, y: cursor - height, width: contentWidth, height },
+      fontFamily: options.defaultFontFamily,
+      fontSize,
+      bold,
+      italic: false,
+      strike: false,
+      underline: false,
+      textColor,
+      fillColor: null,
+      horizontalAlign: "left",
+      verticalAlign: "top",
+      wrapText: true,
+      borders: { top: null, right: null, bottom: null, left: null },
+      borderInsets: { top: 0, right: 0, bottom: 0, left: 0 },
+      colSpan: 1,
+      rowSpan: 1,
+      hyperlink: null,
+      richText: null,
+      textRotation: 0,
+      indent: 0,
+      textOverflowWidth: 0
+    });
+    cursor -= height;
+  };
+
+  push(`${sheet.name} — comments`, true);
+  for (const comment of comments) {
+    const author = comment.author ? ` (${comment.author})` : "";
+    push(`${comment.ref}${author}: ${comment.text}`, false);
+  }
+  flush();
+
+  return pages;
 }
 
 /**
@@ -363,30 +663,48 @@ function buildPageLayout(
     pageWidth,
     pageHeight,
     contentWidth,
+    availableHeight,
     headerHeight,
     scaleFactor,
-    margins
+    margins,
+    headings
   } = ctx;
 
   const cells: LayoutCell[] = [];
+  // The row-number gutter and column-letter band shift the grid origin right
+  // and down respectively; both are 0 when headings are not printed.
+  const gridLeft = margins.left + (headings?.gutterWidth ?? 0);
+  const gridTop = pageHeight - margins.top - headerHeight - (headings?.bandHeight ?? 0);
 
-  // Compute column offsets for this column group
+  // Compute column offsets for this column group. Content starts at the left
+  // margin, matching Excel's print behaviour; it is only centered when the
+  // sheet (or the caller) asks for it via Excel's "Center on page →
+  // Horizontally" print option.
   const groupColWidths = colGroup.map(ci => scaledColumnWidths[ci]);
   const groupTotalWidth = groupColWidths.reduce((s, w) => s + w, 0);
   const groupColOffsets: number[] = [];
-  let gx = margins.left;
-  if (groupTotalWidth < contentWidth) {
-    gx = margins.left + (contentWidth - groupTotalWidth) / 2;
+  let gx = gridLeft;
+  if (options.horizontalCentered && groupTotalWidth < contentWidth) {
+    gx = gridLeft + (contentWidth - groupTotalWidth) / 2;
   }
   for (const w of groupColWidths) {
     groupColOffsets.push(gx);
     gx += w;
   }
 
-  // Row Y positions
+  // Row Y positions. Same rule as above for the vertical axis.
   const rowYPositions: number[] = [];
   const pageRowHeights: number[] = [];
-  let currentY = pageHeight - margins.top - headerHeight;
+  let currentY = gridTop;
+  if (options.verticalCentered) {
+    const pageTotalHeight = rowPage.reduce(
+      (sum, rowIdx) => sum + (rowHeights[rowIdx] ?? DEFAULT_ROW_HEIGHT * scaleFactor),
+      0
+    );
+    if (pageTotalHeight < availableHeight) {
+      currentY -= (availableHeight - pageTotalHeight) / 2;
+    }
+  }
   for (const rowIdx of rowPage) {
     const rowH = rowHeights[rowIdx] ?? DEFAULT_ROW_HEIGHT * scaleFactor;
     rowYPositions.push(currentY);
@@ -471,6 +789,12 @@ function buildPageLayout(
       // Propagate merged cell borders from boundary cells
       if (mergeInfo?.isMaster) {
         propagateMergeBorders(layoutCell, mergeInfo, wsRowNumber, wsColNumber, sheet);
+        // Propagation re-converts the boundary cell's border straight from the
+        // Excel style, bypassing the conversion in `buildLayoutCell`, so the
+        // black-and-white pass has to be reapplied to the result.
+        if (options.blackAndWhite) {
+          layoutCell.borders = grayscaleBorders(layoutCell.borders);
+        }
       }
 
       cellGrid.set(`${ri}:${gci}`, layoutCell);
@@ -513,39 +837,131 @@ function buildPageLayout(
     images: [],
     charts: [],
     scaleFactor,
+    headings,
+    commentBoxes:
+      options.cellComments === "asDisplayed"
+        ? placeCommentBoxes(
+            sheet,
+            colGroup.map(ci => visibleCols[ci]),
+            groupColOffsets,
+            groupColWidths,
+            rowPage.map(ri => visibleRows[ri]),
+            rowYPositions,
+            pageRowHeights,
+            options,
+            scaleFactor
+          )
+        : undefined,
     headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
   };
 }
 
-function createEmptyPage(sheet: PdfSheetData, options: ResolvedPdfOptions): LayoutPage {
-  let pageWidth = options.pageSize.width;
-  let pageHeight = options.pageSize.height;
-  if (options.orientation === "landscape") {
-    [pageWidth, pageHeight] = [pageHeight, pageWidth];
+/**
+ * Position each comment box on a page, for `cellComments: "asDisplayed"`.
+ *
+ * A comment is placed when its box overlaps the page's tracks. Fractional VML
+ * coordinates are interpolated against the page's own column offsets and row
+ * positions, so a box lands correctly even when the scale, hidden tracks or
+ * repeated title bands have moved the grid around. Comments whose box falls
+ * entirely outside the page are skipped, which keeps each one on a single page
+ * rather than slicing it across the seam.
+ */
+function placeCommentBoxes(
+  sheet: PdfSheetData,
+  sheetCols: number[],
+  columnOffsets: number[],
+  columnWidths: number[],
+  sheetRows: number[],
+  rowYPositions: number[],
+  rowHeights: number[],
+  options: ResolvedPdfOptions,
+  scaleFactor: number
+): LayoutCommentBox[] | undefined {
+  const comments = sheet.comments;
+  if (!comments?.length || sheetCols.length === 0 || sheetRows.length === 0) {
+    return undefined;
   }
 
-  return {
-    pageNumber: 1,
-    sheetPageNumber: sheet.pageSetup?.firstPageNumber ?? 1,
-    sheetPageIndex: 1,
-    sheetPageCount: 1,
-    firstPageNumber: sheet.pageSetup?.firstPageNumber,
-    options,
-    cells: [],
-    width: pageWidth,
-    height: pageHeight,
-    sheetName: sheet.name,
-    sheetCols: [],
-    columnOffsets: [],
-    columnWidths: [],
-    sheetRows: [],
-    rowYPositions: [],
-    rowHeights: [],
-    images: [],
-    charts: [],
-    scaleFactor: 1,
-    headerFooter: options.includeHeadersFooters ? sheet.headerFooter : undefined
+  // VML coordinates are 0-based; the page tracks are 1-based sheet numbers.
+  const xAt = (col: number): number | undefined => {
+    const index = sheetCols.indexOf(Math.floor(col) + 1);
+    if (index < 0) {
+      return undefined;
+    }
+    return columnOffsets[index] + (col - Math.floor(col)) * columnWidths[index];
   };
+  const yAt = (row: number): number | undefined => {
+    const index = sheetRows.indexOf(Math.floor(row) + 1);
+    if (index < 0) {
+      return undefined;
+    }
+    return rowYPositions[index] - (row - Math.floor(row)) * rowHeights[index];
+  };
+
+  const boxes: LayoutCommentBox[] = [];
+  for (const comment of comments) {
+    const anchor = comment.anchor ?? defaultCommentAnchor(comment.ref);
+    if (!anchor) {
+      continue;
+    }
+    const left = xAt(anchor.left);
+    const right = xAt(anchor.right);
+    const top = yAt(anchor.top);
+    const bottom = yAt(anchor.bottom);
+    if (left === undefined || right === undefined || top === undefined || bottom === undefined) {
+      continue;
+    }
+
+    const width = right - left;
+    const height = top - bottom;
+    if (width <= 0 || height <= 0) {
+      continue;
+    }
+
+    const cell = parseCellRef(comment.ref);
+    const markerCol = sheetCols.indexOf(cell.c + 1);
+    const markerRow = sheetRows.indexOf(cell.r + 1);
+    const author = comment.author ? `${comment.author}:\n` : "";
+
+    boxes.push({
+      rect: { x: left, y: bottom, width, height },
+      text: `${author}${comment.text}`,
+      fontSize: options.defaultFontSize * scaleFactor,
+      marker:
+        markerCol >= 0 && markerRow >= 0
+          ? {
+              x: columnOffsets[markerCol] + columnWidths[markerCol],
+              y: rowYPositions[markerRow],
+              size: COMMENT_MARKER_SIZE * scaleFactor
+            }
+          : undefined
+    });
+  }
+
+  return boxes.length > 0 ? boxes : undefined;
+}
+
+/**
+ * Excel's default comment placement, used when the note carries no VML anchor.
+ *
+ * Mirrors the geometry Excel writes for a fresh comment: the box starts at the
+ * commented cell's column, two rows above it, and spans two columns by four
+ * rows.
+ */
+function defaultCommentAnchor(ref: string): PdfCommentAnchor | undefined {
+  let cell: CellRef;
+  try {
+    cell = parseCellRef(ref);
+  } catch {
+    return undefined;
+  }
+  const left = cell.c + 6 / 68;
+  const top = Math.max(cell.r - 2, 0) + 14 / 18;
+  return { left, top, right: left + 2, bottom: top + 4 };
+}
+
+function createEmptyPage(sheet: PdfSheetData, options: ResolvedPdfOptions): LayoutPage {
+  return blankPage(sheet, options);
 }
 
 // =============================================================================
@@ -642,64 +1058,103 @@ function getPrintRange(sheet: PdfSheetData, options: ResolvedPdfOptions): PrintR
 
 function computeColumnWidths(
   sheet: PdfSheetData,
-  printRange: PrintRange | null
+  printRange: PrintRange | null,
+  titleBand?: PdfRepeatBand | false
 ): {
   columnWidths: number[];
   visibleCols: number[];
+  repeatColIndices: number[];
 } {
   const bounds = sheet.bounds;
   const hasData = bounds.top > 0 && bounds.left > 0;
 
   if (!hasData) {
-    return { columnWidths: [], visibleCols: [] };
+    return { columnWidths: [], visibleCols: [], repeatColIndices: [] };
   }
 
   const startCol = printRange?.startCol ?? bounds.left;
   const endCol = printRange?.endCol ?? bounds.right;
   const columnWidths: number[] = [];
   const visibleCols: number[] = [];
+  const emitted = new Set<number>();
 
-  for (let c = startCol; c <= endCol; c++) {
+  const push = (c: number) => {
+    if (emitted.has(c)) {
+      return;
+    }
     const col = sheet.columns.get(c);
     if (col?.hidden) {
-      continue;
+      return;
     }
+    emitted.add(c);
     const excelWidth = col?.width ?? DEFAULT_COLUMN_WIDTH;
     const pixelWidth = charWidthToPixel(excelWidth, MAX_DIGIT_WIDTH_PX);
     const pointWidth = Math.max(pixelWidth * PX_TO_PT, MIN_COLUMN_WIDTH);
     columnWidths.push(pointWidth);
     visibleCols.push(c);
+  };
+
+  // Print titles are independent of the print area, so a band that is not
+  // fully inside it must be emitted first: it prints down the left of every
+  // page. A band wholly inside keeps the sheet's natural order, so the first
+  // page is not reshuffled — only later pages get the repeated prefix.
+  const titleFullyInside = titleBand && titleBand.first >= startCol && titleBand.last <= endCol;
+  if (titleBand && !titleFullyInside) {
+    for (let c = titleBand.first; c <= titleBand.last; c++) {
+      push(c);
+    }
   }
 
-  return { columnWidths, visibleCols };
+  for (let c = startCol; c <= endCol; c++) {
+    push(c);
+  }
+
+  const repeatColIndices = titleBand
+    ? visibleCols.flatMap((c, i) => (c >= titleBand.first && c <= titleBand.last ? [i] : []))
+    : [];
+
+  return { columnWidths, visibleCols, repeatColIndices };
 }
 
 // =============================================================================
 // Row Height Computation
 // =============================================================================
 
+/**
+ * Measure every printable row at 100% scale.
+ *
+ * Heights are deliberately unscaled: `countWrapLines` derives the wrapped line
+ * count from ratios that are independent of the print scale, so a scaled height
+ * is exactly `unscaled * scale`. Measuring once and multiplying avoids re-running
+ * the most expensive step of layout for every probe of the fit solver.
+ */
 function computeRowHeights(
   sheet: PdfSheetData,
-  scaleFactor: number,
   printRange: PrintRange | null,
   fontManager: FontManager,
-  options: ResolvedPdfOptions
-): { rowHeights: number[]; visibleRows: number[] } {
+  options: ResolvedPdfOptions,
+  titleBand?: PdfRepeatBand | false
+): { rowHeights: number[]; visibleRows: number[]; repeatRowIndices: number[] } {
   const bounds = sheet.bounds;
   if (bounds.top <= 0) {
-    return { rowHeights: [], visibleRows: [] };
+    return { rowHeights: [], visibleRows: [], repeatRowIndices: [] };
   }
 
   const startRow = printRange?.startRow ?? bounds.top;
   const endRow = printRange?.endRow ?? bounds.bottom;
   const rowHeights: number[] = [];
   const visibleRows: number[] = [];
+  const emitted = new Set<number>();
 
-  for (let r = startRow; r <= endRow; r++) {
+  const push = (r: number) => {
+    if (emitted.has(r)) {
+      return;
+    }
     const row = sheet.rows.get(r);
     if (row?.hidden) {
-      continue;
+      return;
     }
+    emitted.add(r);
 
     let height: number;
     if (row?.height && row.customHeight) {
@@ -710,17 +1165,34 @@ function computeRowHeights(
       // the row is tall enough for wrapped text.  The stored height may be
       // stale when columns are narrower in the PDF layout or when the PDF
       // uses different font metrics than the original Excel file.
-      height = Math.max(row.height, autoRowHeight(row, scaleFactor, sheet, fontManager, options));
+      height = Math.max(row.height, autoRowHeight(row, sheet, fontManager, options));
     } else {
       // No height info: auto-size based on cell content
-      height = autoRowHeight(row, scaleFactor, sheet, fontManager, options);
+      height = autoRowHeight(row, sheet, fontManager, options);
     }
 
-    rowHeights.push(height * scaleFactor);
+    rowHeights.push(height);
     visibleRows.push(r);
+  };
+
+  // Mirrors `computeColumnWidths`: a title band not fully inside the print area
+  // leads, otherwise the sheet's natural row order is preserved.
+  const titleFullyInside = titleBand && titleBand.first >= startRow && titleBand.last <= endRow;
+  if (titleBand && !titleFullyInside) {
+    for (let r = titleBand.first; r <= titleBand.last; r++) {
+      push(r);
+    }
   }
 
-  return { rowHeights, visibleRows };
+  for (let r = startRow; r <= endRow; r++) {
+    push(r);
+  }
+
+  const repeatRowIndices = titleBand
+    ? visibleRows.flatMap((r, i) => (r >= titleBand.first && r <= titleBand.last ? [i] : []))
+    : [];
+
+  return { rowHeights, visibleRows, repeatRowIndices };
 }
 
 /**
@@ -729,7 +1201,6 @@ function computeRowHeights(
  */
 function autoRowHeight(
   row: PdfRowData | undefined,
-  scaleFactor: number,
   sheet: PdfSheetData,
   fontManager: FontManager,
   options: ResolvedPdfOptions
@@ -738,14 +1209,7 @@ function autoRowHeight(
   if (row) {
     for (const cell of row.cells.values()) {
       const fontSize = getCellFontSize(cell);
-      const wrapLineCount = countWrapLines(
-        cell,
-        fontSize,
-        scaleFactor,
-        sheet,
-        fontManager,
-        options
-      );
+      const wrapLineCount = countWrapLines(cell, fontSize, sheet, fontManager, options);
       const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
       // Account for border width: half of each border extends inward
       const borderTop = cell.style?.border?.top?.style
@@ -795,7 +1259,6 @@ function getCellFontSize(cell: PdfCellData): number {
 function countWrapLines(
   cell: PdfCellData,
   fontSize: number,
-  scaleFactor: number,
   sheet: PdfSheetData,
   fontManager: FontManager,
   options: ResolvedPdfOptions
@@ -809,7 +1272,7 @@ function countWrapLines(
 
   const col = sheet.columns.get(cell.col);
   const colWidth = col?.width ?? DEFAULT_COLUMN_WIDTH;
-  const scaledColPts = charWidthToPixel(colWidth, MAX_DIGIT_WIDTH_PX) * PX_TO_PT * scaleFactor;
+  const colPts = charWidthToPixel(colWidth, MAX_DIGIT_WIDTH_PX) * PX_TO_PT;
   const indent = cell.style.alignment.indent ?? 0;
   const borderLeft = cell.style?.border?.left?.style
     ? borderStyleToLineWidth(cell.style.border.left.style) / 2
@@ -817,9 +1280,11 @@ function countWrapLines(
   const borderRight = cell.style?.border?.right?.style
     ? borderStyleToLineWidth(cell.style.border.right.style) / 2
     : 0;
+  // Width, padding and font size are all unscaled here, which is what makes the
+  // wrapped line count independent of the print scale.
   const padding =
     CELL_PADDING_H + borderLeft + (CELL_PADDING_H + borderRight) + indent * INDENT_WIDTH;
-  const effectiveWidth = Math.max(scaledColPts - padding, 1);
+  const effectiveWidth = Math.max(colPts - padding, 1);
 
   // For rich text cells, use per-run font size measurement to match rendering
   if (cell.type === PdfCellType.RichText) {
@@ -830,7 +1295,6 @@ function countWrapLines(
         const wrappedCount = countRichTextWrapLines(
           text,
           runs,
-          scaleFactor,
           effectiveWidth,
           fontManager,
           options,
@@ -841,7 +1305,6 @@ function countWrapLines(
     }
   }
 
-  const scaledFontSize = fontSize * scaleFactor;
   const fontProps = extractFontProperties(
     cell.style.font,
     options.defaultFontFamily,
@@ -851,7 +1314,7 @@ function countWrapLines(
   const resourceName = fontManager.hasEmbeddedFont()
     ? fontManager.getEmbeddedResourceName()
     : fontManager.ensureFont(pdfFontName);
-  const measure = (s: string) => fontManager.measureText(s, resourceName, scaledFontSize);
+  const measure = (s: string) => fontManager.measureText(s, resourceName, fontSize);
   const wrappedLines = wrapTextLines(text, measure, effectiveWidth);
 
   return Math.max(lineCount, wrappedLines.length);
@@ -865,7 +1328,6 @@ function countWrapLines(
 function countRichTextWrapLines(
   text: string,
   runs: PdfRichTextRunData[],
-  scaleFactor: number,
   effectiveWidth: number,
   fontManager: FontManager,
   options: ResolvedPdfOptions,
@@ -914,7 +1376,7 @@ function countRichTextWrapLines(
         }
       : cellFont;
     const fontProps = extractFontProperties(effectiveRunFont, defaultFamily, defaultSize);
-    return fontProps.fontSize * scaleFactor;
+    return fontProps.fontSize;
   });
 
   // Measure a range of fullText using per-character run font sizes
@@ -1018,24 +1480,26 @@ function countRichTextWrapLines(
 // =============================================================================
 
 /**
- * Build a set of visible-row indices where manual page breaks occur.
+ * Translate manual break positions from sheet track numbers into indices of the
+ * printed track list.
+ *
+ * A break sits *after* its track, so the following index starts a new page.
+ * Shared by both axes; computed once per sheet because the fit solver paginates
+ * many times and must not rebuild the lookup on every probe.
  */
-function buildRowBreakSet(sheet: PdfSheetData, visibleRows: number[]): Set<number> {
+function buildBreakSet(breakTracks: number[], visibleTracks: number[]): Set<number> {
   const breaks = new Set<number>();
-  const rowBreaks = sheet.rowBreaks ?? [];
-  if (rowBreaks.length === 0) {
+  if (breakTracks.length === 0) {
     return breaks;
   }
-  // Map row numbers to visible-row indices
-  const rowToIndex = new Map<number, number>();
-  for (let i = 0; i < visibleRows.length; i++) {
-    rowToIndex.set(visibleRows[i], i);
+  const trackToIndex = new Map<number, number>();
+  for (let i = 0; i < visibleTracks.length; i++) {
+    trackToIndex.set(visibleTracks[i], i);
   }
-  for (const brk of rowBreaks) {
-    const idx = rowToIndex.get(brk);
-    if (idx !== undefined) {
-      // Break AFTER this row, so the next row starts a new page
-      breaks.add(idx + 1);
+  for (const track of breakTracks) {
+    const index = trackToIndex.get(track);
+    if (index !== undefined) {
+      breaks.add(index + 1);
     }
   }
   return breaks;
@@ -1091,139 +1555,113 @@ function buildMergeMap(sheet: PdfSheetData): Map<string, MergeInfo> {
 // Pagination
 // =============================================================================
 
-export function paginateRows(
-  rowHeights: number[],
-  availableHeight: number,
-  repeatRowCount: number,
-  rowBreaks: Set<number>
+/**
+ * Split a track list (rows or columns) into pages.
+ *
+ * One implementation serves both axes: heights against the available page
+ * height, widths against the content width. The axes differ only in the overflow
+ * tolerance, so `epsilon` is the sole parameter that distinguishes them —
+ * columns need a small slack because scaled point widths accumulate rounding.
+ *
+ * `repeatIndices` are the tracks of a print-title band. They are re-emitted at
+ * the start of every page after the first, which is why they are absolute
+ * indices rather than a count: a band may sit in the middle of the printed range
+ * (Excel allows `printTitlesColumn = "C:D"`).
+ *
+ * Manual breaks are honoured via `breaks`, holding the index that must start a
+ * new page.
+ */
+function paginateTracks(
+  sizes: number[],
+  available: number,
+  repeatIndices: number[],
+  breaks: Set<number>,
+  epsilon = 0
 ): number[][] {
-  if (rowHeights.length === 0) {
+  if (sizes.length === 0) {
     return [[]];
   }
 
   const pages: number[][] = [];
-  let currentPage: number[] = [];
-  let currentPageHeight = 0;
+  let current: number[] = [];
+  let used = 0;
   let isFirstPage = true;
   let repeatedPrefixCount = 0;
+  const repeatSet = new Set(repeatIndices);
 
-  const addRepeatRows = () => {
+  const addRepeats = () => {
     repeatedPrefixCount = 0;
-    for (let h = 0; h < repeatRowCount && h < rowHeights.length; h++) {
-      if (currentPageHeight + rowHeights[h] > availableHeight && currentPage.length > 0) {
+    for (const index of repeatIndices) {
+      if (index >= sizes.length) {
+        continue;
+      }
+      if (used + sizes[index] > available + epsilon && current.length > 0) {
         break;
       }
-      currentPage.push(h);
-      currentPageHeight += rowHeights[h];
+      current.push(index);
+      used += sizes[index];
       repeatedPrefixCount++;
     }
   };
 
-  for (let i = 0; i < rowHeights.length; i++) {
-    const rowHeight = rowHeights[i];
-    const pageAvailable = availableHeight;
-    let skipRepeatedRow = false;
+  for (let i = 0; i < sizes.length; i++) {
+    const size = sizes[i];
+    // A manual break at `i` must fire at most once. Without this latch the break
+    // stays true after the repeated title tracks are re-added, so the loop keeps
+    // flushing title-only pages forever (heap exhaustion).
+    let breakConsumed = false;
 
-    while (true) {
-      // Force page break at row break positions, or when content overflows
-      const forceBreak = rowBreaks.has(i) && currentPage.length > 0;
-      if ((forceBreak || currentPageHeight + rowHeight > pageAvailable) && currentPage.length > 0) {
-        const pageHasOnlyRepeatRows =
-          !forceBreak &&
-          !isFirstPage &&
-          currentPage.length > 0 &&
-          currentPage.length === repeatedPrefixCount;
-
-        if (pageHasOnlyRepeatRows) {
-          currentPage = [];
-          currentPageHeight = 0;
+    for (;;) {
+      const forceBreak = !breakConsumed && breaks.has(i) && current.length > 0;
+      if ((forceBreak || used + size > available + epsilon) && current.length > 0) {
+        if (forceBreak) {
+          breakConsumed = true;
+        }
+        // Never emit a page holding nothing but the repeated prefix.
+        if (!forceBreak && !isFirstPage && current.length === repeatedPrefixCount) {
+          current = [];
+          used = 0;
           repeatedPrefixCount = 0;
           continue;
         }
-
-        pages.push(currentPage);
-        currentPage = [];
-        currentPageHeight = 0;
+        pages.push(current);
+        current = [];
+        used = 0;
         repeatedPrefixCount = 0;
         isFirstPage = false;
-        addRepeatRows();
+        addRepeats();
         continue;
       }
 
-      if (!isFirstPage && i < repeatRowCount && currentPage.includes(i)) {
-        skipRepeatedRow = true;
-        break;
+      if (isFirstPage || !repeatSet.has(i) || !current.includes(i)) {
+        current.push(i);
+        used += size;
       }
-
-      currentPage.push(i);
-      currentPageHeight += rowHeight;
       break;
     }
-
-    if (skipRepeatedRow) {
-      continue;
-    }
   }
 
-  if (currentPage.length > 0) {
-    pages.push(currentPage);
+  if (current.length > 0) {
+    pages.push(current);
   }
 
-  return pages.length > 0 ? pages : [[]];
+  return pages;
 }
 
 /**
- * Split columns into groups for horizontal pagination.
+ * Row pagination. Thin wrapper over {@link paginateTracks} that also accepts a
+ * plain count, which reads better in the focused unit tests.
  */
-function paginateColumns(
-  columnWidths: number[],
-  contentWidth: number,
-  sheet: PdfSheetData,
-  visibleCols: number[]
+export function paginateRows(
+  rowHeights: number[],
+  availableHeight: number,
+  repeatRows: number | number[],
+  rowBreaks: Set<number>
 ): number[][] {
-  if (columnWidths.length === 0) {
-    return [[]];
-  }
-
-  // Build col break set (indices into visibleCols)
-  const colBreaks = new Set<number>();
-  const wsColBreaks = sheet.colBreaks ?? [];
-  if (wsColBreaks.length > 0) {
-    const colToIndex = new Map<number, number>();
-    for (let i = 0; i < visibleCols.length; i++) {
-      colToIndex.set(visibleCols[i], i);
-    }
-    for (const brk of wsColBreaks) {
-      const idx = colToIndex.get(brk);
-      if (idx !== undefined) {
-        colBreaks.add(idx + 1);
-      }
-    }
-  }
-
-  const groups: number[][] = [];
-  let currentGroup: number[] = [];
-  let currentWidth = 0;
-
-  for (let i = 0; i < columnWidths.length; i++) {
-    const colWidth = columnWidths[i];
-
-    const forceBreak = colBreaks.has(i) && currentGroup.length > 0;
-    if ((forceBreak || currentWidth + colWidth > contentWidth + 0.01) && currentGroup.length > 0) {
-      groups.push(currentGroup);
-      currentGroup = [];
-      currentWidth = 0;
-    }
-
-    currentGroup.push(i);
-    currentWidth += colWidth;
-  }
-
-  if (currentGroup.length > 0) {
-    groups.push(currentGroup);
-  }
-
-  return groups.length > 0 ? groups : [Array.from({ length: columnWidths.length }, (_, i) => i)];
+  const repeatIndices = Array.isArray(repeatRows)
+    ? repeatRows
+    : Array.from({ length: Math.max(0, repeatRows) }, (_, i) => i);
+  return paginateTracks(rowHeights, availableHeight, repeatIndices, rowBreaks);
 }
 
 // =============================================================================
@@ -1242,7 +1680,7 @@ function buildLayoutCell(
   fontManager: FontManager,
   scaleFactor: number
 ): LayoutCell {
-  const text = cell?.text ?? "";
+  const text = resolveErrorText(cell, options.errors);
   const style: Partial<PdfCellStyle> = cell?.style ?? {};
 
   const fontProps = extractFontProperties(
@@ -1269,7 +1707,9 @@ function buildLayoutCell(
   // and should inherit the cell's style font including bold/italic).
   const richText = buildRichTextRuns(cell, options, fontManager, scaleFactor, style.font);
 
-  const borders = excelBordersToPdf(style.border);
+  const rawBorders = excelBordersToPdf(style.border);
+  const borders = options.blackAndWhite ? grayscaleBorders(rawBorders) : rawBorders;
+  const rawFill = excelFillToPdfColor(style.fill);
 
   return {
     text,
@@ -1280,8 +1720,8 @@ function buildLayoutCell(
     italic: fontProps.italic,
     strike: fontProps.strike,
     underline: fontProps.underline,
-    textColor: fontProps.textColor,
-    fillColor: excelFillToPdfColor(style.fill),
+    textColor: options.blackAndWhite ? toGrayscale(fontProps.textColor) : fontProps.textColor,
+    fillColor: options.blackAndWhite && rawFill !== null ? toGrayscale(rawFill) : rawFill,
     horizontalAlign: resolveHorizontalAlign(style.alignment, cell?.type, cell?.result),
     verticalAlign: excelVAlignToPdf(style.alignment),
     wrapText: style.alignment?.wrapText ?? false,
@@ -1402,7 +1842,7 @@ export function resolveSharedBorders(
  *  - `br` — when present — locates the opposite corner, so the rect size is
  *    the difference.
  *  - `ext` — when present — overrides the size directly. Images use pixels
- *    (px × 0.75 = pt); charts use EMU (EMU / 9525 = pt). The `extUnit`
+ *    (px × 0.75 = pt); charts use EMU (EMU / 12700 = pt). The `extUnit`
  *    field disambiguates. Historical callers that omit `extUnit` keep
  *    the legacy px behaviour.
  *
@@ -1432,7 +1872,7 @@ function resolveAnchorRect(
     targetPage.rowYPositions[pageRowIndex] ??
     targetPage.height -
       targetPage.options.margins.top -
-      (targetPage.options.showSheetNames ? 20 : 0);
+      (targetPage.options.showSheetNames ? SHEET_NAME_BAND_HEIGHT : 0);
 
   // Apply sub-cell offsets, scaled to match page layout.
   const tlColOff = (emuToPt(tl.nativeColOff ?? 0) || 0) * scaleFactor;
@@ -1446,9 +1886,11 @@ function resolveAnchorRect(
   const extUnit = range.extUnit ?? "px";
   if (range.ext) {
     if (extUnit === "emu") {
-      // EMU → px (the Excel drawing ext.cx/cy convention at 96 DPI).
-      width = emuToPx(range.ext.width) * scaleFactor;
-      height = emuToPx(range.ext.height) * scaleFactor;
+      // EMU → pt (÷12700). Using the px factor (÷9525) here rendered every
+      // EMU-sized chart 4/3 too large: a 4in chart came out 384pt instead of
+      // 288pt, overflowing the content area and skewing its aspect ratio.
+      width = emuToPt(range.ext.width) * scaleFactor;
+      height = emuToPt(range.ext.height) * scaleFactor;
     } else {
       // Legacy pixel → pt (0.75 factor = 72/96 dpi)
       width = range.ext.width * 0.75 * scaleFactor;
@@ -1612,13 +2054,24 @@ function assignChartsToPages(
     // is near a page break: rather than clipping them to a sliver, we
     // push them onto the following page at full size.
     const tl = chart.range.tl;
+    const tlCol = (tl.nativeCol ?? tl.col ?? 0) + 1;
     const tlRow = (tl.nativeRow ?? tl.row ?? 0) + 1;
+
+    // Restrict the search to the column band that holds the anchor, then walk
+    // it in row order. Filtering before stepping keeps the result independent
+    // of `pageOrder`: that setting decides the array order, but "the next page
+    // down" is always the next row band within the same column band.
+    const band = layoutPages.filter(page => page.sheetCols.includes(tlCol));
+    const ordered = (band.length > 0 ? band : [...layoutPages]).sort(
+      (a, b) => (a.sheetRows[0] ?? 0) - (b.sheetRows[0] ?? 0)
+    );
+
     let targetPage: LayoutPage | undefined;
-    for (let pi = 0; pi < layoutPages.length; pi++) {
-      const page = layoutPages[pi];
+    for (let pi = 0; pi < ordered.length; pi++) {
+      const page = ordered[pi];
       const lastPageRow = page.sheetRows[page.sheetRows.length - 1] ?? 0;
-      if (lastPageRow >= tlRow - 1 && pi + 1 < layoutPages.length) {
-        targetPage = layoutPages[pi + 1];
+      if (lastPageRow >= tlRow - 1 && pi + 1 < ordered.length) {
+        targetPage = ordered[pi + 1];
         break;
       }
       if (lastPageRow >= tlRow) {
@@ -1627,11 +2080,11 @@ function assignChartsToPages(
       }
     }
     if (!targetPage) {
-      targetPage = layoutPages[layoutPages.length - 1];
+      targetPage = ordered[ordered.length - 1];
     }
     if (targetPage) {
       const margins = targetPage.options.margins;
-      const headerH = targetPage.options.showSheetNames ? 20 : 0;
+      const headerH = targetPage.options.showSheetNames ? SHEET_NAME_BAND_HEIGHT : 0;
       const contentX = margins.left;
       const contentY = margins.bottom;
       const contentW = targetPage.width - margins.left - margins.right;
@@ -1880,7 +2333,40 @@ function buildRichTextRuns(
       italic: fontProps.italic,
       strike: fontProps.strike,
       underline: fontProps.underline,
-      textColor: fontProps.textColor
+      textColor: options.blackAndWhite ? toGrayscale(fontProps.textColor) : fontProps.textColor
     };
   });
+}
+
+/**
+ * Apply Excel's "Cell errors as" print option to a cell's display text.
+ *
+ * Error values reach the PDF model in two shapes: a plain error cell
+ * (`PdfCellType.Error`) and a formula whose computed result is an error
+ * (`PdfCellType.Formula` with an `{ error }` result). Both must be substituted.
+ */
+function resolveErrorText(cell: PdfCellData | undefined, mode: PdfCellErrorMode): string {
+  const text = cell?.text ?? "";
+  if (mode === "displayed" || !cell) {
+    return text;
+  }
+  const isError =
+    cell.type === PdfCellType.Error ||
+    (cell.type === PdfCellType.Formula &&
+      typeof cell.result === "object" &&
+      cell.result !== null &&
+      "error" in cell.result);
+  if (!isError) {
+    return text;
+  }
+  switch (mode) {
+    case "blank":
+      return "";
+    case "dash":
+      return "--";
+    case "NA":
+      return "#N/A";
+    default:
+      return text;
+  }
 }

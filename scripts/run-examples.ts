@@ -151,6 +151,16 @@ const examples: ExampleTest[] = [
     file: "src/modules/formula/examples/formula-pdf-integration.ts",
     description: "Formula: automatic recalc during excelToPdf()",
     outputFiles: ["tmp/formula-examples/formula-pdf-integration.pdf"]
+  },
+  {
+    file: "src/modules/pdf/examples/pdf-page-setup.ts",
+    description: "PDF: Excel page-setup fidelity, incl. issue #203 regression",
+    outputFiles: [
+      "tmp/pdf-examples/issue-203-fixed.pdf",
+      "tmp/pdf-examples/print-titles-outside-print-area.pdf",
+      "tmp/pdf-examples/comments-as-displayed.pdf",
+      "tmp/pdf-examples/combined-settings.pdf"
+    ]
   }
 ];
 

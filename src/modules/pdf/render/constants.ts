@@ -33,3 +33,56 @@ export const INDENT_WIDTH = 10;
  */
 export const MAX_DIGIT_WIDTH_PX = 7;
 export const PX_TO_PT = 72 / 96; // 0.75
+
+/**
+ * Font size of the printed row-number / column-letter headings, in points.
+ *
+ * Deliberately independent of the grid's print scale: headings are a reading
+ * aid rather than content, so a fixed size stays legible even when the grid is
+ * shrunk to fit, and lets the layout reserve exactly the space it draws.
+ */
+export const HEADING_FONT_SIZE = 8;
+
+/** Padding around a heading label, in points (applied on both sides). */
+export const HEADING_PADDING = 3;
+
+/** Background shade and rule color of the heading bands. */
+export const HEADING_FILL = { r: 0.94, g: 0.94, b: 0.94 };
+export const HEADING_RULE = { r: 0.6, g: 0.6, b: 0.6 };
+export const HEADING_TEXT = { r: 0.2, g: 0.2, b: 0.2 };
+
+/**
+ * Lower bound when solving "fit to N pages", matching the 10% floor of Excel's
+ * Page Setup scaling. A target that is unreachable at this scale — typically
+ * because manual page breaks force more pages than requested — yields more than
+ * N pages rather than shrinking the grid into illegibility.
+ */
+export const FIT_MIN_SCALE = 0.1;
+
+/**
+ * Side length of the red corner marker Excel draws on a commented cell, in
+ * points at 100% scale.
+ */
+export const COMMENT_MARKER_SIZE = 4;
+
+/** Comment box fill, border and text colors, matching Excel's note styling. */
+export const COMMENT_FILL = { r: 1, g: 1, b: 0.88 };
+export const COMMENT_BORDER = { r: 0.4, g: 0.4, b: 0.4 };
+export const COMMENT_MARKER_COLOR = { r: 0.8, g: 0, b: 0 };
+
+/**
+ * Overflow tolerance when packing columns into a page, in points.
+ *
+ * Scaled point widths accumulate rounding error, so a column that mathematically
+ * fits can measure a hair too wide. Rows need no such slack because their
+ * heights are not derived from a character-width conversion.
+ */
+export const COLUMN_FIT_EPSILON = 0.01;
+
+/**
+ * Height of the bands reserved for the fallback sheet-name header and
+ * page-number footer, in points. Excel header/footers use their own margins;
+ * these are the simple `showSheetNames` / `showPageNumbers` bands.
+ */
+export const SHEET_NAME_BAND_HEIGHT = 20;
+export const PAGE_NUMBER_BAND_HEIGHT = 20;

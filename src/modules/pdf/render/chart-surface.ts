@@ -21,6 +21,7 @@ import type { PdfContentStream } from "@pdf/core/pdf-stream";
 import type { FontManager } from "@pdf/font/font-manager";
 import { resolvePdfFontName } from "@pdf/font/font-manager";
 import { alphaGsName, emitTextBlock } from "@pdf/render/page-renderer";
+import { toGrayscale } from "@pdf/render/style-converter";
 import type { PdfChartDrawingSurface, PdfChartPathOp, PdfColor } from "@pdf/types";
 
 /**
@@ -33,12 +34,22 @@ import type { PdfChartDrawingSurface, PdfChartPathOp, PdfColor } from "@pdf/type
  * @param alphaValues   Shared set that accumulates transparency values for
  *                      later `ExtGState` registration. The surface adds any
  *                      `color.a` values it observes to this set.
+ * @param grayscale     When true, every color the chart renderer emits is
+ *                      converted to grayscale. Charts bypass the cell style
+ *                      pipeline entirely — the chart engine pushes colors
+ *                      straight into this surface — so Excel's "Black and
+ *                      white" print option has to be applied right here.
  */
 export function createChartSurface(
   stream: PdfContentStream,
   fontManager: FontManager,
-  alphaValues: Set<number>
+  alphaValues: Set<number>,
+  grayscale = false
 ): PdfChartDrawingSurface {
+  /** Single choke point for every color entering the surface. */
+  const mapColor = <T extends PdfColor | undefined>(color: T): T =>
+    grayscale && color ? (toGrayscale(color) as T) : color;
+
   const applyAlpha = (color: PdfColor | undefined): void => {
     if (color?.a !== undefined && color.a < 1) {
       alphaValues.add(color.a);
@@ -46,32 +57,73 @@ export function createChartSurface(
     }
   };
 
-  const paintFillStroke = (options: {
-    fill?: PdfColor;
-    stroke?: PdfColor;
-    lineWidth?: number;
-  }): void => {
-    const { fill, stroke, lineWidth } = options;
+  /**
+   * Fill and/or stroke the path built by `buildPath`.
+   *
+   * `buildPath` is a closure rather than a pre-built path because a fill and a
+   * stroke with *different* opacities cannot share one graphics state: the
+   * alpha `ExtGState` sets `/ca` and `/CA` together, and `fillAndStroke()`
+   * paints both under whichever was applied last. In that case we paint in two
+   * passes and rebuild the path for the second one. (Within a single pass the
+   * unused half of the ExtGState is harmless — a fill-only pass never strokes.)
+   */
+  const paintFillStroke = (
+    buildPath: () => void,
+    options: {
+      fill?: PdfColor;
+      stroke?: PdfColor;
+      lineWidth?: number;
+      dashPattern?: number[];
+    }
+  ): void => {
+    const { lineWidth, dashPattern } = options;
+    const fill = mapColor(options.fill);
+    const stroke = mapColor(options.stroke);
+
+    const applyDash = () => {
+      if (dashPattern && dashPattern.length > 0) {
+        stream.setDashPattern(dashPattern);
+      }
+    };
+
+    if (fill && stroke) {
+      const fillAlpha = fill.a ?? 1;
+      const strokeAlpha = stroke.a ?? 1;
+      if (fillAlpha !== strokeAlpha) {
+        stream.save();
+        buildPath();
+        stream.setFillColor(fill);
+        applyAlpha(fill);
+        stream.fill();
+        stream.restore();
+
+        stream.save();
+        buildPath();
+        stream.setStrokeColor(stroke);
+        applyAlpha(stroke);
+        applyDash();
+        if (lineWidth !== undefined) {
+          stream.setLineWidth(lineWidth);
+        }
+        stream.stroke();
+        stream.restore();
+        return;
+      }
+    }
+
+    buildPath();
+    applyDash();
+    // Reaching here means either a single operation, or a fill and stroke that
+    // share one opacity — so one ExtGState describes both and no reset is
+    // needed (the differing case returned above, each pass in its own q/Q).
     if (fill) {
       stream.setFillColor(fill);
       applyAlpha(fill);
     }
     if (stroke) {
       stream.setStrokeColor(stroke);
-      // When fill applied a sub-1 alpha but stroke is fully opaque (no
-      // `a` field or `a >= 1`), we must explicitly restore opaque alpha
-      // so the stroke is not drawn with the fill's transparency. The
-      // ExtGState set by `applyAlpha(fill)` applies to both fill and
-      // stroke operations in PDF; without this reset the stroke leaks
-      // the fill's alpha.
-      const strokeNeedsAlpha = stroke.a !== undefined && stroke.a < 1;
-      const fillAppliedAlpha = fill?.a !== undefined && fill.a < 1;
-      if (strokeNeedsAlpha) {
+      if (!fill) {
         applyAlpha(stroke);
-      } else if (fillAppliedAlpha) {
-        // Reset to fully opaque for the stroke
-        alphaValues.add(1);
-        stream.setGraphicsState(alphaGsName(1));
       }
       if (lineWidth !== undefined) {
         stream.setLineWidth(lineWidth);
@@ -92,14 +144,14 @@ export function createChartSurface(
     drawRect(options) {
       const { x, y, width, height, fill, stroke, lineWidth } = options;
       stream.save();
-      stream.rect(x, y, width, height);
-      paintFillStroke({ fill, stroke, lineWidth });
+      paintFillStroke(() => stream.rect(x, y, width, height), { fill, stroke, lineWidth });
       stream.restore();
       return this;
     },
 
     drawLine(options) {
-      const { x1, y1, x2, y2, color, lineWidth, dashPattern } = options;
+      const { x1, y1, x2, y2, lineWidth, dashPattern } = options;
+      const color = mapColor(options.color);
       stream.save();
       if (color) {
         stream.setStrokeColor(color);
@@ -121,7 +173,7 @@ export function createChartSurface(
         return this;
       }
       const fontSize = options.fontSize ?? 10;
-      const color = options.color ?? { r: 0, g: 0, b: 0 };
+      const color = mapColor(options.color ?? { r: 0, g: 0, b: 0 });
       const bold = options.bold ?? false;
       const italic = options.italic ?? false;
       const fontFamily = options.fontFamily ?? "Helvetica";
@@ -163,40 +215,40 @@ export function createChartSurface(
     drawCircle(options) {
       const { cx, cy, r, fill, stroke, lineWidth } = options;
       stream.save();
-      stream.circle(cx, cy, r);
-      paintFillStroke({ fill, stroke, lineWidth });
+      paintFillStroke(() => stream.circle(cx, cy, r), { fill, stroke, lineWidth });
       stream.restore();
       return this;
     },
 
     drawPath(ops: PdfChartPathOp[], options) {
-      stream.save();
-      for (const op of ops) {
-        switch (op.op) {
-          case "move":
-            stream.moveTo(op.x, op.y);
-            break;
-          case "line":
-            stream.lineTo(op.x, op.y);
-            break;
-          case "curve":
-            stream.curveTo(op.x1, op.y1, op.x2, op.y2, op.x3, op.y3);
-            break;
-          case "close":
-            stream.closePath();
-            break;
+      const buildPath = () => {
+        for (const op of ops) {
+          switch (op.op) {
+            case "move":
+              stream.moveTo(op.x, op.y);
+              break;
+            case "line":
+              stream.lineTo(op.x, op.y);
+              break;
+            case "curve":
+              stream.curveTo(op.x1, op.y1, op.x2, op.y2, op.x3, op.y3);
+              break;
+            case "close":
+              stream.closePath();
+              break;
+          }
         }
-      }
-      if (options?.closePath) {
-        stream.closePath();
-      }
-      if (options?.dashPattern && options.dashPattern.length > 0) {
-        stream.setDashPattern(options.dashPattern);
-      }
-      paintFillStroke({
+        if (options?.closePath) {
+          stream.closePath();
+        }
+      };
+
+      stream.save();
+      paintFillStroke(buildPath, {
         fill: options?.fill,
         stroke: options?.stroke,
-        lineWidth: options?.lineWidth
+        lineWidth: options?.lineWidth,
+        dashPattern: options?.dashPattern
       });
       stream.restore();
       return this;
