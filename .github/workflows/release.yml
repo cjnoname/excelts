@@ -83,12 +83,21 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: `🚀 Canary version published: \`${{ steps.canary_version.outputs.version }}\`\n\nInstall with: \`npm install documonster@canary\``
-            })
+            // The publish above already succeeded and was verified against the
+            // registry, so this notification must not be able to fail the job.
+            // `createCommitComment` returns a promise: without `await` a rejected
+            // request surfaces as an unhandled rejection and fails the run, and a
+            // transient 500 from the GitHub API is enough to trigger it.
+            try {
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.sha,
+                body: `🚀 Canary version published: \`${{ steps.canary_version.outputs.version }}\`\n\nInstall with: \`npm install documonster@canary\``
+              });
+            } catch (error) {
+              core.warning(`Canary published, but commenting on the commit failed: ${error.message}`);
+            }
 
   # Step 2b: Publish — triggered only when release-please creates a release (PR merged).
   # Automatically uses --tag beta for prerelease versions, or latest for stable.
