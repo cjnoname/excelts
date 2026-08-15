@@ -1,6 +1,10 @@
+import { inflateSync } from "node:zlib";
+
 import { createWorkbook, addWorksheet } from "@excel/core/workbook";
 import { Cell } from "@excel/index";
+import { PdfWriter } from "@pdf/core/pdf-writer";
 import { PdfFontError } from "@pdf/errors";
+import { embedTtfFont } from "@pdf/font/font-embedder";
 import { FontManager } from "@pdf/font/font-manager";
 import { parseTtf } from "@pdf/font/ttf-parser";
 /**
@@ -8,7 +12,7 @@ import { parseTtf } from "@pdf/font/ttf-parser";
  */
 import { describe, it, expect } from "vitest";
 
-import { buildMinimalTtf, buildSparseGidTtf } from "./ttf-test-utils";
+import { buildMinimalTtf, buildSparseGidTtf, buildTtfWithCmap } from "./ttf-test-utils";
 
 // =============================================================================
 // Tests
@@ -109,6 +113,58 @@ describe("Font Embedding Utilities", () => {
     // A=600, B=550 in font units, unitsPerEm=1000
     // (600 + 550) / 1000 * 12 = 13.8
     expect(width).toBeCloseTo(13.8, 1);
+  });
+});
+
+describe("Subset Horizontal Metrics", () => {
+  // A→GID 5, B→GID 8, so the subset has to remap as well as copy.
+  const BEARINGS = [40, 0, 0, 0, 0, -35, 0, 0, 120, 0];
+  const WIDTHS = Array.from({ length: 10 }, (_, i) => 500 + i * 10);
+
+  function buildBearingTtf(): Uint8Array {
+    return buildTtfWithCmap(
+      [
+        { start: 0x41, end: 0x41, delta: 5 - 0x41 },
+        { start: 0x42, end: 0x42, delta: 8 - 0x42 }
+      ],
+      10,
+      { advanceWidths: WIDTHS, leftSideBearings: BEARINGS }
+    );
+  }
+
+  /** Inflate the subset font program the embedder wrote into `writer`. */
+  function subsetProgram(writer: PdfWriter): Uint8Array {
+    const stream = writer.getObjects().find(o => o.content.includes("/Length1"));
+    if (!stream?.streamData) {
+      throw new Error("no embedded font program was written");
+    }
+    return new Uint8Array(inflateSync(stream.streamData));
+  }
+
+  it("should read left side bearings, including negative ones", () => {
+    const font = parseTtf(buildBearingTtf());
+
+    expect(font.leftSideBearings[0]).toBe(40);
+    expect(font.leftSideBearings[5]).toBe(-35); // 'A'
+    expect(font.leftSideBearings[8]).toBe(120); // 'B'
+  });
+
+  it("should carry left side bearings into the subset font", () => {
+    // A rasterizer positions an outline by translating it by `lsb - xMin`, so a
+    // subset that drops the bearing draws every glyph's ink at the pen position
+    // instead of at `pen + xMin`. The damage is invisible in the advance widths
+    // and shows up as glyphs drifting inside their own advance — most visibly
+    // for a glyph like 'j', whose outline reaches left of the pen.
+    const writer = new PdfWriter();
+    const font = parseTtf(buildBearingTtf());
+    embedTtfFont(writer, font, new Set([0x41, 0x42]), "EF1");
+
+    // Used glyphs sorted: [.notdef, 5, 8] → subset GIDs [0, 1, 2].
+    const subset = parseTtf(subsetProgram(writer));
+
+    expect(subset.numGlyphs).toBe(3);
+    expect(Array.from(subset.leftSideBearings)).toEqual([40, -35, 120]);
+    expect(Array.from(subset.advanceWidths)).toEqual([WIDTHS[0], WIDTHS[5], WIDTHS[8]]);
   });
 });
 

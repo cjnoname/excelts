@@ -171,6 +171,12 @@ function assembleTtfFromTables(tables: Array<{ tag: string; data: Uint8Array }>)
 interface TtfBuildOptions {
   /** Per-glyph advance widths. Length must equal `numGlyphs`. Falls back to 500 for each glyph. */
   advanceWidths?: number[];
+  /**
+   * Per-glyph left side bearings. Length must equal `numGlyphs`. Falls back to 0
+   * for each glyph. May be negative, as it is for glyphs like `j` whose outline
+   * reaches left of the pen position.
+   */
+  leftSideBearings?: number[];
   /** Font family name written into the `name` table. Defaults to `"TestFont"`. */
   familyName?: string;
   /** PostScript name written into the `name` table. Defaults to `"<familyName>-Regular"`. */
@@ -188,6 +194,7 @@ export function buildTtfWithCmap(
   options?: TtfBuildOptions
 ): Uint8Array {
   const widths = options?.advanceWidths;
+  const bearings = options?.leftSideBearings;
   const family = options?.familyName ?? "TestFont";
   const ps = options?.postScriptName ?? `${family}-Regular`;
 
@@ -293,7 +300,7 @@ export function buildTtfWithCmap(
   const hmtxV = new DataView(hmtx.buffer);
   for (let i = 0; i < numGlyphs; i++) {
     hmtxV.setUint16(i * 4, widths?.[i] ?? 500, false);
-    hmtxV.setInt16(i * 4 + 2, 0, false);
+    hmtxV.setInt16(i * 4 + 2, bearings?.[i] ?? 0, false);
   }
   tables.push({ tag: "hmtx", data: hmtx });
 

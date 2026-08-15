@@ -100,6 +100,16 @@ export interface TtfFont {
   /** Advance widths per glyph ID (in font units) */
   readonly advanceWidths: Uint16Array;
 
+  /**
+   * Left side bearings per glyph ID (in font units).
+   *
+   * A rasterizer positions a glyph's outline by translating it by
+   * `lsb - xMin`, so a subset font has to ship these unchanged: a bearing that
+   * disagrees with the outline it belongs to moves the glyph inside its own
+   * advance width.
+   */
+  readonly leftSideBearings: Int16Array;
+
   /** Glyph offsets (from loca table), used for subsetting */
   readonly glyphOffsets: Uint32Array;
 }
@@ -292,7 +302,12 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
   const cmap = readCmap(r, tables.get("cmap")!);
 
   // --- hmtx table ---
-  const advanceWidths = readHmtx(r, tables.get("hmtx")!, hhea.numHMetrics, maxp.numGlyphs);
+  const { advanceWidths, leftSideBearings } = readHmtx(
+    r,
+    tables.get("hmtx")!,
+    hhea.numHMetrics,
+    maxp.numGlyphs
+  );
 
   // --- loca table ---
   const glyphOffsets =
@@ -344,6 +359,7 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     tables,
     cmap,
     advanceWidths,
+    leftSideBearings,
     glyphOffsets
   };
 }
@@ -692,29 +708,39 @@ function readCmapFormat12(r: BEReader, offset: number): Map<number, number> {
 // =============================================================================
 
 /**
- * Read horizontal metrics. Returns advance widths for all glyphs.
+ * Read horizontal metrics. Returns the advance width and the left side bearing
+ * of every glyph.
+ *
+ * The table stores `numHMetrics` `longHorMetric` records (advance width + left
+ * side bearing), followed by a bare int16 array holding the left side bearings
+ * of the remaining monospaced-tail glyphs. A font may truncate that trailing
+ * array, so reads past the end of the table fall back to 0.
  */
 function readHmtx(
   r: BEReader,
   entry: TableEntry,
   numHMetrics: number,
   numGlyphs: number
-): Uint16Array {
+): { advanceWidths: Uint16Array; leftSideBearings: Int16Array } {
   const tr = r.at(entry.offset);
   const widths = new Uint16Array(numGlyphs);
+  const leftSideBearings = new Int16Array(numGlyphs);
+  const tableEnd = entry.offset + entry.length;
+  const nextLsb = (): number => (tr.offset + 2 <= tableEnd ? tr.i16() : 0);
 
   let lastWidth = 0;
   for (let i = 0; i < numHMetrics; i++) {
     lastWidth = tr.u16();
-    tr.skip(2); // lsb (left side bearing)
     widths[i] = lastWidth;
+    leftSideBearings[i] = nextLsb();
   }
-  // Remaining glyphs share the last advanceWidth
+  // Remaining glyphs share the last advanceWidth but keep their own bearing
   for (let i = numHMetrics; i < numGlyphs; i++) {
     widths[i] = lastWidth;
+    leftSideBearings[i] = nextLsb();
   }
 
-  return widths;
+  return { advanceWidths: widths, leftSideBearings };
 }
 
 // =============================================================================

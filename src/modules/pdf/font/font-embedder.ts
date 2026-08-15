@@ -287,12 +287,16 @@ function subsetTtfFont(
   }
 
   // --- Rebuild hmtx ---
+  // Both metrics are copied from the source font. The left side bearing matters
+  // as much as the advance width: a rasterizer translates a glyph's outline by
+  // `lsb - xMin`, so writing a constant here would draw every glyph's ink at the
+  // pen position instead of at `pen + xMin`.
   const newHmtx = new Uint8Array(numGlyphs * 4);
   const hmtxView = new DataView(newHmtx.buffer);
   for (let i = 0; i < sortedOldGids.length; i++) {
     const oldGid = sortedOldGids[i];
     hmtxView.setUint16(i * 4, font.advanceWidths[oldGid] ?? 0, false);
-    hmtxView.setInt16(i * 4 + 2, 0, false); // lsb = 0 (simplified)
+    hmtxView.setInt16(i * 4 + 2, font.leftSideBearings[oldGid] ?? 0, false);
   }
 
   // --- Rebuild cmap (format 12 for full Unicode) ---
