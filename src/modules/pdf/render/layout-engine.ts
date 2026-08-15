@@ -18,7 +18,6 @@
  */
 
 import type { FontManager } from "@pdf/font/font-manager";
-import { resolvePdfFontName } from "@pdf/font/font-manager";
 import {
   CELL_PADDING_H,
   CELL_PADDING_V,
@@ -497,9 +496,7 @@ function computeHeadingMetrics(
   options: ResolvedPdfOptions
 ): LayoutHeadings {
   const fontSize = HEADING_FONT_SIZE;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   const lastRow = printRange?.endRow ?? sheet.bounds.bottom;
   const widestLabel = String(Math.max(1, lastRow));
@@ -579,9 +576,7 @@ function buildCommentPages(
   const bottom = margins.bottom + footerHeight;
 
   const fontSize = options.defaultFontSize;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
   const measure = (text: string) => fontManager.measureText(text, resourceName, fontSize);
   const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
   const textColor = { r: 0, g: 0, b: 0 };
@@ -1310,10 +1305,11 @@ function countWrapLines(
     options.defaultFontFamily,
     options.defaultFontSize
   );
-  const pdfFontName = resolvePdfFontName(fontProps.fontFamily, fontProps.bold, fontProps.italic);
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(pdfFontName);
+  const resourceName = fontManager.resolveFont(
+    fontProps.fontFamily,
+    fontProps.bold,
+    fontProps.italic
+  );
   const measure = (s: string) => fontManager.measureText(s, resourceName, fontSize);
   const wrappedLines = wrapTextLines(text, measure, effectiveWidth);
 
@@ -1359,10 +1355,7 @@ function countRichTextWrapLines(
         }
       : cellFont;
     const fontProps = extractFontProperties(effectiveRunFont, defaultFamily, defaultSize);
-    const pdfFontName = resolvePdfFontName(fontProps.fontFamily, fontProps.bold, fontProps.italic);
-    return fontManager.hasEmbeddedFont()
-      ? fontManager.getEmbeddedResourceName()
-      : fontManager.ensureFont(pdfFontName);
+    return fontManager.resolveFont(fontProps.fontFamily, fontProps.bold, fontProps.italic);
   });
 
   // Resolve scaled font sizes for each run
@@ -1692,15 +1685,10 @@ function buildLayoutCell(
   // Scale font size proportionally when fitToPage shrinks the layout
   const scaledFontSize = fontProps.fontSize * scaleFactor;
 
-  // Register font and track text for subsetting
-  if (fontManager.hasEmbeddedFont()) {
-    fontManager.trackText(text);
-  } else {
-    const pdfFontName = resolvePdfFontName(fontProps.fontFamily, fontProps.bold, fontProps.italic);
-    fontManager.ensureFont(pdfFontName);
-    // Track non-WinAnsi code points for Type3 fallback font generation
-    fontManager.trackText(text);
-  }
+  // Register the font this run needs and track its text for subsetting
+  // (non-WinAnsi code points also drive Type3 fallback generation).
+  fontManager.resolveFont(fontProps.fontFamily, fontProps.bold, fontProps.italic);
+  fontManager.trackText(text);
 
   // Rich text runs — pass cell-level font as the fallback for runs without
   // their own font definition (e.g. the first run often has no font object
@@ -2175,17 +2163,12 @@ function computeTextOverflows(
       let textWidth: number;
       if (cell.richText) {
         textWidth = 0;
-        const isEmbedded = fontManager.hasEmbeddedFont();
         for (const run of cell.richText) {
-          const resourceName = isEmbedded
-            ? fontManager.getEmbeddedResourceName()
-            : fontManager.ensureFont(resolvePdfFontName(run.fontFamily, run.bold, run.italic));
+          const resourceName = fontManager.resolveFont(run.fontFamily, run.bold, run.italic);
           textWidth += fontManager.measureText(run.text, resourceName, run.fontSize);
         }
       } else {
-        const resourceName = fontManager.hasEmbeddedFont()
-          ? fontManager.getEmbeddedResourceName()
-          : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+        const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
         textWidth = fontManager.measureText(cell.text, resourceName, cell.fontSize);
       }
 
@@ -2313,16 +2296,12 @@ function buildRichTextRuns(
 
     const fontProps = extractFontProperties(effectiveFont, defaultFamily, defaultSize);
 
-    // Register font for this run
+    // Register the font this run needs. Its text is tracked for subsetting
+    // only when an embedded face will draw it — without one the run renders
+    // through Type1/Type3, whose code points the cell-level pass collects.
+    fontManager.resolveFont(fontProps.fontFamily, fontProps.bold, fontProps.italic);
     if (fontManager.hasEmbeddedFont()) {
       fontManager.trackText(run.text);
-    } else {
-      const pdfFontName = resolvePdfFontName(
-        fontProps.fontFamily,
-        fontProps.bold,
-        fontProps.italic
-      );
-      fontManager.ensureFont(pdfFontName);
     }
 
     return {

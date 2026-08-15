@@ -614,6 +614,24 @@ export interface PdfHeaderFooterOptions {
 }
 
 /**
+ * Raw .ttf bytes for the embedded faces of one typeface, keyed by style.
+ *
+ * Only `regular` is required. A style left out is drawn by the closest face
+ * that was supplied — `boldItalic` prefers `bold`, then `italic` — and every
+ * chain terminates at `regular`.
+ */
+export interface PdfEmbeddedFontFaces {
+  /** The face used for unstyled runs, and the fallback for every other style. */
+  regular: Uint8Array;
+  /** The face used for bold runs. Falls back to `regular`. */
+  bold?: Uint8Array;
+  /** The face used for italic runs. Falls back to `regular`. */
+  italic?: Uint8Array;
+  /** The face used for bold+italic runs. Falls back to `bold`, `italic`, then `regular`. */
+  boldItalic?: Uint8Array;
+}
+
+/**
  * Options for controlling PDF export behavior.
  */
 export interface PdfExportOptions {
@@ -873,8 +891,37 @@ export interface PdfExportOptions {
    * const font = readFileSync("NotoSansSC-Regular.ttf");
    * Pdf.fromExcel(workbook, { font });
    * ```
+   *
+   * A single font draws every run in one face, so bold and italic cell styles
+   * are lost. Use {@link PdfExportOptions.fonts} to embed one face per style.
    */
   font?: Uint8Array;
+
+  /**
+   * TrueType font files (.ttf), one per style, for Unicode text support that
+   * keeps bold and italic.
+   *
+   * A document that embeds a font for its script — Croatian `č`/`ć`/`đ` as
+   * much as CJK — otherwise has to give up styled text, because a single
+   * embedded font draws every run. Supplying the faces separately lets a run's
+   * bold and italic pick the matching one:
+   *
+   * ```typescript
+   * Pdf.fromExcel(workbook, {
+   *   fonts: {
+   *     regular: readFileSync("NotoSans-Regular.ttf"),
+   *     bold: readFileSync("NotoSans-Bold.ttf"),
+   *     italic: readFileSync("NotoSans-Italic.ttf"),
+   *     boldItalic: readFileSync("NotoSans-BoldItalic.ttf")
+   *   }
+   * });
+   * ```
+   *
+   * Only `regular` is required; any style left out falls back to the closest
+   * face that was supplied, ending at `regular`. Takes precedence over
+   * {@link PdfExportOptions.font} when both are given.
+   */
+  fonts?: PdfEmbeddedFontFaces;
 
   /**
    * Encryption options for password-protecting the PDF.

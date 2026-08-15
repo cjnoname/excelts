@@ -31,6 +31,7 @@ import type {
   PdfWorkbook,
   PdfWorkbookSheet,
   PdfExportOptions,
+  PdfEmbeddedFontFaces,
   ResolvedPdfOptions,
   PdfPageSize,
   PdfMargins,
@@ -116,10 +117,18 @@ function prepareExport(workbook: PdfWorkbook, options?: PdfExportOptions): Expor
   // User-provided fonts can be registered immediately. Automatic discovery is
   // delayed until after layout/preflight, when headers, footers, watermarks,
   // and vector charts have all reported their Unicode text.
-  const fontData = options?.font ?? null;
+  //
+  // `fonts` supersedes `font`: it carries one face per style, so bold and
+  // italic survive embedding instead of collapsing onto a single face.
+  const faceData = options?.fonts ?? null;
+  const fontData = faceData ? null : (options?.font ?? null);
 
-  if (!fontData) {
+  if (!fontData && !faceData) {
     registerSystemFontForCodePoints(fontManager, collectNonWinAnsiCodePoints(sheets));
+  }
+
+  if (faceData) {
+    registerEmbeddedFontFaces(fontManager, faceData);
   }
 
   if (fontData) {
@@ -188,9 +197,7 @@ async function finishExport(
     const wmBold = watermark.bold ?? false;
     const wmItalic = watermark.italic ?? false;
     fontManager.trackText(watermark.text);
-    if (!fontManager.hasEmbeddedFont()) {
-      fontManager.ensureFont(resolvePdfFontName(wmFontFamily, wmBold, wmItalic));
-    }
+    fontManager.resolveFont(wmFontFamily, wmBold, wmItalic);
   }
 
   registerAutoDiscoveredFont(fontManager);
@@ -258,6 +265,31 @@ function registerAutoDiscoveredFont(fontManager: FontManager): void {
   registerSystemFontForCodePoints(fontManager, codePoints);
 }
 
+/**
+ * Register the caller's per-style faces.
+ *
+ * `regular` is mandatory and a failure to parse it is fatal, exactly as a bad
+ * `font` is. The optional faces are best-effort: one that fails to parse is
+ * skipped and its style falls back to a face that did parse, which keeps a
+ * single corrupt bold file from failing an otherwise renderable document.
+ */
+function registerEmbeddedFontFaces(fontManager: FontManager, faces: PdfEmbeddedFontFaces): void {
+  const styles = ["regular", "bold", "italic", "boldItalic"] as const;
+  for (const style of styles) {
+    const data = faces[style];
+    if (!data) {
+      continue;
+    }
+    try {
+      fontManager.registerEmbeddedFontFace(parseTtf(data), style);
+    } catch (err) {
+      if (style === "regular") {
+        throw new PdfRenderError("Failed to parse TrueType font", { cause: err });
+      }
+    }
+  }
+}
+
 function registerSystemFontForCodePoints(
   fontManager: FontManager,
   codePoints: ReadonlySet<number>
@@ -320,17 +352,18 @@ function trackFontsForHeaders(allPages: LayoutPage[], fontManager: FontManager):
     }
   }
 
+  // The page footer draws against a Type1 resource unconditionally (page
+  // numbers are ASCII), so its Type1 font must exist before resources are
+  // written even when an embedded face will ultimately render it.
   for (const page of allPages) {
     if (page.options.showPageNumbers) {
       fontManager.ensureFont(resolvePdfFontName(page.options.defaultFontFamily, false, false));
     }
   }
 
-  if (!fontManager.hasEmbeddedFont()) {
-    for (const page of allPages) {
-      if (page.options.showSheetNames) {
-        fontManager.ensureFont(resolvePdfFontName(page.options.defaultFontFamily, true, false));
-      }
+  for (const page of allPages) {
+    if (page.options.showSheetNames) {
+      fontManager.resolveFont(page.options.defaultFontFamily, true, false);
     }
   }
 
@@ -349,15 +382,11 @@ function trackFontsForHeaders(allPages: LayoutPage[], fontManager: FontManager):
           }
           const text = resolveHeaderFooterRunText(run, page);
           fontManager.trackText(text);
-          if (!fontManager.hasEmbeddedFont()) {
-            fontManager.ensureFont(
-              resolvePdfFontName(
-                run.fontFamily || page.options.defaultFontFamily,
-                run.bold,
-                run.italic
-              )
-            );
-          }
+          fontManager.resolveFont(
+            run.fontFamily || page.options.defaultFontFamily,
+            run.bold,
+            run.italic
+          );
         }
       }
     }

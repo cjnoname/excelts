@@ -552,10 +552,7 @@ function drawCellText(
   }
 
   // --- Plain text rendering ---
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   const measure = (s: string) => fontManager.measureText(s, resourceName, fontSize);
   const effectiveWidth = availWidth - indentPts;
@@ -576,7 +573,7 @@ function drawCellText(
 
   stream.setFillColor(cell.textColor);
 
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -627,13 +624,9 @@ function drawRichText(
   const primaryFontSize = maxFontSize;
   const lineHeight = primaryFontSize * LINE_HEIGHT_FACTOR;
 
-  const isEmbedded = fontManager.hasEmbeddedFont();
-
   // Helper: resolve resource name for a run
   const runResource = (run: LayoutRichTextRun) =>
-    isEmbedded
-      ? fontManager.getEmbeddedResourceName()
-      : fontManager.ensureFont(resolvePdfFontName(run.fontFamily, run.bold, run.italic));
+    fontManager.resolveFont(run.fontFamily, run.bold, run.italic);
 
   // --- Wrapping path ---
   if (wrapText) {
@@ -718,7 +711,7 @@ function drawRichText(
       }
 
       let textX = computeTextX(horizontalAlign, rect, lineWidth, indentPts, pad.left, pad.right);
-      const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+      const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
       for (const seg of segments) {
         const { run, text, resourceName } = seg;
 
@@ -773,7 +766,7 @@ function drawRichText(
     pad.bottom
   );
   let textX = computeTextX(horizontalAlign, rect, totalWidth, indentPts, pad.left, pad.right);
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
 
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
@@ -821,10 +814,7 @@ function drawRotatedText(
   const { rect, wrapText } = cell;
   let { fontSize } = cell;
   const pad = computeCellPadding(cell, scaleFactor);
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   // Convert Excel rotation to degrees
   const degrees = excelRotationToDegrees(cell.textRotation);
@@ -1494,10 +1484,7 @@ function drawVerticalStackedText(
 ): void {
   const { rect, text, fontSize, horizontalAlign, verticalAlign } = cell;
   const pad = computeCellPadding(cell, scaleFactor);
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   const charHeight = fontSize * 1.3;
   const ascent = fontManager.getFontAscent(resourceName, fontSize);
@@ -2063,11 +2050,11 @@ function resolveLineRuns(
   width: number;
 }> {
   return line.map(({ run, text }) => {
-    const resourceName = fontManager.hasEmbeddedFont()
-      ? fontManager.getEmbeddedResourceName()
-      : fontManager.ensureFont(
-          resolvePdfFontName(resolveHeaderFooterFontFamily(run, page), run.bold, run.italic)
-        );
+    const resourceName = fontManager.resolveFont(
+      resolveHeaderFooterFontFamily(run, page),
+      run.bold,
+      run.italic
+    );
     const fontSize =
       run.fontSize * (page.headerFooter?.scaleWithDoc === false ? 1 : page.scaleFactor);
     const width = fontManager.measureText(text, resourceName, fontSize);
@@ -2110,9 +2097,7 @@ function drawRowColHeadings(
   }
 
   const { gutterWidth, bandHeight, fontSize } = headings;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   // The heading palette is already neutral gray, so black-and-white needs no
   // conversion here.
@@ -2218,9 +2203,7 @@ function drawCommentBoxes(
   const fill = bw ? toGrayscale(COMMENT_FILL) : COMMENT_FILL;
   const border = bw ? toGrayscale(COMMENT_BORDER) : COMMENT_BORDER;
   const markerColor = bw ? toGrayscale(COMMENT_MARKER_COLOR) : COMMENT_MARKER_COLOR;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   for (const box of boxes) {
     const { rect } = box;
@@ -2276,9 +2259,7 @@ function drawPageHeader(
 ): void {
   const headerFontSize = 10;
   const headerText = page.sheetName;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, true, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, true, false);
 
   const textWidth = fontManager.measureText(headerText, resourceName, headerFontSize);
   const x = (page.width - textWidth) / 2;
@@ -2440,10 +2421,7 @@ function renderTextWatermark(
   const bold = watermark.bold ?? TEXT_WM_DEFAULTS.bold;
   const italic = watermark.italic ?? TEXT_WM_DEFAULTS.italic;
 
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(fontFamily, bold, italic));
+  const resourceName = fontManager.resolveFont(fontFamily, bold, italic);
 
   const textWidth = fontManager.measureText(watermark.text, resourceName, fontSize);
   // Approximate text height using ascent (roughly 0.7 * fontSize for most fonts)

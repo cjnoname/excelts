@@ -9,7 +9,15 @@
  * 3. **Type3 fallback fonts** — auto-generated vector-drawn glyphs for
  *    Unicode characters outside WinAnsi when no embedded font is provided.
  *
- * When an embedded font is registered, ALL text uses the embedded font.
+ * Embedded fonts are held as a set of *faces* keyed by style — regular, bold,
+ * italic, boldItalic. Registering a single font (`registerEmbeddedFont`) is the
+ * degenerate case: it registers one `regular` face, and every style resolves
+ * back to it. When several faces are registered, a run's bold/italic selects
+ * the matching face, falling back through boldItalic → bold → italic → regular
+ * for any face the caller did not supply. This is what lets a document embed a
+ * font for its Unicode coverage without giving up bold and italic.
+ *
+ * When any embedded face is registered, ALL text uses an embedded face.
  * When no embedded font is provided, the system uses Type1 for WinAnsi
  * characters and Type3 for everything else.
  *
@@ -122,6 +130,67 @@ export function resolvePdfFontName(fontFamily: string, bold: boolean, italic: bo
 }
 
 // =============================================================================
+// Embedded Font Faces
+// =============================================================================
+
+/**
+ * The style slot an embedded TrueType face occupies.
+ */
+export type EmbeddedFontStyle = "regular" | "bold" | "italic" | "boldItalic";
+
+/**
+ * The style slot a `bold`/`italic` pair maps to.
+ */
+function embeddedStyleFor(bold: boolean, italic: boolean): EmbeddedFontStyle {
+  if (bold && italic) {
+    return "boldItalic";
+  }
+  if (bold) {
+    return "bold";
+  }
+  if (italic) {
+    return "italic";
+  }
+  return "regular";
+}
+
+/**
+ * Recover the style from a resolved standard font name — the inverse of
+ * {@link resolvePdfFontName}. Used when a run was drawn against a Type1
+ * resource and an embedded face has to be chosen for it afterwards.
+ */
+function parsePdfFontStyle(pdfFontName: string): { bold: boolean; italic: boolean } {
+  const suffix = pdfFontName.slice(pdfFontName.indexOf("-") + 1).toLowerCase();
+  return {
+    bold: suffix.includes("bold"),
+    italic: suffix.includes("italic") || suffix.includes("oblique")
+  };
+}
+
+/**
+ * The faces to try, in order, for a requested style. A caller may supply any
+ * subset of the four; the chain degrades to the closest face they did supply
+ * and always terminates at `regular`, which is mandatory.
+ */
+const FACE_FALLBACK: Record<EmbeddedFontStyle, readonly EmbeddedFontStyle[]> = {
+  regular: ["regular"],
+  bold: ["bold", "regular"],
+  italic: ["italic", "regular"],
+  boldItalic: ["boldItalic", "bold", "italic", "regular"]
+};
+
+/**
+ * One registered embedded TrueType face. `result` is filled in by
+ * `writeFontResources`, which subsets the face and produces its CID mapping.
+ */
+interface EmbeddedFace {
+  style: EmbeddedFontStyle;
+  font: TtfFont;
+  resourceName: string;
+  result: EmbeddedFont | null;
+}
+
+// =============================================================================
 // Font Manager
 // =============================================================================
 
@@ -137,8 +206,10 @@ export class FontManager {
   private nextType1Id = 1;
 
   // --- Embedded TrueType font tracking ---
-  private embeddedFont: TtfFont | null = null;
-  private embeddedResourceName = "";
+  /** Registered faces, keyed by the style slot they fill. */
+  private faces = new Map<EmbeddedFontStyle, EmbeddedFace>();
+  /** The same faces keyed by PDF resource name, for draw-time lookups. */
+  private facesByResource = new Map<string, EmbeddedFace>();
   private usedCodePoints = new Set<number>();
   private nextEmbeddedId = 1;
 
@@ -164,18 +235,59 @@ export class FontManager {
   /**
    * Register an embedded TrueType font for use.
    * When set, all text rendering uses this font instead of standard fonts.
+   *
+   * Shorthand for registering a single `regular` face: with no other face
+   * present every style resolves back to it, which is the historical
+   * single-font behaviour.
    */
   registerEmbeddedFont(font: TtfFont): string {
-    this.embeddedFont = font;
-    this.embeddedResourceName = `EF${this.nextEmbeddedId++}`;
-    return this.embeddedResourceName;
+    return this.registerEmbeddedFontFace(font, "regular");
+  }
+
+  /**
+   * Register one embedded TrueType face for a single style slot.
+   *
+   * Registering `regular` plus any of `bold` / `italic` / `boldItalic` lets a
+   * run's bold and italic survive embedding — `resolveFont` picks the face
+   * matching the run instead of drawing everything in one face. Styles left
+   * unregistered fall back through {@link FACE_FALLBACK}.
+   *
+   * Re-registering a style replaces it; the superseded resource name is
+   * dropped, so it never reaches the PDF.
+   */
+  registerEmbeddedFontFace(font: TtfFont, style: EmbeddedFontStyle): string {
+    const previous = this.faces.get(style);
+    if (previous) {
+      this.facesByResource.delete(previous.resourceName);
+    }
+    const resourceName = `EF${this.nextEmbeddedId++}`;
+    const face: EmbeddedFace = { style, font, resourceName, result: null };
+    this.faces.set(style, face);
+    this.facesByResource.set(resourceName, face);
+    return resourceName;
   }
 
   /**
    * Check if an embedded font is available.
    */
   hasEmbeddedFont(): boolean {
-    return this.embeddedFont !== null;
+    return this.faces.size > 0;
+  }
+
+  /**
+   * The face that should draw a run with the given style, or null when no
+   * embedded face is registered at all.
+   */
+  private resolveFace(bold: boolean, italic: boolean): EmbeddedFace | null {
+    for (const style of FACE_FALLBACK[embeddedStyleFor(bold, italic)]) {
+      const face = this.faces.get(style);
+      if (face) {
+        return face;
+      }
+    }
+    // No `regular` face — possible only if a caller registered, say, `bold`
+    // alone. Any face is a better answer than none.
+    return this.faces.values().next().value ?? null;
   }
 
   /**
@@ -202,9 +314,13 @@ export class FontManager {
 
   /**
    * Get the embedded font's resource name (if registered).
+   *
+   * This is the document's *default* face — `regular`, or the closest thing to
+   * it. Style-aware callers should use `resolveFont`, which honours a run's
+   * bold and italic instead of collapsing every run onto this one face.
    */
   getEmbeddedResourceName(): string {
-    return this.embeddedResourceName;
+    return this.resolveFace(false, false)?.resourceName ?? "";
   }
 
   /**
@@ -219,9 +335,18 @@ export class FontManager {
    * Centralises the routing rule shared by the deferred text renderer and
    * any deferred measurement (anchor alignment, word wrapping) so the two
    * never disagree.
+   *
+   * The standard font name behind the Type1 resource still carries the run's
+   * style ("Helvetica-BoldOblique", "Times-Italic", …), so the switch lands on
+   * the face matching that style rather than flattening the run onto the
+   * default face.
    */
   resolveRenderResourceName(type1ResourceName: string): string {
-    return this.embeddedFont ? this.embeddedResourceName : type1ResourceName;
+    if (this.faces.size === 0 || this.facesByResource.has(type1ResourceName)) {
+      return type1ResourceName;
+    }
+    const { bold, italic } = parsePdfFontStyle(this.getPdfFontName(type1ResourceName));
+    return this.resolveFace(bold, italic)?.resourceName ?? type1ResourceName;
   }
 
   /**
@@ -272,12 +397,14 @@ export class FontManager {
 
   /**
    * Resolve an Excel font specification to a resource name.
-   * If an embedded font is registered, returns the embedded font's resource name.
+   * If embedded faces are registered, returns the face matching `bold`/`italic`
+   * (the family is ignored — embedding replaces the typeface, not the style).
    * Otherwise, falls back to standard Type1 fonts.
    */
   resolveFont(fontFamily: string, bold: boolean, italic: boolean): string {
-    if (this.embeddedFont) {
-      return this.embeddedResourceName;
+    const face = this.resolveFace(bold, italic);
+    if (face) {
+      return face.resourceName;
     }
     // Record unknown families so writers can emit a single diagnostic
     // at build time instead of spamming one warning per text run.
@@ -325,7 +452,7 @@ export class FontManager {
    * Check if a code point needs Type3 rendering (non-WinAnsi, no embedded font).
    */
   needsType3(codePoint: number): boolean {
-    return !this.embeddedFont && !isWinAnsiCodePoint(codePoint);
+    return this.faces.size === 0 && !isWinAnsiCodePoint(codePoint);
   }
 
   // ==========================================================================
@@ -337,8 +464,9 @@ export class FontManager {
    * For mixed Type1/Type3 text, measures each character with the right font.
    */
   measureText(text: string, resourceName: string, fontSize: number): number {
-    if (this.embeddedFont && resourceName === this.embeddedResourceName) {
-      return measureEmbeddedText(text, this.embeddedFont, fontSize);
+    const face = this.facesByResource.get(resourceName);
+    if (face) {
+      return measureEmbeddedText(text, face.font, fontSize);
     }
 
     // If no Type3 fonts or text has no non-WinAnsi chars, use Type1 directly
@@ -377,8 +505,9 @@ export class FontManager {
    * Get the font ascent in points.
    */
   getFontAscent(resourceName: string, fontSize: number): number {
-    if (this.embeddedFont && resourceName === this.embeddedResourceName) {
-      return (this.embeddedFont.ascent / this.embeddedFont.unitsPerEm) * fontSize;
+    const face = this.facesByResource.get(resourceName);
+    if (face) {
+      return (face.font.ascent / face.font.unitsPerEm) * fontSize;
     }
     // Type3 fonts use the same metrics as the base Type1 font
     const base = this.isType3Resource(resourceName)
@@ -391,8 +520,9 @@ export class FontManager {
    * Get the font descent in points (negative value).
    */
   getFontDescent(resourceName: string, fontSize: number): number {
-    if (this.embeddedFont && resourceName === this.embeddedResourceName) {
-      return (this.embeddedFont.descent / this.embeddedFont.unitsPerEm) * fontSize;
+    const face = this.facesByResource.get(resourceName);
+    if (face) {
+      return (face.font.descent / face.font.unitsPerEm) * fontSize;
     }
     const base = this.isType3Resource(resourceName)
       ? "Helvetica"
@@ -404,8 +534,9 @@ export class FontManager {
    * Get the line height in points.
    */
   getLineHeight(resourceName: string, fontSize: number): number {
-    if (this.embeddedFont && resourceName === this.embeddedResourceName) {
-      const f = this.embeddedFont;
+    const face = this.facesByResource.get(resourceName);
+    if (face) {
+      const f = face.font;
       return ((f.ascent - f.descent) / f.unitsPerEm) * fontSize;
     }
     const base = this.isType3Resource(resourceName)
@@ -422,7 +553,7 @@ export class FontManager {
    * Check if a resource name refers to an embedded font.
    */
   isEmbeddedFont(resourceName: string): boolean {
-    return this.embeddedFont !== null && resourceName === this.embeddedResourceName;
+    return this.facesByResource.has(resourceName);
   }
 
   /**
@@ -441,14 +572,15 @@ export class FontManager {
    * subset and produces the unicodeToCid mapping.
    */
   encodeText(text: string, resourceName: string): string | null {
-    if (!this.embeddedFont || resourceName !== this.embeddedResourceName) {
+    const face = this.facesByResource.get(resourceName);
+    if (!face) {
       return null;
     }
 
     // After writeFontResources, use the subset's CID mapping
     // (maps Unicode code points → new sequential glyph IDs in the subset font)
-    if (this._embeddedResult) {
-      return encodeWithCidMap(text, this._embeddedResult.unicodeToCid);
+    if (face.result) {
+      return encodeWithCidMap(text, face.result.unicodeToCid);
     }
 
     // writeFontResources not called yet — this is a programming error
@@ -514,23 +646,25 @@ export class FontManager {
       fontObjectMap.set(resourceName, objNum);
     }
 
-    // Write embedded TrueType font
-    if (this.embeddedFont && this.embeddedResourceName) {
-      const embedded = embedTtfFont(
-        writer,
-        this.embeddedFont,
-        this.usedCodePoints,
-        this.embeddedResourceName
-      );
-      fontObjectMap.set(this.embeddedResourceName, embedded.fontObjNum);
+    // Write embedded TrueType faces — one subset per registered face.
+    //
+    // Every face is subsetted over the same `usedCodePoints`. Code points are
+    // tracked per document, not per run, so there is no way to know which of
+    // them a given face actually draws; covering all of them in each face is
+    // what guarantees a run can switch style without hitting .notdef. Code
+    // points a face has no glyph for are skipped by the embedder, and a
+    // document that registers a single face is unaffected.
+    for (const face of this.faces.values()) {
+      const embedded = embedTtfFont(writer, face.font, this.usedCodePoints, face.resourceName);
+      fontObjectMap.set(face.resourceName, embedded.fontObjNum);
       // Store the embedding result for text re-encoding
-      this._embeddedResult = embedded;
+      face.result = embedded;
     }
 
     // Write Type3 fallback fonts (only when no embedded font). The Type3
     // implementation + Unicode glyph tables are loaded on demand so they stay
     // out of bundles that never render non-WinAnsi characters.
-    if (!this.embeddedFont && this.type3CodePoints.size > 0) {
+    if (this.faces.size === 0 && this.type3CodePoints.size > 0) {
       const { writeType3Fonts } = await import("@pdf/font/type3-font");
       this._type3Result = writeType3Fonts(writer, this.type3CodePoints);
       for (const [resourceName, objNum] of this._type3Result.fontObjects) {
@@ -541,14 +675,12 @@ export class FontManager {
     return fontObjectMap;
   }
 
-  /** Stored after writeFontResources is called */
-  private _embeddedResult: EmbeddedFont | null = null;
-
   /**
-   * Get the embedded font result (available after writeFontResources).
+   * Get the default face's embedding result (available after
+   * writeFontResources).
    */
   getEmbeddedResult(): EmbeddedFont | null {
-    return this._embeddedResult;
+    return this.resolveFace(false, false)?.result ?? null;
   }
 
   /**
