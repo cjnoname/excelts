@@ -4,10 +4,16 @@
   "options": {
     "typeAware": true
   },
-  "ignorePatterns": ["scripts/**/*", "test/**/*", "dist/**/*", "**/*.generated.ts"],
+  "ignorePatterns": [
+    "scripts/**/*",
+    "test/**/*",
+    "dist/**/*",
+    "packages/*/dist/**/*",
+    "**/*.generated.ts"
+  ],
   "overrides": [
     {
-      "files": ["src/**/*.{ts,tsx}"],
+      "files": ["src/**/*.{ts,tsx}", "packages/*/src/**/*.{ts,tsx}"],
       "rules": {
         "no-unused-vars": [
           "error",

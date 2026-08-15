@@ -38,6 +38,12 @@ pnpm format               # Prettier format — run before commit
 pnpm test                 # All tests
 pnpm build                # Production build
 
+# Workspace satellites (packages/*) — need `pnpm build:esm` first, see below
+pnpm verify:packages      # satellites must use the public API only
+pnpm type:packages
+pnpm test:packages
+pnpm build:packages
+
 # Single test file
 pnpm exec vitest run src/modules/excel/core/__tests__/cell.test.ts
 # Pattern match
@@ -60,7 +66,64 @@ src/
 │   └── stream/         # Cross-platform streaming primitives; core/ shared primitives
 ├── utils/              # Shared: errors, datetime, fs, binary, crypto
 └── test/               # Test utilities and fixtures
+
+packages/               # Workspace satellites — MAY have runtime dependencies
+└── mcp/                # @documonster/mcp — Model Context Protocol server (node-only)
 ```
+
+## Workspace Layout
+
+This is a pnpm workspace. The repository **root is the `documonster` package**
+itself; `packages/*` holds satellites.
+
+**Why satellites exist.** The core must have zero runtime dependencies (rule 1),
+but some things genuinely need them — the MCP server needs the MCP SDK. A
+satellite package keeps that dependency out of `documonster` entirely while the
+code still lives in this repo, so a core API change and its MCP counterpart land
+in one PR instead of drifting across two repositories.
+
+**Satellite rules — machine-enforced by `scripts/verify-package-imports.ts`
+(`pnpm verify:packages`, part of `pnpm check`):**
+
+1. A satellite imports `documonster` **only through its published `exports` map**
+   (`documonster/excel`, `documonster/csv`, …). Internal aliases (`@excel/*`,
+   `@utils/*`) and relative reaches into `../../src` are build failures. This
+   makes every satellite an honest consumer of the public API — and a real check
+   on whether that API is sufficient.
+2. A satellite is node-only and ESM-only. It does not participate in the core's
+   CJS / browser / IIFE build matrix.
+3. Satellites are excluded from the root `tsconfig.json` and the root
+   `vitest.config.ts`; each carries its own.
+
+**Consequence for the dev loop:** because satellites resolve the core through
+`exports`, `dist/esm` + `dist/types` must exist before they will type-check.
+Run `pnpm build:esm` once (not the full `pnpm build`), then iterate.
+
+```bash
+pnpm build:esm          # prerequisite: produces dist/esm + dist/types
+pnpm verify:packages    # no internal imports (no build needed)
+pnpm type:packages
+pnpm test:packages
+pnpm build:packages
+```
+
+**Watch out:** root `pnpm check` builds ESM/types first because type-aware lint
+resolves `packages/*` through the public exports map; root tsc itself still
+excludes satellites, whose dedicated type check runs under `pnpm test` and CI.
+Root `pnpm test` (and its `test:all` alias) runs
+everything in the required order (core node tests →
+`build:esm` → package tests → browser tests; the browser step wipes `dist/`, so
+package tests must precede it). `pnpm check` includes `verify:packages` because
+that is a pure source scan; `type:packages` is left out because it needs a build,
+and the pre-commit hook therefore runs it only when `dist/types` already exists.
+
+**Releases.** release-please manages both packages from
+`release-please-config.json`. The core keeps its existing `v0.8.0` tag format
+(`include-component-in-tag: false`); satellites use a component prefix
+(`mcp-v0.1.0`). `@documonster/mcp` depends on `documonster: workspace:*`, which
+`pnpm publish` rewrites to the checked-out core version — so the core must reach
+npm before the satellite, which is why `publish-mcp` needs `publish` in
+`.github/workflows/release.yml`.
 
 ## Module Dependency Layers
 

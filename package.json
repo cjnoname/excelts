@@ -29,13 +29,13 @@
     "url": "https://github.com/documonster/documonster/issues"
   },
   "license": "Apache-2.0",
-  "author": {
-    "name": "cjnoname",
-    "email": "powerfulj87@gmail.com"
-  },
+  "author": "cjnoname <powerfulj87@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/documonster/documonster.git"
+    "url": "git+https://github.com/documonster/documonster.git"
+  },
+  "directories": {
+    "doc": "docs"
   },
   "files": [
     "dist",
@@ -46,6 +46,7 @@
   ],
   "type": "module",
   "sideEffects": false,
+  "main": "index.js",
   "typesVersions": {
     "*": {
       "zip": [
@@ -345,8 +346,9 @@
   "scripts": {
     "example": "node scripts/run-examples.ts",
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
-    "check": "concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\"",
-    "test": "vitest run && pnpm test:browser --",
+    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\"",
+    "test": "vitest run && pnpm build:esm && pnpm test:packages && pnpm test:browser --",
+    "test:all": "pnpm test",
     "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
     "build": "pnpm generate:csv-worker && rimraf dist && concurrently \"pnpm build:esm\" \"pnpm build:cjs\" \"pnpm build:browser\" \"pnpm build:browser:bundle\" && pnpm build:verify && pnpm verify:treeshake",
@@ -356,6 +358,10 @@
     "verify:treeshake": "node scripts/treeshake-verify.ts",
     "verify:layers": "node scripts/verify-layers.ts",
     "verify:public-types": "node scripts/verify-public-types.ts",
+    "verify:packages": "node scripts/verify-package-imports.ts",
+    "build:packages": "pnpm --filter \"./packages/*\" build",
+    "type:packages": "pnpm --filter \"./packages/*\" type",
+    "test:packages": "pnpm --filter \"./packages/*\" test",
     "analyze:browser": "rimraf dist && node --input-type=module -e \"import { execSync } from 'node:child_process'; process.env.ANALYZE='true'; execSync('rolldown -c rolldown.config.ts', { stdio: 'inherit' });\"",
     "clean": "pnpm dlx --reporter=silent rimraf \"**/node_modules\" pnpm-lock.yaml \"**/dist\" -g && pnpm i",
     "lint": "oxlint",

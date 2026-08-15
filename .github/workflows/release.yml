@@ -18,6 +18,11 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      # Per-package output. release-please keys these by the package path from
+      # release-please-config.json, so this is true only when the MCP package
+      # itself was released.
+      mcp_release_created: ${{ steps.release.outputs['packages/mcp--release_created'] }}
+      mcp_tag_name: ${{ steps.release.outputs['packages/mcp--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
@@ -129,6 +134,12 @@ jobs:
       - name: Publish to npm
         run: |
           VERSION=$(node -p "require('./package.json').version")
+          # Idempotent: a re-run after a partial release (core published, MCP
+          # failed) must not abort on "version already exists".
+          if [ "$(npm view documonster@${VERSION} version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "documonster@${VERSION} is already published — skipping"
+            exit 0
+          fi
           if echo "$VERSION" | grep -q "beta\|alpha\|rc"; then
             echo "Publishing ${VERSION} with --tag beta"
             pnpm publish --tag beta --no-git-checks
@@ -150,3 +161,74 @@ jobs:
             exit 1
           fi
           echo "Verified: documonster@${EXPECTED_VERSION} is live on npm"
+
+  # Step 3: Publish @documonster/mcp — only when release-please released that
+  # package specifically.
+  #
+  # Ordering matters. `@documonster/mcp` depends on `documonster: workspace:*`,
+  # which `pnpm publish` rewrites to the core version present in this checkout.
+  # If the same release PR bumped both packages, the core must reach npm first
+  # or the published MCP package would point at a version that does not exist
+  # yet. Hence `needs: publish` — plus `always()`, because a release that only
+  # touched the MCP package leaves the core `publish` job skipped, and a bare
+  # `needs` would block on that.
+  publish-mcp:
+    needs: [release-please, publish]
+    if: ${{ always() && needs.release-please.outputs.mcp_release_created == 'true' && needs.publish.result != 'failure' && needs.publish.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      # The MCP package resolves `documonster` through its published exports
+      # map, so the core's ESM + type output must exist before it can compile.
+      - name: Build core (ESM + types)
+        run: pnpm build:esm
+
+      - name: Build @documonster/mcp
+        run: pnpm build:packages
+
+      - name: Publish @documonster/mcp to npm
+        working-directory: packages/mcp
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$(npm view @documonster/mcp@${VERSION} version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "@documonster/mcp@${VERSION} is already published — skipping"
+            exit 0
+          fi
+          if echo "$VERSION" | grep -q "beta\|alpha\|rc"; then
+            echo "Publishing @documonster/mcp@${VERSION} with --tag beta"
+            pnpm publish --tag beta --no-git-checks
+          else
+            echo "Publishing @documonster/mcp@${VERSION} as latest"
+            pnpm publish --no-git-checks
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify publish
+        working-directory: packages/mcp
+        run: |
+          echo "Waiting for npm registry to propagate..."
+          sleep 30
+          EXPECTED_VERSION=$(node -p "require('./package.json').version")
+          PUBLISHED_VERSION=$(npm view @documonster/mcp@${EXPECTED_VERSION} version 2>/dev/null || echo "NOT_FOUND")
+          if [ "$PUBLISHED_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "ERROR: Expected version ${EXPECTED_VERSION} but found ${PUBLISHED_VERSION} on npm registry"
+            exit 1
+          fi
+          echo "Verified: @documonster/mcp@${EXPECTED_VERSION} is live on npm"

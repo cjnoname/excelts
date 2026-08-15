@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    // Node-only package: resolve `documonster` through its published `exports`
+    // map (the `import` condition), exactly as an external consumer would.
+    // This is deliberate — see the import rule in ../../AGENTS.md: the MCP
+    // server may only touch documonster's PUBLIC API, never `@excel/*` &c.
+    // Consequence: `pnpm build:esm` must have run at the repo root before
+    // type-checking this package, because that is what produces dist/types.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["vitest/globals", "node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "vitest.config.ts"]
+}

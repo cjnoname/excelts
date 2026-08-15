@@ -42,6 +42,7 @@
     "dist",
     "out",
     "scripts/**",
-    "src/modules/csv/worker/worker-script.ts"
+    "src/modules/csv/worker/worker-script.ts",
+    "packages/**"
   ]
 }

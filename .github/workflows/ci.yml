@@ -121,11 +121,73 @@ jobs:
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
 
+      - name: Build core (ESM + types)
+        run: pnpm build:esm
+
       - name: Run linter
         run: pnpm lint
 
       - name: Run type check
         run: pnpm type
+
+  packages:
+    # Workspace satellite packages (packages/*). Separate from the `lint` job
+    # because they consume `documonster` through its published exports map, so
+    # they cannot be type-checked until the core's ESM + type output exists —
+    # which is exactly the constraint that keeps them honest public-API
+    # consumers rather than reaching into src/.
+    #
+    # Runs the full OS matrix on purpose: `sandbox.ts` is the most
+    # platform-sensitive code in the repo (path separators, drive letters,
+    # realpath and symlink semantics all differ on Windows) and it is also the
+    # security boundary, so "passes on Linux" is not good enough.
+    needs: should-run
+    timeout-minutes: 20
+    name: Packages on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macOS-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Set git config
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
+        if: runner.os == 'Windows'
+
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Verify packages use the public API only
+        run: pnpm verify:packages
+
+      - name: Build core (ESM + types)
+        run: pnpm build:esm
+
+      - name: Type check packages
+        run: pnpm type:packages
+
+      - name: Build packages
+        run: pnpm build:packages
+
+      - name: Test packages
+        run: pnpm test:packages
+        env:
+          CI: true
 
   benchmark:
     needs: should-run

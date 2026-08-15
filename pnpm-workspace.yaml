@@ -1,3 +1,10 @@
+# Workspace members. The repository root is itself the `documonster` package
+# (pnpm always treats the root as a workspace package); `packages/*` holds the
+# satellite packages that are allowed to carry runtime dependencies, which the
+# zero-dependency core never may.
+packages:
+  - "packages/*"
+
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
