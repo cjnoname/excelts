@@ -13,8 +13,9 @@ import { initEncryption } from "@pdf/core/encryption";
 import { PdfDict, pdfRef, pdfNumber, pdfString as pdfStr } from "@pdf/core/pdf-object";
 import { PdfContentStream, isWinAnsiCodePoint } from "@pdf/core/pdf-stream";
 import { PdfWriter } from "@pdf/core/pdf-writer";
-import { PdfError, PdfRenderError } from "@pdf/errors";
-import { FontManager, resolvePdfFontName } from "@pdf/font/font-manager";
+import { PdfError, PdfFontError, PdfRenderError } from "@pdf/errors";
+import { compilePdfFontConfig } from "@pdf/font/font-config";
+import { FontManager } from "@pdf/font/font-manager";
 import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { createChartSurface } from "@pdf/render/chart-surface";
@@ -78,7 +79,7 @@ export async function exportPdf(
       date: headerFooter?.date ?? new Date()
     }
   };
-  const ctx = prepareExport(workbook, resolvedInput);
+  const ctx = await prepareExport(workbook, resolvedInput);
 
   for (const sheet of ctx.sheets) {
     await layoutSheetInto(ctx, sheet, resolvedInput);
@@ -103,14 +104,33 @@ interface ExportContext {
  * Shared setup: validate sheets, create font manager and writer,
  * register embedded font.
  */
-function prepareExport(workbook: PdfWorkbook, options?: PdfExportOptions): ExportContext {
+async function prepareExport(
+  workbook: PdfWorkbook,
+  options?: PdfExportOptions
+): Promise<ExportContext> {
   const sheets = selectSheets(workbook, options?.sheets);
 
   if (sheets.length === 0) {
     throw new PdfError("No sheets to export. The workbook is empty or no sheets matched.");
   }
 
-  const fontManager = new FontManager();
+  if (options?.font && options.fonts) {
+    throw new PdfFontError("`font` and `fonts` cannot be used together");
+  }
+
+  let fontManager: FontManager;
+  if (options?.fonts) {
+    try {
+      fontManager = new FontManager(compilePdfFontConfig(options.fonts));
+    } catch (err) {
+      if (err instanceof PdfFontError) {
+        throw err;
+      }
+      throw new PdfRenderError("Failed to configure PDF fonts", { cause: err });
+    }
+  } else {
+    fontManager = new FontManager();
+  }
   const writer = new PdfWriter();
 
   // User-provided fonts can be registered immediately. Automatic discovery is
@@ -118,7 +138,7 @@ function prepareExport(workbook: PdfWorkbook, options?: PdfExportOptions): Expor
   // and vector charts have all reported their Unicode text.
   const fontData = options?.font ?? null;
 
-  if (!fontData) {
+  if (!fontData && !options?.fonts) {
     registerSystemFontForCodePoints(fontManager, collectNonWinAnsiCodePoints(sheets));
   }
 
@@ -129,10 +149,23 @@ function prepareExport(workbook: PdfWorkbook, options?: PdfExportOptions): Expor
     } catch (err) {
       if (options?.font) {
         // Only throw if the user explicitly provided a font
-        throw new PdfRenderError("Failed to parse TrueType font", { cause: err });
+        if (err instanceof PdfFontError) {
+          throw err;
+        }
+        throw new PdfFontError("Failed to parse TrueType font", { cause: err });
       }
       // Auto-discovered font failed to parse — silently fall back to Type1 + Type3
     }
+  }
+
+  // Type3 metrics are part of layout, not a side effect of writing resources.
+  // Seed the repertoire now and load its real widths before any wrapping,
+  // alignment or pagination decision is made.
+  if (!fontManager.hasEmbeddedFont()) {
+    for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
+      fontManager.trackText(String.fromCodePoint(codePoint));
+    }
+    await fontManager.prepare();
   }
 
   return { sheets, fontManager, writer, allPages: [] };
@@ -174,8 +207,10 @@ async function finishExport(
   const documentOptions = resolveOptions(options, sheets[0]);
 
   ensureAtLeastOnePage(allPages, documentOptions, sheets);
-  for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
-    fontManager.trackText(String.fromCodePoint(codePoint));
+  if (!fontManager.hasEmbeddedFont()) {
+    for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
+      fontManager.trackText(String.fromCodePoint(codePoint));
+    }
   }
   fixPageNumbers(allPages);
   trackFontsForHeaders(allPages, fontManager);
@@ -187,10 +222,8 @@ async function finishExport(
     const wmFontFamily = watermark.fontFamily ?? "Helvetica";
     const wmBold = watermark.bold ?? false;
     const wmItalic = watermark.italic ?? false;
-    fontManager.trackText(watermark.text);
-    if (!fontManager.hasEmbeddedFont()) {
-      fontManager.ensureFont(resolvePdfFontName(wmFontFamily, wmBold, wmItalic));
-    }
+    const resourceName = fontManager.resolveFont(wmFontFamily, wmBold, wmItalic);
+    fontManager.trackText(watermark.text, resourceName);
   }
 
   registerAutoDiscoveredFont(fontManager);
@@ -205,6 +238,11 @@ async function finishExport(
     watermark
   );
 
+  // Every text run has now been routed, so coverage gaps are fully known.
+  if (options?.onWarning) {
+    fontManager.reportDiagnostics(options.onWarning);
+  }
+
   return buildFinalPdf(
     writer,
     pageObjNums,
@@ -215,7 +253,6 @@ async function finishExport(
     options
   );
 }
-
 interface PreparedChart {
   stream: PdfContentStream;
   alphaValues: Set<number>;
@@ -312,25 +349,14 @@ function fixPageNumbers(allPages: LayoutPage[]): void {
 }
 
 function trackFontsForHeaders(allPages: LayoutPage[], fontManager: FontManager): void {
-  if (fontManager.hasEmbeddedFont()) {
-    for (const page of allPages) {
-      if (page.options.showSheetNames) {
-        fontManager.trackText(page.sheetName);
-      }
-    }
-  }
-
   for (const page of allPages) {
-    if (page.options.showPageNumbers) {
-      fontManager.ensureFont(resolvePdfFontName(page.options.defaultFontFamily, false, false));
+    if (page.options.showSheetNames) {
+      const resourceName = fontManager.resolveFont(page.options.defaultFontFamily, true, false);
+      fontManager.trackText(page.sheetName, resourceName);
     }
-  }
-
-  if (!fontManager.hasEmbeddedFont()) {
-    for (const page of allPages) {
-      if (page.options.showSheetNames) {
-        fontManager.ensureFont(resolvePdfFontName(page.options.defaultFontFamily, true, false));
-      }
+    if (page.options.showPageNumbers) {
+      const resourceName = fontManager.resolveFont(page.options.defaultFontFamily, false, false);
+      fontManager.trackText(`Page ${page.pageNumber} of ${allPages.length}`, resourceName);
     }
   }
 
@@ -348,16 +374,12 @@ function trackFontsForHeaders(allPages: LayoutPage[], fontManager: FontManager):
             continue;
           }
           const text = resolveHeaderFooterRunText(run, page);
-          fontManager.trackText(text);
-          if (!fontManager.hasEmbeddedFont()) {
-            fontManager.ensureFont(
-              resolvePdfFontName(
-                run.fontFamily || page.options.defaultFontFamily,
-                run.bold,
-                run.italic
-              )
-            );
-          }
+          const resourceName = fontManager.resolveFont(
+            run.fontFamily || page.options.defaultFontFamily,
+            run.bold,
+            run.italic
+          );
+          fontManager.trackText(text, resourceName);
         }
       }
     }

@@ -13,6 +13,7 @@ import type { DocxDocument, PageContent } from "@word/index";
 import { describe, it, expect } from "vitest";
 
 import { docxToPdf } from "../word-bridge";
+import { buildTtfWithCmap } from "./ttf-test-utils";
 
 describe("docxToPdf — layout-driven smoke test", () => {
   it("produces a valid PDF for a paragraph-only document", async () => {
@@ -28,6 +29,104 @@ describe("docxToPdf — layout-driven smoke test", () => {
     expect(head).toBe("%PDF-");
     const tailDecoded = new TextDecoder().decode(pdfBytes.slice(-32));
     expect(tailDecoded).toMatch(/%%EOF\s*$/);
+  });
+
+  it("registers configured fonts before Word performs its first draw", async () => {
+    const h = Document.create();
+    Document.addParagraphElement(
+      h,
+      Build.paragraph([Build.text("A", { bold: true, font: "Word Family" })])
+    );
+    const regular = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "WordRegular"
+    });
+    const bold = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "WordBold",
+      postScriptName: "WordBold-Bold"
+    });
+
+    const bytes = await docxToPdf(Document.build(h), {
+      fonts: {
+        default: { regular },
+        families: [{ name: "Word Family", faces: { regular, bold } }]
+      }
+    });
+    const pdf = new TextDecoder("latin1").decode(bytes);
+    expect(pdf).toContain("WordBold-Bold");
+    const encoded = pdf.match(/<([0-9A-F]{4})> Tj/);
+    expect(encoded).not.toBeNull();
+    expect(encoded![1]).not.toBe("0000");
+  });
+
+  it("uses the configured font metrics for both Word layout and PDF drawing", async () => {
+    const h = Document.create();
+    Document.addParagraphElement(
+      h,
+      Build.paragraph([Build.text("AAA AAA", { font: "Wide Family", size: 20 })])
+    );
+    const widths = [500, ...Array.from({ length: 59 }, () => 500)];
+    widths[0x41 - 0x20 + 1] = 2000;
+    const wide = buildTtfWithCmap([{ start: 0x20, end: 0x5a, delta: 1 - 0x20 }], 60, {
+      advanceWidths: widths,
+      familyName: "WideFont"
+    });
+
+    const bytes = await docxToPdf(Document.build(h), {
+      pageWidth: 90,
+      pageHeight: 200,
+      marginLeft: 20,
+      marginRight: 20,
+      marginTop: 20,
+      marginBottom: 20,
+      fonts: {
+        default: { regular: wide },
+        families: [{ name: "Wide Family", faces: { regular: wide } }]
+      }
+    });
+    const pdf = new TextDecoder("latin1").decode(bytes);
+    const textYs = [...pdf.matchAll(/1 0 0 1 [\d.]+ ([\d.]+) Tm/g)].map(match =>
+      Number.parseFloat(match[1])
+    );
+
+    expect(new Set(textYs).size).toBe(3);
+  });
+
+  it("reports uncovered characters through onWarning", async () => {
+    const h = Document.create();
+    Document.addParagraphElement(h, Build.paragraph([Build.text("A中")]));
+    const latin = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "LatinOnly"
+    });
+    const warnings: string[] = [];
+
+    await docxToPdf(Document.build(h), {
+      fonts: { default: { regular: latin } },
+      onWarning: message => warnings.push(message)
+    });
+
+    expect(warnings.some(message => message.includes("U+4E2D"))).toBe(true);
+  });
+
+  it("does not interpret a real family name ending in -Bold as a style suffix", async () => {
+    const h = Document.create();
+    Document.addParagraphElement(h, Build.paragraph([Build.text("AAAA", { font: "Brand-Bold" })]));
+    const narrow = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "Default",
+      advanceWidths: [500, 300]
+    });
+    const wide = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "Brand-Bold",
+      advanceWidths: [500, 900]
+    });
+
+    const bytes = await docxToPdf(Document.build(h), {
+      fonts: {
+        default: { regular: narrow },
+        families: [{ name: "Brand-Bold", faces: { regular: wide } }]
+      }
+    });
+
+    expect(new TextDecoder("latin1").decode(bytes)).toContain("Brand-Bold-Regular-Subset");
   });
 
   it("handles a document with a paragraph + table without throwing", async () => {

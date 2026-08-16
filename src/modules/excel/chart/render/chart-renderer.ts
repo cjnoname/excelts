@@ -8281,6 +8281,12 @@ function truncateLabel(label: string): string {
 }
 
 /**
+ * CSS pixels to points. `@excel/utils/text-metrics` reports pixel widths for a
+ * point-sized font; chart scene units are the units text is drawn in.
+ */
+const POINTS_PER_PIXEL = 72 / 96;
+
+/**
  * Measure the rendered pixel width of a label using the Excel module's
  * built-in font metrics engine (`@excel/utils/text-metrics`). This replaces
  * the previous `text.length * fontSize * 0.55` approximation with a real
@@ -8299,12 +8305,21 @@ function estimateTextWidth(
   if (!text) {
     return 0;
   }
-  return measureTextWidthPx(text, {
-    name: options.fontName ?? "arial",
-    size: fontSize,
-    bold: options.bold,
-    italic: options.italic
-  });
+  // `measureTextWidthPx` takes a point size and returns a CSS-pixel width, so
+  // it embeds a 96/72 scale. Chart scenes are a single coordinate space in which
+  // text is *drawn* at `fontSize` units — SVG emits `font-size="${fontSize}"`
+  // (user units) and the PDF surface passes `fontSize` straight through as
+  // points. Returning the pixel width therefore over-allocated every label by
+  // 4/3, which pushed legends wider, shifted centred titles left, and
+  // ellipsised axis labels that in fact fit.
+  return (
+    measureTextWidthPx(text, {
+      name: options.fontName ?? "arial",
+      size: fontSize,
+      bold: options.bold,
+      italic: options.italic
+    }) * POINTS_PER_PIXEL
+  );
 }
 
 function loadImage(url: string): Promise<HTMLImageElement> {

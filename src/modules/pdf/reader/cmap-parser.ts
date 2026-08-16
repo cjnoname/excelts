@@ -74,10 +74,7 @@ export class CMap {
       } else {
         // code is within this range
         if (typeof range.mapping === "string") {
-          // Single base string — offset the code point
-          const offset = code - range.low;
-          const baseCode = stringToCodePoint(range.mapping);
-          return String.fromCodePoint(baseCode + offset);
+          return offsetBfRangeDestination(range.mapping, code - range.low);
         }
         // Array mapping
         const index = code - range.low;
@@ -356,8 +353,43 @@ function decodeUtf16BE(bytes: Uint8Array): string {
 }
 
 /**
- * Get the first code point from a string.
+ * Apply a `bfrange` offset to its destination string.
+ *
+ * Per PDF 32000-1 9.10.3 a `bfrange` with a single destination string maps the
+ * range by incrementing the *last* byte of that string, keeping the preceding
+ * bytes fixed. So `<0000> <0002> <00410042>` maps to "AB", "AC", "AD" — the
+ * destination may be several UTF-16 code units long (decomposed accents,
+ * ligature expansions, emoji sequences), and all but the last are carried
+ * through unchanged.
+ *
+ * Returns undefined when the increment would leave the last code unit's valid
+ * space, which means the CMap's range is wider than its destination allows;
+ * inventing a character there would silently corrupt extracted text.
  */
-function stringToCodePoint(str: string): number {
-  return str.codePointAt(0) ?? 0;
+function offsetBfRangeDestination(destination: string, offset: number): string | undefined {
+  if (destination.length === 0) {
+    return undefined;
+  }
+  if (offset === 0) {
+    return destination;
+  }
+
+  const lastIndex = destination.length - 1;
+  const incremented = destination.charCodeAt(lastIndex) + offset;
+  if (incremented < 0 || incremented > 0xffff) {
+    return undefined;
+  }
+  // A destination ending in a surrogate pair must still end in one: the low
+  // surrogate may only be replaced by another low surrogate.
+  const precedingUnit = lastIndex > 0 ? destination.charCodeAt(lastIndex - 1) : 0;
+  const endsWithSurrogatePair = precedingUnit >= 0xd800 && precedingUnit <= 0xdbff;
+  if (endsWithSurrogatePair && (incremented < 0xdc00 || incremented > 0xdfff)) {
+    return undefined;
+  }
+  // An unpaired surrogate is not a character.
+  if (!endsWithSurrogatePair && incremented >= 0xd800 && incremented <= 0xdfff) {
+    return undefined;
+  }
+
+  return destination.slice(0, lastIndex) + String.fromCharCode(incremented);
 }

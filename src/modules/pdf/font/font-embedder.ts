@@ -1,7 +1,7 @@
 /**
  * TrueType font subsetting and PDF embedding.
  *
- * Takes a parsed TrueType font and a set of used Unicode code points,
+ * Takes a parsed TrueType font and the used text,
  * and produces:
  * 1. A subsetted font program (binary TTF with only the needed glyphs)
  * 2. A CID-to-GID mapping for the CIDFont dictionary
@@ -11,8 +11,8 @@
  * PDF embedding uses a Type0 (composite) font structure:
  *   Type0 font → CIDFont (CIDFontType2) → embedded TrueType font program
  *
- * The CID-to-GID mapping is Identity (CID = new GID in the subset).
- * Character codes in the content stream are 2-byte big-endian glyph IDs.
+ * CIDs identify encoded Unicode sequences independently from glyph IDs.
+ * Character codes in the content stream are 2-byte big-endian CIDs.
  *
  * @see PDF Reference 1.7, §5.6 - Composite Fonts
  * @see PDF Reference 1.7, §5.9 - ToUnicode CMaps
@@ -21,6 +21,7 @@
 import { zlibSync } from "@archive/compression/compress";
 import { PdfDict, pdfName, pdfNumber, pdfRef, pdfArray } from "@pdf/core/pdf-object";
 import type { PdfWriter } from "@pdf/core/pdf-writer";
+import { PdfFontError } from "@pdf/errors";
 import type { TtfFont } from "@pdf/font/ttf-parser";
 import { concatUint8Arrays } from "@utils/binary";
 
@@ -42,10 +43,16 @@ export interface EmbeddedFont {
   font: TtfFont;
 
   /**
-   * Map from Unicode code point → CID (= new glyph index in subset).
-   * Only contains characters that were actually used.
+   * Legacy map from single Unicode code points to CIDs.
+   * Multi-code-point sequences are available through `sequenceToCid`.
    */
   unicodeToCid: Map<number, number>;
+
+  /** Map from an extracted Unicode sequence to its CID. */
+  sequenceToCid: Map<string, number>;
+
+  /** Encode text with the same grapheme/sequence rules used while subsetting. */
+  encodeText(text: string): readonly number[];
 
   /** Advance widths in font units, indexed by CID */
   cidWidths: number[];
@@ -60,23 +67,21 @@ export interface EmbeddedFont {
  *
  * @param writer - The PDF writer to add objects to
  * @param font - Parsed TrueType font
- * @param usedCodePoints - Set of Unicode code points used in the document
+ * @param usedText - Text runs, or a legacy set of Unicode code points
  * @param resourceName - PDF resource name (e.g., "EF1")
  * @returns Embedded font info
  */
 export function embedTtfFont(
   writer: PdfWriter,
   font: TtfFont,
-  usedCodePoints: Set<number>,
+  usedText: Set<number> | Iterable<string> | Iterable<EmbeddedGlyphUse>,
   resourceName: string
 ): EmbeddedFont {
   // --- Step 1: Build the glyph subset ---
   // Map: original glyph ID → new glyph ID in subset
-  // Map: Unicode code point → new CID
-  const { oldToNewGid, unicodeToCid, cidWidths, usedGlyphIds } = buildSubsetMapping(
-    font,
-    usedCodePoints
-  );
+  // Map: Unicode code point → CID, then CID → subset glyph ID
+  const { oldToNewGid, unicodeToCid, sequenceToCid, cidToGid, cidWidths, usedGlyphIds } =
+    buildSubsetMapping(font, usedText);
 
   // --- Step 2: Create the subsetted font program ---
   const subsetData = subsetTtfFont(font, usedGlyphIds, oldToNewGid);
@@ -109,7 +114,16 @@ export function embedTtfFont(
   // --- Step 5: Build the CID width array (W entry) ---
   const wArray = buildWidthArray(cidWidths, font.unitsPerEm);
 
-  // --- Step 6: Create the CIDFont dictionary ---
+  // --- Step 6: Write the binary CID-to-GID map ---
+  const cidToGidMap = buildCidToGidMap(cidToGid);
+  const compressedCidToGidMap = zlibSync(cidToGidMap, { level: 6 });
+  const cidToGidMapObjNum = writer.allocObject();
+  const cidToGidMapDict = new PdfDict()
+    .set("Length", pdfNumber(compressedCidToGidMap.length))
+    .set("Filter", "/FlateDecode");
+  writer.addStreamObject(cidToGidMapObjNum, cidToGidMapDict, compressedCidToGidMap);
+
+  // --- Step 7: Create the CIDFont dictionary ---
   const cidFontObjNum = writer.allocObject();
   const cidFontDict = new PdfDict()
     .set("Type", "/Font")
@@ -119,11 +133,11 @@ export function embedTtfFont(
     .set("FontDescriptor", pdfRef(descriptorObjNum))
     .set("DW", pdfNumber(1000))
     .set("W", wArray)
-    .set("CIDToGIDMap", "/Identity");
+    .set("CIDToGIDMap", pdfRef(cidToGidMapObjNum));
   writer.addObject(cidFontObjNum, cidFontDict);
 
-  // --- Step 7: Create the ToUnicode CMap ---
-  const toUnicodeCmap = buildToUnicodeCMap(unicodeToCid);
+  // --- Step 8: Create the ToUnicode CMap ---
+  const toUnicodeCmap = buildToUnicodeCMap(sequenceToCid);
   const compressedCmap = zlibSync(toUnicodeCmap, { level: 6 });
   const toUnicodeObjNum = writer.allocObject();
   const toUnicodeDict = new PdfDict()
@@ -131,7 +145,7 @@ export function embedTtfFont(
     .set("Filter", "/FlateDecode");
   writer.addStreamObject(toUnicodeObjNum, toUnicodeDict, compressedCmap);
 
-  // --- Step 8: Create the Type0 font dictionary ---
+  // --- Step 9: Create the Type0 font dictionary ---
   const fontObjNum = writer.allocObject();
   const type0Dict = new PdfDict()
     .set("Type", "/Font")
@@ -147,6 +161,8 @@ export function embedTtfFont(
     fontObjNum,
     font,
     unicodeToCid,
+    sequenceToCid,
+    encodeText: text => encodeUnicodeSequences(text, sequenceToCid),
     cidWidths
   };
 }
@@ -158,27 +174,71 @@ export function embedTtfFont(
 interface SubsetMapping {
   /** Map from original glyph ID → new glyph ID in subset */
   oldToNewGid: Map<number, number>;
-  /** Map from Unicode code point → new CID (= new GID) */
+  /** Map from Unicode code point → CID */
   unicodeToCid: Map<number, number>;
-  /** Widths indexed by new CID */
+  /** Map from Unicode sequence → CID */
+  sequenceToCid: Map<string, number>;
+  /** Map from CID → subset GID */
+  cidToGid: number[];
+  /** Widths indexed by CID */
   cidWidths: number[];
   /** Set of all original glyph IDs needed */
   usedGlyphIds: Set<number>;
 }
 
-function buildSubsetMapping(font: TtfFont, usedCodePoints: Set<number>): SubsetMapping {
+export interface EmbeddedGlyphUse {
+  readonly codePoint: number;
+  readonly sequence: string;
+}
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+function buildSubsetMapping(
+  font: TtfFont,
+  usedText: Set<number> | Iterable<string> | Iterable<EmbeddedGlyphUse>
+): SubsetMapping {
   const usedGlyphIds = new Set<number>();
-  const cpToOrigGid = new Map<number, number>();
+  const sequenceToOrigGid = new Map<string, number>();
+  const entries: Array<string | number | EmbeddedGlyphUse> = [];
+  for (const value of usedText) {
+    entries.push(value);
+  }
+  const legacyScalars = entries.every(value => typeof value === "number");
+  const textRuns = entries.every(value => typeof value === "string");
+  const glyphUses = entries.every(
+    value =>
+      typeof value === "object" && value !== null && "codePoint" in value && "sequence" in value
+  );
+  if (!legacyScalars && !textRuns && !glyphUses) {
+    throw new PdfFontError(
+      "Embedded font usage must contain only code points, only text runs, or only glyph uses"
+    );
+  }
 
   // Always include glyph 0 (.notdef)
   usedGlyphIds.add(0);
 
-  // Map used code points to their glyph IDs
-  for (const cp of usedCodePoints) {
-    const gid = font.cmap.get(cp);
-    if (gid !== undefined && gid > 0) {
-      usedGlyphIds.add(gid);
-      cpToOrigGid.set(cp, gid);
+  // Map every visible use to its glyph ID. Missing glyphs deliberately map
+  // to GID 0 rather than disappearing from the encoding plan: the page still
+  // shows .notdef, but a distinct CID + ToUnicode entry preserves the original
+  // character for copy/search/accessibility.
+  const uses: EmbeddedGlyphUse[] = legacyScalars
+    ? (entries as number[]).map(codePoint => ({
+        codePoint,
+        sequence: String.fromCodePoint(codePoint)
+      }))
+    : textRuns
+      ? (entries as string[]).flatMap(text => collectEmbeddedGlyphUses(text))
+      : (entries as EmbeddedGlyphUse[]);
+  for (const use of uses) {
+    const gid = isSemanticControl(use.codePoint)
+      ? (font.cmap.get(0x20) ?? 0)
+      : (font.cmap.get(use.codePoint) ?? 0);
+    if (!sequenceToOrigGid.has(use.sequence)) {
+      sequenceToOrigGid.set(use.sequence, gid);
+      if (gid > 0) {
+        usedGlyphIds.add(gid);
+      }
     }
   }
 
@@ -210,20 +270,89 @@ function buildSubsetMapping(font: TtfFont, usedCodePoints: Set<number>): SubsetM
     oldToNewGid.set(sortedGids[i], i);
   }
 
-  // Build unicode → new CID mapping and width array
+  // Assign one CID per Unicode sequence. Multiple sequences may deliberately
+  // use the same subset glyph while retaining distinct ToUnicode mappings.
   const unicodeToCid = new Map<number, number>();
-  const cidWidths: number[] = new Array(sortedGids.length).fill(0);
+  const sequenceToCid = new Map<string, number>();
+  const cidToGid = [0];
+  const cidWidths = [font.advanceWidths[0] ?? 0];
 
-  // Width for .notdef (CID 0)
-  cidWidths[0] = font.advanceWidths[0] ?? 0;
-
-  for (const [cp, origGid] of cpToOrigGid) {
-    const newCid = oldToNewGid.get(origGid)!;
-    unicodeToCid.set(cp, newCid);
-    cidWidths[newCid] = font.advanceWidths[origGid] ?? 0;
+  for (const [sequence, origGid] of sequenceToOrigGid) {
+    const cid = cidToGid.length;
+    if (cid > 0xffff) {
+      throw new PdfFontError(
+        "A single embedded font face cannot encode more than 65,535 distinct Unicode sequences"
+      );
+    }
+    sequenceToCid.set(sequence, cid);
+    const codePoints = Array.from(sequence, char => char.codePointAt(0)!);
+    if (codePoints.length === 1) {
+      unicodeToCid.set(codePoints[0], cid);
+    }
+    cidToGid.push(oldToNewGid.get(origGid)!);
+    cidWidths.push(isSemanticControl(codePoints[0]) ? 0 : (font.advanceWidths[origGid] ?? 0));
   }
 
-  return { oldToNewGid, unicodeToCid, cidWidths, usedGlyphIds };
+  return {
+    oldToNewGid,
+    unicodeToCid,
+    sequenceToCid,
+    cidToGid,
+    cidWidths,
+    usedGlyphIds
+  };
+}
+
+export function collectEmbeddedGlyphUses(text: string): EmbeddedGlyphUse[] {
+  const result: Array<{ codePoint: number; sequence: string }> = [];
+  let leadingControls = "";
+  for (const part of graphemeSegmenter.segment(text)) {
+    let clusterHasVisibleGlyph = false;
+    for (const char of part.segment) {
+      const codePoint = char.codePointAt(0)!;
+      if (isSemanticControl(codePoint)) {
+        if (clusterHasVisibleGlyph) {
+          result[result.length - 1].sequence += char;
+        } else {
+          leadingControls += char;
+        }
+        continue;
+      }
+      result.push({ codePoint, sequence: leadingControls + char });
+      leadingControls = "";
+      clusterHasVisibleGlyph = true;
+    }
+  }
+  if (leadingControls && result.length > 0) {
+    result[result.length - 1].sequence += leadingControls;
+  }
+  return result;
+}
+
+function encodeUnicodeSequences(
+  text: string,
+  sequenceToCid: ReadonlyMap<string, number>
+): number[] {
+  return collectEmbeddedGlyphUses(text).map(use => sequenceToCid.get(use.sequence) ?? 0);
+}
+
+function isSemanticControl(codePoint: number): boolean {
+  return (
+    codePoint === 0x200c ||
+    codePoint === 0x200d ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+  );
+}
+
+/** Build the big-endian, two-byte-per-CID map required by CIDFontType2. */
+function buildCidToGidMap(cidToGid: number[]): Uint8Array {
+  const data = new Uint8Array(cidToGid.length * 2);
+  const view = new DataView(data.buffer);
+  for (let cid = 0; cid < cidToGid.length; cid++) {
+    view.setUint16(cid * 2, cidToGid[cid], false);
+  }
+  return data;
 }
 
 // =============================================================================
@@ -304,6 +433,9 @@ function subsetTtfFont(
     font.data.subarray(headEntry.offset, headEntry.offset + headEntry.length)
   );
   const headView = new DataView(newHead.buffer, newHead.byteOffset, newHead.byteLength);
+  // The whole-font checksum is computed only after all tables are assembled.
+  // The head table checksum itself must be calculated with this field zeroed.
+  headView.setUint32(8, 0, false); // checkSumAdjustment
   // Force long loca format
   headView.setInt16(50, 1, false); // indexToLocFormat = 1
 
@@ -501,6 +633,16 @@ function assembleTtf(tables: Array<[string, Uint8Array]>): Uint8Array {
     result.set(entry.data, entry.offset);
   }
 
+  // TrueType requires the checksum of the complete font (including the table
+  // directory) to equal 0xB1B0AFBA. Strict viewers validate this even for an
+  // embedded subset. `head.checkSumAdjustment` was zero while its table
+  // checksum was calculated above; patch only the assembled table now.
+  const head = tableEntries.find(entry => entry.tag === "head");
+  if (head) {
+    const totalChecksum = calcTableChecksum(result);
+    v.setUint32(head.offset + 8, (0xb1b0afba - totalChecksum) >>> 0, false);
+  }
+
   return result;
 }
 
@@ -520,16 +662,12 @@ function calcTableChecksum(data: Uint8Array): number {
 
 /**
  * Build a ToUnicode CMap stream for PDF text extraction.
- * Maps CIDs to Unicode code points.
+ * Maps CIDs to Unicode sequences.
  */
-function buildToUnicodeCMap(unicodeToCid: Map<number, number>): Uint8Array {
-  // Invert the map: CID → Unicode
-  const cidToUnicode = new Map<number, number>();
-  for (const [cp, cid] of unicodeToCid) {
-    cidToUnicode.set(cid, cp);
-  }
-
-  const entries = Array.from(cidToUnicode.entries()).sort((a, b) => a[0] - b[0]);
+function buildToUnicodeCMap(sequenceToCid: Map<string, number>): Uint8Array {
+  const entries = Array.from(sequenceToCid, ([sequence, cid]) => [cid, sequence] as const).sort(
+    (a, b) => a[0] - b[0]
+  );
 
   const lines: string[] = [];
   lines.push("/CIDInit /ProcSet findresource begin");
@@ -548,20 +686,22 @@ function buildToUnicodeCMap(unicodeToCid: Map<number, number>): Uint8Array {
   for (let i = 0; i < entries.length; i += batchSize) {
     const batch = entries.slice(i, i + batchSize);
     lines.push(`${batch.length} beginbfchar`);
-    for (const [cid, cp] of batch) {
+    for (const [cid, sequence] of batch) {
       const cidHex = cid.toString(16).toUpperCase().padStart(4, "0");
-      // Supplementary characters (U+10000+) must be encoded as UTF-16 surrogate pairs
-      let cpHex: string;
-      if (cp > 0xffff) {
-        const hi = 0xd800 + ((cp - 0x10000) >> 10);
-        const lo = 0xdc00 + ((cp - 0x10000) & 0x3ff);
-        cpHex =
-          hi.toString(16).toUpperCase().padStart(4, "0") +
-          lo.toString(16).toUpperCase().padStart(4, "0");
-      } else {
-        cpHex = cp.toString(16).toUpperCase().padStart(4, "0");
-      }
-      lines.push(`<${cidHex}> <${cpHex}>`);
+      const unicodeHex = Array.from(sequence, char => char.codePointAt(0)!)
+        .map(codePoint => {
+          if (codePoint <= 0xffff) {
+            return codePoint.toString(16).toUpperCase().padStart(4, "0");
+          }
+          const hi = 0xd800 + ((codePoint - 0x10000) >> 10);
+          const lo = 0xdc00 + ((codePoint - 0x10000) & 0x3ff);
+          return `${hi.toString(16).toUpperCase().padStart(4, "0")}${lo
+            .toString(16)
+            .toUpperCase()
+            .padStart(4, "0")}`;
+        })
+        .join("");
+      lines.push(`<${cidHex}> <${unicodeHex}>`);
     }
     lines.push("endbfchar");
   }

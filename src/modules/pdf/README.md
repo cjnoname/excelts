@@ -334,6 +334,9 @@ doc.setMetadata({ title: "My Report", author: "documonster" });
 
 const page = doc.addPage({ width: 595, height: 842 }); // A4
 
+// Font configuration may follow addPage(), but must precede the first drawText().
+doc.embedFont(fontFileBytes);
+
 // Text
 page.drawText("Hello, World!", { x: 72, y: 770, fontSize: 24, bold: true });
 
@@ -363,9 +366,6 @@ page.addFormField({
 
 // Encryption
 doc.setEncryption({ ownerPassword: "admin", userPassword: "reader" });
-
-// Font embedding (for Unicode/CJK)
-doc.embedFont(fontFileBytes);
 
 const bytes = await doc.build();
 ```
@@ -535,7 +535,8 @@ interface PdfExportOptions {
   creator?: string; // PDF producer string (default: "documonster")
 
   // Font
-  font?: Uint8Array; // TrueType font file bytes (for Unicode/CJK)
+  font?: Uint8Array; // Legacy single TrueType font shortcut
+  fonts?: PdfFontConfig; // Named families, styled faces, TTC selection, and fallback
   defaultFontFamily?: string; // Fallback font family (default: "Helvetica")
   defaultFontSize?: number; // Fallback font size (default: 11)
 
@@ -944,19 +945,80 @@ const result = await Pdf.read(encryptedBytes, { password: "secret" });
 
 ---
 
-## Unicode / CJK Support
+## Font Configuration
 
-Standard Type1 fonts (Helvetica, Times, Courier) only support Latin characters. For Unicode, CJK, or other scripts, provide a TrueType font:
+Standard Type1 fonts (Helvetica, Times, Courier) cover a limited character set. Use `PdfFontConfig` to embed TrueType families for Unicode text, style faces, and deterministic fallback:
 
 ```typescript
-import { readFileSync } from "fs";
+import { readFileSync } from "node:fs";
+import type { PdfFontConfig, PdfFontSource } from "documonster/pdf";
 
-const pdf = await Pdf.fromExcel(workbook, {
-  font: readFileSync("NotoSansSC-Regular.ttf")
+const notoCjk: PdfFontSource = {
+  data: readFileSync("NotoSansCJK.ttc"),
+  collectionIndex: 2 // zero-based face index; defaults to 0
+};
+
+const fonts: PdfFontConfig = {
+  // Used when no requested family name or alias matches. regular is required;
+  // omitted bold/italic/boldItalic slots fall back to this regular face.
+  default: {
+    regular: readFileSync("NotoSans-Regular.ttf"),
+    bold: readFileSync("NotoSans-Bold.ttf"),
+    italic: readFileSync("NotoSans-Italic.ttf"),
+    boldItalic: readFileSync("NotoSans-BoldItalic.ttf")
+  },
+  families: [
+    {
+      name: "Noto Sans CJK SC",
+      aliases: ["Microsoft YaHei", "SimSun"],
+      faces: { regular: notoCjk }
+    }
+  ],
+  // Ordered names or aliases from families. Only listed families participate
+  // in missing-glyph fallback; default is tried last.
+  fallbackFamilies: ["Noto Sans CJK SC"]
+};
+```
+
+Family names and aliases are matched case-insensitively. Fallback chooses one face for each Unicode grapheme cluster, so a grapheme is never split across fonts. Fonts are subsetted to the sequences used in the output.
+
+The same configuration is accepted by every writing bridge and the builder:
+
+```typescript
+// Standalone data or Excel workbook
+const tablePdf = await Pdf.create(rows, { fonts });
+const workbookPdf = await Pdf.fromExcel(workbook, { fonts });
+
+// Word document; the same fonts drive layout measurement and PDF rendering
+const wordPdf = await Pdf.fromDocx(docxDocument, { fonts });
+
+// Standalone Excel chart; fonts apply to selectable vector-chart text
+const chartPdf = await Pdf.fromChart(chart, { fonts }); // chartToPdf bridge
+
+// Builder: configure in the constructor or with embedFonts().
+const builder = new Pdf.Builder({ fonts });
+const page = builder.addPage();
+page.drawText("Report", { x: 72, y: 760, fontFamily: "Noto Sans CJK SC" });
+```
+
+`font?: Uint8Array` remains available on `Pdf.create()` and `Pdf.fromExcel()` as the legacy single-font shortcut. It behaves as one default regular face and cannot be combined with `fonts`. `Builder.embedFont(bytes)` is the corresponding compatibility method; it replaces any prior Builder font configuration. `embedFont()` and `embedFonts()` must run before the first text command across all pages. Calling `addPage()` first is allowed if no text has yet been drawn.
+
+If no configured face covers a character, the PDF displays that face's `.notdef` glyph, but retains the original Unicode sequence in ToUnicode for copy, search, accessibility, and extraction. One embedded face can encode at most 65,535 distinct Unicode sequences per PDF.
+
+Because that degradation is visual only, pass `onWarning` to detect it. Every
+bridge and the builder accept it, and it reports the uncovered code points so a
+fallback family can be added:
+
+```typescript
+await Pdf.fromExcel(workbook, {
+  fonts,
+  onWarning: message => console.warn(message)
 });
 ```
 
-The font is automatically subsetted (only used glyphs are embedded) to minimize PDF file size.
+Font fallback is scalar rendering, not complex text layout. OpenType shaping (GSUB/GPOS), bidi reordering, and color emoji are **not supported** — configuring a font does not make shaping-dependent Arabic or Indic text render correctly.
+
+These limits are detectable rather than silent: when the document contains a complex script, right-to-left text, or an embedded font carrying color glyph tables (`COLR`/`CBDT`/`sbix`/`SVG`), `onWarning` reports it once per feature, naming the scripts or font families involved. Pre-shape and pre-order such text (or render it as an image) before drawing it.
 
 ---
 
@@ -1111,12 +1173,13 @@ const doc = new Pdf.Builder();
 doc.setMetadata({ title, author, subject, creator });
 doc.setEncryption({ ownerPassword, userPassword?, permissions? });
 doc.setPdfACompliance();       // Enable PDF/A-1b
-doc.embedFont(fontBytes);      // TrueType font for Unicode/CJK
+doc.embedFont(fontBytes);      // Legacy single-default-font compatibility API
+// Or: doc.embedFonts(fonts);  // Complete PdfFontConfig; the later call replaces earlier config
 
 const page = doc.addPage({ width?, height? }); // Returns PdfPageBuilder
 
 // PdfPageBuilder methods:
-page.drawText(text, { x, y, fontSize?, bold?, italic?, color?, font? });
+page.drawText(text, { x, y, fontSize?, fontFamily?, bold?, italic?, color? });
 page.drawRect({ x, y, width, height, fill?, stroke?, lineWidth? });
 page.drawCircle({ cx, cy, r, fill?, stroke? });
 page.drawEllipse({ cx, cy, rx, ry, fill?, stroke? });

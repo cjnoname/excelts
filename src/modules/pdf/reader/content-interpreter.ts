@@ -22,7 +22,12 @@
  * @see PDF Reference 1.7, Chapter 4 - Graphics
  */
 
-import { resolveFont, decodeText, getCharWidth } from "@pdf/reader/font-decoder";
+import {
+  resolveFont,
+  decodeText,
+  getCharWidth,
+  splitCharacterCodes
+} from "@pdf/reader/font-decoder";
 import type { ResolvedFont } from "@pdf/reader/font-decoder";
 import type { PdfDocument } from "@pdf/reader/pdf-document";
 import type { PdfDictValue, PdfObject } from "@pdf/reader/pdf-parser";
@@ -674,45 +679,12 @@ class ContentInterpreter {
     let width = 0;
     const scale = this.textState.fontSize * (this.textState.horizontalScaling / 100);
 
-    if (font.subtype === "Type0" || font.bytesPerCode === 2) {
-      // CID fonts: use CMap codespace ranges for variable-length code parsing,
-      // consistent with decodeCIDText in font-decoder.ts
-      let i = 0;
-      while (i < bytes.length) {
-        let codeLen = 0;
-        if (font.toUnicode?.hasCodeSpaceRanges) {
-          codeLen = font.toUnicode.getCodeLength(bytes[i]);
-        }
-
-        let code: number;
-        if (codeLen === 2 && i + 1 < bytes.length) {
-          code = (bytes[i] << 8) | bytes[i + 1];
-          i += 2;
-        } else if (codeLen === 1) {
-          code = bytes[i];
-          i++;
-        } else if (i + 1 < bytes.length) {
-          // Fallback: assume 2-byte
-          code = (bytes[i] << 8) | bytes[i + 1];
-          i += 2;
-        } else {
-          code = bytes[i];
-          i++;
-        }
-
-        const w = getCharWidth(code, font) / 1000;
-        width += w * scale + this.textState.charSpacing;
-        if (code === 0x0020) {
-          width += this.textState.wordSpacing;
-        }
-      }
-    } else {
-      for (let i = 0; i < bytes.length; i++) {
-        const w = getCharWidth(bytes[i], font) / 1000;
-        width += w * scale + this.textState.charSpacing;
-        if (bytes[i] === 0x20) {
-          width += this.textState.wordSpacing;
-        }
+    // Same code splitting as text extraction, so widths and decoded characters
+    // can never disagree about byte boundaries.
+    for (const code of splitCharacterCodes(bytes, font)) {
+      width += (getCharWidth(code, font) / 1000) * scale + this.textState.charSpacing;
+      if (code === 0x0020) {
+        width += this.textState.wordSpacing;
       }
     }
 

@@ -6,6 +6,8 @@
  * the Excel module, allowing the PDF engine to be used standalone.
  */
 
+import type { PdfFontConfig } from "@pdf/font/font-config";
+
 // =============================================================================
 // PDF Input Data Model (Excel-independent)
 // =============================================================================
@@ -863,9 +865,9 @@ export interface PdfExportOptions {
   creator?: string;
 
   /**
-   * TrueType font file (.ttf) data for Unicode text support.
-   * When provided, all text rendering uses this font, enabling
-   * CJK (Chinese, Japanese, Korean), Arabic, Hindi, Cyrillic, and other scripts.
+   * Legacy single-font shortcut for TrueType font file (.ttf) data.
+   * When provided, all text rendering uses this font. Prefer {@link fonts} for
+   * named families, style faces, TrueType Collections, and fallback.
    *
    * Pass the raw bytes of a .ttf font file:
    * ```typescript
@@ -873,8 +875,46 @@ export interface PdfExportOptions {
    * const font = readFileSync("NotoSansSC-Regular.ttf");
    * Pdf.fromExcel(workbook, { font });
    * ```
+   *
+   * Cannot be combined with {@link fonts}.
    */
   font?: Uint8Array;
+
+  /**
+   * Embedded TrueType typefaces used by PDF text planning.
+   *
+   * `default` serves document font names that are not explicitly configured.
+   * Named families are matched case-insensitively through `name` and
+   * `aliases`; only families listed in `fallbackFamilies` participate in
+   * missing-glyph fallback. This keeps fallback deterministic instead of
+   * borrowing from whichever configured font happens to come next.
+   *
+   * Each family requires `regular`. Missing style slots fall back to that
+   * family's regular face. A source may select a face inside a TrueType
+   * Collection through `collectionIndex`.
+   *
+   * The current renderer performs grapheme-safe font fallback but does not
+   * perform OpenType shaping (GSUB/GPOS), bidi reordering, or color-emoji
+   * rendering. A missing glyph is visibly rendered as `.notdef`, while its
+   * original Unicode sequence remains in ToUnicode for copy, search, and text
+   * extraction. Each embedded face is limited to 65,535 distinct Unicode
+   * sequences in one PDF.
+   *
+   * Cannot be combined with the legacy {@link PdfExportOptions.font} option.
+   */
+  fonts?: PdfFontConfig;
+
+  /**
+   * Receive non-fatal font diagnostics raised while exporting.
+   *
+   * Currently reports characters that no configured typeface covers. Those
+   * characters still carry their original Unicode for copy and search, but the
+   * page shows the `.notdef` glyph, and only the caller can decide which
+   * fallback family to add. Without this callback the condition is invisible.
+   *
+   * The callback is synchronous and may fire more than once per export.
+   */
+  onWarning?: (message: string) => void;
 
   /**
    * Encryption options for password-protecting the PDF.

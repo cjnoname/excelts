@@ -34,6 +34,9 @@
  */
 
 import type { PdfPageBuilder } from "@pdf/builder/document-builder";
+import { compilePdfFontConfig } from "@pdf/font/font-config";
+import type { PdfFontConfig } from "@pdf/font/font-config";
+import { FontManager } from "@pdf/font/font-manager";
 import type { RenderLayoutOptions } from "@pdf/word-layout-to-pdf";
 import { renderLayoutDocumentToPdf } from "@pdf/word-layout-to-pdf";
 import { twipsToPt } from "@utils/units";
@@ -65,6 +68,19 @@ export interface DocxToPdfOptions {
   readonly defaultFont?: string;
   /** Default font size in points (default: 11). */
   readonly defaultFontSize?: number;
+  /**
+   * Embedded families used both to measure Word layout and to render PDF text.
+   * Family names and aliases match Word font names case-insensitively; configured
+   * fallback is applied per grapheme. OpenType shaping, bidi reordering, and
+   * color emoji are not supported.
+   */
+  readonly fonts?: PdfFontConfig;
+  /**
+   * Receive non-fatal font diagnostics raised while converting.
+   *
+   * @see `PdfExportOptions.onWarning`
+   */
+  readonly onWarning?: (message: string) => void;
   /**
    * Header band distance from the top edge of the page, in points
    * (default: section's `pgMar.header`, or 36pt / 0.5").
@@ -134,7 +150,17 @@ export async function docxToPdf(
   // 1. Resolve effective page geometry. Section properties win unless the
   //    caller explicitly overrode an axis. Margins are independent: the
   //    section's margins are applied unless the caller overrode them.
-  const layoutOptions = mapToLayoutOptions(doc, options);
+  let layoutOptions = mapToLayoutOptions(doc, options);
+  if (options?.fonts) {
+    const fontManager = new FontManager(compilePdfFontConfig(options.fonts));
+    layoutOptions = {
+      ...layoutOptions,
+      measureText: (text, fontName, fontSize, bold = false, italic = false) => {
+        const resourceName = fontManager.resolveFont(fontName, bold, italic);
+        return fontManager.measureText(text, resourceName, fontSize);
+      }
+    };
+  }
 
   // 2. Try to obtain the built-in, layout-aware Excel chart renderer.
   //    It handles BOTH classic `<c:chart>` and modern `<cx:chartSpace>`
@@ -177,6 +203,8 @@ export async function docxToPdf(
     subject: doc.coreProperties?.subject,
     defaultFont: options?.defaultFont ?? "Helvetica",
     defaultFontSize: options?.defaultFontSize ?? 11,
+    fonts: options?.fonts,
+    onWarning: options?.onWarning,
     chartRenderer:
       userChartRenderer || builtInLayoutRenderer
         ? (layoutChart, page, rect): boolean | void => {

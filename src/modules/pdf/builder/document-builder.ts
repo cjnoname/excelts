@@ -25,6 +25,9 @@ import { PdfDict, pdfRef, pdfString, pdfNumber } from "@pdf/core/pdf-object";
 import { PdfContentStream } from "@pdf/core/pdf-stream";
 import { PdfWriter } from "@pdf/core/pdf-writer";
 import { writePdfAMetadata, writePdfAOutputIntent } from "@pdf/core/pdfa";
+import { PdfError } from "@pdf/errors";
+import { compilePdfFontConfig } from "@pdf/font/font-config";
+import type { PdfFontConfig } from "@pdf/font/font-config";
 import { FontManager } from "@pdf/font/font-manager";
 import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
@@ -217,6 +220,15 @@ export interface DocumentMetadata {
   author?: string;
   subject?: string;
   creator?: string;
+}
+
+/** Document-wide options. Fonts are compiled before any page text is drawn. */
+export interface PdfDocumentBuilderOptions {
+  /**
+   * Font families available to all pages. This is equivalent to calling
+   * `embedFonts()` before the first text command.
+   */
+  readonly fonts?: PdfFontConfig;
 }
 
 /** Options for table of contents generation. */
@@ -493,7 +505,9 @@ export class PdfPageBuilder {
   /** @internal */
   readonly _formFields: BuilderFormField[] = [];
   /** @internal */
-  readonly _fontManager: FontManager;
+  _fontManager: FontManager;
+  /** @internal — once text exists its request resources belong to this manager. */
+  _hasText = false;
   /**
    * Alpha values < 1 encountered during painting; each is materialised as
    * one `/ExtGState` object in the page resource dictionary and applied
@@ -503,12 +517,15 @@ export class PdfPageBuilder {
    * @internal
    */
   readonly _alphaValues = new Set<number>();
+  /** @internal — isolates resources when this page is overlaid onto another PDF. */
+  readonly _resourcePrefix: string;
 
   /** @internal */
-  constructor(width: number, height: number, fontManager: FontManager) {
+  constructor(width: number, height: number, fontManager: FontManager, resourcePrefix = "") {
     this._width = width;
     this._height = height;
     this._fontManager = fontManager;
+    this._resourcePrefix = resourcePrefix;
   }
 
   /** Page width in points. */
@@ -532,6 +549,10 @@ export class PdfPageBuilder {
    * @param options - Position, font, color, etc.
    */
   drawText(text: string, options: DrawTextOptions): this {
+    if (text.length === 0) {
+      return this;
+    }
+    this._hasText = true;
     const fontSize = options.fontSize ?? DEFAULT_FONT_SIZE;
     const color = options.color ?? BLACK;
     const lineHeightFactor = options.lineHeight ?? DEFAULT_LINE_HEIGHT;
@@ -539,15 +560,13 @@ export class PdfPageBuilder {
     const italic = options.italic ?? false;
     const fontFamily = options.fontFamily ?? "Helvetica";
 
-    // Resolve the provisional Type1 resource and record the run's code
-    // points. The text is emitted as a deferred block so anchor alignment,
+    // The text fragment owns its unresolved font request and preflight intent,
+    // so build snapshots can collect every glyph without draw-time mutation of
+    // the font manager. The block stays deferred so alignment,
     // word wrapping, and glyph encoding are all computed at build time —
     // after fonts are finalised (a non-WinAnsi run may trigger a build-time
     // auto-embed of a system CIDFont). Measuring against the provisional
     // metrics here would misplace anchored text and break lines wrongly.
-    const resourceName = this._fontManager.resolveFont(fontFamily, bold, italic);
-    this._fontManager.trackText(text);
-
     this._stream.save();
     this._applyAlpha(color.a);
     this._stream.setFillColor(color);
@@ -557,7 +576,9 @@ export class PdfPageBuilder {
         text,
         x: options.x,
         y: options.y,
-        type1ResourceName: resourceName,
+        fontFamily,
+        bold,
+        italic,
         fontSize,
         anchor: options.anchor ?? "start",
         maxWidth: options.maxWidth,
@@ -587,8 +608,7 @@ export class PdfPageBuilder {
     const fontFamily = options?.fontFamily ?? "Helvetica";
     const bold = options?.bold ?? false;
     const italic = options?.italic ?? false;
-    const resourceName = this._fontManager.resolveFont(fontFamily, bold, italic);
-    return this._fontManager.measureText(text, resourceName, fontSize);
+    return this._fontManager.measureTextRequest(text, fontFamily, bold, italic, fontSize);
   }
 
   // ===========================================================================
@@ -704,7 +724,7 @@ export class PdfPageBuilder {
     this._images.push(options);
     // Image drawing is deferred to build time (needs object allocation)
     // We record a placeholder name based on index
-    const imgName = `Im${this._images.length}`;
+    const imgName = `${this._resourcePrefix}Im${this._images.length}`;
     this._stream.drawImage(imgName, options.x, options.y, options.width, options.height);
     return this;
   }
@@ -1007,13 +1027,36 @@ export class PdfPageBuilder {
     }
     const clamped = Math.max(0, Math.min(1, alpha));
     this._alphaValues.add(clamped);
-    this._stream.setGraphicsState(alphaGsName(clamped));
+    this._stream.setGraphicsState(alphaGsName(clamped, this._resourcePrefix));
   }
 }
 
 // =============================================================================
 // PdfDocumentBuilder
 // =============================================================================
+
+interface BuilderPageSnapshot {
+  readonly _stream: PdfContentStream;
+  readonly _width: number;
+  readonly _height: number;
+  readonly _images: readonly DrawImageOptions[];
+  readonly _annotations: readonly PageAnnotation[];
+  readonly _builderAnnotations: readonly BuilderAnnotation[];
+  readonly _formFields: readonly BuilderFormField[];
+  readonly _alphaValues: ReadonlySet<number>;
+  readonly _resourcePrefix: string;
+}
+
+interface BuilderSnapshot {
+  readonly pages: readonly BuilderPageSnapshot[];
+  readonly bookmarks: readonly BookmarkNode[];
+  readonly metadata: DocumentMetadata;
+  readonly encryption: PdfExportOptions["encryption"];
+  readonly pdfA: boolean;
+  readonly signatureOptions: PdfSignatureOptions | null;
+  readonly disableFontAutoDiscovery: boolean;
+  readonly onWarning: ((message: string) => void) | undefined;
+}
 
 /**
  * Builder for constructing multi-page PDF documents with free-form content.
@@ -1024,10 +1067,9 @@ export class PdfPageBuilder {
 export class PdfDocumentBuilder {
   private _pages: PdfPageBuilder[] = [];
   private _bookmarks: BookmarkNode[] = [];
-  private _fontManager = new FontManager();
+  private _fontManager: FontManager;
   private _metadata: DocumentMetadata = {};
   private _encryption: PdfExportOptions["encryption"];
-  private _embeddedFont: Uint8Array | null = null;
   private _pdfA = false;
   private _signatureOptions: PdfSignatureOptions | null = null;
   /**
@@ -1045,6 +1087,13 @@ export class PdfDocumentBuilder {
    * not another.
    */
   private _disableFontAutoDiscovery = false;
+  private _buildQueue: Promise<void> = Promise.resolve();
+
+  constructor(options: PdfDocumentBuilderOptions = {}) {
+    this._fontManager = options.fonts
+      ? new FontManager(compilePdfFontConfig(options.fonts))
+      : new FontManager();
+  }
 
   /**
    * Add a new blank page to the document.
@@ -1077,12 +1126,33 @@ export class PdfDocumentBuilder {
   }
 
   /**
-   * Embed a TrueType font for Unicode/CJK support.
+   * Embed one TrueType font as the document-wide default.
+   *
+   * This legacy compatibility method is equivalent to a font configuration
+   * with only `default.regular`. It replaces any previous font configuration
+   * and must be called before the first `drawText()` command. Pages may already
+   * have been added if no text has been drawn yet.
    *
    * @param fontBytes - Raw .ttf file bytes
    */
   embedFont(fontBytes: Uint8Array): this {
-    this._embeddedFont = fontBytes;
+    this._assertFontsMutable();
+    const manager = new FontManager();
+    manager.registerEmbeddedFont(parseTtf(fontBytes));
+    this._replaceFontManager(manager);
+    return this;
+  }
+
+  /**
+   * Compile and register a complete font-family configuration.
+   *
+   * This replaces any previous `embedFont()` or `embedFonts()` configuration
+   * and must be called before the first `drawText()` command. Pages may already
+   * have been added if no text has been drawn yet.
+   */
+  embedFonts(config: PdfFontConfig): this {
+    this._assertFontsMutable();
+    this._replaceFontManager(new FontManager(compilePdfFontConfig(config)));
     return this;
   }
 
@@ -1323,18 +1393,50 @@ export class PdfDocumentBuilder {
    * @returns The PDF file as Uint8Array.
    */
   async build(): Promise<Uint8Array> {
+    // Capture synchronously: modifications made after build() returns belong to
+    // the next build even when this build is queued behind another one.
+    const snapshot = this._snapshot();
+    let release!: () => void;
+    const previous = this._buildQueue;
+    this._buildQueue = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this._build(snapshot);
+    } finally {
+      release();
+    }
+  }
+
+  private async _build(snapshot: BuilderSnapshot): Promise<Uint8Array> {
+    for (const page of snapshot.pages) {
+      page._stream.preflight();
+    }
+    const hadEmbeddedFont = this._fontManager.hasEmbeddedFont();
+    this._fontManager.beginBuild();
+    try {
+      return await this._buildWithFontSession(snapshot);
+    } finally {
+      // Auto-discovery is a decision for this immutable build snapshot, not a
+      // mutation of the authoring model. A later build may contain characters
+      // that require a different (broader) system font.
+      if (!hadEmbeddedFont && this._fontManager.hasEmbeddedFont()) {
+        this._fontManager.clearAutoDiscoveredFont();
+      }
+      this._fontManager.endBuild();
+    }
+  }
+
+  private async _buildWithFontSession(snapshot: BuilderSnapshot): Promise<Uint8Array> {
     const writer = new PdfWriter();
 
     // PDF/A-1b requires PDF 1.4
-    if (this._pdfA) {
+    if (snapshot.pdfA) {
       writer.setVersion("1.4");
     }
 
-    // Register embedded font if provided
-    if (this._embeddedFont) {
-      const ttfFont = parseTtf(this._embeddedFont);
-      this._fontManager.registerEmbeddedFont(ttfFont);
-    } else {
+    if (!this._fontManager.hasEmbeddedFont()) {
       // Auto-discover a system font when the document contains non-WinAnsi
       // characters (CJK, accented code points beyond WinAnsi, etc.) and
       // the caller did not supply one via `embedFont`. Mirrors the
@@ -1347,11 +1449,11 @@ export class PdfDocumentBuilder {
       const nonWinAnsi = this._fontManager.getType3CodePoints();
       if (nonWinAnsi.size > 0) {
         // Try auto-discovery unless the caller opted out.
-        if (!this._disableFontAutoDiscovery) {
+        if (!snapshot.disableFontAutoDiscovery) {
           const discovered = findSystemFontForCodePoints(nonWinAnsi);
           if (discovered) {
             this._fontManager.registerEmbeddedFont(discovered);
-            this._warn(
+            snapshot.onWarning?.(
               `Auto-embedded system font '${discovered.familyName}' to render ${nonWinAnsi.size} non-WinAnsi character(s). ` +
                 `Call embedFont(bytes) explicitly for deterministic output.`
             );
@@ -1368,12 +1470,16 @@ export class PdfDocumentBuilder {
             .slice(0, 5)
             .map(cp => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
             .join(", ");
-          this._warn(
+          snapshot.onWarning?.(
             `${nonWinAnsi.size} non-WinAnsi character(s) present but no TrueType font is embedded and no system font candidate covered them ` +
               `(e.g. ${sample}). Call embedFont(bytes) with a font that covers these code points; otherwise Type3 NOTDEF boxes will render.`
           );
         }
       }
+    }
+
+    if (snapshot.onWarning) {
+      this._fontManager.reportDiagnostics(snapshot.onWarning);
     }
 
     // Surface any unknown font families the FontManager saw during
@@ -1385,7 +1491,7 @@ export class PdfDocumentBuilder {
       if (unknown.size > 0) {
         const list = [...unknown].slice(0, 5).join(", ");
         const more = unknown.size > 5 ? ` (and ${unknown.size - 5} more)` : "";
-        this._warn(
+        snapshot.onWarning?.(
           `Font family ${unknown.size > 1 ? "names" : "name"} '${list}'${more} not recognised; ` +
             `falling back to Helvetica metrics. Add the typeface to the font-family map or call embedFont(bytes).`
         );
@@ -1401,7 +1507,7 @@ export class PdfDocumentBuilder {
     const pagesTreeObjNum = writer.allocObject();
 
     // Pre-allocate page object numbers so annotations can reference them
-    for (let i = 0; i < this._pages.length; i++) {
+    for (let i = 0; i < snapshot.pages.length; i++) {
       pageObjNums.push(writer.allocObject());
     }
 
@@ -1411,14 +1517,14 @@ export class PdfDocumentBuilder {
     const allFormFieldRefs: number[] = [];
 
     // Write pages with their content, resources, and annotations
-    for (let i = 0; i < this._pages.length; i++) {
-      const page = this._pages[i];
+    for (let i = 0; i < snapshot.pages.length; i++) {
+      const page = snapshot.pages[i];
 
       // Write image XObjects for this page
       const imageXObjectMap = new Map<string, number>();
       for (let j = 0; j < page._images.length; j++) {
         const img = page._images[j];
-        const imgName = `Im${j + 1}`;
+        const imgName = `${page._resourcePrefix}Im${j + 1}`;
         const imgObjNum = this._writeImageXObject(writer, img);
         imageXObjectMap.set(imgName, imgObjNum);
       }
@@ -1461,7 +1567,7 @@ export class PdfDocumentBuilder {
             .set("ca", pdfNumber(alpha))
             .set("CA", pdfNumber(alpha));
           writer.addObject(gsObjNum, gsDict);
-          gsParts.push(`/${alphaGsName(alpha)} ${pdfRef(gsObjNum)}`);
+          gsParts.push(`/${alphaGsName(alpha, page._resourcePrefix)} ${pdfRef(gsObjNum)}`);
         }
         gsParts.push(">>");
         resourcesStr += `/ExtGState ${gsParts.join("\n")} `;
@@ -1561,16 +1667,16 @@ export class PdfDocumentBuilder {
 
     // Build outline tree from bookmarks
     let outlinesRef: number | undefined;
-    if (this._bookmarks.length > 0) {
-      outlinesRef = this._buildOutlines(writer, pageObjNums);
+    if (snapshot.bookmarks.length > 0) {
+      outlinesRef = this._buildOutlines(writer, pageObjNums, snapshot.bookmarks);
     }
 
     // Catalog — with optional PDF/A entries
     const catalogExtras: Array<[string, string]> = [];
 
-    if (this._pdfA) {
+    if (snapshot.pdfA) {
       // Write XMP metadata stream
-      const xmpObjNum = writePdfAMetadata(writer, this._metadata);
+      const xmpObjNum = writePdfAMetadata(writer, snapshot.metadata);
       catalogExtras.push(["Metadata", pdfRef(xmpObjNum)]);
 
       // Write OutputIntents with sRGB ICC profile
@@ -1585,7 +1691,7 @@ export class PdfDocumentBuilder {
     // 1. Simple: no form fields, no signing → addCatalog()
     // 2. Form fields only → rebuild catalog with AcroForm
     // 3. Signing (with or without form fields) → signing path builds the catalog
-    const needsCustomCatalog = allFormFieldRefs.length > 0 || this._signatureOptions;
+    const needsCustomCatalog = allFormFieldRefs.length > 0 || snapshot.signatureOptions;
 
     if (!needsCustomCatalog) {
       writer.addCatalog(pagesTreeObjNum, {
@@ -1595,7 +1701,7 @@ export class PdfDocumentBuilder {
     }
 
     // AcroForm — if any pages have form fields (and not signing — signing path builds its own catalog)
-    if (allFormFieldRefs.length > 0 && !this._signatureOptions) {
+    if (allFormFieldRefs.length > 0 && !snapshot.signatureOptions) {
       const catalogObjNum = writer.allocObject();
       const catalogDict = new PdfDict()
         .set("Type", "/Catalog")
@@ -1616,17 +1722,17 @@ export class PdfDocumentBuilder {
 
     // Info dict
     if (
-      this._metadata.title ||
-      this._metadata.author ||
-      this._metadata.subject ||
-      this._metadata.creator
+      snapshot.metadata.title ||
+      snapshot.metadata.author ||
+      snapshot.metadata.subject ||
+      snapshot.metadata.creator
     ) {
-      writer.addInfoDict(this._metadata);
+      writer.addInfoDict(snapshot.metadata);
     }
 
     // Encryption
-    if (this._encryption) {
-      const encState = initEncryption(this._encryption);
+    if (snapshot.encryption) {
+      const encState = initEncryption(snapshot.encryption);
       writer.setEncryption(encState);
     }
 
@@ -1634,15 +1740,15 @@ export class PdfDocumentBuilder {
     // 1. Add the signature dict placeholder + widget to the PDF
     // 2. Build the PDF bytes
     // 3. Call signPdf() to fill in the real signature
-    if (this._signatureOptions) {
+    if (snapshot.signatureOptions) {
       const { buildSignatureDictPlaceholder, signPdf } =
         await import("@pdf/core/digital-signature");
 
       const { dictString } = buildSignatureDictPlaceholder({
-        name: this._signatureOptions.name,
-        reason: this._signatureOptions.reason,
-        location: this._signatureOptions.location,
-        contactInfo: this._signatureOptions.contactInfo
+        name: snapshot.signatureOptions.name,
+        reason: snapshot.signatureOptions.reason,
+        location: snapshot.signatureOptions.location,
+        contactInfo: snapshot.signatureOptions.contactInfo
       });
 
       // Write signature dict as indirect object
@@ -1701,8 +1807,8 @@ export class PdfDocumentBuilder {
       // Sign the PDF
       return signPdf(
         pdfWithPlaceholder,
-        this._signatureOptions.certificate,
-        this._signatureOptions.privateKey
+        snapshot.signatureOptions.certificate,
+        snapshot.signatureOptions.privateKey
       );
     }
 
@@ -1713,6 +1819,42 @@ export class PdfDocumentBuilder {
   // Internal Helpers
   // ===========================================================================
 
+  private _assertFontsMutable(): void {
+    if (this._pages.some(page => page._hasText)) {
+      throw new PdfError("Fonts must be configured before drawing the first PDF text command");
+    }
+  }
+
+  private _replaceFontManager(manager: FontManager): void {
+    this._fontManager = manager;
+    for (const page of this._pages) {
+      page._fontManager = manager;
+    }
+  }
+
+  private _snapshot(): BuilderSnapshot {
+    return {
+      pages: this._pages.map(page => ({
+        _stream: page._stream.snapshot(),
+        _width: page._width,
+        _height: page._height,
+        _images: [...page._images],
+        _annotations: [...page._annotations],
+        _builderAnnotations: [...page._builderAnnotations],
+        _formFields: [...page._formFields],
+        _alphaValues: new Set(page._alphaValues),
+        _resourcePrefix: page._resourcePrefix
+      })),
+      bookmarks: [...this._bookmarks],
+      metadata: { ...this._metadata },
+      encryption: this._encryption,
+      pdfA: this._pdfA,
+      signatureOptions: this._signatureOptions ? { ...this._signatureOptions } : null,
+      disableFontAutoDiscovery: this._disableFontAutoDiscovery,
+      onWarning: this._onWarning
+    };
+  }
+
   /** @internal */
   private _writeImageXObject(writer: PdfWriter, img: DrawImageOptions): number {
     return writeImageXObject(writer, img.data, img.format);
@@ -1722,7 +1864,11 @@ export class PdfDocumentBuilder {
    * Build a nested PDF outline (bookmark) tree.
    * @internal
    */
-  private _buildOutlines(writer: PdfWriter, pageObjNums: number[]): number {
+  private _buildOutlines(
+    writer: PdfWriter,
+    pageObjNums: number[],
+    bookmarks: readonly BookmarkNode[]
+  ): number {
     const outlinesObjNum = writer.allocObject();
 
     // Allocate object numbers for all nodes (pre-order traversal)
@@ -1733,14 +1879,18 @@ export class PdfDocumentBuilder {
       depth: number;
     }> = [];
 
-    const allocNodes = (nodes: BookmarkNode[], parentObjNum: number, depth: number): void => {
+    const allocNodes = (
+      nodes: readonly BookmarkNode[],
+      parentObjNum: number,
+      depth: number
+    ): void => {
       for (const node of nodes) {
         const objNum = writer.allocObject();
         allNodes.push({ node, objNum, parentObjNum, depth });
         allocNodes(node.children, objNum, depth + 1);
       }
     };
-    allocNodes(this._bookmarks, outlinesObjNum, 0);
+    allocNodes(bookmarks, outlinesObjNum, 0);
 
     // Group children by parent for sibling linkage
     const childrenByParent = new Map<number, typeof allNodes>();

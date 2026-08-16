@@ -36,7 +36,13 @@ export class PdfContentStream {
    * exact draw-order position (preserving z-order) while letting the actual
    * encoding run after the font manager's state is settled.
    */
-  private parts: Array<string | (() => string)> = [];
+  private parts: Array<
+    | string
+    | {
+        readonly produce: () => string;
+        readonly preflight?: () => void;
+      }
+  > = [];
 
   // ===========================================================================
   // Raw Operator
@@ -58,9 +64,28 @@ export class PdfContentStream {
    * draw-order slot immediately, so z-order relative to other operators is
    * preserved.
    */
-  deferred(produce: () => string): this {
-    this.parts.push(produce);
+  deferred(produce: () => string, preflight?: () => void): this {
+    this.parts.push({ produce, preflight });
     return this;
+  }
+
+  /** Run data-only preparation for every deferred fragment without rendering it. */
+  preflight(): void {
+    for (const part of this.parts) {
+      if (typeof part !== "string") {
+        part.preflight?.();
+      }
+    }
+  }
+
+  /**
+   * Freeze the current draw-order fragments for one build. Later writes to this
+   * stream are intentionally absent from the returned snapshot.
+   */
+  snapshot(): PdfContentStream {
+    const copy = new PdfContentStream();
+    copy.parts = [...this.parts];
+    return copy;
   }
 
   /**
@@ -569,7 +594,7 @@ export class PdfContentStream {
   toString(): string {
     const out: string[] = [];
     for (const part of this.parts) {
-      out.push(typeof part === "function" ? part() : part);
+      out.push(typeof part === "string" ? part : part.produce());
     }
     return out.join("\n");
   }

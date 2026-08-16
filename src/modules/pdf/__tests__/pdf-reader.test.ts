@@ -1704,6 +1704,7 @@ describe("decodeText — CID variable-length code regression", () => {
       defaultWidth: 1000,
       missingWidth: 0,
       isIdentityEncoding: false,
+      cidToUnicode: null,
       wmode: 0
     };
   }
@@ -1733,6 +1734,125 @@ describe("decodeText — CID variable-length code regression", () => {
 // =============================================================================
 // Text Reconstruction — Table vs Multi-Column
 // =============================================================================
+
+describe("CMap bfrange — multi-code-unit destinations", () => {
+  it("keeps the destination prefix and increments only the last code unit", () => {
+    const cmap = new CMap();
+    // PDF 32000-1 9.10.3: <0000> <0002> <00410042> maps to "AB", "AC", "AD".
+    cmap.addBfRange(0x0000, 0x0002, "AB");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0x0000)).toBe("AB");
+    expect(cmap.lookup(0x0001)).toBe("AC");
+    expect(cmap.lookup(0x0002)).toBe("AD");
+  });
+
+  it("preserves a combining sequence rather than truncating it to the base", () => {
+    const cmap = new CMap();
+    cmap.addBfRange(0x0010, 0x0011, "e\u0301");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0x0010)).toBe("e\u0301");
+    expect(cmap.lookup(0x0011)).toBe("e\u0302");
+  });
+
+  it("still handles a single-code-unit destination", () => {
+    const cmap = new CMap();
+    cmap.addBfRange(0x0020, 0x0022, "A");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0x0020)).toBe("A");
+    expect(cmap.lookup(0x0022)).toBe("C");
+  });
+
+  it("increments within the supplementary plane through the low surrogate", () => {
+    const cmap = new CMap();
+    // U+1F600; incrementing the low surrogate yields U+1F601.
+    cmap.addBfRange(0x0030, 0x0031, "\u{1F600}");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0x0030)).toBe("\u{1F600}");
+    expect(cmap.lookup(0x0031)).toBe("\u{1F601}");
+  });
+
+  it("refuses to invent characters when the range outruns its destination", () => {
+    const cmap = new CMap();
+    // Incrementing the low surrogate past DFFF would break the pair.
+    cmap.addBfRange(0x0040, 0x0500, "\u{1F600}");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0x0040)).toBe("\u{1F600}");
+    expect(cmap.lookup(0x0500)).toBeUndefined();
+  });
+
+  it("does not produce an unpaired surrogate", () => {
+    const cmap = new CMap();
+    cmap.addBfRange(0xd7ff, 0xd800, "\ud7ff");
+    cmap.sortRanges();
+
+    expect(cmap.lookup(0xd7ff)).toBe("\ud7ff");
+    expect(cmap.lookup(0xd800)).toBeUndefined();
+  });
+});
+
+describe("decodeText — 3-byte codespace and embedded-cmap fallback", () => {
+  it("decodes a 3-byte code as a single character", () => {
+    const cmap = new CMap();
+    cmap.addCodeSpaceRange(0x000000, 0xffffff, 3);
+    cmap.addBfChar(0x010203, "\u4E9C");
+    cmap.sortRanges();
+
+    const font: ResolvedFont = {
+      name: "ThreeByte",
+      subtype: "Type0",
+      toUnicode: cmap,
+      encoding: new Map(),
+      bytesPerCode: 3,
+      baseFontName: "ThreeByte",
+      isSymbolic: false,
+      widths: new Map(),
+      defaultWidth: 1000,
+      missingWidth: 0,
+      isIdentityEncoding: false,
+      cidToUnicode: null,
+      wmode: 0
+    };
+
+    expect(decodeText(new Uint8Array([0x01, 0x02, 0x03]), font)).toBe("\u4E9C");
+  });
+
+  it("recovers text through the embedded font cmap when ToUnicode is absent", async () => {
+    const { PdfDocumentBuilder } = await import("@pdf/builder/document-builder");
+    const { buildTtfWithCmap } = await import("./ttf-test-utils");
+    const builder = new PdfDocumentBuilder();
+    builder.embedFont(
+      buildTtfWithCmap([{ start: 0x41, end: 0x42, delta: 1 - 0x41 }], 3, {
+        familyName: "NoToUnicode"
+      })
+    );
+    builder.addPage().drawText("AB", { x: 72, y: 700 });
+    const withToUnicode = await builder.build();
+
+    // Strip the /ToUnicode reference so extraction has to fall back to the
+    // embedded font program, which is what many third-party producers emit.
+    // Rename the key in place rather than deleting bytes: xref offsets must stay
+    // valid, and an unknown key is ignored exactly like a missing ToUnicode.
+    // The patch is done on bytes because decoding a PDF as text is lossy.
+    const bytes = withToUnicode.slice();
+    const needle = [..."/ToUnicode "].map(ch => ch.charCodeAt(0));
+    let keyOffset = -1;
+    for (let i = 0; i + needle.length <= bytes.length && keyOffset < 0; i++) {
+      if (needle.every((byte, j) => bytes[i + j] === byte)) {
+        keyOffset = i;
+      }
+    }
+    expect(keyOffset).toBeGreaterThan(0);
+    bytes[keyOffset + "/ToUnicod".length] = "X".charCodeAt(0);
+
+    const result = await readPdf(bytes, { extractImages: false });
+    expect(result.text).toContain("AB");
+  });
+});
 
 describe("Text Reconstruction — table data should not be split into columns", () => {
   it("should keep table columns on the same line", async () => {

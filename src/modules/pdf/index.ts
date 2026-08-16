@@ -71,6 +71,12 @@ export type {
   PdfImageWatermark,
   PdfWatermarkFilter
 } from "@pdf/types";
+export type {
+  PdfFontSource,
+  PdfFontFaces,
+  PdfNamedFontFamily,
+  PdfFontConfig
+} from "@pdf/font/font-config";
 
 // =============================================================================
 // Types — Reading
@@ -90,6 +96,7 @@ export type { PdfTable, PdfTableRow, PdfTableCell } from "@pdf/reader/table-extr
 // =============================================================================
 
 export type {
+  PdfDocumentBuilderOptions,
   PageOptions,
   DrawSvgOptions,
   DrawTextOptions,

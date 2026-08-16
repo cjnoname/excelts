@@ -195,3 +195,53 @@ describe("layoutDocumentFull — pagination", () => {
     expect(out.sectionBreaks[0]).toBe(0);
   });
 });
+
+describe("layoutDocumentFull — custom text measurement", () => {
+  it("uses custom wide metrics for positioned line wrapping and pagination", () => {
+    const body = Array.from({ length: 12 }, () => makeParagraph("wide words wide words"));
+    const doc: DocxDocument = {
+      body,
+      sectionProperties: {
+        pageSize: { width: 2400, height: 2400 },
+        margins: { top: 200, bottom: 200, left: 200, right: 200 }
+      }
+    };
+
+    const normal = layoutDocumentFull(doc, { measureText: text => text.length * 3 });
+    const wide = layoutDocumentFull(doc, { measureText: text => text.length * 12 });
+    const normalParagraph = normal.pages[0]!.content.find(item => item.type === "paragraph");
+    const wideParagraph = wide.pages[0]!.content.find(item => item.type === "paragraph");
+    if (normalParagraph?.type !== "paragraph" || wideParagraph?.type !== "paragraph") {
+      throw new Error("expected paragraphs");
+    }
+
+    expect(normalParagraph.lines).toHaveLength(1);
+    expect(wideParagraph.lines.length).toBeGreaterThan(1);
+    expect(wide.totalPages).toBeGreaterThan(normal.totalPages);
+  });
+
+  it("passes the styled font variant to the custom measurer", () => {
+    const fonts: Array<{ name: string; bold?: boolean; italic?: boolean }> = [];
+    const paragraph: Paragraph = {
+      type: "paragraph",
+      children: [
+        {
+          content: [{ type: "text", text: "styled" }],
+          properties: { size: HALF_PT_12, font: "Times New Roman", bold: true, italic: true }
+        }
+      ]
+    };
+
+    layoutDocumentFull(
+      { body: [paragraph] },
+      {
+        measureText: (text, fontName, _fontSize, bold, italic) => {
+          fonts.push({ name: fontName, bold, italic });
+          return text.length;
+        }
+      }
+    );
+
+    expect(fonts).toContainEqual({ name: "Times New Roman", bold: true, italic: true });
+  });
+});

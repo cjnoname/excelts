@@ -22,6 +22,7 @@
 
 import type { PdfPageBuilder } from "@pdf/builder/document-builder";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
+import type { PdfFontConfig } from "@pdf/font/font-config";
 import type { PdfColor } from "@pdf/types";
 import { hexToRgb01 } from "@utils/theme-colors";
 import type {
@@ -61,6 +62,14 @@ export interface RenderLayoutOptions {
   readonly defaultFont?: string;
   /** Default font size in points. */
   readonly defaultFontSize?: number;
+  /** Font families compiled before the first PDF page is created. */
+  readonly fonts?: PdfFontConfig;
+  /**
+   * Receive non-fatal font diagnostics raised while building the PDF.
+   *
+   * @see `PdfExportOptions.onWarning`
+   */
+  readonly onWarning?: (message: string) => void;
   /**
    * Optional pluggable chart renderer. Receives the bounding rect
    * (already translated into PDF coordinates) and the layout chart
@@ -96,7 +105,10 @@ export function renderLayoutDocumentToPdf(
   layout: LayoutDocument,
   options: RenderLayoutOptions = {}
 ): PdfDocumentBuilder {
-  const builder = new PdfDocumentBuilder();
+  const builder = new PdfDocumentBuilder({ fonts: options.fonts });
+  if (options.onWarning) {
+    builder.onWarning(options.onWarning);
+  }
   if (options.title || options.author || options.subject) {
     builder.setMetadata({
       title: options.title,

@@ -19,7 +19,6 @@
 
 import type { PdfContentStream } from "@pdf/core/pdf-stream";
 import type { FontManager } from "@pdf/font/font-manager";
-import { resolvePdfFontName } from "@pdf/font/font-manager";
 import { alphaGsName, emitTextBlock } from "@pdf/render/page-renderer";
 import { toGrayscale } from "@pdf/render/style-converter";
 import type { PdfChartDrawingSurface, PdfChartPathOp, PdfColor } from "@pdf/types";
@@ -183,9 +182,8 @@ export function createChartSurface(
       // Font resources are frozen before page content is written. Track every
       // chart label during the exporter preflight so Unicode glyph subsets and
       // Type1 style variants exist before the resource dictionary is emitted.
-      fontManager.trackText(text);
-
-      const resourceName = resolveResourceName(fontManager, fontFamily, bold, italic);
+      const resourceName = fontManager.resolveFont(fontFamily, bold, italic);
+      fontManager.trackText(text, resourceName);
 
       stream.save();
       stream.setFillColor(color);
@@ -254,16 +252,4 @@ export function createChartSurface(
       return this;
     }
   };
-}
-
-function resolveResourceName(
-  fontManager: FontManager,
-  fontFamily: string,
-  bold: boolean,
-  italic: boolean
-): string {
-  if (fontManager.hasEmbeddedFont()) {
-    return fontManager.getEmbeddedResourceName();
-  }
-  return fontManager.ensureFont(resolvePdfFontName(fontFamily, bold, italic));
 }

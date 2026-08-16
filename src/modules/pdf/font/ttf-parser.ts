@@ -202,21 +202,58 @@ class BEReader {
  * @returns Parsed font data
  * @throws {PdfFontError} If the font is invalid or unsupported
  */
-export function parseTtf(data: Uint8Array): TtfFont {
+export function parseTtf(data: Uint8Array, collectionIndex = 0): TtfFont {
+  if (!Number.isFinite(collectionIndex) || !Number.isInteger(collectionIndex)) {
+    throw new PdfFontError("TrueType collection index must be a finite integer");
+  }
+  if (collectionIndex < 0) {
+    throw new PdfFontError("TrueType collection index must not be negative");
+  }
+  if (data.byteLength < 4) {
+    throw new PdfFontError("Invalid TrueType font: header is truncated");
+  }
+
   const r = new BEReader(data);
 
   // --- Check for TTC (TrueType Collection) ---
   const magic = r.u32();
   if (magic === 0x74746366) {
     // 'ttcf' — TrueType Collection
-    // Read the offset of the first font and restart parsing from there
-    r.skip(4); // majorVersion, minorVersion
+    if (data.byteLength < 12) {
+      throw new PdfFontError("Invalid TrueType Collection: header is truncated");
+    }
+    const version = r.u32();
+    if (version !== 0x00010000 && version !== 0x00020000) {
+      throw new PdfFontError(
+        `Invalid TrueType Collection: unsupported version 0x${version.toString(16)}`
+      );
+    }
     const numFonts = r.u32();
     if (numFonts === 0) {
       throw new PdfFontError("TrueType Collection is empty (0 fonts)");
     }
-    const firstFontOffset = r.u32();
-    return parseTtfAtOffset(data, firstFontOffset);
+    if (numFonts > Math.floor((data.byteLength - 12) / 4)) {
+      throw new PdfFontError("Invalid TrueType Collection: font offset table is truncated");
+    }
+    if (collectionIndex >= numFonts) {
+      throw new PdfFontError(
+        `TrueType collection index ${collectionIndex} is out of range (0-${numFonts - 1})`
+      );
+    }
+    const fontOffset = r.u32At(12 + collectionIndex * 4);
+    if (fontOffset > data.byteLength - 12) {
+      throw new PdfFontError(
+        `Invalid TrueType Collection: font ${collectionIndex} header is out of range`
+      );
+    }
+    return parseTtfAtOffset(data, fontOffset);
+  }
+
+  if (collectionIndex !== 0) {
+    throw new PdfFontError("TrueType collection index must be 0 for a non-collection font");
+  }
+  if (data.byteLength < 12) {
+    throw new PdfFontError("Invalid TrueType font: header is truncated");
   }
 
   // Not TTC — parse as regular TTF starting from the magic we already read
@@ -249,8 +286,15 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     throw new PdfFontError(`Invalid TrueType font: bad sfVersion 0x${sfVersion.toString(16)}`);
   }
 
+  const fontOffset = r.offset - 4;
+  if (fontOffset < 0 || fontOffset > data.byteLength - 12) {
+    throw new PdfFontError("Invalid TrueType font: header is truncated");
+  }
   const numTables = r.u16();
   r.skip(6); // searchRange, entrySelector, rangeShift
+  if (numTables > Math.floor((data.byteLength - r.offset) / 16)) {
+    throw new PdfFontError("Invalid TrueType font: table directory is truncated");
+  }
 
   // --- Table directory ---
   const tables = new Map<string, TableEntry>();
@@ -259,6 +303,9 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     r.skip(4); // checksum
     const offset = r.u32();
     const length = r.u32();
+    if (offset > data.byteLength || length > data.byteLength - offset) {
+      throw new PdfFontError(`Invalid TrueType font: table '${tag}' is out of range`);
+    }
     tables.set(tag, { offset, length });
   }
 

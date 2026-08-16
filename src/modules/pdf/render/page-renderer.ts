@@ -13,7 +13,6 @@
 import { parseImageDimensions } from "@pdf/builder/image-utils";
 import { PdfContentStream } from "@pdf/core/pdf-stream";
 import type { FontManager } from "@pdf/font/font-manager";
-import { resolvePdfFontName } from "@pdf/font/font-manager";
 import {
   CELL_PADDING_H,
   CELL_PADDING_V,
@@ -552,10 +551,7 @@ function drawCellText(
   }
 
   // --- Plain text rendering ---
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   const measure = (s: string) => fontManager.measureText(s, resourceName, fontSize);
   const effectiveWidth = availWidth - indentPts;
@@ -563,7 +559,9 @@ function drawCellText(
   const lines = wrapText ? wrapTextLines(text, measure, effectiveWidth) : text.split(/\r?\n/);
 
   const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
-  const ascent = fontManager.getFontAscent(resourceName, fontSize);
+  const ascent = Math.max(
+    ...lines.map(line => fontManager.measureTextMetrics(line, resourceName, fontSize).ascent)
+  );
   const totalTextHeight = lines.length * lineHeight;
   const textStartY = computeTextStartY(
     verticalAlign,
@@ -576,7 +574,7 @@ function drawCellText(
 
   stream.setFillColor(cell.textColor);
 
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -627,13 +625,9 @@ function drawRichText(
   const primaryFontSize = maxFontSize;
   const lineHeight = primaryFontSize * LINE_HEIGHT_FACTOR;
 
-  const isEmbedded = fontManager.hasEmbeddedFont();
-
   // Helper: resolve resource name for a run
   const runResource = (run: LayoutRichTextRun) =>
-    isEmbedded
-      ? fontManager.getEmbeddedResourceName()
-      : fontManager.ensureFont(resolvePdfFontName(run.fontFamily, run.bold, run.italic));
+    fontManager.resolveFont(run.fontFamily, run.bold, run.italic);
 
   // --- Wrapping path ---
   if (wrapText) {
@@ -664,8 +658,9 @@ function drawRichText(
       availWidth
     );
 
-    // Compute per-line heights based on the maximum font size in each line
+    // Compute per-line heights from the faces that actually draw the line.
     const lineHeights: number[] = [];
+    const lineAscents: number[] = [];
     for (const range of lineRanges) {
       let lineMaxFont = cell.fontSize;
       for (let ci = range.start; ci < range.end; ci++) {
@@ -674,11 +669,28 @@ function drawRichText(
           lineMaxFont = runs[ri].fontSize;
         }
       }
-      lineHeights.push(lineMaxFont * LINE_HEIGHT_FACTOR);
+      let lineAscent = 0;
+      let lineDescent = 0;
+      for (let ci = range.start; ci < range.end;) {
+        const ri = runForChar[ci] ?? 0;
+        let end = ci + 1;
+        while (end < range.end && runForChar[end] === ri) {
+          end++;
+        }
+        const metrics = fontManager.measureTextMetrics(
+          fullText.slice(ci, end),
+          runResources[ri],
+          runs[ri].fontSize
+        );
+        lineAscent = Math.max(lineAscent, metrics.ascent);
+        lineDescent = Math.min(lineDescent, metrics.descent);
+        ci = end;
+      }
+      lineAscents.push(lineAscent);
+      lineHeights.push(Math.max(lineMaxFont * LINE_HEIGHT_FACTOR, lineAscent - lineDescent));
     }
 
-    const primaryResourceName = runResources[0];
-    const ascent = fontManager.getFontAscent(primaryResourceName, primaryFontSize);
+    const ascent = lineAscents[0] ?? primaryFontSize;
     const totalTextHeight = lineHeights.reduce((sum, h) => sum + h, 0);
     const textStartY = computeTextStartY(
       verticalAlign,
@@ -718,7 +730,7 @@ function drawRichText(
       }
 
       let textX = computeTextX(horizontalAlign, rect, lineWidth, indentPts, pad.left, pad.right);
-      const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+      const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
       for (const seg of segments) {
         const { run, text, resourceName } = seg;
 
@@ -735,12 +747,12 @@ function drawRichText(
         );
 
         if (run.strike) {
-          const descent = fontManager.getFontDescent(resourceName, run.fontSize);
+          const descent = fontManager.measureTextMetrics(text, resourceName, run.fontSize).descent;
           const y = lineY + descent + run.fontSize * 0.3;
           stream.drawLine(textX, y, textX + segWidth, y, run.textColor, 0.5);
         }
         if (run.underline) {
-          const descent = fontManager.getFontDescent(resourceName, run.fontSize);
+          const descent = fontManager.measureTextMetrics(text, resourceName, run.fontSize).descent;
           const y = lineY + descent * 0.5;
           stream.drawLine(textX, y, textX + segWidth, y, run.textColor, 0.5);
         }
@@ -754,26 +766,32 @@ function drawRichText(
   // --- Single-line (no wrap) path ---
   // Measure total width of all runs
   let totalWidth = 0;
-  const runMetrics: Array<{ resourceName: string; width: number }> = [];
+  const runMetrics: Array<{
+    resourceName: string;
+    width: number;
+    ascent: number;
+    descent: number;
+  }> = [];
   for (const run of runs) {
     const resourceName = runResource(run);
-    const w = fontManager.measureText(run.text, resourceName, run.fontSize);
-    runMetrics.push({ resourceName, width: w });
-    totalWidth += w;
+    const metrics = fontManager.measureTextMetrics(run.text, resourceName, run.fontSize);
+    runMetrics.push({ resourceName, ...metrics });
+    totalWidth += metrics.width;
   }
 
-  const primaryResourceName = runMetrics[0]?.resourceName ?? "F1";
-  const ascent = fontManager.getFontAscent(primaryResourceName, primaryFontSize);
+  const ascent = Math.max(...runMetrics.map(metrics => metrics.ascent));
+  const descent = Math.min(...runMetrics.map(metrics => metrics.descent));
+  const actualLineHeight = Math.max(lineHeight, ascent - descent);
   const textStartY = computeTextStartY(
     verticalAlign,
     rect,
-    lineHeight,
+    actualLineHeight,
     ascent,
     pad.top,
     pad.bottom
   );
   let textX = computeTextX(horizontalAlign, rect, totalWidth, indentPts, pad.left, pad.right);
-  const useType3 = fontManager.hasType3Fonts() && !isEmbedded;
+  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
 
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
@@ -793,13 +811,13 @@ function drawRichText(
 
     // Draw per-run decorations (strikethrough, underline)
     if (run.strike) {
-      const descent = fontManager.getFontDescent(resourceName, run.fontSize);
-      const y = textStartY + descent + run.fontSize * 0.3;
+      const runDescent = runMetrics[i].descent;
+      const y = textStartY + runDescent + run.fontSize * 0.3;
       stream.drawLine(textX, y, textX + runWidth, y, run.textColor, 0.5);
     }
     if (run.underline) {
-      const descent = fontManager.getFontDescent(resourceName, run.fontSize);
-      const y = textStartY + descent * 0.5;
+      const runDescent = runMetrics[i].descent;
+      const y = textStartY + runDescent * 0.5;
       stream.drawLine(textX, y, textX + runWidth, y, run.textColor, 0.5);
     }
 
@@ -821,10 +839,7 @@ function drawRotatedText(
   const { rect, wrapText } = cell;
   let { fontSize } = cell;
   const pad = computeCellPadding(cell, scaleFactor);
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   // Convert Excel rotation to degrees
   const degrees = excelRotationToDegrees(cell.textRotation);
@@ -881,7 +896,9 @@ function drawRotatedText(
   }
 
   const scaledLineHeight = fontSize * LINE_HEIGHT_FACTOR;
-  const ascent = fontManager.getFontAscent(resourceName, fontSize);
+  const ascent = Math.max(
+    ...lines.map(line => fontManager.measureTextMetrics(line, resourceName, fontSize).ascent)
+  );
 
   const is90 = Math.abs(degrees - 90) < 0.01;
   const isMinus90 = Math.abs(degrees + 90) < 0.01;
@@ -1167,26 +1184,28 @@ export interface TextMatrixOptions {
   renderingMode?: 0 | 1 | 2;
 }
 
-export function emitTextWithMatrix(
+function emitTextWithMatrix(
   stream: PdfContentStream,
   fontManager: FontManager,
   options: TextMatrixOptions
 ): void {
   const [a, b, c, d, tx, ty] = options.matrix;
-  stream.deferred(() =>
-    renderTextBlock(
-      options.text,
-      a,
-      b,
-      c,
-      d,
-      tx,
-      ty,
-      options.resourceName,
-      options.fontSize,
-      fontManager,
-      options.renderingMode ?? 0
-    )
+  stream.deferred(
+    () =>
+      renderTextBlock(
+        options.text,
+        a,
+        b,
+        c,
+        d,
+        tx,
+        ty,
+        options.resourceName,
+        options.fontSize,
+        fontManager,
+        options.renderingMode ?? 0
+      ),
+    () => fontManager.trackText(options.text, options.resourceName)
   );
 }
 
@@ -1199,7 +1218,11 @@ export interface TextBlockOptions {
   /** Baseline y of the first line in unrotated page space. */
   y: number;
   /** Draw-time-resolved Type1 resource name; re-routed at build time. */
-  type1ResourceName: string;
+  type1ResourceName?: string;
+  /** Deferred font request used by the free-form builder. */
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
   fontSize: number;
   /** Horizontal anchor; applied per line (including each wrapped line). */
   anchor: "start" | "middle" | "end";
@@ -1230,7 +1253,19 @@ export function emitTextBlock(
   options: TextBlockOptions,
   fontManager: FontManager
 ): void {
-  stream.deferred(() => renderTextBlockLayout(options, fontManager));
+  let resourceName = options.type1ResourceName;
+  const resolveResource = () => {
+    resourceName ??= fontManager.resolveFont(
+      options.fontFamily ?? "Helvetica",
+      options.bold ?? false,
+      options.italic ?? false
+    );
+    return resourceName;
+  };
+  stream.deferred(
+    () => renderTextBlockLayout({ ...options, type1ResourceName: resolveResource() }, fontManager),
+    () => fontManager.trackText(options.text, resolveResource())
+  );
 }
 
 /**
@@ -1246,7 +1281,10 @@ export function emitTextBlock(
  * rotation maps the whole block into place. Upright text (rotation 0) reduces
  * to the identity mapping.
  */
-function renderTextBlockLayout(options: TextBlockOptions, fontManager: FontManager): string {
+function renderTextBlockLayout(
+  options: TextBlockOptions & { type1ResourceName: string },
+  fontManager: FontManager
+): string {
   const { text, x, y, type1ResourceName, fontSize, anchor, maxWidth, lineHeightFactor, rotation } =
     options;
 
@@ -1315,6 +1353,26 @@ function renderTextBlock(
   renderingMode: 0 | 1 | 2 = 0
 ): string {
   const sink = new PdfContentStream();
+
+  const routed = fontManager.routeText(text, type1ResourceName);
+  if (routed.some(segment => segment.resourceName !== type1ResourceName)) {
+    let curTx = tx;
+    let curTy = ty;
+    for (const segment of routed) {
+      sink.beginText();
+      if (renderingMode !== 0) {
+        sink.setTextRenderingMode(renderingMode);
+      }
+      sink.setFont(segment.resourceName, fontSize);
+      sink.setTextMatrix(a, b, c, d, curTx, curTy);
+      emitText(sink, fontManager, segment.text, segment.resourceName);
+      sink.endText();
+      const width = segment.width * fontSize;
+      curTx += a * width;
+      curTy += b * width;
+    }
+    return sink.toString();
+  }
 
   // Type3 splitting only applies when there is no embedded font but Type3
   // fallback glyphs were generated. Otherwise the run renders as a single
@@ -1494,13 +1552,10 @@ function drawVerticalStackedText(
 ): void {
   const { rect, text, fontSize, horizontalAlign, verticalAlign } = cell;
   const pad = computeCellPadding(cell, scaleFactor);
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(cell.fontFamily, cell.bold, cell.italic));
+  const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
   const charHeight = fontSize * 1.3;
-  const ascent = fontManager.getFontAscent(resourceName, fontSize);
+  const ascent = fontManager.measureTextMetrics(text, resourceName, fontSize).ascent;
 
   // Split on newlines — each segment becomes a new column
   const columns = text.split(/\r?\n/);
@@ -1562,8 +1617,8 @@ function drawVerticalStackedText(
  * Uses 4 decimal digits to avoid collisions between close alpha values.
  * E.g. alpha=0.504 → "GS5040", alpha=0.506 → "GS5060"
  */
-export function alphaGsName(alpha: number): string {
-  return `GS${Math.round(alpha * 10000)}`;
+export function alphaGsName(alpha: number, resourcePrefix = ""): string {
+  return `${resourcePrefix}GS${Math.round(alpha * 10000)}`;
 }
 
 // =============================================================================
@@ -1645,7 +1700,11 @@ function drawTextDecorations(
   pad?: CellPadding
 ): void {
   if (cell.strike) {
-    const descent = fontManager.getFontDescent(resourceName, cell.fontSize);
+    const descent = fontManager.measureTextMetrics(
+      lines[0] ?? "",
+      resourceName,
+      cell.fontSize
+    ).descent;
     const strikeY = textStartY + descent + cell.fontSize * 0.3;
     for (let i = 0; i < lines.length; i++) {
       const lineY = strikeY - i * lineHeight;
@@ -1662,7 +1721,11 @@ function drawTextDecorations(
     }
   }
   if (cell.underline) {
-    const descent = fontManager.getFontDescent(resourceName, cell.fontSize);
+    const descent = fontManager.measureTextMetrics(
+      lines[0] ?? "",
+      resourceName,
+      cell.fontSize
+    ).descent;
     const underlineOffset = descent * 0.5;
     for (let i = 0; i < lines.length; i++) {
       const lineY = textStartY - i * lineHeight + underlineOffset;
@@ -1707,20 +1770,25 @@ export function wrapTextLines(
     }
 
     const words = paragraph.split(/\s+/);
+    const spaceWidth = measure(" ");
     let currentLine = "";
+    let currentWidth = 0;
 
     for (const word of words) {
+      const wordWidth = measure(word);
       if (!currentLine) {
         currentLine = word;
+        currentWidth = wordWidth;
         continue;
       }
 
-      const testLine = currentLine + " " + word;
-      if (measure(testLine) <= maxWidth) {
-        currentLine = testLine;
+      if (currentWidth + spaceWidth + wordWidth <= maxWidth) {
+        currentLine += ` ${word}`;
+        currentWidth += spaceWidth + wordWidth;
       } else {
         allLines.push(currentLine);
         currentLine = word;
+        currentWidth = wordWidth;
       }
     }
 
@@ -1834,23 +1902,30 @@ function wrapRichTextLines(
 
     let lineStart = globalOffset;
     let lineEnd = globalOffset;
+    let lineWidth = 0;
 
     for (let wi = 0; wi < wordStarts.length; wi++) {
+      const wordStart = globalOffset + wordStarts[wi];
       const wordEnd = globalOffset + wordEnds[wi];
       if (lineEnd === lineStart) {
-        // First word on line — always take it
+        // First word on line — always take it.
         lineEnd = wordEnd;
+        lineWidth = measureRange(wordStart, wordEnd);
         continue;
       }
-      // Test if adding this word (with preceding space) fits
-      if (measureRange(lineStart, wordEnd) <= maxWidth) {
+      // Widths are additive in the PDF font model (there is no shaping or
+      // kerning stage), so measure only the newly appended whitespace + word.
+      // Re-measuring the growing line on every word is quadratic for comments
+      // and other long rich-text paragraphs.
+      const appendedWidth = measureRange(lineEnd, wordEnd);
+      if (lineWidth + appendedWidth <= maxWidth) {
         lineEnd = wordEnd;
+        lineWidth += appendedWidth;
       } else {
-        // Emit current line
         allLines.push({ start: lineStart, end: lineEnd });
-        // Start new line at this word
-        lineStart = globalOffset + wordStarts[wi];
+        lineStart = wordStart;
         lineEnd = wordEnd;
+        lineWidth = measureRange(wordStart, wordEnd);
       }
     }
 
@@ -2063,11 +2138,11 @@ function resolveLineRuns(
   width: number;
 }> {
   return line.map(({ run, text }) => {
-    const resourceName = fontManager.hasEmbeddedFont()
-      ? fontManager.getEmbeddedResourceName()
-      : fontManager.ensureFont(
-          resolvePdfFontName(resolveHeaderFooterFontFamily(run, page), run.bold, run.italic)
-        );
+    const resourceName = fontManager.resolveFont(
+      resolveHeaderFooterFontFamily(run, page),
+      run.bold,
+      run.italic
+    );
     const fontSize =
       run.fontSize * (page.headerFooter?.scaleWithDoc === false ? 1 : page.scaleFactor);
     const width = fontManager.measureText(text, resourceName, fontSize);
@@ -2110,9 +2185,7 @@ function drawRowColHeadings(
   }
 
   const { gutterWidth, bandHeight, fontSize } = headings;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   // The heading palette is already neutral gray, so black-and-white needs no
   // conversion here.
@@ -2167,7 +2240,6 @@ function drawRowColHeadings(
 
   for (let i = 0; i < page.sheetCols.length; i++) {
     const label = columnNumberToLetters(page.sheetCols[i]);
-    fontManager.trackText(label);
     const w = fontManager.measureText(label, resourceName, fontSize);
     const x = page.columnOffsets[i] + (page.columnWidths[i] - w) / 2;
     emitTextWithMatrix(stream, fontManager, {
@@ -2180,7 +2252,6 @@ function drawRowColHeadings(
 
   for (let i = 0; i < page.sheetRows.length; i++) {
     const label = String(page.sheetRows[i]);
-    fontManager.trackText(label);
     const w = fontManager.measureText(label, resourceName, fontSize);
     const rowH = page.rowHeights[i];
     const x = gridLeft - gutterWidth + (gutterWidth - w) / 2;
@@ -2218,9 +2289,7 @@ function drawCommentBoxes(
   const fill = bw ? toGrayscale(COMMENT_FILL) : COMMENT_FILL;
   const border = bw ? toGrayscale(COMMENT_BORDER) : COMMENT_BORDER;
   const markerColor = bw ? toGrayscale(COMMENT_MARKER_COLOR) : COMMENT_MARKER_COLOR;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, false, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   for (const box of boxes) {
     const { rect } = box;
@@ -2243,7 +2312,6 @@ function drawCommentBoxes(
       if (baseline < rect.y + CELL_PADDING_V) {
         break;
       }
-      fontManager.trackText(line);
       emitTextWithMatrix(stream, fontManager, {
         text: line,
         matrix: [1, 0, 0, 1, rect.x + CELL_PADDING_H, baseline],
@@ -2276,9 +2344,7 @@ function drawPageHeader(
 ): void {
   const headerFontSize = 10;
   const headerText = page.sheetName;
-  const resourceName = fontManager.hasEmbeddedFont()
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(options.defaultFontFamily, true, false));
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, true, false);
 
   const textWidth = fontManager.measureText(headerText, resourceName, headerFontSize);
   const x = (page.width - textWidth) / 2;
@@ -2304,10 +2370,7 @@ function drawPageFooter(
 ): void {
   const footerFontSize = 9;
   const footerText = `Page ${page.pageNumber} of ${totalPages}`;
-  // Footer always uses Type1 (page numbers are ASCII)
-  const resourceName = fontManager.ensureFont(
-    resolvePdfFontName(options.defaultFontFamily, false, false)
-  );
+  const resourceName = fontManager.resolveFont(options.defaultFontFamily, false, false);
 
   const textWidth = fontManager.measureText(footerText, resourceName, footerFontSize);
   const x = (page.width - textWidth) / 2;
@@ -2315,11 +2378,12 @@ function drawPageFooter(
 
   stream.save();
   stream.setFillColor({ r: 0.5, g: 0.5, b: 0.5 });
-  stream.beginText();
-  stream.setFont(resourceName, footerFontSize);
-  stream.setTextMatrix(1, 0, 0, 1, x, y);
-  stream.showText(footerText);
-  stream.endText();
+  emitTextWithMatrix(stream, fontManager, {
+    text: footerText,
+    matrix: [1, 0, 0, 1, x, y],
+    resourceName,
+    fontSize: footerFontSize
+  });
   stream.restore();
 }
 
@@ -2440,10 +2504,7 @@ function renderTextWatermark(
   const bold = watermark.bold ?? TEXT_WM_DEFAULTS.bold;
   const italic = watermark.italic ?? TEXT_WM_DEFAULTS.italic;
 
-  const isEmbedded = fontManager.hasEmbeddedFont();
-  const resourceName = isEmbedded
-    ? fontManager.getEmbeddedResourceName()
-    : fontManager.ensureFont(resolvePdfFontName(fontFamily, bold, italic));
+  const resourceName = fontManager.resolveFont(fontFamily, bold, italic);
 
   const textWidth = fontManager.measureText(watermark.text, resourceName, fontSize);
   // Approximate text height using ascent (roughly 0.7 * fontSize for most fonts)

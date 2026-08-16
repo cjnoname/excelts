@@ -334,6 +334,9 @@ doc.setMetadata({ title: "My Report", author: "documonster" });
 
 const page = doc.addPage({ width: 595, height: 842 }); // A4
 
+// 可先 addPage(),但字体配置必须早于第一次 drawText()。
+doc.embedFont(fontFileBytes);
+
 // 文本
 page.drawText("Hello, World!", { x: 72, y: 770, fontSize: 24, bold: true });
 
@@ -363,9 +366,6 @@ page.addFormField({
 
 // 加密
 doc.setEncryption({ ownerPassword: "admin", userPassword: "reader" });
-
-// 字体嵌入(用于 Unicode/CJK)
-doc.embedFont(fontFileBytes);
 
 const bytes = await doc.build();
 ```
@@ -533,7 +533,8 @@ interface PdfExportOptions {
   creator?: string; // PDF producer 字符串(默认:"documonster")
 
   // 字体
-  font?: Uint8Array; // TrueType 字体文件字节(用于 Unicode/CJK)
+  font?: Uint8Array; // 旧版单 TrueType 字体快捷选项
+  fonts?: PdfFontConfig; // 命名字体族、样式 face、TTC 选择和 fallback
   defaultFontFamily?: string; // 后备字体族(默认:"Helvetica")
   defaultFontSize?: number; // 后备字号(默认:11)
 
@@ -924,19 +925,79 @@ const result = await Pdf.read(encryptedBytes, { password: "secret" });
 
 ---
 
-## Unicode / CJK 支持
+## 字体配置
 
-标准 Type1 字体(Helvetica、Times、Courier)仅支持拉丁字符。对于 Unicode、CJK 或其他文字,请提供 TrueType 字体:
+标准 Type1 字体(Helvetica、Times、Courier)仅覆盖有限字符集。使用 `PdfFontConfig` 嵌入 TrueType 字体族,以支持 Unicode 文本、样式 face 和确定性的 fallback:
 
 ```typescript
-import { readFileSync } from "fs";
+import { readFileSync } from "node:fs";
+import type { PdfFontConfig, PdfFontSource } from "documonster/pdf";
 
-const pdf = await Pdf.fromExcel(workbook, {
-  font: readFileSync("NotoSansSC-Regular.ttf")
+const notoCjk: PdfFontSource = {
+  data: readFileSync("NotoSansCJK.ttc"),
+  collectionIndex: 2 // TTC 中从 0 开始的 face 索引;默认为 0
+};
+
+const fonts: PdfFontConfig = {
+  // 请求的字体族名或别名均不匹配时使用 default。regular 必填;
+  // 缺少 bold/italic/boldItalic 时回退到该字体族的 regular face。
+  default: {
+    regular: readFileSync("NotoSans-Regular.ttf"),
+    bold: readFileSync("NotoSans-Bold.ttf"),
+    italic: readFileSync("NotoSans-Italic.ttf"),
+    boldItalic: readFileSync("NotoSans-BoldItalic.ttf")
+  },
+  families: [
+    {
+      name: "Noto Sans CJK SC",
+      aliases: ["Microsoft YaHei", "SimSun"],
+      faces: { regular: notoCjk }
+    }
+  ],
+  // 按顺序填写 families 中的 name 或 alias。只有列出的字体族参与缺字
+  // fallback;最后再尝试 default。
+  fallbackFamilies: ["Noto Sans CJK SC"]
+};
+```
+
+字体族名和别名按不区分大小写的方式匹配。Fallback 按 Unicode grapheme cluster 为单位选择单个 face,不会把同一个 grapheme 拆到多个字体中。输出只嵌入实际用到的序列子集。
+
+所有写入桥接和 Builder 都接受同一配置:
+
+```typescript
+// 独立数据或 Excel 工作簿
+const tablePdf = await Pdf.create(rows, { fonts });
+const workbookPdf = await Pdf.fromExcel(workbook, { fonts });
+
+// Word 文档;同一字体配置同时用于布局测量和 PDF 渲染
+const wordPdf = await Pdf.fromDocx(docxDocument, { fonts });
+
+// 独立 Excel 图表;字体用于可选择的矢量图表文本
+const chartPdf = await Pdf.fromChart(chart, { fonts }); // chartToPdf 桥接
+
+// Builder:在构造函数中配置,或调用 embedFonts()。
+const builder = new Pdf.Builder({ fonts });
+const page = builder.addPage();
+page.drawText("报告", { x: 72, y: 760, fontFamily: "Noto Sans CJK SC" });
+```
+
+`Pdf.create()` 和 `Pdf.fromExcel()` 仍支持 `font?: Uint8Array`,作为旧版单字体快捷选项;它相当于仅配置一个默认 regular face,不能与 `fonts` 同时使用。`Builder.embedFont(bytes)` 是对应的兼容方法,并会替换 Builder 之前的字体配置。`embedFont()` 和 `embedFonts()` 必须在所有页面的首个文本命令之前调用。可以先调用 `addPage()`,前提是尚未绘制文本。
+
+如果所有已配置 face 都缺少某字符,PDF 会显示该 face 的 `.notdef` 字形,但 ToUnicode 仍保留原始 Unicode 序列,供复制、搜索、无障碍和文本提取使用。每个嵌入 face 在单个 PDF 中最多编码 65,535 个不同 Unicode 序列。
+
+由于这种降级只体现在视觉上,请通过 `onWarning` 检测。所有 bridge 和 builder 都接受
+该回调,它会报告未被覆盖的码点,便于补一个 fallback 字体族:
+
+```typescript
+await Pdf.fromExcel(workbook, {
+  fonts,
+  onWarning: message => console.warn(message)
 });
 ```
 
-字体会被自动子集化(仅嵌入用到的字形)以最小化 PDF 文件大小。
+字体 fallback 只是标量渲染,不是复杂文本布局。本模块**不支持** OpenType shaping(GSUB/GPOS)、bidi 重排与彩色 emoji——仅配置字体不能让依赖 shaping 的 Arabic 或 Indic 文本正确渲染。
+
+这些限制是可检测的,不会静默发生:当文档包含复杂文字系统(script)、从右至左文本,或内嵌字体带有彩色字形表(`COLR`/`CBDT`/`sbix`/`SVG`)时,`onWarning` 会按特性各上报一次,并指出涉及的文字系统或字体族。请在绘制前自行完成 shaping 与重排(或改为渲染为图片)。
 
 ---
 
@@ -1091,12 +1152,13 @@ const doc = new Pdf.Builder();
 doc.setMetadata({ title, author, subject, creator });
 doc.setEncryption({ ownerPassword, userPassword?, permissions? });
 doc.setPdfACompliance();       // 启用 PDF/A-1b
-doc.embedFont(fontBytes);      // 用于 Unicode/CJK 的 TrueType 字体
+doc.embedFont(fontBytes);      // 旧版单默认字体兼容 API
+// 或:doc.embedFonts(fonts);   // 完整 PdfFontConfig;后一次调用替换之前的配置
 
 const page = doc.addPage({ width?, height? }); // 返回 PdfPageBuilder
 
 // PdfPageBuilder 方法:
-page.drawText(text, { x, y, fontSize?, bold?, italic?, color?, font? });
+page.drawText(text, { x, y, fontSize?, fontFamily?, bold?, italic?, color? });
 page.drawRect({ x, y, width, height, fill?, stroke?, lineWidth? });
 page.drawCircle({ cx, cy, r, fill?, stroke? });
 page.drawEllipse({ cx, cy, rx, ry, fill?, stroke? });

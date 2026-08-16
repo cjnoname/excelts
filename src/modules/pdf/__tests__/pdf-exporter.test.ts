@@ -344,7 +344,7 @@ describe("excelToPdf", () => {
       expect(text.replace(/\s+/g, " ")).toContain("Page 1 of 1");
     });
 
-    it("should register footer fonts even when using an embedded font", async () => {
+    it("should render footer text with the embedded font", async () => {
       const wb = Workbook.create();
       Cell.setValue(Workbook.addWorksheet(wb, "Test"), "A1", "Data");
 
@@ -354,7 +354,8 @@ describe("excelToPdf", () => {
       });
 
       const text = pdfToString(pdf);
-      expect(text).toContain("/BaseFont /Helvetica");
+      expect(text).toContain("/Subtype /Type0");
+      expect(text).not.toContain("/BaseFont /Helvetica");
     });
 
     it("should render Excel header/footer sections, fields, and formatting", async () => {
@@ -1680,6 +1681,85 @@ describe("exportPdf vector chart preparation", () => {
 
     expectValidPdf(bytes);
     expect(calls).toBe(1);
+  });
+
+  it("renders configured chart text through multiple fallback faces", async () => {
+    const primary = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "Primary"
+    });
+    const fallback = buildTtfWithCmap([{ start: 0x42, end: 0x42, delta: 1 - 0x42 }], 2, {
+      familyName: "Fallback"
+    });
+    const bytes = await exportPdf(
+      {
+        sheets: [
+          {
+            kind: "chartsheet",
+            name: "Chart",
+            chart: {
+              drawVector(surface, rect) {
+                surface.drawText("AB", { x: rect.x, y: rect.y, fontFamily: "Primary" });
+              }
+            }
+          }
+        ]
+      },
+      {
+        fonts: {
+          default: { regular: fallback },
+          families: [
+            { name: "Primary", faces: { regular: primary } },
+            { name: "Fallback", faces: { regular: fallback } }
+          ],
+          fallbackFamilies: ["Fallback"]
+        }
+      }
+    );
+
+    const fragments = (await readPdf(bytes)).pages[0].textFragments;
+    expect(fragments.map(fragment => fragment.text)).toEqual(expect.arrayContaining(["A", "B"]));
+    expect(fragments.find(fragment => fragment.text === "B")!.x).toBeGreaterThan(
+      fragments.find(fragment => fragment.text === "A")!.x
+    );
+  });
+
+  it("reports uncovered characters through onWarning", async () => {
+    const latin = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "LatinOnly"
+    });
+    const warnings: string[] = [];
+
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Cell.setValue(ws, "A1", "A中");
+
+    const bytes = await excelToPdf(wb, {
+      fonts: { default: { regular: latin } },
+      onWarning: message => warnings.push(message)
+    });
+
+    expectValidPdf(bytes);
+    expect(warnings.some(message => message.includes("U+4E2D"))).toBe(true);
+    // The character is still recoverable even though it draws as .notdef.
+    expect((await readPdf(bytes)).text).toContain("中");
+  });
+
+  it("stays silent when the configured fonts cover everything", async () => {
+    const latin = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "LatinOnly"
+    });
+    const warnings: string[] = [];
+
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Cell.setValue(ws, "A1", "A");
+
+    await excelToPdf(wb, {
+      fonts: { default: { regular: latin } },
+      onWarning: message => warnings.push(message)
+    });
+
+    expect(warnings).toEqual([]);
   });
 
   it("uses final font metrics for centered Unicode chart text", async () => {

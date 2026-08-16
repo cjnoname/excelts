@@ -13,6 +13,7 @@
  * @see PDF Reference 1.7, §5.5 - Character Encoding
  */
 
+import { parseTtf } from "@pdf/font/ttf-parser";
 import type { CMap } from "@pdf/reader/cmap-parser";
 import { parseCMap } from "@pdf/reader/cmap-parser";
 import type { PdfDocument } from "@pdf/reader/pdf-document";
@@ -54,8 +55,19 @@ export interface ResolvedFont {
   defaultWidth: number;
   /** Missing width for characters not in widths table */
   missingWidth: number;
-  /** Whether the font uses Identity-H or Identity-V encoding (codes are Unicode code points) */
+  /**
+   * Whether the font uses the Identity-H / Identity-V CMap.
+   *
+   * Identity means "character code equals CID". It says nothing about Unicode:
+   * a CID is an index into the font, so recovering text still requires either a
+   * ToUnicode CMap or the embedded font's own cmap (see `cidToUnicode`).
+   */
   isIdentityEncoding: boolean;
+  /**
+   * CID → Unicode recovered from the embedded font program, used only when the
+   * font has no ToUnicode CMap.
+   */
+  cidToUnicode: Map<number, string> | null;
   /** Writing mode: 0 = horizontal, 1 = vertical */
   wmode: number;
 }
@@ -170,6 +182,14 @@ export function resolveFont(fontDict: PdfDictValue, doc: PdfDocument): ResolvedF
   // Build widths map
   const { widths, defaultWidth, missingWidth } = buildWidths(fontDict, subtype, descriptor, doc);
 
+  // Producers may omit ToUnicode entirely. For an Identity CID font the codes
+  // are glyph indices, so the embedded font's own cmap can be inverted to
+  // recover the text instead of guessing that a CID is a Unicode scalar.
+  const cidToUnicode =
+    !toUnicode && isIdentityEncoding
+      ? buildCidToUnicodeFromEmbeddedFont(fontDict, descriptor, doc)
+      : null;
+
   return {
     name,
     subtype,
@@ -182,6 +202,7 @@ export function resolveFont(fontDict: PdfDictValue, doc: PdfDocument): ResolvedF
     defaultWidth,
     missingWidth,
     isIdentityEncoding,
+    cidToUnicode,
     wmode
   };
 }
@@ -190,63 +211,52 @@ export function resolveFont(fontDict: PdfDictValue, doc: PdfDocument): ResolvedF
  * Decode character codes to Unicode text using a resolved font.
  */
 export function decodeText(codes: Uint8Array, font: ResolvedFont): string {
-  // For Type0 (CID) fonts, try ToUnicode first with multi-byte codes
-  if (font.subtype === "Type0" || font.bytesPerCode === 2) {
-    return decodeCIDText(codes, font);
-  }
-
-  // Simple fonts: single-byte encoding
   let result = "";
-  for (let i = 0; i < codes.length; i++) {
-    const code = codes[i];
-    const ch = lookupChar(code, font);
-    result += ch;
+  for (const code of splitCharacterCodes(codes, font)) {
+    result += lookupChar(code, font);
   }
   return result;
 }
 
 /**
- * Decode a hex-encoded string from a TJ/Tj operator for CID fonts.
- * Uses the CMap's codespace ranges to determine byte lengths when available.
+ * Split a show-text string into character codes.
+ *
+ * Simple fonts use one byte per code. For CID fonts the codespace ranges of the
+ * font's CMap decide how many bytes each code occupies, and PDF allows 1 to 4.
+ *
+ * Every consumer — text extraction and width accumulation — goes through this
+ * one function, because they must agree on the split: if one consumed two bytes
+ * where the other consumed one, every following glyph would be mis-decoded or
+ * mis-positioned.
  */
-function decodeCIDText(codes: Uint8Array, font: ResolvedFont): string {
-  let result = "";
+export function splitCharacterCodes(codes: Uint8Array, font: ResolvedFont): Iterable<number> {
+  // A `bytesPerCode` of 2 on a non-Type0 font still means two-byte codes.
+  // For genuinely single-byte fonts the input already *is* the code sequence,
+  // so it is handed back as-is rather than copied into an array.
+  if (font.subtype !== "Type0" && font.bytesPerCode !== 2) {
+    return codes;
+  }
+
+  const result: number[] = [];
   let i = 0;
 
   while (i < codes.length) {
-    // Determine code length using CMap codespace ranges if available
-    let codeLen = 0;
-    if (font.toUnicode?.hasCodeSpaceRanges) {
-      codeLen = font.toUnicode.getCodeLength(codes[i]);
-    }
+    let codeLen = font.toUnicode?.hasCodeSpaceRanges ? font.toUnicode.getCodeLength(codes[i]) : 0;
 
-    if (codeLen === 2 && i + 1 < codes.length) {
-      // Codespace says this is a 2-byte code
-      const code2 = (codes[i] << 8) | codes[i + 1];
-      const ch = lookupChar(code2, font);
-      result += ch;
-      i += 2;
-    } else if (codeLen === 1) {
-      // Codespace says this is a 1-byte code
-      const ch = lookupChar(codes[i], font);
-      result += ch;
-      i++;
-    } else {
-      // No codespace ranges or unknown byte — fall back to greedy 2-byte then 1-byte
-      if (i + 1 < codes.length) {
-        const code2 = (codes[i] << 8) | codes[i + 1];
-        const ch = lookupChar(code2, font);
-        if (ch !== "\uFFFD") {
-          result += ch;
-          i += 2;
-          continue;
-        }
-      }
-      // Fall back to 1-byte
-      const ch = lookupChar(codes[i], font);
-      result += ch;
-      i++;
+    // No codespace ranges: Identity and most CID encodings are two-byte, which
+    // is also what `bytesPerCode` reports for them.
+    if (codeLen < 1) {
+      codeLen = Math.min(Math.max(font.bytesPerCode, 1), 4);
     }
+    // Never read past the end of the string.
+    codeLen = Math.min(codeLen, codes.length - i);
+
+    let code = 0;
+    for (let byte = 0; byte < codeLen; byte++) {
+      code = (code << 8) | codes[i + byte];
+    }
+    result.push(code);
+    i += codeLen;
   }
 
   return result;
@@ -265,11 +275,13 @@ function lookupChar(code: number, font: ResolvedFont): string {
     }
   }
 
-  // 2. Identity-H/Identity-V: the 2-byte code IS the Unicode code point
-  if (font.isIdentityEncoding && code > 0) {
-    // Validate it's a reasonable Unicode code point (BMP or supplementary)
-    if (code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)) {
-      return String.fromCodePoint(code);
+  // 2. Identity CID font with no ToUnicode: invert the embedded font's cmap.
+  //    A CID is a glyph index, so it must be translated through the font — the
+  //    code is not itself a Unicode scalar.
+  if (font.cidToUnicode) {
+    const viaFont = font.cidToUnicode.get(code);
+    if (viaFont !== undefined) {
+      return viaFont;
     }
   }
 
@@ -301,20 +313,9 @@ function lookupChar(code: number, font: ResolvedFont): string {
 function parseToUnicode(fontDict: PdfDictValue, doc: PdfDocument): CMap | null {
   const toUnicodeRef = fontDict.get("ToUnicode");
   if (!toUnicodeRef) {
-    // For Type0 fonts, check descendant fonts
-    if (dictGetName(fontDict, "Subtype") === "Type0") {
-      const descendants = dictGetArray(fontDict, "DescendantFonts");
-      if (descendants && descendants.length > 0) {
-        const cidFont = doc.derefDict(descendants[0]);
-        if (cidFont) {
-          const cidToUnicode = cidFont.get("ToUnicode");
-          if (cidToUnicode) {
-            return resolveToUnicode(cidToUnicode, doc);
-          }
-        }
-      }
-    }
-    return null;
+    // A Type0 font may carry ToUnicode on its descendant CIDFont instead.
+    const cidToUnicode = resolveDescendantCIDFont(fontDict, doc)?.get("ToUnicode");
+    return cidToUnicode ? resolveToUnicode(cidToUnicode, doc) : null;
   }
 
   return resolveToUnicode(toUnicodeRef, doc);
@@ -473,6 +474,29 @@ function applyDifferences(encoding: Map<number, string>, differences: PdfArrayVa
 }
 
 // =============================================================================
+// CID Font Structure
+// =============================================================================
+
+/**
+ * Resolve a Type0 font's descendant CIDFont dictionary.
+ *
+ * A Type0 font delegates its widths, `CIDToGIDMap` and font descriptor to a
+ * descendant CIDFont, and PDF 32000-1 9.7.4 permits exactly one. Returns null
+ * for every other subtype, so callers can use it as a combined "is this a CID
+ * font, and if so give me its CIDFont dict" test.
+ */
+function resolveDescendantCIDFont(fontDict: PdfDictValue, doc: PdfDocument): PdfDictValue | null {
+  if (dictGetName(fontDict, "Subtype") !== "Type0") {
+    return null;
+  }
+  const descendants = dictGetArray(fontDict, "DescendantFonts");
+  if (!descendants || descendants.length === 0) {
+    return null;
+  }
+  return doc.derefDict(descendants[0]);
+}
+
+// =============================================================================
 // Font Descriptor
 // =============================================================================
 
@@ -482,19 +506,94 @@ function resolveDescriptor(fontDict: PdfDictValue, doc: PdfDocument): PdfDictVal
     return doc.derefDict(descRef);
   }
 
-  // For Type0 fonts, check descendant
-  if (dictGetName(fontDict, "Subtype") === "Type0") {
-    const descendants = dictGetArray(fontDict, "DescendantFonts");
-    if (descendants && descendants.length > 0) {
-      const cidFont = doc.derefDict(descendants[0]);
-      if (cidFont) {
-        const cidDesc = cidFont.get("FontDescriptor");
-        return doc.derefDict(cidDesc);
+  // A Type0 font's descriptor lives on its descendant CIDFont.
+  const cidDesc = resolveDescendantCIDFont(fontDict, doc)?.get("FontDescriptor");
+  return cidDesc ? doc.derefDict(cidDesc) : null;
+}
+
+/**
+ * Read an explicit `CIDToGIDMap` stream as CID → glyph index.
+ *
+ * Returns null for `/Identity`, a missing entry, or an unreadable stream, all of
+ * which mean the CID can be used as the glyph index directly.
+ */
+function readCidToGidMap(fontDict: PdfDictValue, doc: PdfDocument): Uint16Array | null {
+  const entry = resolveDescendantCIDFont(fontDict, doc)?.get("CIDToGIDMap");
+  if (!entry || typeof entry === "string") {
+    return null;
+  }
+  const stream = doc.derefStreamWithObjNum(entry);
+  if (!stream) {
+    return null;
+  }
+  const data = doc.getStreamData(stream.stream, stream.objNum, stream.gen);
+  const count = Math.floor(data.length / 2);
+  const map = new Uint16Array(count);
+  for (let cid = 0; cid < count; cid++) {
+    map[cid] = (data[cid * 2] << 8) | data[cid * 2 + 1];
+  }
+  return count > 0 ? map : null;
+}
+
+/**
+ * Invert an embedded TrueType font's cmap to map CID → Unicode.
+ *
+ * Only used for Identity CID fonts without a ToUnicode CMap. With
+ * `CIDToGIDMap /Identity` the CID is the glyph index directly; an explicit
+ * CIDToGIDMap stream is applied first. Returns null when the font program is
+ * absent or unparseable, in which case extraction falls back to the heuristics
+ * further down `lookupChar`.
+ */
+function buildCidToUnicodeFromEmbeddedFont(
+  fontDict: PdfDictValue,
+  descriptor: PdfDictValue | null,
+  doc: PdfDocument
+): Map<number, string> | null {
+  if (!descriptor) {
+    return null;
+  }
+  const fontFile = descriptor.get("FontFile2");
+  if (!fontFile) {
+    return null;
+  }
+  try {
+    const stream = doc.derefStreamWithObjNum(fontFile);
+    if (!stream) {
+      return null;
+    }
+    const data = doc.getStreamData(stream.stream, stream.objNum, stream.gen);
+    if (data.length === 0) {
+      return null;
+    }
+    const font = parseTtf(data);
+    const gidToUnicode = new Map<number, string>();
+    for (const [codePoint, gid] of font.cmap) {
+      if (gid > 0 && !gidToUnicode.has(gid)) {
+        gidToUnicode.set(gid, String.fromCodePoint(codePoint));
       }
     }
-  }
+    if (gidToUnicode.size === 0) {
+      return null;
+    }
 
-  return null;
+    // CIDToGIDMap may remap CIDs onto glyph indices. `/Identity` (or an absent
+    // entry) means CID == GID; a stream holds one big-endian u16 GID per CID.
+    const cidToGid = readCidToGidMap(fontDict, doc);
+    if (!cidToGid) {
+      return gidToUnicode;
+    }
+    const result = new Map<number, string>();
+    for (let cid = 0; cid < cidToGid.length; cid++) {
+      const unicode = gidToUnicode.get(cidToGid[cid]);
+      if (unicode !== undefined) {
+        result.set(cid, unicode);
+      }
+    }
+    return result.size > 0 ? result : null;
+  } catch {
+    // A broken or unsupported font program must not break text extraction.
+    return null;
+  }
 }
 
 // =============================================================================
@@ -515,18 +614,13 @@ function buildWidths(
     missingWidth = dictGetNumber(descriptor, "MissingWidth") ?? 0;
   }
 
-  if (subtype === "Type0") {
+  const cidFont = resolveDescendantCIDFont(fontDict, doc);
+  if (cidFont) {
     // CID font widths
-    const descendants = dictGetArray(fontDict, "DescendantFonts");
-    if (descendants && descendants.length > 0) {
-      const cidFont = doc.derefDict(descendants[0]);
-      if (cidFont) {
-        defaultWidth = dictGetNumber(cidFont, "DW") ?? 1000;
-        const wArray = dictGetArray(cidFont, "W");
-        if (wArray) {
-          parseCIDWidths(wArray, widths, doc);
-        }
-      }
+    defaultWidth = dictGetNumber(cidFont, "DW") ?? 1000;
+    const wArray = dictGetArray(cidFont, "W");
+    if (wArray) {
+      parseCIDWidths(wArray, widths, doc);
     }
   } else {
     // Simple font widths

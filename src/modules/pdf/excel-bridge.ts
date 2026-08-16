@@ -101,6 +101,7 @@ import type {
 } from "@excel/types";
 import { formatCellValue } from "@excel/utils/cell-format";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
+import type { PdfFontConfig } from "@pdf/font/font-config";
 import { exportPdf } from "@pdf/render/pdf-exporter";
 import type {
   PdfWorkbook,
@@ -224,6 +225,14 @@ export interface ChartToPdfOptions {
   /** Document metadata forwarded to the resulting PDF. */
   title?: string;
   author?: string;
+  /** Embedded typefaces used by selectable vector-chart text. */
+  fonts?: PdfFontConfig;
+  /**
+   * Receive non-fatal font diagnostics raised while rendering.
+   *
+   * @see `PdfExportOptions.onWarning`
+   */
+  onWarning?: (message: string) => void;
   /**
    * ChartEx `regionMap` data. When supplied, the vector PDF path
    * uses the TopoJSON polygons (matched via `match` rules) instead
@@ -271,7 +280,10 @@ export async function chartToPdf(
   const pageWidth = options.pageWidth ?? Math.max(width + margin * 2, 400);
   const pageHeight = options.pageHeight ?? Math.max(height + margin * 2, 300);
 
-  const doc = new PdfDocumentBuilder();
+  const doc = new PdfDocumentBuilder({ fonts: options.fonts });
+  if (options.onWarning) {
+    doc.onWarning(options.onWarning);
+  }
   if (options.title || options.author) {
     doc.setMetadata({
       title: options.title,

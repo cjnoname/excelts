@@ -1,14 +1,23 @@
 import { createWorkbook, addWorksheet } from "@excel/core/workbook";
 import { Cell } from "@excel/index";
 import { PdfFontError } from "@pdf/errors";
+import { embedTtfFont } from "@pdf/font/font-embedder";
 import { FontManager } from "@pdf/font/font-manager";
 import { parseTtf } from "@pdf/font/ttf-parser";
+import { PdfDocument } from "@pdf/reader/pdf-document";
+import { isPdfArray, isPdfDict } from "@pdf/reader/pdf-parser";
+import { readPdf } from "@pdf/reader/pdf-reader";
 /**
  * Tests for TrueType font parsing, subsetting, and embedding.
  */
 import { describe, it, expect } from "vitest";
 
-import { buildMinimalTtf, buildSparseGidTtf } from "./ttf-test-utils";
+import {
+  buildAliasedGidTtf,
+  buildMinimalTtf,
+  buildSparseGidTtf,
+  buildTtfWithCmap
+} from "./ttf-test-utils";
 
 // =============================================================================
 // Tests
@@ -68,6 +77,24 @@ describe("TrueType Font Parser", () => {
 });
 
 describe("Font Embedding Utilities", () => {
+  it("keeps the legacy scalar Set input", async () => {
+    const { PdfWriter } = await import("@pdf/core/pdf-writer");
+    const embedded = embedTtfFont(
+      new PdfWriter(),
+      parseTtf(buildMinimalTtf()),
+      new Set([0x41, 0x42]),
+      "EF1"
+    );
+
+    expect(embedded.unicodeToCid).toEqual(
+      new Map([
+        [0x41, 1],
+        [0x42, 2]
+      ])
+    );
+    expect(embedded.encodeText("AB")).toEqual([1, 2]);
+  });
+
   it("should encode text via FontManager", async () => {
     const ttfData = buildMinimalTtf();
     const font = parseTtf(ttfData);
@@ -160,5 +187,137 @@ describe("Font Integration with excelToPdf", () => {
     expect(text).toContain("<00010002> Tj");
     // Must NOT contain original GIDs
     expect(text).not.toContain("<00050008>");
+  });
+
+  it("writes a valid whole-font checksum for the embedded subset", async () => {
+    const { excelToPdf } = await import("@pdf/excel-bridge");
+    const wb = createWorkbook();
+    const ws = addWorksheet(wb, "Test");
+    Cell.setValue(ws, "A1", "AB");
+    const pdf = await excelToPdf(wb, { font: buildMinimalTtf() });
+
+    const doc = new PdfDocument(pdf);
+    const resources = doc.derefDict(doc.getPages()[0].get("Resources"));
+    const fonts = resources && doc.derefDict(resources.get("Font"));
+    const type0 = fonts && doc.derefDict(fonts.get("EF1"));
+    const descendants = type0?.get("DescendantFonts");
+    const cidFont = isPdfArray(descendants) ? doc.derefDict(descendants[0]) : null;
+    const descriptor = cidFont && doc.derefDict(cidFont.get("FontDescriptor"));
+    const fontStreamRef = descriptor?.get("FontFile2");
+    const fontStream = doc.derefStreamWithObjNum(fontStreamRef);
+    expect(fontStream).not.toBeNull();
+    const subset = fontStream
+      ? doc.getStreamData(fontStream.stream, fontStream.objNum, fontStream.gen)
+      : new Uint8Array();
+    const view = new DataView(subset.buffer, subset.byteOffset, subset.byteLength);
+    let checksum = 0;
+    for (let offset = 0; offset + 4 <= subset.length; offset += 4) {
+      checksum = (checksum + view.getUint32(offset, false)) >>> 0;
+    }
+    expect(checksum).toBe(0xb1b0afba);
+  });
+
+  it("should keep aliased Unicode code points as distinct CIDs", async () => {
+    const { excelToPdf } = await import("@pdf/excel-bridge");
+    const wb = createWorkbook();
+    const ws = addWorksheet(wb, "Test");
+    Cell.setValue(ws, "A1", "AΑ");
+
+    const pdf = await excelToPdf(wb, { font: buildAliasedGidTtf() });
+    const serialized = new TextDecoder().decode(pdf);
+    expect(serialized).toContain("<00010002> Tj");
+    expect(serialized).not.toContain("/CIDToGIDMap /Identity");
+    expect(serialized).toContain("/W [0 [500 550 550]]");
+
+    const doc = new PdfDocument(pdf);
+    const resources = doc.derefDict(doc.getPages()[0].get("Resources"));
+    const fonts = resources && doc.derefDict(resources.get("Font"));
+    const type0 = fonts && doc.derefDict(fonts.get("EF1"));
+    const descendants = type0?.get("DescendantFonts");
+    expect(isPdfArray(descendants)).toBe(true);
+    const cidFont = isPdfArray(descendants) ? doc.derefDict(descendants[0]) : null;
+    const mapRef = cidFont?.get("CIDToGIDMap");
+    const mapStream = doc.derefStreamWithObjNum(mapRef);
+    expect(mapStream).not.toBeNull();
+    const map = mapStream
+      ? doc.getStreamData(mapStream.stream, mapStream.objNum, mapStream.gen)
+      : new Uint8Array();
+    expect(Array.from(map)).toEqual([0, 0, 0, 1, 0, 1]);
+    expect(isPdfDict(cidFont)).toBe(true);
+
+    const roundtrip = await readPdf(pdf, { extractImages: false });
+    expect(roundtrip.text).toContain("AΑ");
+  });
+
+  it("roundtrips variation selectors and ZWJ sequences through a real PDF", async () => {
+    const { excelToPdf } = await import("@pdf/excel-bridge");
+    const heart = 0x2764;
+    const sun = 0x2600;
+    const font = buildTtfWithCmap(
+      [
+        { start: 0x41, end: 0x41, delta: 1 - 0x41 },
+        { start: heart, end: heart, delta: 2 - heart },
+        { start: sun, end: sun, delta: 3 - sun }
+      ],
+      4,
+      { advanceWidths: [500, 600, 600, 600] }
+    );
+    const text = "A\ufe0f❤\u200d☀";
+    const wb = createWorkbook();
+    const ws = addWorksheet(wb, "Sequences");
+    Cell.setValue(ws, "A1", text);
+
+    const pdf = await excelToPdf(wb, { font });
+    const serialized = new TextDecoder().decode(pdf);
+    expect(serialized).toContain("<000100020003> Tj");
+
+    const roundtrip = await readPdf(pdf, { extractImages: false });
+    expect(roundtrip.text).toContain(text);
+  });
+
+  it("assigns distinct CIDs to Unicode sequences sharing one GID", async () => {
+    const { excelToPdf } = await import("@pdf/excel-bridge");
+    const eAcute = 0x00e9;
+    const font = buildTtfWithCmap(
+      [
+        { start: 0x41, end: 0x41, delta: 1 - 0x41 },
+        { start: 0x65, end: 0x65, delta: 2 - 0x65 },
+        { start: eAcute, end: eAcute, delta: 2 - eAcute },
+        { start: 0x0301, end: 0x0301, delta: 3 - 0x0301 }
+      ],
+      4,
+      { advanceWidths: [500, 600, 550, 0] }
+    );
+    const text = "AA\ufe0féée\u0301";
+    const wb = createWorkbook();
+    const ws = addWorksheet(wb, "Aliases");
+    Cell.setValue(ws, "A1", text);
+
+    const pdf = await excelToPdf(wb, { font });
+    const serialized = new TextDecoder().decode(pdf);
+    expect(serialized).toContain("<000100020003000300040005> Tj");
+
+    const roundtrip = await readPdf(pdf, { extractImages: false });
+    expect(roundtrip.text).toContain(text);
+  });
+
+  it("roundtrips routed configured-font sequences", async () => {
+    const { Pdf } = await import("@pdf/index");
+    const heart = 0x2764;
+    const sun = 0x2600;
+    const font = buildTtfWithCmap(
+      [
+        { start: 0x41, end: 0x41, delta: 1 - 0x41 },
+        { start: heart, end: heart, delta: 2 - heart },
+        { start: sun, end: sun, delta: 3 - sun }
+      ],
+      4
+    );
+    const text = "A\ufe0f❤\u200d☀";
+    const doc = new Pdf.Builder({ fonts: { default: { regular: font } } });
+    doc.addPage().drawText(text, { x: 72, y: 720 });
+
+    const roundtrip = await Pdf.read(await doc.build());
+    expect(roundtrip.text).toContain(text);
   });
 });

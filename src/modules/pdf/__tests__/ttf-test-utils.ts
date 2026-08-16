@@ -175,6 +175,15 @@ interface TtfBuildOptions {
   familyName?: string;
   /** PostScript name written into the `name` table. Defaults to `"<familyName>-Regular"`. */
   postScriptName?: string;
+  /** Vertical metrics in font units. Defaults to 800 / -200. */
+  ascent?: number;
+  descent?: number;
+  /**
+   * Extra table tags to append, each with a single placeholder byte. Used to
+   * simulate fonts carrying tables the embedder detects but does not consume,
+   * such as the color glyph tables `COLR` / `CBDT` / `sbix`.
+   */
+  extraTableTags?: readonly string[];
 }
 
 /**
@@ -190,6 +199,8 @@ export function buildTtfWithCmap(
   const widths = options?.advanceWidths;
   const family = options?.familyName ?? "TestFont";
   const ps = options?.postScriptName ?? `${family}-Regular`;
+  const ascent = options?.ascent ?? 800;
+  const descent = options?.descent ?? -200;
 
   const tables: Array<{ tag: string; data: Uint8Array }> = [];
 
@@ -212,8 +223,8 @@ export function buildTtfWithCmap(
   const hhea = new Uint8Array(36);
   const hheaV = new DataView(hhea.buffer);
   hheaV.setUint32(0, 0x00010000, false);
-  hheaV.setInt16(4, 800, false);
-  hheaV.setInt16(6, -200, false);
+  hheaV.setInt16(4, ascent, false);
+  hheaV.setInt16(6, descent, false);
   hheaV.setUint16(10, 600, false);
   hheaV.setUint16(34, numGlyphs, false);
   tables.push({ tag: "hhea", data: hhea });
@@ -231,8 +242,8 @@ export function buildTtfWithCmap(
   os2V.setUint16(0, 4, false);
   os2V.setInt16(2, 500, false);
   os2V.setUint16(4, 400, false);
-  os2V.setInt16(68, 800, false);
-  os2V.setInt16(70, -200, false);
+  os2V.setInt16(68, ascent, false);
+  os2V.setInt16(70, descent, false);
   os2V.setUint16(74, 800, false);
   os2V.setUint16(76, 200, false);
   os2V.setInt16(88, 700, false);
@@ -304,6 +315,10 @@ export function buildTtfWithCmap(
   // glyf (empty)
   tables.push({ tag: "glyf", data: new Uint8Array(0) });
 
+  for (const tag of options?.extraTableTags ?? []) {
+    tables.push({ tag, data: new Uint8Array(1) });
+  }
+
   return assembleTtfFromTables(tables);
 }
 
@@ -336,6 +351,23 @@ export function buildSparseGidTtf(): Uint8Array {
       advanceWidths: widths,
       familyName: "SparseFont",
       postScriptName: "SparseFont-Regular"
+    }
+  );
+}
+
+/** Build a TTF where Latin A and Greek Alpha alias the same original GID. */
+export function buildAliasedGidTtf(): Uint8Array {
+  const widths = Array.from({ length: 6 }, (_, i) => 500 + i * 10);
+  return buildTtfWithCmap(
+    [
+      { start: 0x41, end: 0x41, delta: 5 - 0x41 },
+      { start: 0x391, end: 0x391, delta: 5 - 0x391 }
+    ],
+    6,
+    {
+      advanceWidths: widths,
+      familyName: "AliasFont",
+      postScriptName: "AliasFont-Regular"
     }
   );
 }

@@ -24,6 +24,17 @@ import { EMU_PER_INCH } from "@utils/units";
 import { describe, expect, it } from "vitest";
 
 import { TINY_PNG, decompressPdfContent, expectAllGray, pdfColorOps } from "./test-helpers";
+import { buildTtfWithCmap } from "./ttf-test-utils";
+
+function configuredAsciiFonts() {
+  const regular = buildTtfWithCmap([{ start: 0x20, end: 0x7e, delta: 1 - 0x20 }], 96, {
+    familyName: "Configured Regular"
+  });
+  const bold = buildTtfWithCmap([{ start: 0x20, end: 0x7e, delta: 1 - 0x20 }], 96, {
+    familyName: "Configured Bold"
+  });
+  return { default: { regular, bold } };
+}
 
 /** Baseline 8x8 JPEG header with three components — enough for DCTDecode wiring. */
 const MINIMAL_JPEG = new Uint8Array([
@@ -865,6 +876,15 @@ describe("pageSetup.showRowColHeaders", () => {
     expect(page).toContain("2");
   });
 
+  it("should reserve heading labels during layout with configured fonts", async () => {
+    const { wb } = plainSheet();
+    const page = textPerPage(
+      await excelToPdf(wb, { showRowColHeaders: true, fonts: configuredAsciiFonts() })
+    )[0];
+    expect(page).toContain("A");
+    expect(page).toContain("2");
+  });
+
   it("should shift the grid right to make room for the row gutter", async () => {
     const { wb } = plainSheet();
     const plain = leftMostX(await excelToPdf(wb));
@@ -1056,6 +1076,15 @@ describe("pageSetup.cellComments", () => {
     expect(pages[1]).toContain("C9: Second remark");
   });
 
+  it("should use the configured bold face for the atEnd title", async () => {
+    const { wb } = commentSheet();
+    const pdf = await excelToPdf(wb, {
+      cellComments: "atEnd",
+      fonts: configuredAsciiFonts()
+    });
+    expect(new TextDecoder("latin1").decode(pdf)).toContain("/Configured#20Bold-Regular-Subset");
+  });
+
   it("should read the mode from the worksheet", async () => {
     const { wb, ws } = commentSheet();
     ws.pageSetup.cellComments = "atEnd";
@@ -1084,6 +1113,26 @@ describe("pageSetup.cellComments", () => {
     // Note-yellow box plus Excel's red corner marker on the commented cell.
     expect(content).toMatch(/1 1 0\.88 rg/);
     expect(content).toMatch(/0\.8 0 0 rg/);
+  });
+
+  it("should reserve asDisplayed comment text during configured-font layout", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    for (let row = 1; row <= 8; row++) {
+      for (let col = 1; col <= 4; col++) {
+        Cell.setValue(ws, row, col, `${row}:${col}`);
+      }
+    }
+    cellSetNote(getCell(ws, "B6"), "Comment text");
+
+    expect(
+      pageTexts(
+        await excelToPdf(wb, {
+          cellComments: "asDisplayed",
+          fonts: configuredAsciiFonts()
+        })
+      )[0]
+    ).toContain("Comment text");
   });
 
   it("should honour an explicit VML anchor for asDisplayed", async () => {

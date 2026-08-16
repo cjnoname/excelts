@@ -1265,9 +1265,11 @@ describe("P2: chart SVG/PDF renderer", () => {
     // Hash refreshed when the renderer switched to a two-pass series
     // loop (all shapes first, then all adornments) so later series'
     // filled polygons no longer obscure earlier series' data labels
-    // and trendlines. The SVG content is byte-stable again after the
-    // reorder; this golden pins it.
-    expect(stableHash(svg)).toBe("7e29a405");
+    // and trendlines, and again when label measurement started
+    // reporting scene units instead of CSS pixels (a font drawn at
+    // `font-size="N"` user units is N units tall, not N * 96/72), which
+    // narrowed every legend and label reservation by 4/3.
+    expect(stableHash(svg)).toBe("4f54220a");
   });
 
   it("renderChartSvg is documented as a deterministic preview, not Excel-identical", () => {

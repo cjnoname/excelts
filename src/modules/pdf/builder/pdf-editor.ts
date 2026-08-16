@@ -96,11 +96,17 @@ export class PdfEditorPage {
   readonly _height: number;
 
   /** @internal */
-  constructor(pageIndex: number, width: number, height: number, fontManager: FontManager) {
+  constructor(
+    pageIndex: number,
+    width: number,
+    height: number,
+    fontManager: FontManager,
+    resourcePrefix = ""
+  ) {
     this._pageIndex = pageIndex;
     this._width = width;
     this._height = height;
-    this._overlay = new PdfPageBuilder(width, height, fontManager);
+    this._overlay = new PdfPageBuilder(width, height, fontManager, resourcePrefix);
   }
 
   /** Page width in points. */
@@ -241,7 +247,9 @@ export class PdfEditor {
   private _password: string;
   private _pages: PdfEditorPage[] = [];
   private _newPages: PdfPageBuilder[] = [];
-  private _fontManager = new FontManager();
+  private _fontManager: FontManager;
+  /** Prefix that isolates every overlay resource from the original document. */
+  private _overlayResourcePrefix: string;
   private _formFieldUpdates = new Map<string, string>();
   private _copiedPages: CopiedPage[] = [];
   /** @internal - Indices of original pages to remove on save */
@@ -259,6 +267,8 @@ export class PdfEditor {
   private constructor(data: Uint8Array, password: string) {
     this._doc = new PdfDocument(data);
     this._password = password;
+    this._overlayResourcePrefix = this._chooseOverlayResourcePrefix();
+    this._fontManager = new FontManager(undefined, this._overlayResourcePrefix);
 
     // Handle encryption
     if (isEncrypted(this._doc)) {
@@ -276,7 +286,15 @@ export class PdfEditor {
         width: 612,
         height: 792
       };
-      this._pages.push(new PdfEditorPage(i, dims.width, dims.height, this._fontManager));
+      this._pages.push(
+        new PdfEditorPage(
+          i,
+          dims.width,
+          dims.height,
+          this._fontManager,
+          this._overlayResourcePrefix
+        )
+      );
     }
   }
 
@@ -314,7 +332,7 @@ export class PdfEditor {
   addPage(options?: PageOptions): PdfPageBuilder {
     const width = options?.width ?? 595.28;
     const height = options?.height ?? 841.89;
-    const page = new PdfPageBuilder(width, height, this._fontManager);
+    const page = new PdfPageBuilder(width, height, this._fontManager, this._overlayResourcePrefix);
     this._newPages.push(page);
     return page;
   }
@@ -379,6 +397,36 @@ export class PdfEditor {
     }
 
     return results;
+  }
+
+  /**
+   * Pick a deterministic resource prefix absent from every original page.
+   *
+   * Overlay content is merged into each page resource dictionary. Fonts,
+   * images, and ExtGState entries therefore need a private namespace; otherwise
+   * an overlay `/EF1` or `/Im1` silently replaces the original page resource and
+   * corrupts content that was already there.
+   */
+  private _chooseOverlayResourcePrefix(): string {
+    const used = new Set<string>();
+    for (const { dict } of this._doc.getPagesWithObjInfo()) {
+      const resources = this._doc.resolvePageResources(dict);
+      for (const category of ["Font", "XObject", "ExtGState"]) {
+        const value = resources.get(category);
+        const subDict = value ? this._doc.derefDict(value) : null;
+        if (!subDict) {
+          continue;
+        }
+        for (const name of subDict.keys()) {
+          used.add(name);
+        }
+      }
+    }
+    let id = 1;
+    while ([...used].some(name => name.startsWith(`DMO${id}_`))) {
+      id++;
+    }
+    return `DMO${id}_`;
   }
 
   /**
@@ -493,10 +541,12 @@ export class PdfEditor {
     const writer = new PdfWriter();
     this._writerForSave = writer;
     this._clonedRefs = new Map();
+    this._fontManager.beginBuild();
 
     try {
       return await this._buildFullSave(writer);
     } finally {
+      this._fontManager.endBuild();
       this._writerForSave = null;
       this._clonedRefs.clear();
     }
@@ -504,6 +554,12 @@ export class PdfEditor {
 
   /** @internal Full rebuild implementation, extracted for try/finally cleanup. */
   private async _buildFullSave(writer: PdfWriter): Promise<Uint8Array> {
+    for (const page of this._pages) {
+      page._overlay._stream.preflight();
+    }
+    for (const page of this._newPages) {
+      page._stream.preflight();
+    }
     // Write font resources for any overlay content
     const fontObjectMap = await this._fontManager.writeFontResources(writer);
     const fontDictStr = this._fontManager.buildFontDictString(fontObjectMap);
@@ -753,7 +809,7 @@ export class PdfEditor {
             .set("ca", pdfNumber(alpha))
             .set("CA", pdfNumber(alpha));
           writer.addObject(gsObjNum, gsDict);
-          gsEntries.push(`/${alphaGsName(alpha)} ${pdfRef(gsObjNum)}`);
+          gsEntries.push(`/${alphaGsName(alpha, this._overlayResourcePrefix)} ${pdfRef(gsObjNum)}`);
         }
         gsDictStr = `<< ${gsEntries.join(" ")} >>`;
       }
@@ -918,9 +974,11 @@ export class PdfEditor {
     }
 
     this._isIncrementalSave = true;
+    this._fontManager.beginBuild();
     try {
       return await this._buildIncrementalUpdate();
     } finally {
+      this._fontManager.endBuild();
       this._isIncrementalSave = false;
       this._writerForSave = null;
       this._clonedRefs.clear();
@@ -949,6 +1007,9 @@ export class PdfEditor {
     const writerFontObjRemap = new Map<number, number>();
 
     if (hasOverlays) {
+      for (const page of this._pages) {
+        page._overlay._stream.preflight();
+      }
       // Write font resources via the writer (to serialize font objects)
       const fontObjectMap = await this._fontManager.writeFontResources(writer);
 
@@ -1044,7 +1105,7 @@ export class PdfEditor {
         const imageObjMap = new Map<string, number>();
         for (let imgIdx = 0; imgIdx < editorPage._overlay._images.length; imgIdx++) {
           const img = editorPage._overlay._images[imgIdx];
-          const imgName = `Im${imgIdx + 1}`;
+          const imgName = `${this._overlayResourcePrefix}Im${imgIdx + 1}`;
           const imgObjNum = nextObjNum++;
           imageObjMap.set(imgName, imgObjNum);
           modifiedObjects.set(
@@ -1617,7 +1678,7 @@ export class PdfEditor {
     const map = new Map<string, number>();
     for (let i = 0; i < page._images.length; i++) {
       const img = page._images[i];
-      const imgName = `Im${i + 1}`;
+      const imgName = `${this._overlayResourcePrefix}Im${i + 1}`;
       const objNum = writeImageXObject(writer, img.data, img.format);
       map.set(imgName, objNum);
     }
@@ -1669,7 +1730,7 @@ export class PdfEditor {
           .set("ca", pdfNumber(alpha))
           .set("CA", pdfNumber(alpha));
         writer.addObject(gsObjNum, gsDict);
-        gsMap.set(alphaGsName(alpha), pdfRef(gsObjNum));
+        gsMap.set(alphaGsName(alpha, this._overlayResourcePrefix), pdfRef(gsObjNum));
       }
       dict.set("ExtGState", gsMap);
     }

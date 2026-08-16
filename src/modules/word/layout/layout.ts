@@ -82,7 +82,13 @@ export interface LayoutOptions {
    * };
    * ```
    */
-  readonly measureText?: (text: string, fontName: string, fontSize: number) => number;
+  readonly measureText?: (
+    text: string,
+    fontName: string,
+    fontSize: number,
+    bold?: boolean,
+    italic?: boolean
+  ) => number;
 }
 
 // =============================================================================

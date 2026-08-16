@@ -1,3 +1,4 @@
+import { _setCandidatesForTest, resetFontDiscoveryCache } from "@pdf/font/system-fonts";
 import { describe, it, expect } from "vitest";
 
 import {
@@ -81,6 +82,126 @@ describe("PdfDocumentBuilder", () => {
     expect(result.text).toContain("Normal text");
     expect(result.text).toContain("Bold text");
     expect(result.text).toContain("Italic text");
+  });
+
+  it("compiles configured fonts before drawing and routes bold glyphs to a non-zero CID", async () => {
+    const regular = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "BuilderRegular"
+    });
+    const bold = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "BuilderBold",
+      postScriptName: "BuilderBold-Bold"
+    });
+    const doc = new Pdf.Builder({
+      fonts: {
+        default: { regular },
+        families: [{ name: "Builder Family", faces: { regular, bold } }]
+      }
+    });
+    doc.addPage().drawText("A", {
+      x: 72,
+      y: 750,
+      fontFamily: "Builder Family",
+      bold: true
+    });
+
+    const pdf = new TextDecoder("latin1").decode(await doc.build());
+    expect(pdf).toContain("BuilderBold-Bold");
+    const encoded = pdf.match(/<([0-9A-F]{4})> Tj/);
+    expect(encoded).not.toBeNull();
+    expect(encoded![1]).not.toBe("0000");
+  });
+
+  it("allows font registration after page creation but before its first text command", () => {
+    const font = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2);
+    const doc = new Pdf.Builder();
+    const page = doc.addPage();
+
+    expect(() => doc.embedFont(font)).not.toThrow();
+
+    page.drawText("A", { x: 72, y: 750 });
+
+    expect(() => doc.embedFont(font)).toThrow(/before drawing the first PDF text command/);
+    expect(() => doc.embedFonts({ default: { regular: font } })).toThrow(
+      /before drawing the first PDF text command/
+    );
+  });
+
+  it("keeps repeated and concurrent configured-font builds byte-stable", async () => {
+    const font = buildTtfWithCmap([{ start: 0x41, end: 0x5a, delta: 1 - 0x41 }], 27);
+    const doc = new Pdf.Builder({ fonts: { default: { regular: font } } });
+    const page = doc.addPage();
+    page.drawText("FIRST", { x: 72, y: 750 });
+
+    const first = await doc.build();
+    const second = await doc.build();
+    expect(second).toEqual(first);
+    const [parallelA, parallelB] = await Promise.all([doc.build(), doc.build()]);
+    expect(parallelA).toEqual(first);
+    expect(parallelB).toEqual(first);
+
+    page.drawText("SECOND", { x: 72, y: 720 });
+    const extended = await doc.build();
+    expect(extended).not.toEqual(first);
+    expect((await Pdf.read(extended)).text).toContain("SECOND");
+  });
+
+  it("handles empty text and wrapped tabs without introducing post-freeze glyphs", async () => {
+    const font = buildTtfWithCmap([{ start: 0x20, end: 0x42, delta: 1 - 0x20 }], 36);
+    const doc = new Pdf.Builder({ fonts: { default: { regular: font } } });
+    const page = doc.addPage();
+    page.drawText("", { x: 72, y: 750 });
+    page.drawText("A\tB", { x: 72, y: 720, maxWidth: 20 });
+
+    await expect(doc.build()).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it("re-runs auto-discovery when later builds add new character coverage", async () => {
+    const cjkOnly = buildTtfWithCmap([{ start: 0x4e2d, end: 0x4e2d, delta: 1 - 0x4e2d }], 2, {
+      familyName: "CjkOnly"
+    });
+    const broad = buildTtfWithCmap(
+      [
+        { start: 0x180, end: 0x180, delta: 1 - 0x180 },
+        { start: 0x4e2d, end: 0x4e2d, delta: 2 - 0x4e2d }
+      ],
+      3,
+      { familyName: "Broad" }
+    );
+    resetFontDiscoveryCache();
+    _setCandidatesForTest([cjkOnly, broad]);
+    try {
+      const doc = new Pdf.Builder();
+      const page = doc.addPage();
+      page.drawText("中", { x: 72, y: 750 });
+      const first = new TextDecoder("latin1").decode(await doc.build());
+      expect(first).toContain("CjkOnly-Regular-Subset");
+
+      page.drawText("ƀ", { x: 72, y: 720 });
+      const secondBytes = await doc.build();
+      const second = new TextDecoder("latin1").decode(secondBytes);
+      expect(second).toContain("Broad-Regular-Subset");
+      expect((await Pdf.read(secondBytes)).text).toContain("ƀ");
+    } finally {
+      resetFontDiscoveryCache();
+    }
+  });
+
+  it("snapshots page commands when build is called", async () => {
+    const doc = new Pdf.Builder();
+    const page = doc.addPage();
+    page.drawText("BEFORE", { x: 72, y: 750 });
+
+    const firstPending = doc.build();
+    page.drawText("AFTER", { x: 72, y: 720 });
+
+    const first = await Pdf.read(await firstPending);
+    expect(first.text).toContain("BEFORE");
+    expect(first.text).not.toContain("AFTER");
+
+    const second = await Pdf.read(await doc.build());
+    expect(second.text).toContain("BEFORE");
+    expect(second.text).toContain("AFTER");
   });
 
   it("should draw text with word-wrap", async () => {
@@ -295,7 +416,7 @@ describe("PdfDocumentBuilder", () => {
     expect(pdfText).toContain("/ca 0.35");
     expect(pdfText).toContain("/CA 0.35");
     // And the content stream references the alpha gs (GS3500 = round(0.35*10000)).
-    expect(pdfText).toMatch(/\/GS3500 gs/);
+    expect(pdfText).toMatch(/\/(?:DMO\d+_)?GS3500 gs/);
   });
 
   it("honours rgba() and fill-opacity in drawSvg", async () => {
@@ -511,29 +632,21 @@ describe("PdfDocumentBuilder", () => {
     expect(cids.every(c => c !== "0000")).toBe(true);
   });
 
-  it("drawText routes a late auto-embedded font through the CIDFont (no WinAnsi space fallback)", async () => {
-    // Even when the font is discovered/embedded at build time (after the
-    // run was drawn against a Type1 resource), the deferred encoder must
-    // re-route the run through the now-available embedded font instead of
-    // emitting the stale Type1/WinAnsi bytes. We simulate the build-time
-    // embed by registering the font through the public embedFont API but
-    // drawing first — the draw still records a Type1 resource, and the
-    // deferred encode must override it.
+  it("drawText routes a legacy embedded font through the CIDFont (no WinAnsi space fallback)", async () => {
     const ttf = buildTtfWithCmap([{ start: 0x20, end: 0x5a, delta: 1 - 0x20 }], 60, {
       familyName: "AsciiOnly"
     });
 
     const doc = new Pdf.Builder();
-    const page = doc.addPage();
-    // Draw before embedFont so resolveFont returns a Type1 resource name.
-    page.drawText("HELLO", { x: 40, y: 150, fontSize: 16 });
     doc.embedFont(ttf);
+    const page = doc.addPage();
+    page.drawText("HELLO", { x: 40, y: 150, fontSize: 16 });
     const bytes = await doc.build();
 
     const text = new TextDecoder("latin1").decode(bytes);
     expect(text).toContain("/Type0");
     // The run must reference the embedded font resource, not the Type1 F1.
-    expect(text).toMatch(/\/EF\d+ 16 Tf/);
+    expect(text).toMatch(/\/(?:DMO\d+_)?EF\d+ 16 Tf/);
   });
 
   it("drawText falls back to Type3 glyphs for non-WinAnsi chars when no font covers them", async () => {
@@ -1398,7 +1511,7 @@ describe("PdfEditor", () => {
     expect(pdfText).toContain("/ExtGState");
     expect(pdfText).toContain("/ca 0.35");
     expect(pdfText).toContain("/CA 0.35");
-    expect(pdfText).toMatch(/\/GS3500 gs/);
+    expect(pdfText).toMatch(/\/(?:DMO\d+_)?GS3500 gs/);
   });
 
   it("serialises /ExtGState on newly-added pages (PdfEditor.addPage)", async () => {
@@ -1418,7 +1531,7 @@ describe("PdfEditor", () => {
     const pdfText = new TextDecoder("latin1").decode(result);
     expect(pdfText).toContain("/ExtGState");
     expect(pdfText).toContain("/ca 0.5");
-    expect(pdfText).toMatch(/\/GS5000 gs/);
+    expect(pdfText).toMatch(/\/(?:DMO\d+_)?GS5000 gs/);
   });
 });
 
@@ -1755,6 +1868,42 @@ describe("PdfEditor — saveIncremental", () => {
     expect(readResult.text).toContain("Overlay");
   });
 
+  it("keeps original embedded-font resources isolated from overlay resources", async () => {
+    const fontA = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "OriginalFont"
+    });
+    const builder = new Pdf.Builder();
+    builder.embedFont(fontA);
+    builder.addPage().drawText("A", { x: 72, y: 700 });
+    const original = await builder.build();
+
+    const fontB = buildTtfWithCmap([{ start: 0x42, end: 0x42, delta: 1 - 0x42 }], 2, {
+      familyName: "OverlayFont"
+    });
+    const editor = Pdf.Editor.load(original);
+    editor.embedFont(fontB);
+    editor.getPage(0).drawText("B", { x: 72, y: 650 });
+
+    const result = await Pdf.read(await editor.save());
+    expect(result.pages[0].textFragments.map(fragment => fragment.text)).toEqual(["A", "B"]);
+  });
+
+  it("can save again after adding new embedded-font overlay text", async () => {
+    const originalPdf = await Pdf.create([["Original"]]);
+    const editor = Pdf.Editor.load(originalPdf);
+    const font = buildTtfWithCmap([{ start: 0x41, end: 0x42, delta: 1 - 0x41 }], 3, {
+      familyName: "OverlayFont"
+    });
+    editor.embedFont(font);
+    editor.getPage(0).drawText("A", { x: 72, y: 700 });
+    await editor.save();
+
+    editor.getPage(0).drawText("B", { x: 72, y: 670 });
+    const second = await Pdf.read(await editor.save());
+    expect(second.text).toContain("A");
+    expect(second.text).toContain("B");
+  });
+
   it("saveIncremental overlays embedded-font text without evaluating deferred text early", async () => {
     // Regression: text is now emitted as a deferred fragment whose encoding
     // runs at serialization time. `_hasOverlay()` must probe for content
@@ -1779,7 +1928,7 @@ describe("PdfEditor — saveIncremental", () => {
     const result = await editor.saveIncremental();
     const text = new TextDecoder("latin1").decode(result);
     expect(text).toContain("/Type0");
-    expect(text).toMatch(/\/EF\d+ 16 Tf/);
+    expect(text).toMatch(/\/(?:DMO\d+_)?EF\d+ 16 Tf/);
   });
 
   it("should update form field values incrementally", async () => {

@@ -15,7 +15,7 @@
  * is a build error, never a silent drop.
  */
 
-import { measureTextWidth, mapToStandardFont, styledFontVariant } from "@utils/font-metrics";
+import { measureTextWidth, styledFontVariant } from "@utils/font-metrics";
 import { ommlToMathML } from "@word/advanced/math-convert";
 import { extractMathText, isHyperlink, isRun } from "@word/core/text-utils";
 import { layoutDocument } from "@word/layout/layout";
@@ -1387,12 +1387,19 @@ function layoutParagraph(
       headingScale,
       lineHeightPt,
       startY + spaceBefore,
-      pageContext
+      pageContext,
+      options
     );
     lines = result.lines;
     perLineSlots = result.slots;
   } else {
-    lines = wrapSegmentsToLines(segments, fullAvailableWidth, firstLineIndentPt, headingScale);
+    lines = wrapSegmentsToLines(
+      segments,
+      fullAvailableWidth,
+      firstLineIndentPt,
+      headingScale,
+      options
+    );
   }
 
   // Build line boxes
@@ -1427,12 +1434,15 @@ function layoutParagraph(
         }
       } else {
         const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-        const fontName = styledFontVariant(
-          resolveRunFontName(seg.properties),
+        const fontName = resolveRunFontName(seg.properties);
+        lineWidth += measureLayoutText(
+          seg.text,
+          fontName,
+          fontSize,
+          options,
           seg.properties?.bold,
           seg.properties?.italic
         );
-        lineWidth += measureTextWidth(seg.text, fontName, fontSize);
       }
     }
 
@@ -1464,12 +1474,14 @@ function layoutParagraph(
       }
       const fontSize = getRunFontSizePt(seg.properties) * headingScale;
       const fontName = resolveRunFontName(seg.properties);
-      const measuredFont = styledFontVariant(
+      const segWidth = measureLayoutText(
+        seg.text,
         fontName,
+        fontSize,
+        options,
         seg.properties?.bold,
         seg.properties?.italic
       );
-      const segWidth = measureTextWidth(seg.text, measuredFont, fontSize);
 
       runs.push({
         text: seg.text,
@@ -1847,7 +1859,8 @@ function wrapSegmentsToLinesWithExclusions(
   headingScale: number,
   lineHeightPt: number,
   paragraphTopPageY: number,
-  pageContext: PageLayoutContext
+  pageContext: PageLayoutContext,
+  options: FullLayoutOptions | undefined
 ): { lines: ParagraphSegment[][]; slots: { xOffset: number; width: number }[] } {
   // Tokenize all segments into a flat sequence of "atoms" (words,
   // whitespace, and inline images) carrying their measured width.
@@ -1874,11 +1887,7 @@ function wrapSegmentsToLinesWithExclusions(
       continue;
     }
     const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-    const fontName = styledFontVariant(
-      resolveRunFontName(seg.properties),
-      seg.properties?.bold,
-      seg.properties?.italic
-    );
+    const fontName = resolveRunFontName(seg.properties);
     // Split on runs of whitespace, keeping the whitespace tokens so
     // wrapping can decide whether to drop trailing space at line end.
     const tokens = seg.text.split(/(\s+)/);
@@ -1888,7 +1897,14 @@ function wrapSegmentsToLinesWithExclusions(
       }
       atoms.push({
         text: tok,
-        width: measureTextWidth(tok, fontName, fontSize),
+        width: measureLayoutText(
+          tok,
+          fontName,
+          fontSize,
+          options,
+          seg.properties?.bold,
+          seg.properties?.italic
+        ),
         properties: seg.properties,
         isSpace: /^\s+$/.test(tok),
         isImage: false
@@ -2015,7 +2031,8 @@ function wrapSegmentsToLines(
   segments: ParagraphSegment[],
   availableWidth: number,
   firstLineIndent: number,
-  headingScale: number
+  headingScale: number,
+  options: FullLayoutOptions | undefined
 ): ParagraphSegment[][] {
   const lines: ParagraphSegment[][] = [];
   let currentLine: ParagraphSegment[] = [];
@@ -2053,12 +2070,15 @@ function wrapSegmentsToLines(
 
     const text = segment.text;
     const fontSize = getRunFontSizePt(segment.properties) * headingScale;
-    const fontName = styledFontVariant(
-      resolveRunFontName(segment.properties),
+    const fontName = resolveRunFontName(segment.properties);
+    const segmentWidth = measureLayoutText(
+      text,
+      fontName,
+      fontSize,
+      options,
       segment.properties?.bold,
       segment.properties?.italic
     );
-    const segmentWidth = measureTextWidth(text, fontName, fontSize);
 
     if (currentLineWidth + segmentWidth <= effectiveWidth) {
       // Whole segment fits on the current line — fast path.
@@ -2074,7 +2094,14 @@ function wrapSegmentsToLines(
       let bufferedWidth = 0;
 
       for (const word of words) {
-        const wordWidth = measureTextWidth(word, fontName, fontSize);
+        const wordWidth = measureLayoutText(
+          word,
+          fontName,
+          fontSize,
+          options,
+          segment.properties?.bold,
+          segment.properties?.italic
+        );
         if (
           currentLineWidth + bufferedWidth + wordWidth <= effectiveWidth ||
           (currentLine.length === 0 && bufferedText.length === 0)
@@ -2170,6 +2197,20 @@ function resolveRunFontName(props: Run["properties"]): string {
     return props.font;
   }
   return (props.font as { ascii?: string }).ascii ?? "Calibri";
+}
+
+function measureLayoutText(
+  text: string,
+  fontName: string,
+  fontSize: number,
+  options: FullLayoutOptions | undefined,
+  bold?: boolean,
+  italic?: boolean
+): number {
+  if (options?.measureText) {
+    return options.measureText(text, fontName, fontSize, bold, italic);
+  }
+  return measureTextWidth(text, styledFontVariant(fontName, bold, italic), fontSize);
 }
 
 function resolveColorHex(
@@ -2633,8 +2674,8 @@ function layoutMath(
   const lineHeight = fontSize * 1.2;
   // Width is approximated from the plain-text fallback so renderers that
   // don't handle MathML still see a reasonable bounding box.
-  const fontName = mapToStandardFont(options?.fonts?.get("Cambria Math") ?? "Cambria Math");
-  const widthPt = Math.min(measureTextWidth(text, fontName, fontSize), contentWidth);
+  const fontName = options?.fonts?.get("Cambria Math") ?? "Cambria Math";
+  const widthPt = Math.min(measureLayoutText(text, fontName, fontSize, options), contentWidth);
 
   return {
     type: "math",
@@ -2656,10 +2697,8 @@ function layoutCheckBox(
   const glyph = checked
     ? (cb.checkedState?.value ?? "\u2611") // ☑
     : (cb.uncheckedState?.value ?? "\u2610"); // ☐
-  const fontName = mapToStandardFont(
-    cb.checkedState?.font ?? options?.fonts?.get("MS Gothic") ?? "MS Gothic"
-  );
-  const widthPt = measureTextWidth(glyph, fontName, fontSize);
+  const fontName = cb.checkedState?.font ?? options?.fonts?.get("MS Gothic") ?? "MS Gothic";
+  const widthPt = measureLayoutText(glyph, fontName, fontSize, options);
   return {
     type: "checkBox",
     rect: { x: 0, y: startY, width: widthPt, height: fontSize * 1.2 },
