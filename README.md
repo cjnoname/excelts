@@ -10,7 +10,7 @@ Documonster was built to fix this. One package, one consistent API, one codebase
 
 Documonster is a zero-dependency TypeScript toolkit for spreadsheets and documents:
 
-- **AI-Friendly** — Clean, consistent API designed for AI coding agents. Every module has comprehensive documentation and runnable examples for AI to learn from
+- **AI-Friendly** — Clean, consistent API designed for AI coding agents. Every module has comprehensive documentation and runnable examples for AI to learn from. An [MCP server](packages/mcp/README.md) is available for AI clients that need to work on real files
 - **Zero Runtime Dependencies** — Pure TypeScript, no external packages
 - **Nine Modules** — Excel, Word, Formula, PDF, CSV, Markdown, XML, Archive, Stream
 - **Cross-Platform** — Node.js 22+, Bun, Chrome 89+, Firefox 102+, Safari 14.1+
@@ -82,6 +82,13 @@ Node.js-compatible Readable/Writable/Transform/Duplex that works identically in 
 
 - [Documentation](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [Examples](src/modules/stream/examples/)
+
+## MCP Server — Documonster for AI Clients
+
+`@documonster/mcp` puts the toolkit behind the Model Context Protocol, so Claude Desktop, Claude Code, Cursor, and other MCP clients can read and write real spreadsheets, documents, PDFs, forms, and archives instead of guessing about them. It ships as a separate package, keeping the MCP SDK out of `documonster` and its zero-dependency promise intact.
+
+- [Documentation](packages/mcp/README.md)
+- [Examples](packages/mcp/src/examples/)
 
 ## Installation
 

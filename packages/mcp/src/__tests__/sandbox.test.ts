@@ -90,12 +90,19 @@ describe("resolveInRoot", () => {
     const config = await makeConfig();
     await expectCode(resolveInRoot(config, "https://example.com/a.xlsx"), "invalid_input");
     await expectCode(resolveInRoot(config, "file:///etc/passwd"), "invalid_input");
-    // `C:` must not be mistaken for a URL scheme. On POSIX it is simply an
-    // ordinary directory name, so the path stays inside the root instead of
-    // being rejected — that is correct, and this pins the carve-out.
-    await expect(resolveInRoot(config, "C:/Windows/system.ini")).resolves.toBe(
-      path.join(config.root, "C:", "Windows", "system.ini")
-    );
+    // `C:` must not be mistaken for a URL scheme. What happens after that is
+    // platform-specific and both outcomes are correct: on Windows the path is
+    // drive-absolute and escapes the root, so it must be refused as
+    // outside_root; on POSIX `C:` is an ordinary directory name and the path
+    // stays inside. What this pins on either platform is that a drive letter is
+    // never mistaken for a URL — and that Windows never lets it through.
+    if (process.platform === "win32") {
+      await expectCode(resolveInRoot(config, "C:/Windows/system.ini"), "outside_root");
+    } else {
+      await expect(resolveInRoot(config, "C:/Windows/system.ini")).resolves.toBe(
+        path.join(config.root, "C:", "Windows", "system.ini")
+      );
+    }
   });
 
   it("rejects an empty path", async () => {

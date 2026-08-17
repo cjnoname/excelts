@@ -10,7 +10,7 @@ Documonster 正是为了解决这个问题而生。一个包、一套 API、一�
 
 Documonster 是一个零依赖的 TypeScript 电子表格和文档工具包：
 
-- **AI 友好** — 简洁一致的 API,专为 AI 编程助手设计。每个模块都配有完整的文档和可运行的示例供 AI 学习
+- **AI 友好** — 简洁一致的 API,专为 AI 编程助手设计。每个模块都配有完整的文档和可运行的示例供 AI 学习。另提供 [MCP 服务器](packages/mcp/README.md),供需要操作真实文件的 AI 客户端使用
 - **零运行时依赖** — 纯 TypeScript,无外部包
 - **九大模块** — Excel、Word、Formula、PDF、CSV、Markdown、XML、Archive、Stream
 - **跨平台** — Node.js 22+、Bun、Chrome 89+、Firefox 102+、Safari 14.1+
@@ -82,6 +82,13 @@ ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工�
 
 - [文档](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [示例](src/modules/stream/examples/)
+
+## MCP 服务器 — 面向 AI 客户端的 Documonster
+
+`@documonster/mcp` 通过 Model Context Protocol 暴露本工具包,让 Claude Desktop、Claude Code、Cursor 等 MCP 客户端能够真正读写电子表格、文档、PDF、表单和归档,而不是靠猜。它作为独立的包发布,因此 MCP SDK 不会进入 `documonster`,零依赖承诺保持不变。
+
+- [文档](packages/mcp/README.md)
+- [示例](packages/mcp/src/examples/)
 
 ## 安装
 
