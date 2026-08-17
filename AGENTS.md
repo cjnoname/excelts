@@ -132,6 +132,11 @@ an old core forever. Releasing both together keeps that pin fresh. It also means
 the core must reach npm first, which is why `publish-mcp` needs `publish` in
 `.github/workflows/release.yml`.
 
+Canaries follow the same rule. Both manifests receive the deterministic version
+`<current>-canary.sha.<commit>`, then core publishes before MCP. The version must
+not contain a timestamp: a retry after only one package published must reproduce
+the same version so the idempotent checks can skip it and finish the pair.
+
 Do not try to give the satellite its own version line with the `linked-versions`
 plugin: it skips any package whose component resolves to empty, and the core's
 component is empty by design (`include-component-in-tag: false`, which is what

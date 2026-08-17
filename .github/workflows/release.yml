@@ -56,28 +56,57 @@ jobs:
         id: canary_version
         run: |
           COMMIT_SHORT=$(git rev-parse --short HEAD)
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          CANARY_VERSION="${CURRENT_VERSION}-canary.${TIMESTAMP}.sha.${COMMIT_SHORT}"
+          CANARY_VERSION="${CURRENT_VERSION}-canary.sha.${COMMIT_SHORT}"
           echo "version=${CANARY_VERSION}" >> $GITHUB_OUTPUT
-          node -e "const p=require('./package.json');p.version='${CANARY_VERSION}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          CANARY_VERSION="${CANARY_VERSION}" node - <<'NODE'
+          const fs = require("node:fs");
+          for (const file of ["package.json", "packages/mcp/package.json"]) {
+            const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+            manifest.version = process.env.CANARY_VERSION;
+            fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
+          }
+          NODE
 
-      - name: Publish canary to npm
-        run: pnpm publish --tag canary --no-git-checks
+      - name: Publish documonster canary
+        run: |
+          VERSION="${{ steps.canary_version.outputs.version }}"
+          if [ "$(npm view documonster@${VERSION} version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "documonster@${VERSION} is already published — skipping"
+          else
+            pnpm publish --tag canary --no-git-checks
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Verify canary publish
+      - name: Build @documonster/mcp canary
+        run: pnpm build:packages
+
+      - name: Publish @documonster/mcp canary
+        working-directory: packages/mcp
+        run: |
+          VERSION="${{ steps.canary_version.outputs.version }}"
+          if [ "$(npm view @documonster/mcp@${VERSION} version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "@documonster/mcp@${VERSION} is already published — skipping"
+          else
+            pnpm publish --tag canary --no-git-checks
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify canary publishes
         run: |
           echo "Waiting for npm registry to propagate..."
           sleep 30
           EXPECTED_VERSION="${{ steps.canary_version.outputs.version }}"
-          PUBLISHED_VERSION=$(npm view documonster@${EXPECTED_VERSION} version 2>/dev/null || echo "NOT_FOUND")
-          if [ "$PUBLISHED_VERSION" != "$EXPECTED_VERSION" ]; then
-            echo "ERROR: Expected version ${EXPECTED_VERSION} but found ${PUBLISHED_VERSION} on npm registry"
-            exit 1
-          fi
-          echo "Verified: documonster@${EXPECTED_VERSION} is live on npm"
+          for PACKAGE in documonster @documonster/mcp; do
+            PUBLISHED_VERSION=$(npm view "${PACKAGE}@${EXPECTED_VERSION}" version 2>/dev/null || echo "NOT_FOUND")
+            if [ "$PUBLISHED_VERSION" != "$EXPECTED_VERSION" ]; then
+              echo "ERROR: Expected ${PACKAGE}@${EXPECTED_VERSION} but found ${PUBLISHED_VERSION}"
+              exit 1
+            fi
+            echo "Verified: ${PACKAGE}@${EXPECTED_VERSION} is live on npm"
+          done
 
       - name: Comment on commit
         uses: actions/github-script@v9
@@ -93,7 +122,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 commit_sha: context.sha,
-                body: `🚀 Canary version published: \`${{ steps.canary_version.outputs.version }}\`\n\nInstall with: \`npm install documonster@canary\``
+                body: `🚀 Canary version published: \`${{ steps.canary_version.outputs.version }}\`\n\nInstall core: \`npm install documonster@canary\`\n\nInstall MCP: \`npm install @documonster/mcp@canary\``
               });
             } catch (error) {
               core.warning(`Canary published, but commenting on the commit failed: ${error.message}`);
