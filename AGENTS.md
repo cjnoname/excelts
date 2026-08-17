@@ -117,13 +117,25 @@ package tests must precede it). `pnpm check` includes `verify:packages` because
 that is a pure source scan; `type:packages` is left out because it needs a build,
 and the pre-commit hook therefore runs it only when `dist/types` already exists.
 
-**Releases.** release-please manages both packages from
-`release-please-config.json`. The core keeps its existing `v0.8.0` tag format
-(`include-component-in-tag: false`); satellites use a component prefix
-(`mcp-v0.1.0`). `@documonster/mcp` depends on `documonster: workspace:*`, which
-`pnpm publish` rewrites to the checked-out core version — so the core must reach
-npm before the satellite, which is why `publish-mcp` needs `publish` in
+**Releases — one version for the whole repository.** `@documonster/mcp` always
+carries the same version as `documonster`. release-please tracks a single
+package (`.`) and writes the new version into `packages/mcp/package.json` through
+`extra-files`, so the two stay identical by construction — there is no second
+manifest entry, no `mcp-v*` tag and no separate MCP changelog. MCP changes appear
+in the root `CHANGELOG.md` like any other change, and a commit that only touches
+`packages/mcp` still bumps the shared version.
+
+That coupling is deliberate. `@documonster/mcp` depends on
+`documonster: workspace:*`, which `pnpm publish` rewrites to an **exact** version
+— so an MCP release that skipped a core release would leave MCP users pinned to
+an old core forever. Releasing both together keeps that pin fresh. It also means
+the core must reach npm first, which is why `publish-mcp` needs `publish` in
 `.github/workflows/release.yml`.
+
+Do not try to give the satellite its own version line with the `linked-versions`
+plugin: it skips any package whose component resolves to empty, and the core's
+component is empty by design (`include-component-in-tag: false`, which is what
+keeps the `v0.9.0` tag format instead of `documonster-v0.9.0`).
 
 ## Module Dependency Layers
 

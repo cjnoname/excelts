@@ -18,11 +18,6 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
-      # Per-package output. release-please keys these by the package path from
-      # release-please-config.json, so this is true only when the MCP package
-      # itself was released.
-      mcp_release_created: ${{ steps.release.outputs['packages/mcp--release_created'] }}
-      mcp_tag_name: ${{ steps.release.outputs['packages/mcp--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
@@ -162,19 +157,16 @@ jobs:
           fi
           echo "Verified: documonster@${EXPECTED_VERSION} is live on npm"
 
-  # Step 3: Publish @documonster/mcp — only when release-please released that
-  # package specifically.
+  # Step 3: Publish @documonster/mcp — the repository releases as a single unit,
+  # so this runs on the same release as the core.
   #
   # Ordering matters. `@documonster/mcp` depends on `documonster: workspace:*`,
   # which `pnpm publish` rewrites to the core version present in this checkout.
-  # If the same release PR bumped both packages, the core must reach npm first
-  # or the published MCP package would point at a version that does not exist
-  # yet. Hence `needs: publish` — plus `always()`, because a release that only
-  # touched the MCP package leaves the core `publish` job skipped, and a bare
-  # `needs` would block on that.
+  # The core must therefore reach npm first, or the published MCP package would
+  # point at a version that does not exist yet — hence `needs: publish`.
   publish-mcp:
     needs: [release-please, publish]
-    if: ${{ always() && needs.release-please.outputs.mcp_release_created == 'true' && needs.publish.result != 'failure' && needs.publish.result != 'cancelled' }}
+    if: ${{ needs.release-please.outputs.release_created == 'true' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

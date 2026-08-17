@@ -4,12 +4,13 @@
     ".": {
       "release-type": "node",
       "include-component-in-tag": false,
-      "exclude-paths": ["packages/mcp"]
-    },
-    "packages/mcp": {
-      "release-type": "node",
-      "component": "mcp",
-      "include-component-in-tag": true
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "packages/mcp/package.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   },
   "plugins": ["sentence-case"],
