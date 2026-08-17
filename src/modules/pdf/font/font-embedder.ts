@@ -416,12 +416,18 @@ function subsetTtfFont(
   }
 
   // --- Rebuild hmtx ---
+  // Both metrics are copied verbatim, and the bearing matters as much as the
+  // advance width: the rasterizer translates each outline by `lsb - xMin`, so a
+  // bearing that no longer belongs to the outline next to it moves the glyph
+  // inside its own advance. Zeroing it draws every glyph's ink at the pen
+  // position; deriving it from the copied outline's `xMin` would normalize away
+  // the source font's own placement. Only the source value reproduces it.
   const newHmtx = new Uint8Array(numGlyphs * 4);
   const hmtxView = new DataView(newHmtx.buffer);
   for (let i = 0; i < sortedOldGids.length; i++) {
     const oldGid = sortedOldGids[i];
     hmtxView.setUint16(i * 4, font.advanceWidths[oldGid] ?? 0, false);
-    hmtxView.setInt16(i * 4 + 2, 0, false); // lsb = 0 (simplified)
+    hmtxView.setInt16(i * 4 + 2, font.leftSideBearings[oldGid] ?? 0, false);
   }
 
   // --- Rebuild cmap (format 12 for full Unicode) ---
@@ -446,6 +452,16 @@ function subsetTtfFont(
   );
   const hheaView = new DataView(newHhea.buffer, newHhea.byteOffset, newHhea.byteLength);
   hheaView.setUint16(34, numGlyphs, false); // numOfLongHorMetrics
+  // The four horizontal extremes describe the glyphs the font actually carries,
+  // so a subset has to publish its own. Copied from the source they would
+  // describe glyphs that are no longer here.
+  const extremes = measureHorizontalExtremes(font, sortedOldGids);
+  hheaView.setUint16(10, extremes.advanceWidthMax, false);
+  if (extremes.outline) {
+    hheaView.setInt16(12, extremes.outline.minLeftSideBearing, false);
+    hheaView.setInt16(14, extremes.outline.minRightSideBearing, false);
+    hheaView.setInt16(16, extremes.outline.xMaxExtent, false);
+  }
 
   // --- Rebuild maxp ---
   const maxpEntry = font.tables.get("maxp")!;
@@ -474,6 +490,86 @@ function subsetTtfFont(
   ];
 
   return assembleTtf(tableDefs);
+}
+
+interface HorizontalExtremes {
+  /** Over every glyph, outline or not — an empty glyph still has an advance. */
+  advanceWidthMax: number;
+  /** Only glyphs that have contours have edges to measure. */
+  outline: {
+    minLeftSideBearing: number;
+    minRightSideBearing: number;
+    xMaxExtent: number;
+  } | null;
+}
+
+/**
+ * Measure the horizontal extremes `hhea` publishes, over the glyphs a subset
+ * keeps.
+ *
+ * `advanceWidthMax` covers every glyph. The three bearing-derived values are
+ * defined over glyphs *with contours* — the spec says to ignore empty glyphs,
+ * and a glyph with no contours has no edges to be the minimum or maximum of.
+ * They come back null when the subset has no contours at all, which leaves the
+ * source values in place: there is nothing better to say.
+ *
+ * @see https://learn.microsoft.com/en-us/typography/opentype/spec/hhea
+ */
+function measureHorizontalExtremes(font: TtfFont, sortedOldGids: number[]): HorizontalExtremes {
+  const glyfOffset = font.tables.get("glyf")?.offset ?? 0;
+  const view = new DataView(font.data.buffer, font.data.byteOffset, font.data.byteLength);
+
+  let advanceWidthMax = 0;
+  let minLeftSideBearing = Number.POSITIVE_INFINITY;
+  let minRightSideBearing = Number.POSITIVE_INFINITY;
+  let xMaxExtent = Number.NEGATIVE_INFINITY;
+
+  for (const oldGid of sortedOldGids) {
+    const advanceWidth = font.advanceWidths[oldGid] ?? 0;
+    advanceWidthMax = Math.max(advanceWidthMax, advanceWidth);
+
+    const start = font.glyphOffsets[oldGid];
+    const end = font.glyphOffsets[oldGid + 1];
+    if (end - start < 10) {
+      continue; // no glyph description at all
+    }
+    if (view.getInt16(glyfOffset + start, false) === 0) {
+      continue; // a description, but no contours: nothing to measure
+    }
+
+    const leftSideBearing = font.leftSideBearings[oldGid] ?? 0;
+    const xMin = view.getInt16(glyfOffset + start + 2, false);
+    const xMax = view.getInt16(glyfOffset + start + 6, false);
+    const inkWidth = xMax - xMin;
+
+    minLeftSideBearing = Math.min(minLeftSideBearing, leftSideBearing);
+    minRightSideBearing = Math.min(
+      minRightSideBearing,
+      advanceWidth - (leftSideBearing + inkWidth)
+    );
+    xMaxExtent = Math.max(xMaxExtent, leftSideBearing + inkWidth);
+  }
+
+  return {
+    advanceWidthMax: clampToUint16(advanceWidthMax),
+    outline: Number.isFinite(minLeftSideBearing)
+      ? {
+          minLeftSideBearing: clampToInt16(minLeftSideBearing),
+          minRightSideBearing: clampToInt16(minRightSideBearing),
+          xMaxExtent: clampToInt16(xMaxExtent)
+        }
+      : null
+  };
+}
+
+/** Keep a derived metric writable as an int16, however odd the source font is. */
+function clampToInt16(value: number): number {
+  return Math.max(-32768, Math.min(32767, value));
+}
+
+/** Keep a derived metric writable as a uint16, however odd the source font is. */
+function clampToUint16(value: number): number {
+  return Math.max(0, Math.min(65535, value));
 }
 
 /**

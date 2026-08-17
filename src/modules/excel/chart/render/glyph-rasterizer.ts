@@ -162,43 +162,80 @@ function parseCmapFormat12(data: Uint8Array, offset: number, map: Map<number, nu
   }
 }
 
+/**
+ * Read the glyph index, clamped into `glyf` and non-decreasing.
+ *
+ * These offsets are the only thing that turns a glyph ID into a byte range, so a
+ * broken index would otherwise walk into neighbouring tables. An offset that
+ * breaks either rule collapses onto its predecessor, which reads as an empty
+ * glyph.
+ */
 function parseLoca(
   data: Uint8Array,
   table: TableEntry,
   numGlyphs: number,
-  isLong: boolean
+  isLong: boolean,
+  glyfLength: number
 ): Uint32Array {
   const offsets = new Uint32Array(numGlyphs + 1);
   const base = table.offset;
-  if (isLong) {
-    for (let i = 0; i <= numGlyphs; i++) {
-      offsets[i] = u32(data, base + i * 4);
+  const width = isLong ? 4 : 2;
+  const end = base + table.length;
+
+  let last = 0;
+  let previous = 0;
+  for (let i = 0; i <= numGlyphs; i++) {
+    const at = base + i * width;
+    if (at + width <= end) {
+      last = isLong ? u32(data, at) : u16(data, at) * 2;
     }
-  } else {
-    for (let i = 0; i <= numGlyphs; i++) {
-      offsets[i] = u16(data, base + i * 2) * 2;
-    }
+    previous = Math.min(Math.max(last, previous), glyfLength);
+    offsets[i] = previous;
   }
   return offsets;
 }
 
+interface HorizontalMetrics {
+  advanceWidths: Uint16Array;
+  leftSideBearings: Int16Array;
+}
+
+/**
+ * Read the advance width and left side bearing of every glyph.
+ *
+ * After `numHMetrics` long records the advance width is shared and only the
+ * bearing is stored, in a trailing int16 array — Courier New keeps 3 records
+ * for 3151 glyphs, so for a monospaced font almost every bearing lives there.
+ */
 function parseHmtx(
   data: Uint8Array,
   table: TableEntry,
   numHMetrics: number,
   numGlyphs: number
-): Uint16Array {
-  const widths = new Uint16Array(numGlyphs);
+): HorizontalMetrics {
+  const advanceWidths = new Uint16Array(numGlyphs);
+  const leftSideBearings = new Int16Array(numGlyphs);
   const base = table.offset;
+  const end = base + table.length;
+
+  const longRecords = Math.min(numHMetrics, numGlyphs);
   let lastWidth = 0;
-  for (let i = 0; i < numHMetrics; i++) {
-    lastWidth = u16(data, base + i * 4);
-    widths[i] = lastWidth;
+  let gid = 0;
+  for (; gid < longRecords && base + gid * 4 + 4 <= end; gid++) {
+    lastWidth = u16(data, base + gid * 4);
+    advanceWidths[gid] = lastWidth;
+    leftSideBearings[gid] = i16(data, base + gid * 4 + 2);
   }
-  for (let i = numHMetrics; i < numGlyphs; i++) {
-    widths[i] = lastWidth;
+
+  const tailStart = base + numHMetrics * 4;
+  const tailPresent = gid === numHMetrics && numHMetrics > 0;
+  for (; gid < numGlyphs; gid++) {
+    advanceWidths[gid] = lastWidth;
+    const at = tailStart + (gid - numHMetrics) * 2;
+    leftSideBearings[gid] = tailPresent && at + 2 <= end ? i16(data, at) : 0;
   }
-  return widths;
+
+  return { advanceWidths, leftSideBearings };
 }
 
 // =============================================================================
@@ -291,77 +328,150 @@ const COMP_WE_HAVE_A_SCALE = 0x0008;
 const COMP_MORE_COMPONENTS = 0x0020;
 const COMP_WE_HAVE_AN_X_AND_Y_SCALE = 0x0040;
 const COMP_WE_HAVE_A_TWO_BY_TWO = 0x0080;
+const COMP_USE_MY_METRICS = 0x0200;
+
+/**
+ * How deep a composite may nest before it is treated as empty. The spec says to
+ * avoid nesting at all and real fonts stay at one or two levels; the limit is
+ * what stops a font whose components reference each other in a cycle from
+ * recursing forever.
+ */
+const MAX_COMPOSITE_DEPTH = 5;
+
+/**
+ * Find the glyph whose horizontal metrics a composite adopts.
+ *
+ * `USE_MY_METRICS` forces the composite's advance width and left side bearing to
+ * be those of the flagged component — an i-circumflex takes the metrics of the
+ * dotless i it is built from. FreeType implements this by keeping that
+ * component's phantom points instead of restoring the parent's, and because the
+ * points it keeps are saved per component, the last flagged component is the one
+ * that survives. Returns the glyph itself when nothing claims the metrics.
+ */
+function metricsGlyphId(
+  data: Uint8Array,
+  glyphId: number,
+  glyfBase: number,
+  glyphOffsets: Uint32Array,
+  depth = 0
+): number {
+  const start = glyphOffsets[glyphId];
+  const end = glyphOffsets[glyphId + 1];
+  if (depth > MAX_COMPOSITE_DEPTH || end - start < 10) {
+    return glyphId;
+  }
+  const offset = glyfBase + start;
+  if (i16(data, offset) >= 0) {
+    return glyphId; // simple glyph: it owns its own metrics
+  }
+
+  let pos = offset + 10;
+  let claimed = glyphId;
+  for (;;) {
+    const component = readComponentRecord(data, pos);
+    pos = component.next;
+    if (component.flags & COMP_USE_MY_METRICS) {
+      claimed = metricsGlyphId(data, component.glyphId, glyfBase, glyphOffsets, depth + 1);
+    }
+    if (!(component.flags & COMP_MORE_COMPONENTS)) {
+      return claimed;
+    }
+  }
+}
+
+/** One component of a composite glyph, and where the next one starts. */
+interface ComponentRecord {
+  flags: number;
+  glyphId: number;
+  dx: number;
+  dy: number;
+  /** 2x2 transform, as [a, b, c, d]. */
+  transform: [number, number, number, number];
+  next: number;
+}
+
+/**
+ * Read one component record. The record's length depends on its own flags, so
+ * this is the single place that knows the layout — every walk over a composite
+ * goes through it.
+ */
+function readComponentRecord(data: Uint8Array, pos: number): ComponentRecord {
+  const flags = u16(data, pos);
+  const glyphId = u16(data, pos + 2);
+  let at = pos + 4;
+
+  // Point-matching placement (no XY values) is not supported; it needs the
+  // parent's points, which are not available here.
+  let dx = 0;
+  let dy = 0;
+  if (flags & COMP_ARG_1_AND_2_ARE_WORDS) {
+    if (flags & COMP_ARGS_ARE_XY_VALUES) {
+      dx = i16(data, at);
+      dy = i16(data, at + 2);
+    }
+    at += 4;
+  } else {
+    if (flags & COMP_ARGS_ARE_XY_VALUES) {
+      dx = data[at] >= 0x80 ? data[at] - 256 : data[at];
+      dy = data[at + 1] >= 0x80 ? data[at + 1] - 256 : data[at + 1];
+    }
+    at += 2;
+  }
+
+  let transform: [number, number, number, number] = [1, 0, 0, 1];
+  if (flags & COMP_WE_HAVE_A_SCALE) {
+    const scale = i16(data, at) / 16384;
+    transform = [scale, 0, 0, scale];
+    at += 2;
+  } else if (flags & COMP_WE_HAVE_AN_X_AND_Y_SCALE) {
+    transform = [i16(data, at) / 16384, 0, 0, i16(data, at + 2) / 16384];
+    at += 4;
+  } else if (flags & COMP_WE_HAVE_A_TWO_BY_TWO) {
+    transform = [
+      i16(data, at) / 16384,
+      i16(data, at + 2) / 16384,
+      i16(data, at + 4) / 16384,
+      i16(data, at + 6) / 16384
+    ];
+    at += 8;
+  }
+
+  return { flags, glyphId, dx, dy, transform, next: at };
+}
 
 function parseCompositeGlyph(
   data: Uint8Array,
   offset: number,
   glyfBase: number,
-  glyphOffsets: Uint32Array
+  glyphOffsets: Uint32Array,
+  depth: number
 ): GlyphPoint[][] {
   let pos = offset + 10; // skip header
   const allContours: GlyphPoint[][] = [];
 
-  while (true) {
-    const flags = u16(data, pos);
-    pos += 2;
-    const componentGid = u16(data, pos);
-    pos += 2;
-
-    // Read translation
-    let dx: number;
-    let dy: number;
-    if (flags & COMP_ARG_1_AND_2_ARE_WORDS) {
-      if (flags & COMP_ARGS_ARE_XY_VALUES) {
-        dx = i16(data, pos);
-        dy = i16(data, pos + 2);
-      } else {
-        dx = 0;
-        dy = 0;
-      }
-      pos += 4;
-    } else {
-      if (flags & COMP_ARGS_ARE_XY_VALUES) {
-        dx = data[pos] >= 0x80 ? data[pos] - 256 : data[pos];
-        dy = data[pos + 1] >= 0x80 ? data[pos + 1] - 256 : data[pos + 1];
-      } else {
-        dx = 0;
-        dy = 0;
-      }
-      pos += 2;
-    }
-
-    // Read scale/transform
-    let a = 1;
-    let b = 0;
-    let c = 0;
-    let d = 1;
-    if (flags & COMP_WE_HAVE_A_SCALE) {
-      a = d = i16(data, pos) / 16384;
-      pos += 2;
-    } else if (flags & COMP_WE_HAVE_AN_X_AND_Y_SCALE) {
-      a = i16(data, pos) / 16384;
-      d = i16(data, pos + 2) / 16384;
-      pos += 4;
-    } else if (flags & COMP_WE_HAVE_A_TWO_BY_TWO) {
-      a = i16(data, pos) / 16384;
-      b = i16(data, pos + 2) / 16384;
-      c = i16(data, pos + 4) / 16384;
-      d = i16(data, pos + 6) / 16384;
-      pos += 8;
-    }
+  for (;;) {
+    const component = readComponentRecord(data, pos);
+    pos = component.next;
+    const [a, b, c, d] = component.transform;
 
     // Recursively get component outlines
-    const compContours = getGlyphContours(data, componentGid, glyfBase, glyphOffsets);
+    const compContours = getGlyphContours(
+      data,
+      component.glyphId,
+      glyfBase,
+      glyphOffsets,
+      depth + 1
+    );
     for (const contour of compContours) {
       const transformed = contour.map(pt => ({
-        x: a * pt.x + c * pt.y + dx,
-        y: b * pt.x + d * pt.y + dy,
+        x: a * pt.x + c * pt.y + component.dx,
+        y: b * pt.x + d * pt.y + component.dy,
         onCurve: pt.onCurve
       }));
       allContours.push(transformed);
     }
 
-    if (!(flags & COMP_MORE_COMPONENTS)) {
+    if (!(component.flags & COMP_MORE_COMPONENTS)) {
       break;
     }
   }
@@ -372,12 +482,13 @@ function getGlyphContours(
   data: Uint8Array,
   glyphId: number,
   glyfBase: number,
-  glyphOffsets: Uint32Array
+  glyphOffsets: Uint32Array,
+  depth = 0
 ): GlyphPoint[][] {
   const start = glyphOffsets[glyphId];
   const end = glyphOffsets[glyphId + 1];
-  if (end - start < 10) {
-    return []; // empty glyph (e.g. space)
+  if (end - start < 10 || depth > MAX_COMPOSITE_DEPTH) {
+    return []; // empty glyph (e.g. space), or a composite that nests too deep
   }
 
   const offset = glyfBase + start;
@@ -386,7 +497,7 @@ function getGlyphContours(
   if (numberOfContours >= 0) {
     return parseSimpleGlyph(data, offset, numberOfContours);
   }
-  return parseCompositeGlyph(data, offset, glyfBase, glyphOffsets);
+  return parseCompositeGlyph(data, offset, glyfBase, glyphOffsets, depth);
 }
 
 // =============================================================================
@@ -551,24 +662,63 @@ function buildRasterFont(data: Uint8Array, tables: Map<string, TableEntry>): Ras
   const numGlyphs = u16(data, maxp.offset + 4);
 
   const cmap = parseCmap(data, cmapTable);
-  const advanceWidths = parseHmtx(data, hmtxTable, numHMetrics, numGlyphs);
-  const glyphOffsets = parseLoca(data, locaTable, numGlyphs, indexToLocFormat !== 0);
+  const { advanceWidths, leftSideBearings } = parseHmtx(data, hmtxTable, numHMetrics, numGlyphs);
+  const glyphOffsets = parseLoca(
+    data,
+    locaTable,
+    numGlyphs,
+    indexToLocFormat !== 0,
+    glyfTable.length
+  );
   const glyfBase = glyfTable.offset;
+
+  function buildOutline(codePoint: number): GlyphOutline | undefined {
+    const gid = cmap.get(codePoint);
+    if (gid === undefined || gid === 0) {
+      return undefined;
+    }
+    // The glyph a composite borrows its metrics from, which is the glyph
+    // itself unless a component claims them with USE_MY_METRICS.
+    const metricsGid = metricsGlyphId(data, gid, glyfBase, glyphOffsets);
+    const advanceWidth = advanceWidths[metricsGid];
+
+    const contours = getGlyphContours(data, gid, glyfBase, glyphOffsets);
+    if (contours.length === 0) {
+      // No ink, but a real advance: a space has to move the pen by what the
+      // font says, not by a guess.
+      return { contours, advanceWidth };
+    }
+    // Outline coordinates start at the glyph's own `xMin`, but the ink belongs
+    // at `pen + lsb`: a rasterizer translates the outline by `lsb - xMin`
+    // (FreeType does it unconditionally, so every mainstream renderer agrees).
+    // The two values match in a well-formed font and the shift is nothing, yet
+    // ~0.4% of glyphs in shipped fonts disagree — by up to 0.35 em in Times
+    // New Roman Italic — and those have to land where a PDF viewer would put
+    // them, or a chart label drifts away from the text beside it.
+    const shift = leftSideBearings[metricsGid] - i16(data, glyfBase + glyphOffsets[metricsGid] + 2);
+    return {
+      contours:
+        shift === 0
+          ? contours
+          : contours.map(contour => contour.map(pt => ({ ...pt, x: pt.x + shift }))),
+      advanceWidth
+    };
+  }
+
+  // One outline object per code point, so callers that rasterize the same glyph
+  // twice — measuring a label and then drawing it — get the same object and can
+  // key a cache on it.
+  const outlines = new Map<number, GlyphOutline | undefined>();
 
   return {
     unitsPerEm,
     ascent,
     descent,
     getOutline(codePoint: number): GlyphOutline | undefined {
-      const gid = cmap.get(codePoint);
-      if (gid === undefined || gid === 0) {
-        return undefined;
+      if (!outlines.has(codePoint)) {
+        outlines.set(codePoint, buildOutline(codePoint));
       }
-      const contours = getGlyphContours(data, gid, glyfBase, glyphOffsets);
-      if (contours.length === 0) {
-        return undefined;
-      }
-      return { contours, advanceWidth: advanceWidths[gid] };
+      return outlines.get(codePoint);
     }
   };
 }

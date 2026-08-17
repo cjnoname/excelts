@@ -8,7 +8,7 @@
  * - maxp: maximum profile (number of glyphs)
  * - OS/2: OS/2 and Windows metrics (weights, widths, unicode ranges)
  * - cmap: character-to-glyph mapping (we use format 4 for BMP or format 12 for full Unicode)
- * - hmtx: horizontal metrics (advance widths per glyph)
+ * - hmtx: horizontal metrics (advance width and left side bearing per glyph)
  * - post: PostScript name mapping
  * - loca: glyph location index (offsets into glyf table)
  * - glyf: glyph outlines (needed for subsetting)
@@ -100,6 +100,19 @@ export interface TtfFont {
   /** Advance widths per glyph ID (in font units) */
   readonly advanceWidths: Uint16Array;
 
+  /**
+   * Left side bearings per glyph ID (in font units), which may be negative.
+   *
+   * Before drawing, a TrueType rasterizer translates the outline by
+   * `lsb - xMin`, so the ink lands at `pen + lsb` — the bearing, not the
+   * outline's own `xMin`, decides where the glyph is painted inside its
+   * advance width. FreeType does this unconditionally (`TT_Load_Glyph`, which
+   * makes pdfium/Chrome, Poppler and MuPDF follow), and Acrobat behaves the
+   * same. Anything that rewrites `hmtx` must therefore carry these through
+   * next to the outlines they belong to.
+   */
+  readonly leftSideBearings: Int16Array;
+
   /** Glyph offsets (from loca table), used for subsetting */
   readonly glyphOffsets: Uint32Array;
 }
@@ -113,45 +126,74 @@ export interface TableEntry {
 // Big Endian Reader
 // =============================================================================
 
+/**
+ * Big-endian reader bounded to the region it may read.
+ *
+ * Every table is read through a reader limited to that table's declared extent,
+ * so a table too short for the contents it describes fails as a `PdfFontError`
+ * naming the table, instead of quietly reading whatever bytes follow it — or
+ * running off the end of the file, which a `DataView` reports as an opaque
+ * `RangeError`. Fonts are untrusted input; the diagnosis has to say which table
+ * is broken.
+ */
 class BEReader {
   private view: DataView;
   private data: Uint8Array;
+  /** Exclusive end of the readable region. */
+  private limit: number;
+  /** What the region is, for error messages. */
+  private region: string;
   offset: number;
 
-  constructor(data: Uint8Array, offset = 0) {
+  constructor(data: Uint8Array, offset = 0, limit = data.length, region = "font") {
     this.data = data;
     this.view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     this.offset = offset;
+    this.limit = Math.min(limit, data.length);
+    this.region = region;
+  }
+
+  /** Claim `bytes` at the current offset and step over them. */
+  private take(bytes: number): number {
+    const at = this.claim(this.offset, bytes);
+    this.offset = at + bytes;
+    return at;
+  }
+
+  /** Claim `bytes` at an absolute offset, leaving the cursor alone. */
+  private claim(at: number, bytes: number): number {
+    if (at < 0 || at + bytes > this.limit) {
+      throw new PdfFontError(
+        `Invalid TrueType font: ${this.region} is truncated ` +
+          `(wanted ${bytes} byte(s) at ${at}, region ends at ${this.limit})`
+      );
+    }
+    return at;
+  }
+
+  /** Whether `bytes` more can be read, for a region with an optional tail. */
+  canRead(bytes: number): boolean {
+    return this.offset + bytes <= this.limit;
   }
 
   u8(): number {
-    const v = this.view.getUint8(this.offset);
-    this.offset += 1;
-    return v;
+    return this.view.getUint8(this.take(1));
   }
 
   u16(): number {
-    const v = this.view.getUint16(this.offset, false);
-    this.offset += 2;
-    return v;
+    return this.view.getUint16(this.take(2), false);
   }
 
   i16(): number {
-    const v = this.view.getInt16(this.offset, false);
-    this.offset += 2;
-    return v;
+    return this.view.getInt16(this.take(2), false);
   }
 
   u32(): number {
-    const v = this.view.getUint32(this.offset, false);
-    this.offset += 4;
-    return v;
+    return this.view.getUint32(this.take(4), false);
   }
 
   i32(): number {
-    const v = this.view.getInt32(this.offset, false);
-    this.offset += 4;
-    return v;
+    return this.view.getInt32(this.take(4), false);
   }
 
   /** Read a Fixed 16.16 number */
@@ -161,9 +203,8 @@ class BEReader {
   }
 
   bytes(len: number): Uint8Array {
-    const b = this.data.subarray(this.offset, this.offset + len);
-    this.offset += len;
-    return b;
+    const at = this.take(len);
+    return this.data.subarray(at, at + len);
   }
 
   tag(): string {
@@ -171,23 +212,29 @@ class BEReader {
   }
 
   skip(n: number): void {
-    this.offset += n;
+    this.take(n);
   }
 
+  /** A reader at another position in the same region. */
   at(offset: number): BEReader {
-    return new BEReader(this.data, offset);
+    return new BEReader(this.data, offset, this.limit, this.region);
+  }
+
+  /** A reader over one table, bounded to what the table directory declares. */
+  atTable(tag: string, entry: TableEntry): BEReader {
+    return new BEReader(this.data, entry.offset, entry.offset + entry.length, `table '${tag}'`);
   }
 
   u16At(offset: number): number {
-    return this.view.getUint16(offset, false);
+    return this.view.getUint16(this.claim(offset, 2), false);
   }
 
   u32At(offset: number): number {
-    return this.view.getUint32(offset, false);
+    return this.view.getUint32(this.claim(offset, 4), false);
   }
 
   i16At(offset: number): number {
-    return this.view.getInt16(offset, false);
+    return this.view.getInt16(this.claim(offset, 2), false);
   }
 }
 
@@ -339,12 +386,23 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
   const cmap = readCmap(r, tables.get("cmap")!);
 
   // --- hmtx table ---
-  const advanceWidths = readHmtx(r, tables.get("hmtx")!, hhea.numHMetrics, maxp.numGlyphs);
+  const { advanceWidths, leftSideBearings } = readHmtx(
+    r,
+    tables.get("hmtx")!,
+    hhea.numHMetrics,
+    maxp.numGlyphs
+  );
 
   // --- loca table ---
   const glyphOffsets =
     tables.has("loca") && tables.has("glyf")
-      ? readLoca(r, tables.get("loca")!, maxp.numGlyphs, head.indexToLocFormat)
+      ? readLoca(
+          r,
+          tables.get("loca")!,
+          maxp.numGlyphs,
+          head.indexToLocFormat,
+          tables.get("glyf")!.length
+        )
       : new Uint32Array(maxp.numGlyphs + 1);
 
   // --- Compute font descriptor values ---
@@ -391,6 +449,7 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     tables,
     cmap,
     advanceWidths,
+    leftSideBearings,
     glyphOffsets
   };
 }
@@ -410,7 +469,7 @@ interface HeadData {
 }
 
 function readHead(r: BEReader, entry: TableEntry): HeadData {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("head", entry);
   tr.skip(4); // majorVersion, minorVersion
   tr.skip(4); // fontRevision (Fixed)
   tr.skip(4); // checksumAdjustment
@@ -437,7 +496,7 @@ interface HheaData {
 }
 
 function readHhea(r: BEReader, entry: TableEntry): HheaData {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("hhea", entry);
   tr.skip(4); // majorVersion, minorVersion
   const ascent = tr.i16();
   const descent = tr.i16();
@@ -453,7 +512,7 @@ interface MaxpData {
 }
 
 function readMaxp(r: BEReader, entry: TableEntry): MaxpData {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("maxp", entry);
   tr.skip(4); // version
   const numGlyphs = tr.u16();
   return { numGlyphs };
@@ -467,7 +526,7 @@ interface Os2Data {
 }
 
 function readOs2(r: BEReader, entry: TableEntry): Os2Data {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("OS/2", entry);
   const version = tr.u16();
   tr.skip(2); // xAvgCharWidth
   const usWeightClass = tr.u16();
@@ -504,7 +563,7 @@ interface PostData {
 }
 
 function readPost(r: BEReader, entry: TableEntry): PostData {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("post", entry);
   tr.skip(4); // version (Fixed)
   const italicAngle = tr.fixed();
   tr.skip(2); // underlinePosition
@@ -520,7 +579,7 @@ interface NameData {
 
 function readName(r: BEReader, entry: TableEntry): NameData {
   const base = entry.offset;
-  const tr = r.at(base);
+  const tr = r.atTable("name", entry);
   tr.skip(2); // format
   const count = tr.u16();
   const storageOffset = tr.u16();
@@ -542,7 +601,7 @@ function readName(r: BEReader, entry: TableEntry): NameData {
       continue;
     }
 
-    const strBytes = r.at(stringStorageBase + offset).bytes(length);
+    const strBytes = tr.at(stringStorageBase + offset).bytes(length);
     let str: string;
 
     if (platformID === 3 || platformID === 0) {
@@ -579,7 +638,7 @@ function readName(r: BEReader, entry: TableEntry): NameData {
  */
 function readCmap(r: BEReader, entry: TableEntry): Map<number, number> {
   const base = entry.offset;
-  const tr = r.at(base);
+  const tr = r.atTable("cmap", entry);
   tr.skip(2); // version
   const numSubtables = tr.u16();
 
@@ -600,7 +659,7 @@ function readCmap(r: BEReader, entry: TableEntry): Map<number, number> {
       continue;
     }
 
-    const format = r.u16At(base + subtableOffset);
+    const format = tr.u16At(base + subtableOffset);
     if (format === 12 && format12Offset < 0) {
       format12Offset = base + subtableOffset;
     }
@@ -611,10 +670,10 @@ function readCmap(r: BEReader, entry: TableEntry): Map<number, number> {
 
   // Prefer format 12 (full Unicode support)
   if (format12Offset >= 0) {
-    return readCmapFormat12(r, format12Offset);
+    return readCmapFormat12(tr, format12Offset);
   }
   if (format4Offset >= 0) {
-    return readCmapFormat4(r, format4Offset);
+    return readCmapFormat4(tr, format4Offset);
   }
 
   throw new PdfFontError("No usable Unicode cmap subtable found in font");
@@ -738,30 +797,63 @@ function readCmapFormat12(r: BEReader, offset: number): Map<number, number> {
 // hmtx Table
 // =============================================================================
 
+interface HmtxData {
+  advanceWidths: Uint16Array;
+  leftSideBearings: Int16Array;
+}
+
 /**
- * Read horizontal metrics. Returns advance widths for all glyphs.
+ * Read horizontal metrics: the advance width and the left side bearing of
+ * every glyph.
+ *
+ * `hmtx` stores `numHMetrics` `longHorMetric` records (advance width + left
+ * side bearing), followed by a bare int16 array carrying the bearings of the
+ * remaining glyphs — the monospaced tail, whose advance width is the last one
+ * spelled out. The tail is not exotic: Courier New ships 3 long records for
+ * 3151 glyphs, so almost every bearing in it lives in that trailing array.
+ *
+ * Reads stop at the extent the table directory declares, and missing metrics
+ * fall back to the last advance width and a zero bearing rather than failing the
+ * parse. That is what FreeType does with the same font: `tt_face_get_metrics`
+ * clamps to the table end, hands out a zero bearing once the trailing array runs
+ * out, and reports zero for both when `numberOfHMetrics` is 0 — which the spec
+ * forbids, and which leaves nothing here worth guessing at either.
+ *
+ * @see https://gitlab.freedesktop.org/freetype/freetype/-/blob/master/src/sfnt/ttmtx.c
  */
 function readHmtx(
   r: BEReader,
   entry: TableEntry,
   numHMetrics: number,
   numGlyphs: number
-): Uint16Array {
-  const tr = r.at(entry.offset);
-  const widths = new Uint16Array(numGlyphs);
+): HmtxData {
+  const advanceWidths = new Uint16Array(numGlyphs);
+  const leftSideBearings = new Int16Array(numGlyphs);
 
+  const tr = r.atTable("hmtx", entry);
+
+  // --- longHorMetric records ---
+  // A font that declares more records than it has glyphs is malformed; reading
+  // past numGlyphs would only discard the values anyway.
+  const longRecords = Math.min(numHMetrics, numGlyphs);
   let lastWidth = 0;
-  for (let i = 0; i < numHMetrics; i++) {
+  let gid = 0;
+  for (; gid < longRecords && tr.canRead(4); gid++) {
     lastWidth = tr.u16();
-    tr.skip(2); // lsb (left side bearing)
-    widths[i] = lastWidth;
-  }
-  // Remaining glyphs share the last advanceWidth
-  for (let i = numHMetrics; i < numGlyphs; i++) {
-    widths[i] = lastWidth;
+    advanceWidths[gid] = lastWidth;
+    leftSideBearings[gid] = tr.i16();
   }
 
-  return widths;
+  // --- Monospaced tail ---
+  // The trailing bearing array begins where the records end, so the reader only
+  // sits on it if every declared record was there to be read.
+  const atTailStart = gid === numHMetrics && numHMetrics > 0;
+  for (; gid < numGlyphs; gid++) {
+    advanceWidths[gid] = lastWidth;
+    leftSideBearings[gid] = atTailStart && tr.canRead(2) ? tr.i16() : 0;
+  }
+
+  return { advanceWidths, leftSideBearings };
 }
 
 // =============================================================================
@@ -771,26 +863,38 @@ function readHmtx(
 /**
  * Read glyph offsets from loca table.
  * Returns numGlyphs+1 offsets (the extra one marks the end of the last glyph).
+ *
+ * The offsets are the only thing standing between a glyph ID and a range of
+ * bytes, so they are returned clamped into `glyf` and non-decreasing. Anything
+ * else would hand consumers a byte range that reaches into a neighbouring table
+ * or runs backwards — and the subsetter copies whatever range it is given.
+ *
+ * An offset that breaks either rule collapses onto its predecessor, which reads
+ * as an empty glyph. FreeType refuses the same offsets for the same reason
+ * (`tt_face_get_location` drops a glyph whose start is past `glyf_len`); where
+ * it substitutes an upper bound for a non-monotonic pair, an empty glyph is the
+ * safer answer here, because a wrong length is bytes that get embedded.
  */
 function readLoca(
   r: BEReader,
   entry: TableEntry,
   numGlyphs: number,
-  indexToLocFormat: number
+  indexToLocFormat: number,
+  glyfLength: number
 ): Uint32Array {
-  const tr = r.at(entry.offset);
+  const tr = r.atTable("loca", entry);
   const offsets = new Uint32Array(numGlyphs + 1);
+  const width = indexToLocFormat === 0 ? 2 : 4;
 
-  if (indexToLocFormat === 0) {
-    // Short format: offsets are uint16, multiply by 2
-    for (let i = 0; i <= numGlyphs; i++) {
-      offsets[i] = tr.u16() * 2;
+  let last = 0;
+  let previous = 0;
+  for (let i = 0; i <= numGlyphs; i++) {
+    if (tr.canRead(width)) {
+      // Short format stores half the real offset, so it is always even
+      last = indexToLocFormat === 0 ? tr.u16() * 2 : tr.u32();
     }
-  } else {
-    // Long format: offsets are uint32
-    for (let i = 0; i <= numGlyphs; i++) {
-      offsets[i] = tr.u32();
-    }
+    previous = Math.min(Math.max(last, previous), glyfLength);
+    offsets[i] = previous;
   }
 
   return offsets;

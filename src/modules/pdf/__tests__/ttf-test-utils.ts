@@ -163,6 +163,30 @@ function assembleTtfFromTables(tables: Array<{ tag: string; data: Uint8Array }>)
   return result;
 }
 
+/**
+ * A structurally valid simple glyph: one contour of two on-curve points,
+ * spanning `xMin`..`xMin + 100` horizontally. Its length is already a multiple
+ * of 4, so glyphs concatenate without padding.
+ */
+function buildTwoPointGlyph(xMin: number): Uint8Array {
+  const glyph = new Uint8Array(24);
+  const v = new DataView(glyph.buffer);
+  v.setInt16(0, 1, false); // numberOfContours
+  v.setInt16(2, xMin, false); // xMin
+  v.setInt16(4, 0, false); // yMin
+  v.setInt16(6, xMin + 100, false); // xMax
+  v.setInt16(8, 100, false); // yMax
+  v.setUint16(10, 1, false); // endPtsOfContours[0] — last point index, so 2 points
+  v.setUint16(12, 0, false); // instructionLength
+  glyph[14] = 0x01; // point 0: on-curve, x and y written as int16 deltas
+  glyph[15] = 0x01; // point 1: same
+  v.setInt16(16, xMin, false); // x[0], delta from the origin
+  v.setInt16(18, 100, false); // x[1]
+  v.setInt16(20, 0, false); // y[0]
+  v.setInt16(22, 100, false); // y[1]
+  return glyph;
+}
+
 // ---------------------------------------------------------------------------
 // High-level TTF builders
 // ---------------------------------------------------------------------------
@@ -171,6 +195,29 @@ function assembleTtfFromTables(tables: Array<{ tag: string; data: Uint8Array }>)
 interface TtfBuildOptions {
   /** Per-glyph advance widths. Length must equal `numGlyphs`. Falls back to 500 for each glyph. */
   advanceWidths?: number[];
+  /**
+   * Per-glyph left side bearings. Length must equal `numGlyphs`. Falls back to
+   * 0 for each glyph. May be negative, as it is for glyphs like `j` whose ink
+   * reaches left of the pen position.
+   */
+  leftSideBearings?: number[];
+  /**
+   * Number of `longHorMetric` records in `hmtx`, written to `hhea` as well.
+   * Defaults to `numGlyphs` (every glyph spells out its advance width). A
+   * smaller value produces the monospaced tail real fonts use — Courier New
+   * ships 3 records for 3151 glyphs — where the glyphs past the last record
+   * share its advance width and keep their own bearing in a trailing int16
+   * array.
+   */
+  numHMetrics?: number;
+  /**
+   * Per-glyph outline left edge, one entry per glyph. When given, every glyph
+   * gets a real single-contour outline whose bounding box starts at that `xMin`
+   * instead of the empty default — needed to check that a rewritten `hmtx` still
+   * describes the outline sitting next to it, since a bearing only positions ink
+   * correctly while it stays paired with its own `glyf` entry.
+   */
+  outlineXMins?: number[];
   /** Font family name written into the `name` table. Defaults to `"TestFont"`. */
   familyName?: string;
   /** PostScript name written into the `name` table. Defaults to `"<familyName>-Regular"`. */
@@ -197,6 +244,8 @@ export function buildTtfWithCmap(
   options?: TtfBuildOptions
 ): Uint8Array {
   const widths = options?.advanceWidths;
+  const bearings = options?.leftSideBearings;
+  const numHMetrics = options?.numHMetrics ?? numGlyphs;
   const family = options?.familyName ?? "TestFont";
   const ps = options?.postScriptName ?? `${family}-Regular`;
   const ascent = options?.ascent ?? 800;
@@ -226,7 +275,7 @@ export function buildTtfWithCmap(
   hheaV.setInt16(4, ascent, false);
   hheaV.setInt16(6, descent, false);
   hheaV.setUint16(10, 600, false);
-  hheaV.setUint16(34, numGlyphs, false);
+  hheaV.setUint16(34, numHMetrics, false);
   tables.push({ tag: "hhea", data: hhea });
 
   // maxp
@@ -299,21 +348,40 @@ export function buildTtfWithCmap(
   // cmap
   tables.push({ tag: "cmap", data: buildCmapFormat4(segments) });
 
-  // hmtx
-  const hmtx = new Uint8Array(numGlyphs * 4);
+  // hmtx: numHMetrics long records, then a bare int16 bearing per remaining glyph
+  const hmtx = new Uint8Array(numHMetrics * 4 + (numGlyphs - numHMetrics) * 2);
   const hmtxV = new DataView(hmtx.buffer);
   for (let i = 0; i < numGlyphs; i++) {
-    hmtxV.setUint16(i * 4, widths?.[i] ?? 500, false);
-    hmtxV.setInt16(i * 4 + 2, 0, false);
+    if (i < numHMetrics) {
+      hmtxV.setUint16(i * 4, widths?.[i] ?? 500, false);
+      hmtxV.setInt16(i * 4 + 2, bearings?.[i] ?? 0, false);
+    } else {
+      hmtxV.setInt16(numHMetrics * 4 + (i - numHMetrics) * 2, bearings?.[i] ?? 0, false);
+    }
   }
   tables.push({ tag: "hmtx", data: hmtx });
 
-  // loca (long format)
+  // loca (long format) + glyf
+  const outlineXMins = options?.outlineXMins;
   const loca = new Uint8Array((numGlyphs + 1) * 4);
-  tables.push({ tag: "loca", data: loca });
-
-  // glyf (empty)
-  tables.push({ tag: "glyf", data: new Uint8Array(0) });
+  if (outlineXMins) {
+    const locaV = new DataView(loca.buffer);
+    const glyphs: Uint8Array[] = [];
+    let glyfLength = 0;
+    for (let i = 0; i < numGlyphs; i++) {
+      locaV.setUint32(i * 4, glyfLength, false);
+      const glyph = buildTwoPointGlyph(outlineXMins[i] ?? 0);
+      glyphs.push(glyph);
+      glyfLength += glyph.length;
+    }
+    locaV.setUint32(numGlyphs * 4, glyfLength, false);
+    tables.push({ tag: "loca", data: loca });
+    tables.push({ tag: "glyf", data: concatArrays(glyphs) });
+  } else {
+    // Every offset stays 0, so every glyph is empty
+    tables.push({ tag: "loca", data: loca });
+    tables.push({ tag: "glyf", data: new Uint8Array(0) });
+  }
 
   for (const tag of options?.extraTableTags ?? []) {
     tables.push({ tag, data: new Uint8Array(1) });
