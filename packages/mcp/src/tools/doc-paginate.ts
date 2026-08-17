@@ -26,11 +26,14 @@ import {
   replaceAtomically,
   writeWithPolicy
 } from "./fs-helpers.js";
-import { textResult } from "./result.js";
+import { escapeTableCell, textResult } from "./result.js";
 import { defineTool } from "./types.js";
 
 /** Headings listed in one call. */
 const MAX_HEADINGS = 150;
+
+/** Source characters kept per heading cell in the page map. */
+const MAX_HEADING_CHARS = 120;
 
 export const docPaginateTool = defineTool({
   name: "doc_paginate",
@@ -197,7 +200,7 @@ function collectHeadings(
 
     found.push({
       level: Number(match[1] ?? 1),
-      text: text.replace(/\|/g, "\\|").slice(0, 120),
+      text: escapeTableCell(text, MAX_HEADING_CHARS),
       page: contentPages[index] ?? 1
     });
   });

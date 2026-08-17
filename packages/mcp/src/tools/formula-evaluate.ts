@@ -162,12 +162,10 @@ function describeResult(ws: SheetHandle, address: string): string {
 
   if (value !== null && typeof value === "object" && "result" in value) {
     const result = (value as { result?: unknown }).result;
-    if (
-      result !== null &&
-      typeof result === "object" &&
-      result !== undefined &&
-      "error" in result
-    ) {
+    // `typeof x === "object"` already excludes undefined, so no separate
+    // undefined check belongs here — comparing the narrowed `object` against
+    // `undefined` can only ever be true.
+    if (result !== null && typeof result === "object" && "error" in result) {
       const code = (result as { error?: unknown }).error;
       return `${String(code)} (an Excel error value, not a tool failure)`;
     }

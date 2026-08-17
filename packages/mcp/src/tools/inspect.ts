@@ -370,14 +370,27 @@ async function describeWordDocument(resolved: string, config: ServerConfig): Pro
  * The scanned-document case is the one worth catching early: there is no OCR
  * here, so a page image yields nothing, and a model told only "this is a PDF"
  * will read it, get an empty result, and start inventing.
+ *
+ * The size guard measures and reads through one open descriptor rather than
+ * `stat(path)` then `readFile(path)`. Those are two independent lookups, so the
+ * name can be repointed at a different file in between and the bytes actually
+ * loaded into memory are then the ones nothing checked — which is exactly the
+ * limit's purpose. A descriptor cannot be re-bound: what was measured is what is
+ * read.
  */
 async function describePdf(resolved: string, config: ServerConfig): Promise<string[]> {
-  const stats = await fs.stat(resolved);
-  if (stats.size > config.maxFileSize) {
-    return ["This is a PDF, but it is over the size limit, so it was not opened."];
+  let bytes: Buffer;
+  const handle = await fs.open(resolved, "r");
+  try {
+    const stats = await handle.stat();
+    if (stats.size > config.maxFileSize) {
+      return ["This is a PDF, but it is over the size limit, so it was not opened."];
+    }
+    bytes = await handle.readFile();
+  } finally {
+    await handle.close();
   }
 
-  const bytes = await fs.readFile(resolved);
   let result: Awaited<ReturnType<typeof Pdf.read>>;
   try {
     result = await Pdf.read(new Uint8Array(bytes), {

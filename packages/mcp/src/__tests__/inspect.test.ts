@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { Workbook, Worksheet } from "documonster/excel";
+import { Pdf } from "documonster/pdf";
 
 import { resolveConfig, type ServerConfig } from "../config.js";
 import { inspectTool } from "../tools/inspect.js";
@@ -111,6 +112,30 @@ describe("doc_inspect content detection", () => {
     const fx = await fixture();
     await writeMagic(fx, "spec.pdf", MAGIC.pdf);
     expect(await inspect(fx, "spec.pdf")).toContain("kind: **pdf**");
+  });
+
+  it("describes a real PDF's pages", async () => {
+    const fx = await fixture();
+    const builder = new Pdf.Builder();
+    builder.addPage().drawText("hello", { x: 60, y: 700 });
+    await writeFile(path.join(fx.root, "one.pdf"), await builder.build());
+
+    const text = await inspect(fx, "one.pdf");
+    expect(text).toContain("## PDF");
+    expect(text).toContain("- pages: 1");
+  });
+
+  it("skips opening a PDF over the size limit", async () => {
+    // The guard measures and reads through one descriptor; the early return has
+    // to leave the file closed and the parse unattempted.
+    const fx = await fixture(["--max-file-size", "32"]);
+    const builder = new Pdf.Builder();
+    builder.addPage().drawText("hello", { x: 60, y: 700 });
+    await writeFile(path.join(fx.root, "big.pdf"), await builder.build());
+
+    const text = await inspect(fx, "big.pdf");
+    expect(text).toContain("over the size limit");
+    expect(text).not.toContain("## PDF");
   });
 
   it("identifies a CFB container and explains the ambiguity", async () => {

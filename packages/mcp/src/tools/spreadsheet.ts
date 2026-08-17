@@ -9,6 +9,7 @@
 import { Address, Cell, Workbook, Worksheet } from "documonster/excel";
 
 import { toolError } from "../errors.js";
+import { escapeTableCell } from "./result.js";
 
 /** A workbook handle, as the public API hands it back. */
 export type WorkbookHandle = ReturnType<typeof Workbook.create>;
@@ -197,25 +198,15 @@ export function renderCell(ws: SheetHandle, row: number, column: number, mode: C
 
   if (mode === "formulas") {
     return formula === undefined
-      ? escapeCell(Cell.getDisplayText(ws, row, column))
-      : escapeCell(`=${formula}`);
+      ? escapeTableCell(Cell.getDisplayText(ws, row, column))
+      : escapeTableCell(`=${formula}`);
   }
 
-  const display = escapeCell(Cell.getDisplayText(ws, row, column));
+  const display = escapeTableCell(Cell.getDisplayText(ws, row, column));
   if (mode === "both" && formula !== undefined) {
-    return `${display} \`=${escapeCell(formula)}\``;
+    return `${display} \`=${escapeTableCell(formula)}\``;
   }
   return display;
-}
-
-/**
- * Escape a value for a Markdown table cell.
- *
- * A raw `|` would silently split one cell into two and shift every subsequent
- * column, which the model has no way to detect.
- */
-function escapeCell(text: string): string {
-  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
 /**

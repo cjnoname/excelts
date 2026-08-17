@@ -11,7 +11,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { resolveConfig, type ServerConfig } from "../config.js";
-import { errorResult, formatBytes, textResult, truncate } from "../tools/result.js";
+import {
+  errorResult,
+  escapeTableCell,
+  formatBytes,
+  textResult,
+  truncate
+} from "../tools/result.js";
 
 async function configWith(maxOutputChars: number): Promise<ServerConfig> {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), "documonster-mcp-result-")));
@@ -59,6 +65,53 @@ describe("errorResult", () => {
     const result = errorResult("[not_found] nope");
     expect(result.isError).toBe(true);
     expect(result.content[0]).toMatchObject({ type: "text", text: "[not_found] nope" });
+  });
+});
+
+/**
+ * A cell that leaks a delimiter shifts every later column, and the model has no
+ * way to notice — so the escaping has to hold for adversarial content, not just
+ * for a bare pipe.
+ */
+describe("escapeTableCell", () => {
+  it("escapes a pipe so it cannot split the cell", () => {
+    expect(escapeTableCell("a|b")).toBe("a\\|b");
+  });
+
+  it("escapes a backslash before the pipe it precedes", () => {
+    // Escaping only the pipe yields `a\\|b`, which GFM reads as an escaped
+    // backslash followed by a live delimiter — the break the escaping exists to
+    // prevent.
+    expect(escapeTableCell("a\\|b")).toBe("a\\\\\\|b");
+  });
+
+  it("leaves no odd-length backslash run in front of a pipe", () => {
+    for (let backslashes = 0; backslashes <= 5; backslashes += 1) {
+      const escaped = escapeTableCell(`${"\\".repeat(backslashes)}|`);
+      const run = /(\\*)\\\|$/.exec(escaped);
+      expect(run).not.toBeNull();
+      // The delimiter's own escape is the last backslash; everything before it
+      // must pair up, or one of them consumes that escape.
+      expect((run?.[1]?.length ?? 0) % 2).toBe(0);
+    }
+  });
+
+  it("collapses newlines so a cell cannot end its row early", () => {
+    expect(escapeTableCell("a\r\nb\nc\rd")).toBe("a b c d");
+  });
+
+  it("clips before escaping, so a limit never cuts an escape in half", () => {
+    // Slicing the escaped form at 2 would yield `a\`, whose dangling backslash
+    // escapes the closing delimiter instead of a character of content.
+    expect(escapeTableCell("a|b", 2)).toBe("a\\|");
+  });
+
+  it("counts the limit in source characters", () => {
+    expect(escapeTableCell("||||", 2)).toBe("\\|\\|");
+  });
+
+  it("leaves text within the limit untouched", () => {
+    expect(escapeTableCell("plain", 100)).toBe("plain");
   });
 });
 

@@ -31,11 +31,14 @@ import {
   replaceAtomically,
   writeWithPolicy
 } from "./fs-helpers.js";
-import { textResult } from "./result.js";
+import { escapeTableCell, textResult } from "./result.js";
 import { defineTool } from "./types.js";
 
 /** Matches reported in one call. */
 const MAX_MATCHES = 100;
+
+/** Source characters kept per table cell, so one long run cannot flood the row. */
+const MAX_CELL_CHARS = 200;
 
 const formatCriteria = {
   bold: z.boolean().optional(),
@@ -348,8 +351,9 @@ function describeQuery(args: {
   return args.regex === true ? `pattern \`/${source}/g\`` : JSON.stringify(source);
 }
 
+/** A match rendered into a table cell, capped so one long run cannot flood a row. */
 function escapeCell(text: string): string {
-  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").slice(0, 200);
+  return escapeTableCell(text, MAX_CELL_CHARS);
 }
 
 async function readWord(resolved: string, displayPath: string) {

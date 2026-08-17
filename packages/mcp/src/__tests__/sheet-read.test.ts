@@ -53,6 +53,32 @@ async function makeWorkbook(fx: Fixture, name: string, rows: number): Promise<st
   return name;
 }
 
+/**
+ * Split a rendered table row on its real delimiters, the way GFM does.
+ *
+ * A `|` ends a cell unless an odd number of backslashes precedes it. Counting
+ * cells this way is the only way to prove an escaped value stayed in one column
+ * instead of silently shifting the rest of the row.
+ */
+function splitCells(row: string): string[] {
+  const cells: string[] = [];
+  let current = "";
+  let backslashes = 0;
+  for (const char of row) {
+    if (char === "|" && backslashes % 2 === 0) {
+      cells.push(current);
+      current = "";
+      backslashes = 0;
+      continue;
+    }
+    backslashes = char === "\\" ? backslashes + 1 : 0;
+    current += char;
+  }
+  cells.push(current);
+  // Drop the empty leading and trailing fields created by the outer pipes.
+  return cells.slice(1, -1).map(cell => cell.trim());
+}
+
 describe("sheet_read", () => {
   it("renders a table with column letters and row numbers", async () => {
     const fx = await fixture();
@@ -196,6 +222,24 @@ describe("sheet_read", () => {
 
     const text = await read(fx, { path: "p.xlsx" });
     expect(text).toContain("a\\|b");
+  });
+
+  it("escapes a backslash so it cannot neutralize the pipe's escape", async () => {
+    // `a\|b` escaped as pipe-only becomes `a\\|b`: GFM reads `\\` as one literal
+    // backslash and the pipe as a live delimiter, so the row silently gains a
+    // column and every later value is attributed to the wrong one.
+    const fx = await fixture();
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Worksheet.addAoa(ws, [["a\\|b", "c"]]);
+    await Workbook.writeFile(wb, path.join(fx.root, "b.xlsx"));
+
+    const text = await read(fx, { path: "b.xlsx" });
+    const row = text.split("\n").find(line => line.startsWith("| 1 |"));
+    expect(row).toBeDefined();
+    expect(row).toContain("a\\\\\\|b");
+    // Row number plus two cells — the pipe inside the value must not add a third.
+    expect(splitCells(row ?? "")).toEqual(["1", "a\\\\\\|b", "c"]);
   });
 
   it("rejects a non-workbook with an actionable error", async () => {
