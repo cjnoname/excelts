@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/documonster/documonster/compare/v0.8.0...v0.9.0) (2026-08-17)
+
+
+### Features
+
+* **mcp:** Add @documonster/mcp server ([d458f51](https://github.com/documonster/documonster/commit/d458f51341d1898f4bd3ea7089546bd123940074))
+* **pdf:** Configure font families and report what cannot be rendered ([5562b6e](https://github.com/documonster/documonster/commit/5562b6e49e19790cdc1ef7460ea48574bec2945c))
+
+
+### Bug Fixes
+
+* **pdf:** Keep glyph left side bearings when subsetting embedded fonts ([149b9f2](https://github.com/documonster/documonster/commit/149b9f21665bced1f165420d98db60eb50b07a6b))
+* **pdf:** Name the font face that failed and the format that was supplied ([480bcae](https://github.com/documonster/documonster/commit/480bcae3440270b6fb642b0dde64daa6cbe10ed9))
+
 ## [0.8.0](https://github.com/documonster/documonster/compare/v0.7.0...v0.8.0) (2026-08-12)
 
 
