@@ -33,6 +33,7 @@ import type {
   LayoutFloat,
   LayoutImage,
   LayoutMath,
+  LayoutBorderEdge,
   LayoutOpaqueDrawing,
   LayoutPage,
   LayoutParagraph,
@@ -296,8 +297,82 @@ function renderParagraph(
   geometry: PageGeometry,
   opts: RenderLayoutOptions
 ): void {
+  // Shading first, then borders, then text — so a code block's background sits
+  // behind its frame and its frame behind its glyphs.
+  renderParagraphDecoration(pdfPage, para, geometry);
   for (const line of para.lines) {
     renderLine(pdfPage, para, line, geometry, opts);
+  }
+}
+
+/**
+ * Paint a paragraph's shading and borders (`w:shd`, `w:pBdr`).
+ *
+ * These are what a themed heading rule, a block quote's left bar and a code
+ * block's frame are drawn from. Each edge is offset outwards by its own
+ * `w:space`, which is how Word separates a rule from the text above it.
+ */
+function renderParagraphDecoration(
+  pdfPage: PdfPageBuilder,
+  para: LayoutParagraph,
+  geometry: PageGeometry
+): void {
+  const insets = para.decorationInsets;
+  if (!insets) {
+    return;
+  }
+  // Derived from `rect`, which the caller has already translated (a cell, a text
+  // box) and which a page split has already resized.
+  const box = {
+    x: para.rect.x + insets.left,
+    y: para.rect.y + insets.top,
+    width: Math.max(0, para.rect.width - insets.left - insets.right),
+    height: Math.max(0, para.rect.height - insets.top - insets.bottom)
+  };
+
+  if (para.backgroundColor) {
+    const fill = hexToColor(para.backgroundColor);
+    if (fill) {
+      const pad = para.borders?.left?.space ?? 0;
+      pdfPage.drawRect({
+        x: toPdfX(geometry, box.x - pad),
+        y: toPdfY(geometry, box.y + box.height),
+        width: box.width + pad * 2,
+        height: box.height,
+        fill
+      });
+    }
+  }
+
+  const borders = para.borders;
+  if (!borders) {
+    return;
+  }
+  const left = toPdfX(geometry, box.x);
+  const right = toPdfX(geometry, box.x + box.width);
+  const top = toPdfY(geometry, box.y);
+  const bottom = toPdfY(geometry, box.y + box.height);
+
+  const stroke = (edge: LayoutBorderEdge, x1: number, y1: number, x2: number, y2: number): void => {
+    const color = hexToColor(edge.color) ?? BLACK;
+    pdfPage.drawLine({ x1, y1, x2, y2, color, lineWidth: edge.width });
+  };
+
+  if (borders.top) {
+    const y = top + borders.top.space;
+    stroke(borders.top, left, y, right, y);
+  }
+  if (borders.bottom) {
+    const y = bottom - borders.bottom.space;
+    stroke(borders.bottom, left, y, right, y);
+  }
+  if (borders.left) {
+    const x = left - borders.left.space;
+    stroke(borders.left, x, bottom, x, top);
+  }
+  if (borders.right) {
+    const x = right + borders.right.space;
+    stroke(borders.right, x, bottom, x, top);
   }
 }
 

@@ -193,6 +193,31 @@ export interface EmbeddedGlyphUse {
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+/**
+ * Split text into grapheme clusters.
+ *
+ * Subsetting maps a whole cluster — a base character together with the variation
+ * selectors and joiners that follow it — to a single CID, so anything that
+ * chooses a *face* per character has to agree on the same boundaries. Splitting
+ * mid-cluster leaves the tail looking up a sequence that was never registered,
+ * which encodes as `.notdef`.
+ */
+export function graphemeClusters(text: string): string[] {
+  const out: string[] = [];
+  for (const part of graphemeSegmenter.segment(text)) {
+    out.push(part.segment);
+  }
+  return out;
+}
+
+/**
+ * Whether a code point shapes its neighbours rather than drawing a glyph:
+ * joiners, variation selectors and the like.
+ */
+export function isGlyphShapingControl(codePoint: number): boolean {
+  return isSemanticControl(codePoint);
+}
+
 function buildSubsetMapping(
   font: TtfFont,
   usedText: Set<number> | Iterable<string> | Iterable<EmbeddedGlyphUse>

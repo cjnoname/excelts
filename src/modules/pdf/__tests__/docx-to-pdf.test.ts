@@ -88,7 +88,12 @@ describe("docxToPdf — layout-driven smoke test", () => {
       Number.parseFloat(match[1])
     );
 
-    expect(new Set(textYs).size).toBe(3);
+    // Each `A` is 2 em wide in this font, so at 10pt one glyph advances 20pt in
+    // a 50pt text column: "AAA" (60pt) cannot fit a line even by itself and is
+    // broken mid-token into "AA" + "A", giving four lines for "AAA AAA". The
+    // metrics therefore have to reach the Word layout pass, not just the PDF
+    // drawing — with the default metrics "AAA AAA" would fit on a single line.
+    expect(new Set(textYs).size).toBe(4);
   });
 
   it("reports uncovered characters through onWarning", async () => {

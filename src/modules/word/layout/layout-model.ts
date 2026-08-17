@@ -91,11 +91,81 @@ export interface LineBox {
 }
 
 /** A positioned paragraph on a page. */
+/** A drawn border edge: stroke width in points, `RRGGBB` colour, and its gap from the content. */
+export interface LayoutBorderEdge {
+  readonly width: number;
+  readonly color: string;
+  /** Gap between the border and the content it surrounds, in points (`w:space`). */
+  readonly space: number;
+}
+
+/** The four drawable edges of a block. */
+export interface LayoutBorders {
+  readonly top?: LayoutBorderEdge;
+  readonly bottom?: LayoutBorderEdge;
+  readonly left?: LayoutBorderEdge;
+  readonly right?: LayoutBorderEdge;
+}
+
+/**
+ * How far a block's decoration is inset from its `rect`, in points.
+ *
+ * Borders and shading surround the *text*, not the paragraph's space-before and
+ * space-after, and they span the indented text column rather than the full
+ * content width. Expressing that as insets rather than as a second rectangle is
+ * deliberate: `rect` is translated when a paragraph is laid inside a table cell,
+ * a text box or a footnote, and it is resized when a paragraph is split across a
+ * page break. Anything carrying its own copy of the position silently desyncs at
+ * every one of those points — a split shaded paragraph painted its full
+ * unsplit height on both pages.
+ */
+export interface LayoutDecorationInsets {
+  readonly left: number;
+  readonly right: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
 export interface LayoutParagraph {
   readonly type: "paragraph";
   readonly rect: LayoutRect;
   readonly lines: readonly LineBox[];
   readonly sourceIndex: number; // index in doc.body
+  /**
+   * Paragraph borders (`w:pBdr`), already resolved to stroke widths and colours.
+   *
+   * This is what a themed heading rule, a block quote's left bar and a code
+   * block's frame are made of, so a renderer that ignores it cannot reproduce
+   * any of them.
+   */
+  readonly borders?: LayoutBorders;
+  /** Paragraph background shading (`w:shd`) as a bare `RRGGBB` hex string. */
+  readonly backgroundColor?: string;
+  /** Where the borders and shading sit relative to `rect`. */
+  readonly decorationInsets?: LayoutDecorationInsets;
+  /**
+   * Footnote / endnote ids referenced from each line, parallel to `lines`.
+   *
+   * A paragraph split across a page boundary keeps only the entries for the lines
+   * it kept, so each note is claimed by the page its reference actually landed
+   * on rather than by the page the paragraph began on.
+   */
+  readonly lineNoteIds?: readonly (readonly number[])[];
+  /**
+   * Indices of lines after which a `w:br w:type="page"` demands a page break.
+   *
+   * The break belongs *inside* the paragraph: the lines before it stay where they
+   * are and the rest continues on the next page. Treating the paragraph as a unit
+   * and moving all of it put the text preceding the break on the wrong page.
+   */
+  readonly pageBreakAfterLines?: readonly number[];
+  /**
+   * Bookmark names starting on each line, parallel to `lines`.
+   *
+   * Sliced with the lines when a paragraph is split, so a bookmark in the part
+   * that spilled onto the next page resolves to that page.
+   */
+  readonly lineBookmarks?: readonly (readonly string[])[];
 }
 
 /** A positioned table on a page. */
@@ -108,6 +178,14 @@ export interface LayoutTable {
 
 /** A positioned table cell. */
 export interface LayoutTableCell {
+  /**
+   * Position within the table, on both axes.
+   *
+   * Renderers add the table's own origin. Emitting an absolute `y` here while
+   * `x` stayed table-relative made them add the table's `y` twice, so every
+   * table that did not begin at the top of a page drew its contents that far
+   * below where the layout had placed them.
+   */
   readonly rect: LayoutRect;
   readonly row: number;
   readonly col: number;

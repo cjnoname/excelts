@@ -235,12 +235,141 @@ const FONT_FAMILY_MAP: Record<string, string> = {
 // =============================================================================
 
 /**
+ * BMP code points with a default emoji presentation, which Unicode gives East
+ * Asian Width `W`.
+ *
+ * They sit inside otherwise-narrow blocks (Miscellaneous Symbols, Dingbats), so
+ * a block-level range would make arrows and typographic symbols full-width too.
+ */
+function isWideBmpEmoji(cp: number): boolean {
+  return (
+    (cp >= 0x231a && cp <= 0x231b) || // watch, hourglass
+    (cp >= 0x23e9 && cp <= 0x23ec) || // fast-forward … fast down
+    cp === 0x23f0 || // alarm clock
+    cp === 0x23f3 || // hourglass flowing sand
+    (cp >= 0x25fd && cp <= 0x25fe) || // small squares
+    (cp >= 0x2614 && cp <= 0x2615) || // umbrella with rain, hot beverage
+    (cp >= 0x2648 && cp <= 0x2653) || // zodiac
+    cp === 0x267f || // wheelchair
+    cp === 0x2693 || // anchor
+    cp === 0x26a1 || // high voltage
+    (cp >= 0x26aa && cp <= 0x26ab) || // medium circles
+    (cp >= 0x26bd && cp <= 0x26be) || // soccer, baseball
+    (cp >= 0x26c4 && cp <= 0x26c5) || // snowman, sun behind cloud
+    cp === 0x26ce || // ophiuchus
+    cp === 0x26d4 || // no entry
+    cp === 0x26ea || // church
+    (cp >= 0x26f2 && cp <= 0x26f3) || // fountain, golf
+    cp === 0x26f5 || // sailboat
+    cp === 0x26fa || // tent
+    cp === 0x26fd || // fuel pump
+    cp === 0x2705 || // white heavy check mark
+    (cp >= 0x270a && cp <= 0x270b) || // raised fist, raised hand
+    cp === 0x2728 || // sparkles
+    cp === 0x274c || // cross mark
+    cp === 0x274e || // negative squared cross mark
+    (cp >= 0x2753 && cp <= 0x2755) || // question / exclamation marks
+    cp === 0x2757 || // heavy exclamation
+    (cp >= 0x2795 && cp <= 0x2797) || // heavy plus / minus / division
+    cp === 0x27b0 || // curly loop
+    cp === 0x27bf || // double curly loop
+    (cp >= 0x2b1b && cp <= 0x2b1c) || // black / white large square
+    cp === 0x2b50 || // white medium star
+    cp === 0x2b55 // heavy large circle
+  );
+}
+
+/**
+ * Whether a code point is East Asian Wide or Fullwidth, i.e. drawn one em wide.
+ *
+ * Every real font advances an ideograph, a kana, a Hangul syllable or a
+ * fullwidth form by a full em, independently of the Latin face that was asked
+ * for — a renderer that cannot draw them substitutes a face that can. Measuring
+ * them with a Latin average width (~0.5 em) therefore understates a CJK run by
+ * about half, and text positioned from that measurement collides with whatever
+ * follows it.
+ *
+ * Ranges follow Unicode's East Asian Width property (values `W` and `F`).
+ */
+export function isFullWidthCodePoint(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) || // Hangul Jamo initial consonants
+    (codePoint >= 0x2e80 && codePoint <= 0x303e) || // CJK Radicals, Kangxi, CJK Symbols
+    (codePoint >= 0x3041 && codePoint <= 0x33ff) || // Kana, Bopomofo, Kanbun, Enclosed CJK
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) || // CJK Unified Extension A
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) || // CJK Unified Ideographs
+    (codePoint >= 0xa000 && codePoint <= 0xa4cf) || // Yi
+    (codePoint >= 0xa960 && codePoint <= 0xa97f) || // Hangul Jamo Extended-A
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) || // Hangul Syllables
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) || // CJK Compatibility Ideographs
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) || // Vertical Forms
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) || // CJK Compatibility / Small Forms
+    (codePoint >= 0xff00 && codePoint <= 0xff60) || // Fullwidth Forms
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) || // Fullwidth Signs
+    // BMP symbols whose East Asian Width is W because they have an emoji
+    // presentation by default (watches, zodiac, ball games, ✨, ❌, ⭐ …). The
+    // surrounding blocks are narrow, so these have to be listed rather than
+    // spanned.
+    isWideBmpEmoji(codePoint) ||
+    // Emoji and pictographs. `U+1F300–U+1FAFF` covers Misc Symbols and
+    // Pictographs through Symbols and Pictographs Extended-A in one span,
+    // which is what keeps rockets and hearts the same width as smileys.
+    (codePoint >= 0x1f004 && codePoint <= 0x1f004) || // Mahjong red dragon
+    (codePoint >= 0x1f0cf && codePoint <= 0x1f0cf) || // Playing card black joker
+    (codePoint >= 0x1f18e && codePoint <= 0x1f18e) || // Negative squared AB
+    (codePoint >= 0x1f191 && codePoint <= 0x1f19a) || // Squared CL … VS
+    (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff) || // Regional indicators (flags)
+    (codePoint >= 0x1f200 && codePoint <= 0x1f2ff) || // Enclosed CJK / ideographic supplement
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) || // Emoji: pictographs through Ext-A
+    (codePoint >= 0x20000 && codePoint <= 0x2fffd) || // CJK Extension B–F
+    (codePoint >= 0x30000 && codePoint <= 0x3fffd) // CJK Extension G+
+  );
+}
+
+/**
+ * Whether a code point advances the pen by nothing at all.
+ *
+ * Joiners, variation selectors and other zero-width formatting characters shape
+ * the glyphs around them; they are not glyphs. Charging each one an average
+ * character width measured a four-person family emoji — one glyph — as five and
+ * a half characters wide, which threw off every wrap and page break after it.
+ */
+export function isZeroWidthCodePoint(codePoint: number): boolean {
+  return (
+    codePoint === 0x200b || // zero width space
+    codePoint === 0x200c || // zero width non-joiner
+    codePoint === 0x200d || // zero width joiner
+    codePoint === 0x2060 || // word joiner
+    codePoint === 0xfeff || // zero width no-break space (BOM)
+    (codePoint >= 0x200e && codePoint <= 0x200f) || // LRM / RLM
+    (codePoint >= 0x202a && codePoint <= 0x202e) || // bidi embedding / override
+    (codePoint >= 0x2066 && codePoint <= 0x2069) || // bidi isolates
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) || // variation selectors 1–16
+    (codePoint >= 0x0300 && codePoint <= 0x036f) || // combining diacritical marks
+    (codePoint >= 0xe0100 && codePoint <= 0xe01ef) // variation selectors supplement
+  );
+}
+
+/** One em, in the thousandths-of-a-unit scale these metrics use. */
+const FULL_WIDTH = 1000;
+
+/**
  * Get the width of a character in a given font.
  * @param charCode - Unicode code point (or char code)
  * @param fontName - PDF standard font name
  * @returns Width in thousandths of a unit
  */
 export function getCharWidth(charCode: number, fontName: string): number {
+  // Zero-width formatting characters advance nothing.
+  if (isZeroWidthCodePoint(charCode)) {
+    return 0;
+  }
+  // Full-width code points are one em regardless of the requested family: the
+  // standard-14 faces have no glyph for them, so whatever face the renderer
+  // substitutes decides the advance, and that advance is a full em.
+  if (isFullWidthCodePoint(charCode)) {
+    return FULL_WIDTH;
+  }
   const desc = FONT_DESCRIPTORS[fontName];
   if (!desc) {
     // Fall back to Helvetica
@@ -254,6 +383,10 @@ export function getCharWidth(charCode: number, fontName: string): number {
 
 /**
  * Measure the width of a text string in the given font and size.
+ *
+ * Iterates by code point, not UTF-16 code unit: counting a surrogate pair twice
+ * would double the measured width of every astral character (emoji, rare CJK).
+ *
  * @param text - The string to measure
  * @param fontName - PDF standard font name
  * @param fontSize - Font size in points
@@ -262,7 +395,11 @@ export function getCharWidth(charCode: number, fontName: string): number {
 export function measureTextWidth(text: string, fontName: string, fontSize: number): number {
   let totalWidth = 0;
   for (let i = 0; i < text.length; i++) {
-    totalWidth += getCharWidth(text.charCodeAt(i), fontName);
+    const codePoint = text.codePointAt(i)!;
+    if (codePoint > 0xffff) {
+      i++; // skip the low surrogate
+    }
+    totalWidth += getCharWidth(codePoint, fontName);
   }
   return (totalWidth / 1000) * fontSize;
 }

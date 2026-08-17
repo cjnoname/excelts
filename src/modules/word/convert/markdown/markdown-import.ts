@@ -23,6 +23,7 @@ import type {
   AbstractNumbering,
   Alignment,
   BodyContent,
+  DocDefaults,
   DocxDocument,
   Emu,
   FootnoteDef,
@@ -36,6 +37,7 @@ import type {
   ParagraphProperties,
   Run,
   RunProperties,
+  StyleDef,
   Table,
   TableCell,
   TableCellProperties,
@@ -56,7 +58,10 @@ export interface MarkdownImportOptions {
   readonly defaultFontSize?: number;
   /** Code font family (default: "Courier New"). */
   readonly codeFont?: string;
-  /** Code font size in half-points (default: 20 = 10pt). */
+  /**
+   * Code font size in half-points. Defaults to the body size, matching
+   * `code { font-size: 1em }` in VS Code's Markdown preview stylesheet.
+   */
   readonly codeFontSize?: number;
   /** Custom image resolver — given a URL, return image data or undefined to skip. */
   readonly resolveImage?: (
@@ -97,6 +102,23 @@ export interface MarkdownBodyResult {
   readonly numberingInstances: NumberingInstance[];
   readonly footnotes: FootnoteDef[];
   readonly images: ImageDef[];
+  /**
+   * The style definitions the body refers to by name.
+   *
+   * The body's paragraphs carry `Heading1…6`, `Quote`, `CodeBlock` and
+   * `ListParagraph` as *references*; every visual property — a heading's rule, a
+   * quote's bar, a code block's frame and background, a list's tight spacing —
+   * lives in these definitions. Splicing the body into a host document without
+   * them leaves the text unstyled, so they are returned rather than left for the
+   * caller to guess at.
+   */
+  readonly styles: StyleDef[];
+  /**
+   * Document defaults the body assumes: 11pt body text on a 1.57 line, and the
+   * space below each paragraph. A host document with different defaults will
+   * render the body at its own size and leading.
+   */
+  readonly docDefaults: DocDefaults;
 }
 
 /**
@@ -118,6 +140,7 @@ export async function markdownToDocx(
   const { body, state } = await markdownToDocxBodyInternal(markdown, options);
   return {
     body,
+    docDefaults: defaultMarkdownDocDefaults(),
     styles: defaultMarkdownStyles(),
     abstractNumberings: state.abstractNumberings,
     numberingInstances: state.numberingInstances,
@@ -136,7 +159,11 @@ export async function markdownToDocx(
  *     bullet / numbered / task lists.
  *   - **Footnotes** (`footnotes`) — referenced by footnote-reference runs.
  *   - **Images** (`images`) — referenced by inline image runs.
- *   - The named `Quote` / `CodeBlock` styles (for block quotes / code blocks).
+ *   - **Styles** (`styles`) — `Heading1…6`, `Quote`, `CodeBlock` and
+ *     `ListParagraph`, which carry all of the formatting the body only
+ *     references by name.
+ *   - **Document defaults** (`docDefaults`) — the body text size and leading the
+ *     spacing was calculated against.
  *
  * Splice the relevant arrays into your host document alongside the body, or
  * use the higher-level {@link markdownToDocx} which returns a complete
@@ -156,7 +183,9 @@ export async function markdownToDocxBody(
     abstractNumberings: state.abstractNumberings,
     numberingInstances: state.numberingInstances,
     footnotes: state.footnotes,
-    images: state.images
+    images: state.images,
+    styles: defaultMarkdownStyles(),
+    docDefaults: defaultMarkdownDocDefaults()
   };
 }
 
@@ -171,7 +200,7 @@ async function markdownToDocxBodyInternal(
   const opts: Required<Pick<MarkdownImportOptions, "codeFont" | "codeFontSize">> &
     MarkdownImportOptions = {
     codeFont: "Courier New",
-    codeFontSize: 20,
+    codeFontSize: pxHalfPt(BODY_PX),
     ...options
   };
 
@@ -1282,7 +1311,9 @@ async function convertBlock(
     case "html":
       // Pass through as plain text paragraph
       return [
-        makeParagraph([makeRun(block.content, { font: opts.codeFont, size: opts.codeFontSize })])
+        makeParagraph([makeRun(block.content, { font: opts.codeFont, size: opts.codeFontSize })], {
+          style: "CodeBlock"
+        })
       ];
     default:
       return [];
@@ -1330,17 +1361,17 @@ async function convertBlockquote(
     const converted = await convertBlock(child, opts, 0, state);
     for (const item of converted) {
       if (item.type === "paragraph") {
-        result.push({
-          ...item,
-          properties: {
-            ...item.properties,
-            style: "Quote",
-            indent: { left: 720 }, // 0.5 inch
-            borders: {
-              left: { style: "single", size: 18, color: "CCCCCC", space: 12 }
-            }
-          }
-        });
+        // Geometry and the bar live in the `Quote` style (see
+        // `defaultMarkdownStyles`), so the paragraph only names it — but only
+        // when it has no style of its own. A fenced code block or a heading
+        // inside a quote keeps its own style; overwriting it stripped the code
+        // block's frame, background and leading, and flattened headings to body
+        // text.
+        result.push(
+          item.properties?.style
+            ? item
+            : { ...item, properties: { ...item.properties, style: "Quote" } }
+        );
       } else {
         result.push(item);
       }
@@ -1360,17 +1391,9 @@ function convertFencedCode(block: FencedCodeBlock, opts: ConvertOpts): Paragraph
   }
   return {
     type: "paragraph",
-    properties: {
-      style: "CodeBlock",
-      shading: { fill: "F5F5F5" },
-      borders: {
-        top: { style: "single", size: 4, color: "E0E0E0", space: 4 },
-        bottom: { style: "single", size: 4, color: "E0E0E0", space: 4 },
-        left: { style: "single", size: 4, color: "E0E0E0", space: 4 },
-        right: { style: "single", size: 4, color: "E0E0E0", space: 4 }
-      },
-      spacing: { before: 120, after: 120 }
-    },
+    // Padding, frame, background and line height all live in the `CodeBlock`
+    // style (see `defaultMarkdownStyles`), so the paragraph only names it.
+    properties: { style: "CodeBlock" },
     children: runs
   };
 }
@@ -1380,10 +1403,11 @@ function convertThematicBreak(): Paragraph {
     type: "paragraph",
     properties: {
       thematicBreak: true,
+      // `hr { height: 1px; border-bottom: 1px solid }`.
       borders: {
-        bottom: { style: "single", size: 12, color: "AAAAAA", space: 1 }
+        bottom: { style: "single", size: 8, color: COLORS.rule, space: 0 }
       },
-      spacing: { before: 240, after: 240 }
+      spacing: { before: pxTwips(16), after: pxTwips(16) }
     },
     children: []
   };
@@ -1413,8 +1437,12 @@ async function convertList(
         result.push(...nested);
       } else if (child.type === "paragraph") {
         if (firstBlock) {
-          // First paragraph gets list numbering
+          // First paragraph gets list numbering. `ListParagraph` is how Word
+          // represents a list item, and its `contextualSpacing` is what keeps
+          // consecutive items tight while still separating the list from the
+          // body text around it.
           const props: ParagraphProperties = {
+            style: "ListParagraph",
             numbering: { numId, level: parentLevel }
           };
           const para = await convertParagraph(child.inlines, opts, state, props);
@@ -1435,6 +1463,7 @@ async function convertList(
         } else {
           // Continuation paragraphs — indented but no numbering
           const props: ParagraphProperties = {
+            style: "ListParagraph",
             indent: { left: 720 * (parentLevel + 1) }
           };
           result.push(await convertParagraph(child.inlines, opts, state, props));
@@ -1461,9 +1490,12 @@ async function convertTable(
   const headerCells: TableCell[] = [];
   for (let ci = 0; ci < block.headers.length; ci++) {
     const cell = block.headers[ci];
+    // `th { border-bottom: 1px solid <darker> }` — the header is marked by a
+    // heavier rule and bold text, not by a fill. The sheet gives `th` no
+    // background at all.
     const cellProps: TableCellProperties = {
-      shading: { fill: "F0F0F0" },
-      verticalAlign: "center"
+      verticalAlign: "center",
+      borders: { bottom: { style: "single", size: 8, color: COLORS.headerRule } }
     };
     const paraProps: ParagraphProperties = {
       alignment: block.alignments[ci]
@@ -1502,14 +1534,17 @@ async function convertTable(
     ...dataRows
   ];
 
-  // Table properties with borders
+  // `table { border-collapse: collapse }` with rules only *between* body rows
+  // (`table > tbody > tr + tr > td { border-top: 1px solid }`). There is no
+  // outer frame and no vertical rule — a grid is exactly what the preview
+  // avoids, and it is most of why a Markdown table reads cleanly there.
   const borders: Required<TableProperties>["borders"] = {
-    top: { style: "single", size: 4, color: "CCCCCC" },
-    bottom: { style: "single", size: 4, color: "CCCCCC" },
-    left: { style: "single", size: 4, color: "CCCCCC" },
-    right: { style: "single", size: 4, color: "CCCCCC" },
-    insideH: { style: "single", size: 4, color: "CCCCCC" },
-    insideV: { style: "single", size: 4, color: "CCCCCC" }
+    top: { style: "none" },
+    bottom: { style: "none" },
+    left: { style: "none" },
+    right: { style: "none" },
+    insideH: { style: "single", size: 8, color: COLORS.rule },
+    insideV: { style: "none" }
   };
 
   const tableWidth: TableWidth = { type: "pct", value: 5000 }; // 100%
@@ -1517,6 +1552,13 @@ async function convertTable(
   const tableProps: TableProperties = {
     width: tableWidth,
     borders,
+    // `th, td { padding: 5px 10px }`.
+    cellMargins: {
+      top: { value: pxTwips(5), type: "dxa" },
+      bottom: { value: pxTwips(5), type: "dxa" },
+      left: { value: pxTwips(10), type: "dxa" },
+      right: { value: pxTwips(10), type: "dxa" }
+    },
     layout: "autofit"
   };
 
@@ -1607,8 +1649,9 @@ async function inlineToRuns(
         makeRun(node.text, {
           ...inheritedProps,
           font: opts.codeFont ?? "Courier New",
-          size: opts.codeFontSize ?? 20,
-          shading: { fill: "F0F0F0" }
+          // `code { font-size: 1em }` — inline code matches body size. The
+          // stylesheet gives a background to `pre`, not to inline `code`.
+          size: opts.codeFontSize ?? pxHalfPt(BODY_PX)
         })
       );
       break;
@@ -1620,7 +1663,8 @@ async function inlineToRuns(
         await inlineToRuns(
           child,
           tempOutput,
-          { ...inheritedProps, color: "0563C1", underline: "single" },
+          // `a { text-decoration: none }` — colour alone marks a link.
+          { ...inheritedProps, color: COLORS.link },
           opts,
           state,
           isHeading
@@ -1915,6 +1959,137 @@ function makeParagraph(children: ParagraphChild[], properties?: ParagraphPropert
 // Default Styles
 // =============================================================================
 
+/**
+ * Typographic defaults for rendered Markdown, ported from the stylesheet VS
+ * Code's built-in Markdown preview uses
+ * (`extensions/markdown-language-features/media/markdown.css`).
+ *
+ * That sheet is tuned for reading prose on screen at 14px with a 22px line, and
+ * its proportions are what make the preview legible: a 1.57 line height, a
+ * uniform 24px above / 16px below every heading, rules under h1 and h2, a bar
+ * beside block quotes, and tables ruled horizontally only. The values below keep
+ * those *ratios* but re-base the body text to 11pt, which is the size a printed
+ * page wants — so `px * 11/14` converts a CSS length here.
+ *
+ * Two deliberate deviations from the sheet:
+ *   - `h1 { margin-top: 0 }` assumes the h1 is a document title at the very top
+ *     of a scrolling view. On a paginated page a mid-document h1 needs the same
+ *     air as the others, so it keeps the 24px equivalent.
+ *   - `font-weight: 600` has no equivalent in the PDF standard-14 faces, which
+ *     offer regular and bold only; headings therefore render bold.
+ */
+
+/** CSS pixels → points, at the 14px → 11pt re-basing described above. */
+const PX = 11 / 14;
+/** CSS pixels → twips. */
+const pxTwips = (px: number): number => Math.round(px * PX * 20);
+/** CSS pixels → half-points (the unit `w:sz` uses). */
+const pxHalfPt = (px: number): number => Math.round(px * PX * 2);
+/**
+ * A CSS `line-height` multiple → `w:spacing/@w:line` in 240ths.
+ *
+ * The engine derives a line's natural height as `fontSize * 1.2`, so a CSS
+ * multiple has to be expressed relative to that rather than to the font size.
+ */
+const lineHeight = (multiple: number): number => Math.round((240 * multiple) / 1.2);
+
+/** `--markdown-font-size: 14px` with `--markdown-line-height: 22px`. */
+const BODY_PX = 14;
+const BODY_LINE = 22 / BODY_PX;
+
+/**
+ * Light-theme colours, flattened against the surface each one is painted on.
+ *
+ * Two stylesheets are in play. `markdown.css` ships with the extension and sets
+ * the `rgba(...)` rule colours below; the *webview host* (`pre/index.html`)
+ * supplies the theme-variable colours — including the block quote's, which
+ * `markdown.css` leaves entirely to it. Reading only the extension's sheet is
+ * how the quote lost its blue bar and its tint once already.
+ */
+const COLORS = {
+  /** `rgba(0, 0, 0, 0.18)` — h1/h2 rules, `hr`, and table row rules. */
+  rule: "D1D1D1",
+  /** `rgba(0, 0, 0, 0.69)` — the heavier rule under a table header. */
+  headerRule: "4F4F4F",
+  /** `textLink.foreground` — `#006AB1`. */
+  link: "006AB1",
+  /** `textCodeBlock.background` — `#dcdcdc66`, i.e. `#DCDCDC` at 40% on white. */
+  codeBackground: "F1F1F1",
+  /**
+   * `textBlockQuote.background` — `#f2f2f2`, applied by the host's
+   *
+   *     blockquote { background: var(--vscode-textBlockQuote-background); }
+   */
+  quoteBackground: "F2F2F2",
+  /**
+   * `textBlockQuote.border` — `#007acc80`, half-transparent blue, from the
+   * host's companion `border-color` rule.
+   *
+   * The bar paints over the quote's own background rather than the page, so it
+   * flattens to `#007ACC` at 50% over `#F2F2F2` — not over white.
+   */
+  quoteBar: "79B6DF"
+} as const;
+
+/** Every heading: `margin: 24px 0 16px`, `line-height: 1.25`, semibold. */
+const HEADING_SPACING = {
+  before: pxTwips(24),
+  after: pxTwips(16),
+  line: lineHeight(1.25),
+  lineRule: "auto" as const
+};
+
+function defaultMarkdownDocDefaults(): DocDefaults {
+  return {
+    // `html, body { font-size: 14px; line-height: 22px }` and
+    // `p { margin-bottom: 16px }`.
+    paragraphProperties: {
+      spacing: { after: pxTwips(16), line: lineHeight(BODY_LINE), lineRule: "auto" }
+    },
+    runProperties: { size: pxHalfPt(BODY_PX), font: "Calibri" }
+  };
+}
+
+/** A heading style: `font-size` in `em`, plus the shared heading spacing. */
+function headingStyle(
+  level: 1 | 2 | 3 | 4 | 5 | 6,
+  em: number,
+  options?: { readonly rule?: boolean; readonly italic?: boolean }
+) {
+  const sizeHalfPt = pxHalfPt(BODY_PX * em);
+  return {
+    type: "paragraph" as const,
+    styleId: `Heading${level}`,
+    name: `heading ${level}`,
+    basedOn: "Normal",
+    next: "Normal",
+    paragraphProperties: {
+      spacing: HEADING_SPACING,
+      outlineLevel: (level - 1) as 0 | 1 | 2 | 3 | 4 | 5,
+      keepNext: true,
+      // `h1`/`h2 { padding-bottom: 0.3em; border-bottom: 1px solid }` — the rule
+      // that visually separates a section from what follows it.
+      ...(options?.rule
+        ? {
+            borders: {
+              bottom: {
+                style: "single" as const,
+                size: 4,
+                color: COLORS.rule,
+                space: Math.round(0.3 * em * BODY_PX * PX)
+              }
+            }
+          }
+        : {})
+    },
+    runProperties: {
+      size: sizeHalfPt,
+      bold: true,
+      ...(options?.italic ? { italic: true } : {})
+    }
+  };
+}
+
 function defaultMarkdownStyles() {
   return [
     // Normal — the base every other style here points at via basedOn.
@@ -1927,74 +2102,71 @@ function defaultMarkdownStyles() {
       isDefault: true,
       qFormat: true
     },
+    headingStyle(1, 2, { rule: true }),
+    headingStyle(2, 1.5, { rule: true }),
+    headingStyle(3, 1.25),
+    headingStyle(4, 1),
+    headingStyle(5, 0.875),
+    headingStyle(6, 0.85),
     {
+      // `ul, ol { margin-bottom: 0.7em }` with items themselves left tight —
+      // `contextualSpacing` is how Word expresses "no space between siblings".
       type: "paragraph" as const,
-      styleId: "Heading1",
-      name: "heading 1",
+      styleId: "ListParagraph",
+      name: "List Paragraph",
       basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 480, after: 120 }, outlineLevel: 0 },
-      runProperties: { size: 48, bold: true }
+      qFormat: true,
+      paragraphProperties: {
+        contextualSpacing: true,
+        spacing: { after: pxTwips(0.7 * BODY_PX) }
+      }
     },
     {
-      type: "paragraph" as const,
-      styleId: "Heading2",
-      name: "heading 2",
-      basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 360, after: 120 }, outlineLevel: 1 },
-      runProperties: { size: 36, bold: true }
-    },
-    {
-      type: "paragraph" as const,
-      styleId: "Heading3",
-      name: "heading 3",
-      basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 240, after: 80 }, outlineLevel: 2 },
-      runProperties: { size: 28, bold: true }
-    },
-    {
-      type: "paragraph" as const,
-      styleId: "Heading4",
-      name: "heading 4",
-      basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 240, after: 80 }, outlineLevel: 3 },
-      runProperties: { size: 24, bold: true }
-    },
-    {
-      type: "paragraph" as const,
-      styleId: "Heading5",
-      name: "heading 5",
-      basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 200, after: 60 }, outlineLevel: 4 },
-      runProperties: { size: 22, bold: true }
-    },
-    {
-      type: "paragraph" as const,
-      styleId: "Heading6",
-      name: "heading 6",
-      basedOn: "Normal",
-      next: "Normal",
-      paragraphProperties: { spacing: { before: 200, after: 60 }, outlineLevel: 5 },
-      runProperties: { size: 20, bold: true, italic: true }
-    },
-    {
+      // `blockquote { padding: 0 16px 0 10px; border-left: 5px solid }` from the
+      // extension's sheet, plus the host's background and border colour. What
+      // neither does is italicise or grey the text: the bar and the tint alone
+      // mark the quote.
       type: "paragraph" as const,
       styleId: "Quote",
       name: "Quote",
       basedOn: "Normal",
-      paragraphProperties: { indent: { left: 720 } },
-      runProperties: { italic: true, color: "555555" }
+      paragraphProperties: {
+        indent: { left: pxTwips(10 + 5), right: pxTwips(16) },
+        shading: { fill: COLORS.quoteBackground, pattern: "clear" as const },
+        borders: {
+          left: {
+            style: "single" as const,
+            size: 5 * 8,
+            color: COLORS.quoteBar,
+            space: Math.round(10 * PX)
+          }
+        }
+      }
     },
     {
+      // `pre { padding: 16px; border: 1px solid; background }` and
+      // `code { font-size: 1em; line-height: 1.357em }` — note the code font is
+      // the *same size* as body text, not smaller.
       type: "paragraph" as const,
       styleId: "CodeBlock",
       name: "Code Block",
       basedOn: "Normal",
-      runProperties: { font: "Courier New", size: 20 }
+      paragraphProperties: {
+        indent: { left: pxTwips(16), right: pxTwips(16) },
+        spacing: {
+          before: pxTwips(16),
+          after: pxTwips(16),
+          line: lineHeight(1.357),
+          lineRule: "auto" as const
+        },
+        // `pre` asks for `border: 1px solid var(--vscode-widget-border)`, but
+        // `widget.border` has no value outside the high-contrast themes, so the
+        // declaration never computes and a code block is marked by its background
+        // alone. (The copy button beside it spells out a fallback colour; `pre`
+        // deliberately does not.)
+        shading: { fill: COLORS.codeBackground, pattern: "clear" as const }
+      },
+      runProperties: { font: "Courier New", size: pxHalfPt(BODY_PX) }
     },
     {
       // Character style applied to the in-text footnote reference mark so it
@@ -2010,7 +2182,7 @@ function defaultMarkdownStyles() {
       styleId: "FootnoteText",
       name: "footnote text",
       basedOn: "Normal",
-      runProperties: { size: 20 }
+      runProperties: { size: pxHalfPt(BODY_PX * 0.85) }
     }
   ];
 }

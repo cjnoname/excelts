@@ -29,7 +29,11 @@ export function renderBorderElement(xml: XmlSink, tagName: string, border: Borde
     attrs["w:sz"] = String(border.size);
   }
   if (border.space !== undefined) {
-    attrs["w:space"] = String(border.space);
+    // `w:space` is ST_PointMeasure — a whole number of points. Callers work in
+    // real points (a CSS length converted to pt is rarely integral), so round
+    // here at the schema boundary rather than emitting `w:space="12.571…"`,
+    // which strict consumers reject.
+    attrs["w:space"] = String(Math.max(0, Math.round(border.space)));
   }
   if (border.color) {
     attrs["w:color"] = border.color;

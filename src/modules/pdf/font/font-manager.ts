@@ -199,6 +199,19 @@ export class FontManager {
   // --- Embedded TrueType font tracking ---
   private embeddedFont: TtfFont | null = null;
   private embeddedResourceName = "";
+  /**
+   * True when `embeddedFont` is a *fallback* face rather than the document's
+   * font.
+   *
+   * `embedFont(bytes)` states "render this document with this font", and every
+   * run is routed to it. Build-time system-font auto-discovery means something
+   * entirely different: "the standard-14 faces cannot draw these few code
+   * points, borrow glyphs for them". Treating the second like the first
+   * collapsed every run onto one regular face, so a single `→` in a document
+   * silently stripped bold, italic and monospace from all of its text — and
+   * mismatched the widths layout had already measured with the Type1 metrics.
+   */
+  private embeddedFontIsFallback = false;
   private usedCodePoints = new Set<number>();
   private usedGlyphUses = new Map<string, EmbeddedGlyphUse>();
   private nextEmbeddedId = 1;
@@ -235,10 +248,28 @@ export class FontManager {
    * When set, all text rendering uses this font instead of standard fonts.
    */
   registerEmbeddedFont(font: TtfFont): string {
+    return this.registerTtfFont(font, false);
+  }
+
+  /**
+   * Register an embedded TrueType font as a *per-code-point fallback*.
+   *
+   * The standard-14 faces keep drawing everything they can represent, so
+   * bold / italic / monospace requests still resolve to `Helvetica-Bold`,
+   * `Times-Italic`, `Courier`, … and only the code points WinAnsi cannot encode
+   * are routed to this face. Use it for fonts the library found on its own;
+   * `registerEmbeddedFont` remains the "this is the document's font" contract.
+   */
+  registerFallbackFont(font: TtfFont): string {
+    return this.registerTtfFont(font, true);
+  }
+
+  private registerTtfFont(font: TtfFont, fallbackOnly: boolean): string {
     if (this.config) {
       throw new PdfFontError("Cannot register a legacy embedded font on a configured FontManager");
     }
     this.embeddedFont = font;
+    this.embeddedFontIsFallback = fallbackOnly;
     this.embeddedResourceName = `${this.resourcePrefix}EF${this.nextEmbeddedId++}`;
     this.textFeatures.noteFontTables(font.familyName, font.tables);
     return this.embeddedResourceName;
@@ -256,6 +287,7 @@ export class FontManager {
       throw new PdfFontError("Configured fonts cannot be cleared as auto-discovered fonts");
     }
     this.embeddedFont = null;
+    this.embeddedFontIsFallback = false;
     this.embeddedResourceName = "";
     this._embeddedResult = null;
     this.nextEmbeddedId = 1;
@@ -356,7 +388,36 @@ export class FontManager {
     if (this.config) {
       return type1ResourceName;
     }
-    return this.embeddedFont ? this.embeddedResourceName : type1ResourceName;
+    // A fallback face never replaces the requested family: the Type1 resource
+    // that carries the caller's bold / italic / family choice stays in charge
+    // and `fallbackResourceFor` lends glyphs per code point.
+    if (this.embeddedFont && !this.embeddedFontIsFallback) {
+      return this.embeddedResourceName;
+    }
+    return type1ResourceName;
+  }
+
+  /**
+   * The resource that must draw `codePoint` instead of the requested Type1
+   * face, or null when the Type1 face handles it.
+   *
+   * Only ever non-null in fallback mode, for a code point WinAnsi cannot encode
+   * that the fallback face actually has a glyph for. Code points the fallback
+   * cannot draw either are left to the Type3 path.
+   */
+  fallbackResourceFor(codePoint: number): string | null {
+    if (this.config || !this.embeddedFont || !this.embeddedFontIsFallback) {
+      return null;
+    }
+    if (isWinAnsiCodePoint(codePoint)) {
+      return null;
+    }
+    return (this.embeddedFont.cmap.get(codePoint) ?? 0) === 0 ? null : this.embeddedResourceName;
+  }
+
+  /** Whether an embedded face is lending glyphs per code point rather than replacing the document font. */
+  hasFallbackFont(): boolean {
+    return this.embeddedFont !== null && this.embeddedFontIsFallback;
   }
 
   /**
@@ -450,9 +511,15 @@ export class FontManager {
       }
       return resourceName;
     }
-    if (this.embeddedFont) {
+    if (this.embeddedFont && !this.embeddedFontIsFallback) {
       return this.embeddedResourceName;
     }
+    // A fallback face does not answer font *requests*: the request keeps
+    // resolving to the standard-14 face that carries the caller's family,
+    // bold and italic choice, and `fallbackResourceFor` lends glyphs per code
+    // point at render time. The spreadsheet exporter registers its discovered
+    // font before drawing, so short-circuiting here erased bold and italic
+    // from every cell in a workbook containing one CJK character.
     // Record unknown families so writers can emit a single diagnostic
     // at build time instead of spamming one warning per text run.
     // The canonical base-name keys are kept in FONT_FAMILY_MAP; anything
@@ -648,7 +715,15 @@ export class FontManager {
       // code point needs one would describe a fallback that never exists.
       return false;
     }
-    return !this.embeddedFont && !isWinAnsiCodePoint(codePoint);
+    if (isWinAnsiCodePoint(codePoint)) {
+      return false;
+    }
+    if (!this.embeddedFont) {
+      return true;
+    }
+    // A document font covers everything itself. A fallback face only covers the
+    // code points it has glyphs for; the rest still need a Type3 glyph.
+    return this.embeddedFontIsFallback && this.fallbackResourceFor(codePoint) === null;
   }
 
   // ==========================================================================
@@ -680,7 +755,12 @@ export class FontManager {
 
   /**
    * Measure text width using the correct font metrics.
-   * For mixed Type1/Type3 text, measures each character with the right font.
+   *
+   * Mixed text is measured character by character so every code point is sized
+   * by the face that will actually draw it: the requested Type1 face, an
+   * embedded fallback face, or a Type3 glyph. Measuring with one face and
+   * drawing with another is what produced the stray gaps after non-WinAnsi
+   * runs.
    */
   measureText(text: string, resourceName: string, fontSize: number): number {
     if (this.config) {
@@ -693,8 +773,11 @@ export class FontManager {
       return measureEmbeddedText(text, this.embeddedFont, fontSize);
     }
 
-    // If no Type3 fonts or text has no non-WinAnsi chars, use Type1 directly
-    if ((!this._type3Result && !this.type3PlanningWidths) || !hasNonWinAnsiChars(text)) {
+    // Type1 only when nothing else can be involved: no Type3 glyphs planned or
+    // written, no fallback face, or the text is entirely WinAnsi.
+    const mayNeedFallback =
+      this._type3Result !== null || this.type3PlanningWidths !== null || this.hasFallbackFont();
+    if (!mayNeedFallback || !hasNonWinAnsiChars(text)) {
       const pdfFontName = this.getPdfFontName(resourceName);
       return measureType1Text(text, pdfFontName, fontSize);
     }
@@ -706,6 +789,13 @@ export class FontManager {
       const cp = text.codePointAt(i)!;
       if (cp > 0xffff) {
         i++;
+      }
+      const char = String.fromCodePoint(cp);
+      const fallback = this.fallbackResourceFor(cp);
+      if (fallback !== null) {
+        // Drawn by the embedded fallback face — use its advance width.
+        totalWidth += measureEmbeddedText(char, this.embeddedFont!, fontSize);
+        continue;
       }
       if (isWinAnsiCodePoint(cp)) {
         totalWidth += measureType1Text(String.fromCodePoint(cp), pdfFontName, fontSize);
@@ -733,6 +823,30 @@ export class FontManager {
    * face and would otherwise be clipped by top/center alignment.
    */
   measureTextMetrics(text: string, resourceName: string, fontSize: number): RoutedTextMetrics {
+    // A fallback face lends glyphs per code point, and `routeLegacyText` reports
+    // one segment for the requested face — so its ascent and descent would be
+    // the Latin face's even for text a CJK fallback actually draws. Measure
+    // those extents from the faces that do the drawing.
+    if (!this.config && this.hasFallbackFont() && hasNonWinAnsiChars(text)) {
+      const width = this.measureText(text, resourceName, fontSize);
+      let ascent = 0;
+      let descent = 0;
+      let sawLatin = false;
+      for (const cp of codePointsOf(text)) {
+        if (this.fallbackResourceFor(cp) !== null) {
+          const font = this.embeddedFont!;
+          ascent = Math.max(ascent, (font.ascent / font.unitsPerEm) * fontSize);
+          descent = Math.min(descent, (font.descent / font.unitsPerEm) * fontSize);
+        } else {
+          sawLatin = true;
+        }
+      }
+      if (sawLatin) {
+        ascent = Math.max(ascent, this.getFontAscent(resourceName, fontSize));
+        descent = Math.min(descent, this.getFontDescent(resourceName, fontSize));
+      }
+      return { width, ascent, descent, lineHeight: ascent - descent };
+    }
     const segments = this.routeText(text, resourceName);
     if (segments.length === 0) {
       const ascent = this.getFontAscent(resourceName, fontSize);
@@ -971,16 +1085,23 @@ export class FontManager {
       this._embeddedResult = embedded;
     }
 
-    // Write Type3 fallback fonts (only when no embedded font). The Type3
-    // implementation + Unicode glyph tables are loaded on demand so they stay
-    // out of bundles that never render non-WinAnsi characters.
-    if (!this.embeddedFont && this.type3CodePoints.size > 0) {
+    // Write Type3 fallback fonts for the code points nothing else can draw.
+    // A *document* font (explicit `embedFont`) covers all of them by contract,
+    // so none are needed; without any embedded font every non-WinAnsi code
+    // point needs one; with a fallback face only the code points it lacks a
+    // glyph for do. The Type3 implementation + Unicode glyph tables are loaded
+    // on demand so they stay out of bundles that never render such text.
+    const type3Needed = new Set<number>();
+    if (!this.embeddedFont || this.embeddedFontIsFallback) {
+      for (const cp of this.type3CodePoints) {
+        if (this.needsType3(cp)) {
+          type3Needed.add(cp);
+        }
+      }
+    }
+    if (type3Needed.size > 0) {
       const { writeType3Fonts } = await import("@pdf/font/type3-font");
-      this._type3Result = writeType3Fonts(
-        writer,
-        this.type3CodePoints,
-        `${this.resourcePrefix}T3F`
-      );
+      this._type3Result = writeType3Fonts(writer, type3Needed, `${this.resourcePrefix}T3F`);
       for (const [resourceName, objNum] of this._type3Result.fontObjects) {
         fontObjectMap.set(resourceName, objNum);
       }

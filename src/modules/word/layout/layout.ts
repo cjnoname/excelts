@@ -20,12 +20,17 @@
  *   Half-point 24 = 12pt font; line height ~14.4pt = 288 twips (single-spaced)
  */
 
+import { isFullWidthCodePoint } from "@utils/font-metrics";
 import { isHyperlink, isRun } from "@word/core/text-utils";
 import {
+  DEFAULT_FONT_SIZE_HALF_PT,
   DEFAULT_PAGE_HEIGHT_TWIPS,
   DEFAULT_PAGE_MARGIN_TWIPS,
-  DEFAULT_PAGE_WIDTH_TWIPS
+  DEFAULT_PAGE_WIDTH_TWIPS,
+  LINE_HEIGHT_FACTOR,
+  resolveCellMarginsTwips
 } from "@word/layout/layout-constants";
+import { resolveStyle } from "@word/query/style-resolve";
 import type {
   BodyContent,
   DocxDocument,
@@ -37,6 +42,7 @@ import type {
   ParagraphChild,
   ParagraphProperties,
   Run,
+  RunProperties,
   SectionBreakType,
   SectionColumns,
   SectionProperties,
@@ -47,27 +53,37 @@ import type {
 // Public API Types
 // =============================================================================
 
-/** 分页结果：每个 body content 的页面位置 */
+/** Pagination result: the page each body-content item lands on. */
 export interface LayoutResult {
-  /** 总页数 */
+  /** Total number of pages. */
   readonly pageCount: number;
-  /** 每一节的页数 */
+  /** Page count of each section. */
   readonly sectionPageCounts: readonly number[];
-  /** 每个 body content 项的页码（1-based） */
+  /** Page number of each body-content item (1-based). */
   readonly contentPages: readonly number[];
-  /** 每个 body content 项的所在节（0-based） */
+  /** Section index of each body-content item (0-based). */
   readonly contentSections: readonly number[];
-  /** 书签名 → 页码 的映射 */
+  /** Bookmark name → page number. */
   readonly bookmarkPages: ReadonlyMap<string, number>;
+  /**
+   * Whether each body-content item must start a new page regardless of fit.
+   *
+   * Set by an explicit page break (`w:pageBreakBefore`, a `w:br` of type
+   * `page`) or a section break. The positioner re-flows content to its own
+   * measurements, so it needs to tell "the estimate ran out of room here" —
+   * which it may legitimately disagree with — from "the document demands a
+   * break here", which it must honour.
+   */
+  readonly forcedBreakBefore: readonly boolean[];
 }
 
-/** 布局选项 */
+/** Layout options. */
 export interface LayoutOptions {
-  /** 默认字号（半磅），默认 24 (= 12pt) */
+  /** Default font size in half-points; defaults to 22 (= 11pt, Word's default). */
   readonly defaultFontSize?: number;
-  /** 默认每行字符数估算（用于行高计算），默认 80 */
+  /** Estimated characters per line (used for line-height math); defaults to 80. */
   readonly defaultCharsPerLine?: number;
-  /** 平均字符宽度（twips），默认基于 12pt 字体 */
+  /** Average character width in twips; derived from a 12pt font by default. */
   readonly averageCharWidth?: number;
   /**
    * Optional text measurement function for precise layout.
@@ -95,11 +111,9 @@ export interface LayoutOptions {
 // Internal Constants
 // =============================================================================
 
-/** 默认字号 (半磅): 24 = 12pt */
-const DEFAULT_FONT_SIZE_HALF_PT = 24;
-/** 默认每行字符数 */
+/** Default characters per line. */
 const DEFAULT_CHARS_PER_LINE = 80;
-/** auto spacing (段前/段后自动间距)，约 100 twips ≈ 5pt */
+/** Auto spacing (automatic space before/after a paragraph): ~100 twips ≈ 5pt. */
 const AUTO_SPACING_TWIPS = 100;
 /** Default tab stop interval (twips) — Word default is 0.5 inch = 720 twips */
 const DEFAULT_TAB_INTERVAL = 720;
@@ -112,19 +126,91 @@ const FOOTNOTE_ENTRY_HEIGHT = 300;
 // Internal Helpers
 // =============================================================================
 
-/** 从 SectionProperties 计算可用内容高度 (twips) */
+/**
+ * A paragraph's *effective* properties: the style chain (own props → named
+ * style → … → docDefaults) collapsed into one view.
+ *
+ * Pagination has to see exactly what the renderer sees. Reading
+ * `para.properties` directly makes every value a named style contributes
+ * invisible — spacing, indents, font size — so a document whose headings get
+ * their 24pt size and their space-before from a `Heading1` style is estimated
+ * as if every paragraph were default-sized body text with no spacing. The
+ * estimate then packs far more onto a page than actually fits and the second
+ * pass, which does resolve styles, overflows the bottom margin.
+ */
+interface ResolvedParagraph {
+  /** Effective paragraph properties (spacing, indent, keep flags, …). */
+  readonly properties: ParagraphProperties | undefined;
+  /** Run properties a run inherits when it declares none of its own. */
+  readonly runProperties: RunProperties | undefined;
+}
+
+/**
+ * Style resolution for the in-flight `layoutDocument` call.
+ *
+ * Mirrors the `activeDoc` slot in `layout-full.ts`: pagination walks
+ * paragraphs through tables, footnotes and text boxes, and threading `doc`
+ * through every one of those signatures buys nothing. Layout is fully
+ * synchronous (no `await`), so a single shared slot is safe. The cache makes
+ * the per-paragraph `resolveStyle` (which builds a style map on each call)
+ * a once-per-paragraph cost.
+ */
+let activeStyleCache: Map<Paragraph, ResolvedParagraph> | undefined;
+let activeDoc: DocxDocument | undefined;
+
+/** Effective properties for `para`, or the raw ones when no document is active. */
+function resolved(para: Paragraph): ResolvedParagraph {
+  if (!activeDoc || !activeStyleCache) {
+    return { properties: para.properties, runProperties: undefined };
+  }
+  let hit = activeStyleCache.get(para);
+  if (!hit) {
+    const style = resolveStyle(activeDoc, para);
+    // `resolveStyle` drops `style` from the merged result (it is the selector,
+    // not an inherited value). Keep it so callers can still recognise a
+    // "Heading2" style name.
+    hit = {
+      properties: para.properties?.style
+        ? { ...style.paragraphProperties, style: para.properties.style }
+        : style.paragraphProperties,
+      runProperties: style.runProperties
+    };
+    activeStyleCache.set(para, hit);
+  }
+  return hit;
+}
+
+/**
+ * The font size (half-points) a run inherits from its paragraph's style
+ * chain, falling back to the document-wide default when the chain is silent.
+ */
+function inheritedFontSize(res: ResolvedParagraph, defaultFontSize: number): number {
+  return res.runProperties?.size ?? defaultFontSize;
+}
+
+/** The font name a run inherits from its paragraph's style chain. */
+function inheritedFontName(res: ResolvedParagraph): string | undefined {
+  const font = res.runProperties?.font;
+  if (!font) {
+    return undefined;
+  }
+  return typeof font === "string" ? font : ((font as FontSpec).ascii ?? (font as FontSpec).hAnsi);
+}
+
+/** Usable content height in twips, from SectionProperties. */
 function computeAvailableHeight(sp: SectionProperties | undefined): number {
   const height = sp?.pageSize?.height ?? DEFAULT_PAGE_HEIGHT_TWIPS;
   const marginTop = sp?.margins?.top ?? DEFAULT_PAGE_MARGIN_TWIPS;
   const marginBottom = sp?.margins?.bottom ?? DEFAULT_PAGE_MARGIN_TWIPS;
 
-  // 可用高度 = 页面高度 - 上边距 - 下边距
-  // Word 中 header/footer 区域位于 margin 内部，不额外占用正文空间。
-  // 简化模型：不考虑 header/footer 溢出正文区域的情况。
+  // Usable height = page height - top margin - bottom margin.
+  // In Word the header/footer areas live inside the margins and take no extra
+  // body space. Simplified model: a header/footer overflowing into the body
+  // area is not accounted for.
   return Math.max(0, height - marginTop - marginBottom);
 }
 
-/** 从 SectionProperties 计算可用内容宽度 (twips) */
+/** Usable content width in twips, from SectionProperties. */
 function computeAvailableWidth(sp: SectionProperties | undefined): number {
   const width = sp?.pageSize?.width ?? DEFAULT_PAGE_WIDTH_TWIPS;
   const marginLeft = sp?.margins?.left ?? DEFAULT_PAGE_MARGIN_TWIPS;
@@ -134,20 +220,22 @@ function computeAvailableWidth(sp: SectionProperties | undefined): number {
 }
 
 /**
- * 根据字号计算单行行高 (twips)。
- * 标准排版: 行高 ≈ 字号 × 1.2
- * halfPt 24 (12pt) → 行高 14.4pt = 288 twips
+ * Single-spaced line height in twips for a given font size.
+ *
+ * Shares `LINE_HEIGHT_FACTOR` with the positioner so the two passes derive the
+ * same natural height from the same font size.
+ * halfPt 22 (11pt) → 13.2pt = 264 twips.
  */
 function baseLineHeight(fontSizeHalfPt: number): number {
   const ptSize = fontSizeHalfPt / 2;
-  return Math.round(ptSize * 1.2 * 20); // pt → twips: ×20
+  return Math.round(ptSize * LINE_HEIGHT_FACTOR * 20); // pt → twips: ×20
 }
 
 /**
- * 根据 LineSpacing 配置计算实际行高 (twips)。
- * - auto: value 以 240ths 为单位 (240=单倍, 360=1.5倍, 480=双倍)
- * - exact: value 即为 twips
- * - atLeast: value 为最小值 (twips)，取 max(value, baseLine)
+ * Effective line height in twips for a LineSpacing configuration.
+ * - auto:    value is in 240ths of a line (240 = single, 360 = 1.5×, 480 = double)
+ * - exact:   value is the height in twips
+ * - atLeast: value is a floor in twips — max(value, baseLine)
  */
 function computeLineHeight(spacing: LineSpacing | undefined, fontSizeHalfPt: number): number {
   const baseLine = baseLineHeight(fontSizeHalfPt);
@@ -159,7 +247,7 @@ function computeLineHeight(spacing: LineSpacing | undefined, fontSizeHalfPt: num
   const rule = spacing.lineRule ?? "auto";
   switch (rule) {
     case "auto": {
-      // spacing.line 以 240ths of a line 为单位
+      // spacing.line is expressed in 240ths of a line.
       const multiplier = spacing.line / 240;
       return Math.round(baseLine * multiplier);
     }
@@ -172,28 +260,49 @@ function computeLineHeight(spacing: LineSpacing | undefined, fontSizeHalfPt: num
   }
 }
 
-/** 提取段落的有效字号 (半磅) */
+/** The paragraph's effective font size, in half-points. */
 function getParagraphFontSize(
   props: ParagraphProperties | undefined,
   defaultFontSize: number
 ): number {
-  // 段落标记的 run properties 可以指示字号
+  // The paragraph mark's run properties can carry the font size.
   return props?.markRunProperties?.size ?? defaultFontSize;
 }
 
-/** 从 Run 的 font 属性中提取字体名 */
-function getRunFontName(run: Run): string {
+/**
+ * Average character width (twips) for a paragraph whose largest run is
+ * `fontSize` half-points, given a document-wide average measured at
+ * `defaultFontSize`.
+ *
+ * A 24pt heading's glyphs are twice as wide as 12pt body text, so counting its
+ * lines with the body-text average lets twice as many characters "fit" on a
+ * line — the estimator then reports one line where the renderer produces two.
+ */
+function scaledCharWidth(
+  averageCharWidth: number,
+  fontSize: number,
+  defaultFontSize: number
+): number {
+  const base = averageCharWidth > 0 ? averageCharWidth : 120;
+  if (fontSize <= 0 || defaultFontSize <= 0 || fontSize === defaultFontSize) {
+    return base;
+  }
+  return (base * fontSize) / defaultFontSize;
+}
+
+/** Font name from a run's `font` property. */
+function getRunFontName(run: Run, inherited?: string): string {
   const font = run.properties?.font;
   if (!font) {
-    return "Calibri";
+    return inherited ?? "Calibri";
   }
   if (typeof font === "string") {
     return font;
   }
-  return (font as FontSpec).ascii ?? (font as FontSpec).hAnsi ?? "Calibri";
+  return (font as FontSpec).ascii ?? (font as FontSpec).hAnsi ?? inherited ?? "Calibri";
 }
 
-/** 提取 Run 中的纯文本内容 */
+/** Plain text content of a run. */
 function getRunText(run: Run): string {
   let text = "";
   for (const item of run.content) {
@@ -202,7 +311,7 @@ function getRunText(run: Run): string {
         text += item.text;
         break;
       case "tab":
-        text += "    "; // tab 约等于 4 个字符
+        text += "    "; // a tab counts as roughly 4 characters
         break;
       case "symbol":
         text += " ";
@@ -219,19 +328,14 @@ function getRunText(run: Run): string {
 }
 
 /**
- * Check if a character is CJK (full-width) — takes approximately 2x the width of Latin chars.
- * Covers CJK Unified Ideographs, Katakana, Hiragana, Hangul, fullwidth forms, etc.
+ * Check if a character is full-width — roughly 2x the width of a Latin char.
+ *
+ * Delegates to the shared predicate so the paginator and the positioner classify
+ * the same code points the same way; a disagreement here shows up as a page
+ * whose contents do not fit the space the paginator budgeted for them.
  */
 function isCjkChar(code: number): boolean {
-  return (
-    (code >= 0x2e80 && code <= 0x9fff) || // CJK Radicals, Kangxi, Ideographs
-    (code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
-    (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
-    (code >= 0xfe30 && code <= 0xfe4f) || // CJK Compatibility Forms
-    (code >= 0xff00 && code <= 0xff60) || // Fullwidth Forms
-    (code >= 0xffe0 && code <= 0xffe6) || // Fullwidth Signs
-    (code >= 0x20000 && code <= 0x2fa1f) // CJK Extension B-F, Compatibility Supplement
-  );
+  return isFullWidthCodePoint(code);
 }
 
 /**
@@ -558,20 +662,21 @@ function countBreakElements(children: readonly ParagraphChild[]): number {
 }
 
 /**
- * 使用 measureText 回调计算段落总文本宽度 (points)。
- * 对每个 Run 根据其字体和字号分别测量，然后求和。
+ * Total text width of a paragraph in points, via the `measureText` callback.
+ * Each run is measured with its own font and size, then summed.
  */
 function measureParagraphTextWidth(
   children: readonly ParagraphChild[],
   defaultFontSize: number,
-  measureFn: (text: string, fontName: string, fontSize: number) => number
+  measureFn: (text: string, fontName: string, fontSize: number) => number,
+  inheritedFont?: string
 ): number {
   let totalWidth = 0;
   for (const child of children) {
     if (isRun(child)) {
       const text = getRunText(child);
       if (text.length > 0) {
-        const fontName = getRunFontName(child);
+        const fontName = getRunFontName(child, inheritedFont);
         const fontSize = (child.properties?.size ?? defaultFontSize) / 2; // half-pt → pt
         totalWidth += measureFn(text, fontName, fontSize);
       }
@@ -579,7 +684,7 @@ function measureParagraphTextWidth(
       for (const run of child.children) {
         const text = getRunText(run);
         if (text.length > 0) {
-          const fontName = getRunFontName(run);
+          const fontName = getRunFontName(run, inheritedFont);
           const fontSize = (run.properties?.size ?? defaultFontSize) / 2;
           totalWidth += measureFn(text, fontName, fontSize);
         }
@@ -589,7 +694,7 @@ function measureParagraphTextWidth(
   return totalWidth;
 }
 
-/** 获取段落中 run 的最大字号 */
+/** The largest run font size in a paragraph. */
 function getMaxRunFontSize(children: readonly ParagraphChild[], defaultFontSize: number): number {
   let maxSize = 0;
   for (const child of children) {
@@ -610,7 +715,7 @@ function getMaxRunFontSize(children: readonly ParagraphChild[], defaultFontSize:
   return maxSize || defaultFontSize;
 }
 
-/** 检查段落 run content 中是否有 page break */
+/** Whether any run in the paragraph contains a page break. */
 function hasPageBreakInRuns(children: readonly ParagraphChild[]): boolean {
   for (const child of children) {
     if (isRun(child)) {
@@ -624,7 +729,37 @@ function hasPageBreakInRuns(children: readonly ParagraphChild[]): boolean {
   return false;
 }
 
-/** 检查段落 run content 中是否有 column break */
+/**
+ * Whether a page break precedes any of the paragraph's content.
+ *
+ * Only a *leading* break means "start this paragraph on a new page". One in the
+ * middle splits the paragraph: the lines before it belong to the page it is
+ * already on. Treating any break as a break-before moved the whole paragraph and
+ * carried that leading text onto the wrong page.
+ */
+function hasLeadingPageBreak(children: readonly ParagraphChild[]): boolean {
+  for (const child of children) {
+    if (!isRun(child)) {
+      continue;
+    }
+    for (const item of child.content) {
+      if (item.type === "break") {
+        if ((item as { breakType?: string }).breakType === "page") {
+          return true;
+        }
+        continue;
+      }
+      if (item.type === "text" && item.text.length === 0) {
+        continue;
+      }
+      // Anything else is real content: a later break splits rather than moves.
+      return false;
+    }
+  }
+  return false;
+}
+
+/** Whether any run in the paragraph contains a column break. */
 function hasColumnBreakInRuns(children: readonly ParagraphChild[]): boolean {
   for (const child of children) {
     if (isRun(child)) {
@@ -639,9 +774,9 @@ function hasColumnBreakInRuns(children: readonly ParagraphChild[]): boolean {
 }
 
 /**
- * 估算段落高度 (twips)。
+ * Estimated paragraph height in twips.
  *
- * 高度 = spaceBefore + (行数 × 行高) + spaceAfter
+ * height = spaceBefore + (lineCount × lineHeight) + spaceAfter
  *
  * Line count calculation:
  * 1. If measureTextFn is provided → precise measurement
@@ -660,10 +795,14 @@ function estimateParagraphHeight(
   averageCharWidth: number,
   measureTextFn?: (text: string, fontName: string, fontSize: number) => number
 ): number {
-  const props = para.properties;
+  // Effective properties — style chain included. See `resolved`.
+  const res = resolved(para);
+  const props = res.properties;
   const spacing = props?.spacing;
+  const inheritedSize = inheritedFontSize(res, defaultFontSize);
+  const inheritedFont = inheritedFontName(res);
 
-  // 段前间距
+  // Space before
   let spaceBefore = 0;
   if (spacing?.beforeAutoSpacing) {
     spaceBefore = AUTO_SPACING_TWIPS;
@@ -671,7 +810,7 @@ function estimateParagraphHeight(
     spaceBefore = spacing.before;
   }
 
-  // 段后间距
+  // Space after
   let spaceAfter = 0;
   if (spacing?.afterAutoSpacing) {
     spaceAfter = AUTO_SPACING_TWIPS;
@@ -679,22 +818,28 @@ function estimateParagraphHeight(
     spaceAfter = spacing.after;
   }
 
-  // 确定段落字号
-  const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, defaultFontSize));
+  // Paragraph font size — a run that declares no size of its own inherits it
+  // from the style chain.
+  const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, inheritedSize));
 
-  // 计算行高
+  // Line height
   const lineHeight = computeLineHeight(spacing, fontSize);
 
   // Check if inline images increase the effective line height
   const imgMaxHeight = getInlineImageMaxHeight(para.children);
   const effectiveLineHeight = Math.max(lineHeight, imgMaxHeight);
 
-  // 计算行数
+  // Line count
   let lineCount: number;
   if (measureTextFn) {
-    // 精确测量：考虑首行/后续行不同宽度
+    // Precise measurement: first and subsequent lines can have different widths.
     const [firstLineW, subsequentW] = computeParagraphLineWidths(props, availableWidth);
-    const textWidthPt = measureParagraphTextWidth(para.children, defaultFontSize, measureTextFn);
+    const textWidthPt = measureParagraphTextWidth(
+      para.children,
+      inheritedSize,
+      measureTextFn,
+      inheritedFont
+    );
     const textWidthTwips = textWidthPt * 20; // 1pt = 20 twips
 
     // Count hard line breaks in the paragraph
@@ -702,7 +847,7 @@ function estimateParagraphHeight(
 
     if (breakCount > 0) {
       // If there are hard breaks, use word-based line counting for accuracy
-      const charWidth = averageCharWidth > 0 ? averageCharWidth : 120;
+      const charWidth = scaledCharWidth(averageCharWidth, fontSize, defaultFontSize);
       const tabStops = props?.tabs?.map(t => t.position).filter((p): p is number => p != null);
       lineCount = computeLineCountWordBased(
         para.children,
@@ -721,7 +866,7 @@ function estimateParagraphHeight(
   } else {
     // Word-based line breaking with CJK awareness and tab stop support
     const [firstLineW, subsequentW] = computeParagraphLineWidths(props, availableWidth);
-    const charWidth = averageCharWidth > 0 ? averageCharWidth : 120;
+    const charWidth = scaledCharWidth(averageCharWidth, fontSize, defaultFontSize);
 
     // Extract tab stop positions from paragraph properties
     const tabStops = props?.tabs?.map(t => t.position).filter((p): p is number => p != null);
@@ -738,7 +883,7 @@ function estimateParagraphHeight(
   return spaceBefore + lineCount * effectiveLineHeight + spaceAfter;
 }
 
-/** 估算表格单行高度 (twips)，考虑单元格内容 */
+/** Estimated height of one table row in twips, including cell content. */
 function estimateRowHeight(
   table: Table,
   rowIndex: number,
@@ -777,10 +922,12 @@ function estimateRowHeight(
       cellWidth = Math.floor(availableWidth / Math.max(1, colCount));
     }
 
-    // Subtract cell margins (default ~108 twips each side in Word)
-    const cellMarginLeft = 108;
-    const cellMarginRight = 108;
-    const cellContentWidth = Math.max(1, cellWidth - cellMarginLeft - cellMarginRight);
+    // Inset by the cell's effective margins (`w:tcMar` → `w:tblCellMar` →
+    // Word's defaults). Hardcoding the defaults here ignored any table that
+    // declared its own, so this estimate and the positioner disagreed about both
+    // the wrap width and the row height.
+    const cellMargins = resolveCellMarginsTwips(table.properties, cell.properties);
+    const cellContentWidth = Math.max(1, cellWidth - cellMargins.left - cellMargins.right);
 
     // Calculate height of cell content (paragraphs + nested tables)
     let cellHeight = 0;
@@ -806,8 +953,7 @@ function estimateRowHeight(
       }
     }
 
-    // Add cell top/bottom padding (default ~40 twips each)
-    cellHeight += 80;
+    cellHeight += cellMargins.top + cellMargins.bottom;
 
     if (cellHeight > maxCellHeight) {
       maxCellHeight = cellHeight;
@@ -819,12 +965,13 @@ function estimateRowHeight(
     return Math.max(row.properties.height.value, maxCellHeight);
   }
 
-  // Minimum height: at least one line
-  const minHeight = baseLineHeight(defaultFontSize) + 80;
+  // Minimum height: at least one line, plus the table's own cell margins.
+  const tableMargins = resolveCellMarginsTwips(table.properties, undefined);
+  const minHeight = baseLineHeight(defaultFontSize) + tableMargins.top + tableMargins.bottom;
   return Math.max(minHeight, maxCellHeight);
 }
 
-/** 估算表格总高度 (twips) */
+/** Estimated total table height in twips. */
 function estimateTableHeight(
   table: Table,
   defaultFontSize: number,
@@ -848,14 +995,14 @@ function estimateTableHeight(
   return total;
 }
 
-/** EMU → twips 转换 (1 inch = 914400 EMU = 1440 twips) */
+/** EMU → twips (1 inch = 914400 EMU = 1440 twips). */
 function emuToTwips(emu: number): number {
   return Math.round(emu / 635);
 }
 
-/** 计算浮动图片在文档流中占用的高度 (twips)。
- *  - "topAndBottom" 包裹模式：图片占据垂直空间
- *  - 其他浮动模式：不占用正文流空间
+/** Height a floating image occupies in the document flow, in twips.
+ *  - "topAndBottom" wrapping: the image takes vertical space
+ *  - other wrapping modes: no body-flow space is consumed
  */
 function estimateFloatingImageHeight(img: FloatingImage): number {
   const wrapStyle = img.wrap?.style;
@@ -867,7 +1014,7 @@ function estimateFloatingImageHeight(img: FloatingImage): number {
   return 0;
 }
 
-/** 计算 DrawingShape 在文档流中占用的高度 (twips)。 */
+/** Height a DrawingShape occupies in the document flow, in twips. */
 function estimateDrawingShapeHeight(shape: DrawingShape): number {
   const wrapStyle = shape.wrap?.style;
   // topAndBottom wrapping style causes the shape to consume vertical space
@@ -881,7 +1028,7 @@ function estimateDrawingShapeHeight(shape: DrawingShape): number {
   return 0;
 }
 
-/** 计算可用列宽（考虑多栏布局） */
+/** Usable column width, accounting for a multi-column layout. */
 function computeColumnWidth(availableWidth: number, columns: SectionColumns | undefined): number {
   if (!columns) {
     return availableWidth;
@@ -890,13 +1037,13 @@ function computeColumnWidth(availableWidth: number, columns: SectionColumns | un
   if (count <= 1) {
     return availableWidth;
   }
-  const space = columns.space ?? 720; // 默认 0.5 inch 间距
-  // 总宽度 = count * colWidth + (count - 1) * space
+  const space = columns.space ?? 720; // default 0.5 inch gutter
+  // total width = count * colWidth + (count - 1) * space
   // colWidth = (totalWidth - (count - 1) * space) / count
   return Math.max(1, Math.floor((availableWidth - (count - 1) * space) / count));
 }
 
-/** 收集段落中的书签 */
+/** Collect the bookmarks declared in a paragraph. */
 function collectBookmarks(
   children: readonly ParagraphChild[],
   currentPage: number,
@@ -919,13 +1066,28 @@ function collectBookmarks(
 // =============================================================================
 
 /**
- * 对文档进行分页布局计算。
- * 返回每个 body content 所在的页码和总页数。
+ * Paginate the document.
+ * Returns the page each body-content item lands on, plus the total page count.
  */
 export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): LayoutResult {
+  // Paginating must see the same effective properties the renderer sees, so
+  // style resolution is active for the whole call. See `resolved`.
+  const previousDoc = activeDoc;
+  const previousCache = activeStyleCache;
+  activeDoc = doc;
+  activeStyleCache = new Map();
+  try {
+    return layoutDocumentInner(doc, options);
+  } finally {
+    activeDoc = previousDoc;
+    activeStyleCache = previousCache;
+  }
+}
+
+function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): LayoutResult {
   const defaultFontSize = options?.defaultFontSize ?? DEFAULT_FONT_SIZE_HALF_PT;
   const defaultCharsPerLine = options?.defaultCharsPerLine ?? DEFAULT_CHARS_PER_LINE;
-  // 平均字符宽度 (twips): 12pt 字体约 6pt 宽 = 120 twips
+  // Average character width in twips: a 12pt font is ~6pt wide = 120 twips.
   const averageCharWidth =
     options?.averageCharWidth ?? Math.round((defaultFontSize / 2) * 0.5 * 20);
   const measureTextFn = options?.measureText;
@@ -933,29 +1095,33 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
   const body = doc.body;
   const contentPages: number[] = [];
   const contentSections: number[] = [];
+  // Which items the *document* demands start a new page — as opposed to the
+  // ones this estimate merely ran out of room for. See `forcedBreakBefore`.
+  const forcedBreakBefore: boolean[] = [];
   const bookmarkPages = new Map<string, number>();
   const sectionPageCounts: number[] = [];
 
-  // 布局状态
-  let currentPage = 1; // 1-based 页码
-  let currentSection = 0; // 0-based 节号
-  let sectionStartPage = 1; // 当前节起始页码
-  let currentY = 0; // 当前页面 Y 偏移 (twips from top of content area)
+  // Layout state
+  let currentPage = 1; // 1-based page number
+  let currentSection = 0; // 0-based section index
+  let sectionStartPage = 1; // first page of the current section
+  let currentY = 0; // Y offset on the current page (twips from content-area top)
 
-  // 多栏状态
-  let currentColumn = 0; // 当前列（0-based）
-  let columnCount = 1; // 当前节的列数
+  // Multi-column state
+  let currentColumn = 0; // current column (0-based)
+  let columnCount = 1; // column count of the current section
 
-  // 当前节的页面属性（从最后一个 section properties 开始）
-  // 文档结构：每个节的 SectionProperties 出现在该节最后一个段落的属性中，
-  // 而文档最终节的属性在 doc.sectionProperties 中
+  // Page properties of the current section.
+  // Document structure: a section's SectionProperties live on the properties of
+  // its LAST paragraph; the final section's properties live on
+  // `doc.sectionProperties`.
   let currentSectionProps = findFirstSectionProps(body) ?? doc.sectionProperties;
   let availableHeight = computeAvailableHeight(currentSectionProps);
   let availableWidth = computeAvailableWidth(currentSectionProps);
-  // 实际可用列宽（考虑多栏）
+  // Effective usable column width (multi-column aware)
   let effectiveWidth = computeColumnWidth(availableWidth, currentSectionProps?.columns);
 
-  /** 更新列数和有效宽度 */
+  /** Refresh the column count and effective width. */
   function updateColumnLayout(): void {
     columnCount = currentSectionProps?.columns?.count ?? 1;
     if (columnCount < 1) {
@@ -964,17 +1130,17 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     effectiveWidth = computeColumnWidth(availableWidth, currentSectionProps?.columns);
   }
 
-  // 初始化多栏
+  // Initialise multi-column state
   updateColumnLayout();
 
-  /** 开始新页 */
+  /** Start a new page. */
   function newPage(): void {
     currentPage++;
     currentY = 0;
     currentColumn = 0;
   }
 
-  /** 进入下一列（多栏布局），如果已在最后一列则换页 */
+  /** Advance to the next column; start a new page when already in the last one. */
   function nextColumn(): void {
     if (columnCount > 1 && currentColumn < columnCount - 1) {
       currentColumn++;
@@ -984,12 +1150,12 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     }
   }
 
-  /** 开始新节 */
+  /** Start a new section. */
   function newSection(
     breakType: SectionBreakType,
     nextSectionProps: SectionProperties | undefined
   ): void {
-    // 记录当前节的页数
+    // Record the page count of the section being closed.
     sectionPageCounts.push(currentPage - sectionStartPage + 1);
 
     currentSection++;
@@ -1000,7 +1166,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         newPage();
         break;
       case "evenPage": {
-        // 跳到下一个偶数页
+        // Skip to the next even page.
         newPage();
         if (currentPage % 2 !== 0) {
           newPage();
@@ -1008,7 +1174,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         break;
       }
       case "oddPage": {
-        // 跳到下一个奇数页
+        // Skip to the next odd page.
         newPage();
         if (currentPage % 2 !== 1) {
           newPage();
@@ -1016,7 +1182,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         break;
       }
       case "continuous": {
-        // 如果页面设置（尺寸）改变，则需要分页
+        // A change of page setup (size) forces a page break.
         const currentWidth = currentSectionProps?.pageSize?.width ?? DEFAULT_PAGE_WIDTH_TWIPS;
         const currentHeight = currentSectionProps?.pageSize?.height ?? DEFAULT_PAGE_HEIGHT_TWIPS;
         const nextWidth = nextProps?.pageSize?.width ?? DEFAULT_PAGE_WIDTH_TWIPS;
@@ -1025,11 +1191,11 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         if (currentWidth !== nextWidth || currentHeight !== nextHeight) {
           newPage();
         }
-        // 否则继续在当前位置
+        // Otherwise continue at the current position.
         break;
       }
       case "nextColumn":
-        // 多栏布局下进入下一列
+        // Multi-column layout: advance to the next column.
         nextColumn();
         break;
     }
@@ -1041,10 +1207,10 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     updateColumnLayout();
   }
 
-  /** 尝试在当前页添加内容，如果放不下则分页 */
+  /** Add content to the current page, breaking to the next when it does not fit. */
   function addContent(height: number): void {
     if (currentY + height > availableHeight && currentY > 0) {
-      // 当前页/列放不下，移到下一页/列
+      // Does not fit the current page/column — move to the next one.
       if (columnCount > 1 && currentColumn < columnCount - 1) {
         nextColumn();
       } else {
@@ -1054,7 +1220,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     currentY += height;
   }
 
-  /** 表格跨页布局：逐行分配，处理 cantSplit 和 header 行重复 */
+  /** Paginate a table row by row, honouring `cantSplit` and repeated header rows. */
   function layoutTable(table: Table): void {
     const totalHeight = estimateTableHeight(
       table,
@@ -1065,14 +1231,14 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       measureTextFn
     );
 
-    // 快速路径：如果表格整体能放入当前页剩余空间，直接放入
+    // Fast path: the whole table fits in the space left on this page.
     if (currentY + totalHeight <= availableHeight) {
       currentY += totalHeight;
       return;
     }
 
-    // 如果当前页完全空且表格仍放不下，则需要跨页处理
-    // 如果当前页非空且放不下第一行，先换页
+    // The table must span pages. If this page already has content and the
+    // first row does not fit, break before starting the table.
     const firstRowHeight = estimateRowHeight(
       table,
       0,
@@ -1090,7 +1256,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       }
     }
 
-    // 确定 header 行（tableHeader = true 的行在每页重复）
+    // Identify header rows (`tableHeader = true`), repeated on every page.
     let headerHeight = 0;
     const headerRows: number[] = [];
     for (let r = 0; r < table.rows.length; r++) {
@@ -1106,11 +1272,11 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
           measureTextFn
         );
       } else {
-        break; // header 行必须从第一行开始连续
+        break; // header rows must be a contiguous run starting at row 0
       }
     }
 
-    // 逐行布局
+    // Lay out row by row.
     for (let r = 0; r < table.rows.length; r++) {
       const row = table.rows[r];
       const rowHeight = estimateRowHeight(
@@ -1123,30 +1289,31 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         measureTextFn
       );
 
-      // header 行在新页开头已经由 headerHeight 预留
+      // Header rows are already reserved at the top of a new page via headerHeight.
       if (headerRows.includes(r)) {
-        // header 行直接放入
+        // Header rows are placed directly.
         currentY += rowHeight;
         continue;
       }
 
-      // cantSplit: 该行不能被分页拆分 — 如果放不下，必须整行移到下一页
+      // cantSplit: the row may not be split across pages — if it does not fit,
+      // the whole row moves to the next page.
       const cantSplit = row.properties?.cantSplit ?? false;
 
       if (cantSplit || rowHeight <= availableHeight) {
-        // 检查当前页是否还能放下这一行
+        // Check whether the row still fits on the current page.
         if (currentY + rowHeight > availableHeight) {
-          // 需要换页/换列
+          // Break to the next page/column.
           if (columnCount > 1 && currentColumn < columnCount - 1) {
             nextColumn();
           } else {
             newPage();
           }
-          // 新页顶部先放 header 行
+          // Repeat the header rows at the top of the new page.
           currentY += headerHeight;
         }
       } else {
-        // 行高超过整个页面高度（极端情况），只能直接放
+        // The row is taller than a whole page (degenerate case) — place it as is.
         if (currentY + rowHeight > availableHeight && currentY > 0) {
           if (columnCount > 1 && currentColumn < columnCount - 1) {
             nextColumn();
@@ -1162,7 +1329,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
   }
 
   // =========================================================================
-  // 遍历 body content
+  // Walk the body content.
   // =========================================================================
 
   for (let i = 0; i < body.length; i++) {
@@ -1173,14 +1340,14 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         const para = item;
         const props = para.properties;
 
-        // 收集书签
+        // Collect bookmarks.
         collectBookmarks(para.children, currentPage, bookmarkPages);
 
-        // 检查段落 sectionProperties（节内分节符）
-        // 注意：带 sectionProperties 的段落是其所属节的最后一个段落
-        // sectionProperties 定义了当前节的页面设置
+        // Handle a paragraph-level sectionProperties (a section break).
+        // Note: the paragraph carrying sectionProperties is the LAST paragraph of
+        // its section, and those properties define that section's page setup.
         if (props?.sectionProperties) {
-          // 先渲染该段落本身
+          // Lay out the paragraph itself first.
           const paraHeight = estimateParagraphHeight(
             para,
             effectiveWidth,
@@ -1192,24 +1359,31 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
           handleParagraphLayout(para, paraHeight, i, body);
           contentPages.push(currentPage);
           contentSections.push(currentSection);
+          forcedBreakBefore.push(false);
 
-          // 然后开始新节
+          // Then open the next section.
           const nextSP = findNextSectionProps(body, i + 1) ?? doc.sectionProperties;
           newSection(props.sectionProperties.breakType ?? "nextPage", nextSP);
           break;
         }
 
-        // pageBreakBefore: 强制在段落前分页
-        if (props?.pageBreakBefore && currentY > 0) {
+        // pageBreakBefore: force a page break before this paragraph.
+        // A named style can supply it (Word's "Heading 1, page break before"),
+        // so read the style-resolved effective properties.
+        // Only `w:pageBreakBefore` and a *leading* `w:br w:type="page"` move the
+        // paragraph; an internal break is handled by splitting it (see
+        // `hasLeadingPageBreak`).
+        const wantsPageBreak =
+          resolved(para).properties?.pageBreakBefore === true || hasLeadingPageBreak(para.children);
+        if (wantsPageBreak && currentY > 0) {
           newPage();
         }
+        // An internal break still consumes the rest of the page, which the
+        // height estimate has to allow for or the paginator will under-count
+        // pages badly on break-heavy documents.
+        const hasInternalPageBreak = !wantsPageBreak && hasPageBreakInRuns(para.children);
 
-        // 检查 run 中是否有 page break
-        if (hasPageBreakInRuns(para.children) && currentY > 0) {
-          newPage();
-        }
-
-        // column break: 多栏布局下进入下一列
+        // column break: advance to the next column in a multi-column layout.
         if (hasColumnBreakInRuns(para.children) && currentY > 0) {
           nextColumn();
         }
@@ -1224,9 +1398,13 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         );
 
         handleParagraphLayout(para, paraHeight, i, body);
+        if (hasInternalPageBreak) {
+          newPage();
+        }
 
         contentPages.push(currentPage);
         contentSections.push(currentSection);
+        forcedBreakBefore.push(wantsPageBreak);
         break;
       }
 
@@ -1235,6 +1413,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         layoutTable(item);
         contentPages.push(tableStartPage);
         contentSections.push(currentSection);
+        forcedBreakBefore.push(false);
         break;
       }
 
@@ -1243,21 +1422,21 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         // DrawingShape, OpaqueDrawing, ChartContent, AltChunk, SDT
         const minHeight = baseLineHeight(defaultFontSize);
         if (item.type === "tableOfContents") {
-          // TOC 通常有多个段落
+          // A table of contents usually spans several paragraphs.
           const tocParas = (item as { cachedParagraphs?: readonly Paragraph[] }).cachedParagraphs;
           const tocHeight = tocParas
             ? tocParas.length * baseLineHeight(defaultFontSize)
             : minHeight * 5;
           addContent(tocHeight);
         } else if (item.type === "floatingImage") {
-          // 根据 wrap style 判断是否占用正文流空间
+          // Whether it consumes body-flow space depends on the wrap style.
           const imgHeight = estimateFloatingImageHeight(item as FloatingImage);
           if (imgHeight > 0) {
             addContent(imgHeight);
           }
-          // 其他浮动模式不占用正文流空间
+          // Other floating modes consume no body-flow space.
         } else if (item.type === "drawingShape") {
-          // 根据 wrap style 和尺寸计算占用高度
+          // Height consumed, from the wrap style and the shape's size.
           const shapeHeight = estimateDrawingShapeHeight(item as DrawingShape);
           if (shapeHeight > 0) {
             addContent(shapeHeight);
@@ -1269,12 +1448,13 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
         }
         contentPages.push(currentPage);
         contentSections.push(currentSection);
+        forcedBreakBefore.push(false);
         break;
       }
     }
   }
 
-  // 记录最后一个节的页数
+  // Record the page count of the last section.
   sectionPageCounts.push(currentPage - sectionStartPage + 1);
 
   return {
@@ -1282,11 +1462,12 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     sectionPageCounts,
     contentPages,
     contentSections,
-    bookmarkPages
+    bookmarkPages,
+    forcedBreakBefore
   };
 
   // =========================================================================
-  // 段落布局辅助（处理 keepNext, keepLines, widowControl, orphanControl）
+  // Paragraph placement helpers (keepNext, keepLines, widowControl, orphanControl)
   // =========================================================================
 
   function handleParagraphLayout(
@@ -1295,16 +1476,25 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
     index: number,
     bodyContent: readonly BodyContent[]
   ): void {
-    const props = para.properties;
+    // Effective properties — style chain included. See `resolved`.
+    const res = resolved(para);
+    const props = res.properties;
     const spacing = props?.spacing;
-    const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, defaultFontSize));
+    const inheritedSize = inheritedFontSize(res, defaultFontSize);
+    const inheritedFont = inheritedFontName(res);
+    const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, inheritedSize));
     const lineHeight = computeLineHeight(spacing, fontSize);
 
-    // 计算段落行数（CJK-aware）
+    // Line count for the paragraph (CJK-aware).
     let lineCount: number;
     if (measureTextFn) {
       const [firstLineW, subsequentW] = computeParagraphLineWidths(props, effectiveWidth);
-      const textWidthPt = measureParagraphTextWidth(para.children, defaultFontSize, measureTextFn);
+      const textWidthPt = measureParagraphTextWidth(
+        para.children,
+        inheritedSize,
+        measureTextFn,
+        inheritedFont
+      );
       const textWidthTwips = textWidthPt * 20;
 
       // Count hard line breaks in the paragraph
@@ -1312,7 +1502,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
 
       if (breakCount > 0) {
         // If there are hard breaks, use word-based line counting for accuracy
-        const charWidth = averageCharWidth > 0 ? averageCharWidth : 120;
+        const charWidth = scaledCharWidth(averageCharWidth, fontSize, defaultFontSize);
         const tabStops = props?.tabs?.map(t => t.position).filter((p): p is number => p != null);
         lineCount = computeLineCountWordBased(
           para.children,
@@ -1328,7 +1518,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       }
     } else {
       const [firstLineW, subsequentW] = computeParagraphLineWidths(props, effectiveWidth);
-      const charWidth = averageCharWidth > 0 ? averageCharWidth : 120;
+      const charWidth = scaledCharWidth(averageCharWidth, fontSize, defaultFontSize);
       const tabStops = props?.tabs?.map(t => t.position).filter((p): p is number => p != null);
 
       lineCount = computeLineCountWordBased(
@@ -1353,7 +1543,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       }
     }
 
-    // keepLines: 整段必须在同一页
+    // keepLines: the whole paragraph must stay on one page.
     if (props?.keepLines) {
       if (currentY + paraHeight > availableHeight && currentY > 0) {
         if (columnCount > 1 && currentColumn < columnCount - 1) {
@@ -1368,8 +1558,10 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       return;
     }
 
-    // widowControl: 避免只有 1 行在当前页（至少 2 行，或者整段移走）
-    // orphanControl: 避免最后 1 行单独在下一页（确保至少 2 行在下一页）
+    // widowControl: never leave a single line behind on this page — keep at
+    // least two, or move the whole paragraph.
+    // orphanControl: never push a single last line onto the next page — ensure
+    // at least two lines land there.
     if (props?.widowControl !== false && lineCount > 1) {
       let spaceBefore = 0;
       if (spacing?.beforeAutoSpacing) {
@@ -1411,7 +1603,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       }
     }
 
-    // keepNext: 当前段落需要和下一个段落在同一页
+    // keepNext: this paragraph must stay on the same page as the next one.
     if (props?.keepNext && index + 1 < bodyContent.length) {
       const nextItem = bodyContent[index + 1];
       if (nextItem.type === "paragraph") {
@@ -1423,7 +1615,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
           averageCharWidth,
           measureTextFn
         );
-        // 如果两个段落一起放不下当前页，把当前段移到下一页
+        // If the pair does not fit on this page, move this paragraph down.
         if (currentY + paraHeight + nextHeight > availableHeight && currentY > 0) {
           if (columnCount > 1 && currentColumn < columnCount - 1) {
             nextColumn();
@@ -1434,7 +1626,7 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
       }
     }
 
-    // 普通添加
+    // Ordinary placement.
     addContent(paraHeight);
 
     // Footnote space reservation
@@ -1466,10 +1658,12 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
 // =============================================================================
 
 /**
- * 在 body 中查找第一个节的 SectionProperties。
- * 文档中，每个节（除最后一节）的属性在该节最后一个段落的 pPr/sectPr 中。
- * 这里找第一个含 sectionProperties 的段落之前的区域所适用的属性。
- * 由于第一个节的属性就是第一个 sectPr（如果存在），我们返回它。
+ * Find the first section's SectionProperties in the body.
+ *
+ * Every section except the last carries its properties in the pPr/sectPr of its
+ * last paragraph. The properties that apply to the region before the first
+ * paragraph bearing sectionProperties are therefore that very first sectPr, so
+ * that is what this returns.
  */
 function findFirstSectionProps(body: readonly BodyContent[]): SectionProperties | undefined {
   for (const item of body) {
@@ -1481,8 +1675,9 @@ function findFirstSectionProps(body: readonly BodyContent[]): SectionProperties 
 }
 
 /**
- * 从指定位置开始查找下一个节的 SectionProperties。
- * 返回 body[startIndex..] 中第一个包含 sectionProperties 的段落的 sectionProperties。
+ * Find the next section's SectionProperties starting at a given index.
+ * Returns the sectionProperties of the first paragraph in `body[startIndex..]`
+ * that carries them.
  */
 function findNextSectionProps(
   body: readonly BodyContent[],

@@ -208,7 +208,19 @@ describe("markdownToDocxBody", () => {
       const body = await mdBody("> This is a quote");
       const para = body[0] as Paragraph;
       expect(para.properties?.style).toBe("Quote");
-      expect(para.properties?.indent?.left).toBe(720);
+    });
+
+    it("carries the quote's geometry and bar on the Quote style, not the paragraph", async () => {
+      // Indent, background and the left bar belong to the named style; a
+      // paragraph that repeats them cannot be restyled by editing the style.
+      const { markdownToDocx } = await import("../convert/markdown/markdown-import");
+      const doc = await markdownToDocx("> This is a quote");
+      const quote = doc.styles?.find(s => s.styleId === "Quote");
+      expect(quote?.paragraphProperties?.indent?.left).toBeGreaterThan(0);
+      expect(quote?.paragraphProperties?.borders?.left?.style).toBe("single");
+      // The stylesheet marks a quote with the bar alone — never italic or grey.
+      expect(quote?.runProperties?.italic).toBeUndefined();
+      expect(quote?.runProperties?.color).toBeUndefined();
     });
 
     it("should handle multi-line blockquotes", async () => {

@@ -10,7 +10,10 @@ import type {
   ParagraphProperties,
   Run,
   RunProperties,
+  Shading,
   StyleDef,
+  Table,
+  TableCell,
   TableLook,
   NumberingLevel,
   TableProperties,
@@ -32,6 +35,10 @@ export interface StyleResolveContext {
     readonly colIndex: number;
     readonly totalRows: number;
     readonly totalCols: number;
+    /** `w:tblStyleRowBandSize` — rows per stripe. Defaults to 1. */
+    readonly rowBandSize?: number;
+    /** `w:tblStyleColBandSize` — columns per stripe. Defaults to 1. */
+    readonly colBandSize?: number;
   };
 }
 
@@ -135,7 +142,11 @@ export function resolveStyle(
         tblCtx.rowIndex,
         tblCtx.colIndex,
         tblCtx.totalRows,
-        tblCtx.totalCols
+        tblCtx.totalCols,
+        {
+          row: tblCtx.rowBandSize ?? tblStyleDef.tableProperties?.rowBandSize,
+          column: tblCtx.colBandSize ?? tblStyleDef.tableProperties?.colBandSize
+        }
       );
       for (const cond of matchingConditions) {
         if (cond.paragraphProperties) {
@@ -189,26 +200,33 @@ function getMatchingTableConditions(
   rowIndex: number,
   colIndex: number,
   totalRows: number,
-  totalCols: number
+  totalCols: number,
+  bandSize?: { readonly row?: number; readonly column?: number }
 ): TableStyleConditionalFormat[] {
   // Resolve effective banding flags: noHBand means band rows are disabled,
   // noVBand means band columns are disabled.
   const bandRow = look?.noHBand !== true;
   const bandCol = look?.noVBand !== true;
 
+  // `w:tblStyleRowBandSize` / `w:tblStyleColBandSize`: how many rows or columns
+  // make up one stripe. Alternating per single row regardless of it turned every
+  // "banded by twos" table style into a one-row zebra.
+  const rowBand = Math.max(1, Math.trunc(bandSize?.row ?? 1));
+  const colBand = Math.max(1, Math.trunc(bandSize?.column ?? 1));
+
   // Build a set of applicable condition types based on position and tblLook.
   const applicable = new Set<TableStyleConditionType>();
 
   // Banding (lowest priority among conditions)
   if (bandRow) {
-    if (rowIndex % 2 === 0) {
+    if (Math.floor(rowIndex / rowBand) % 2 === 0) {
       applicable.add("oddRowBanding");
     } else {
       applicable.add("evenRowBanding");
     }
   }
   if (bandCol) {
-    if (colIndex % 2 === 0) {
+    if (Math.floor(colIndex / colBand) % 2 === 0) {
       applicable.add("oddColumnBanding");
     } else {
       applicable.add("evenColumnBanding");
@@ -282,6 +300,244 @@ function getMatchingTableConditions(
   return conditions
     .filter(c => applicable.has(c.type))
     .sort((a, b) => (priorityMap.get(a.type) ?? 0) - (priorityMap.get(b.type) ?? 0));
+}
+
+// =============================================================================
+// Table cell formatting
+// =============================================================================
+
+/** Where a cell sits in its table, which is what selects the conditional formats. */
+export interface TableCellPosition {
+  readonly rowIndex: number;
+  readonly colIndex: number;
+  readonly totalRows: number;
+  readonly totalCols: number;
+}
+
+/** Cell-level formatting a table style contributes to one cell position. */
+export interface ResolvedTableCellStyle {
+  /** Effective background shading, or undefined for no fill. */
+  readonly shading?: Shading;
+}
+
+/**
+ * Resolve the cell-level formatting a table style contributes at one position.
+ *
+ * This is where Word's built-in table styles keep the look that makes a table
+ * read as a table: the header band, the alternating row stripes, the emphasised
+ * corner cells. They live in `tableStyleConditions[].cellProperties`, which
+ * `resolveStyle` deliberately ignores (it answers a question about a paragraph),
+ * so cells need their own resolution pass.
+ *
+ * Precedence, lowest to highest — matching Word:
+ *   1. the table style chain's base `tableProperties.shading`
+ *   2. its conditional formats, in `getMatchingTableConditions` order
+ *      (banding → first/last row/column → corner cells)
+ *
+ * A cell's own `w:shd` and the table's direct `w:tblPr/w:shd` are *direct*
+ * formatting and outrank everything here; callers apply them on top.
+ */
+export function resolveTableCellStyle(
+  doc: DocxDocument,
+  tableStyleId: string | undefined,
+  look: TableLook | undefined,
+  position: TableCellPosition,
+  bandSize?: { readonly row?: number; readonly column?: number }
+): ResolvedTableCellStyle {
+  if (!tableStyleId || !doc.styles) {
+    return {};
+  }
+  const styleMap = new Map<string, StyleDef>();
+  for (const s of doc.styles) {
+    styleMap.set(s.styleId, s);
+  }
+
+  // Style chain, most specific first.
+  const chain: StyleDef[] = [];
+  let current: string | undefined = tableStyleId;
+  const visited = new Set<string>();
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const def = styleMap.get(current);
+    if (!def) {
+      break;
+    }
+    chain.push(def);
+    current = def.basedOn;
+  }
+
+  let shading: Shading | undefined;
+  // Band sizes may be declared by the table or by any style in its chain; the
+  // table's own value wins, then the most derived style that sets one.
+  let rowBand = bandSize?.row;
+  let colBand = bandSize?.column;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    rowBand = rowBand ?? chain[i].tableProperties?.rowBandSize;
+    colBand = colBand ?? chain[i].tableProperties?.colBandSize;
+  }
+  // Walk base → specific so a derived style overrides the one it is based on.
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const def = chain[i];
+    if (def.tableProperties?.shading) {
+      shading = def.tableProperties.shading;
+    }
+    if (!def.tableStyleConditions) {
+      continue;
+    }
+    const matching = getMatchingTableConditions(
+      def.tableStyleConditions,
+      look,
+      position.rowIndex,
+      position.colIndex,
+      position.totalRows,
+      position.totalCols,
+      { row: rowBand, column: colBand }
+    );
+    for (const cond of matching) {
+      if (cond.cellProperties?.shading) {
+        shading = cond.cellProperties.shading;
+      }
+    }
+  }
+
+  return shading ? { shading } : {};
+}
+
+/**
+ * The background colour of a table cell as a bare 6-digit hex string, or
+ * undefined when nothing should be painted.
+ *
+ * Applies the full OOXML precedence in one place so every renderer agrees:
+ *
+ *   cell `w:tcPr/w:shd`  →  table `w:tblPr/w:shd`  →  table style
+ *
+ * `fill: "auto"` means "let the consumer decide", which for a cell background is
+ * no fill; `pattern: "nil"` is an explicit absence of shading. The striped and
+ * percentage patterns are approximated by their fill colour, which is what they
+ * amount to at document scale.
+ */
+export function resolveTableCellFill(
+  doc: DocxDocument,
+  table: Table,
+  cell: TableCell,
+  position: TableCellPosition
+): string | undefined {
+  // Direct formatting wins even when it paints nothing: `w:shd w:val="clear"
+  // w:fill="auto"` is exactly how Word records "this cell has no shading",
+  // which has to override whatever the table style would have contributed.
+  // Treating that as "unspecified" and falling through would make it impossible
+  // to clear a styled header band.
+  if (cell.properties?.shading) {
+    return resolveShadingFill(cell.properties.shading);
+  }
+  if (table.properties?.shading) {
+    return resolveShadingFill(table.properties.shading);
+  }
+  const fromStyle = resolveTableCellStyle(
+    doc,
+    table.properties?.style,
+    table.properties?.look,
+    position,
+    { row: table.properties?.rowBandSize, column: table.properties?.colBandSize }
+  ).shading;
+  return resolveShadingFill(fromStyle);
+}
+
+/** A `RRGGBB` hex string normalised from `w:fill` / `w:color`, or undefined. */
+function normalizeHex(raw: string | undefined): string | undefined {
+  if (!raw || raw === "auto") {
+    return undefined;
+  }
+  const stripped = raw.replace(/^#/, "");
+  if (/^[0-9a-fA-F]{6}$/.test(stripped)) {
+    return stripped.toUpperCase();
+  }
+  if (/^[0-9a-fA-F]{3}$/.test(stripped)) {
+    return stripped
+      .split("")
+      .map(ch => ch + ch)
+      .join("")
+      .toUpperCase();
+  }
+  return undefined;
+}
+
+/**
+ * How much of a shading pattern's area its pattern colour covers, 0–1.
+ *
+ * A `w:shd` is a two-colour pattern: `w:fill` behind, `w:color` in the pattern
+ * itself. `pct25` is literally 25 % coverage, and the named hatches are close to
+ * fixed ratios. Flattening each to its coverage-weighted blend reproduces the
+ * tone the pattern reads as at document scale, which is what a reader sees —
+ * far closer than dropping the pattern colour entirely and painting bare `fill`.
+ *
+ * Returns 0 for a pattern that shows only the fill, and 1 for one that hides it.
+ */
+function patternCoverage(pattern: string | undefined): number {
+  if (!pattern || pattern === "clear") {
+    return 0;
+  }
+  if (pattern === "solid") {
+    return 1;
+  }
+  const pct = /^pct(\d+)$/.exec(pattern);
+  if (pct) {
+    return Math.min(100, Math.max(0, Number.parseInt(pct[1], 10))) / 100;
+  }
+  // Hatches: the `thin*` variants use a 1px stroke, the rest a heavier one.
+  if (pattern.startsWith("thin")) {
+    return pattern.includes("Cross") ? 0.25 : 0.15;
+  }
+  if (pattern.endsWith("Cross")) {
+    return 0.5;
+  }
+  if (pattern.endsWith("Stripe")) {
+    return 0.3;
+  }
+  return 0;
+}
+
+/** Blend `over` onto `under` at `ratio`, both `RRGGBB`. */
+function blendHex(under: string, over: string, ratio: number): string {
+  let out = "";
+  for (let i = 0; i < 6; i += 2) {
+    const a = Number.parseInt(under.slice(i, i + 2), 16);
+    const b = Number.parseInt(over.slice(i, i + 2), 16);
+    out += Math.round(a + (b - a) * ratio)
+      .toString(16)
+      .toUpperCase()
+      .padStart(2, "0");
+  }
+  return out;
+}
+
+/**
+ * A shading's paintable fill as a bare `RRGGBB` hex string, or undefined when it
+ * paints nothing.
+ *
+ * `fill: "auto"` means "let the consumer decide", which for a background is no
+ * fill; `pattern: "nil"` is an explicit absence of shading. A pattern blends its
+ * `w:color` into the fill by its coverage (see `patternCoverage`). Exported so
+ * table cells and paragraphs cannot disagree about what a given `w:shd` paints.
+ */
+export function resolveShadingFill(shading: Shading | undefined): string | undefined {
+  if (!shading || shading.pattern === "nil") {
+    return undefined;
+  }
+  const fill = normalizeHex(shading.fill);
+  const patternColor = normalizeHex(shading.color);
+  const coverage = patternCoverage(shading.pattern);
+
+  if (patternColor === undefined || coverage === 0) {
+    return fill;
+  }
+  if (fill === undefined) {
+    // No fill behind the pattern: the pattern colour is all there is to paint,
+    // and only in proportion to how much of the area it covers. Blend onto
+    // white, the page it sits on.
+    return coverage >= 1 ? patternColor : blendHex("FFFFFF", patternColor, coverage);
+  }
+  return coverage >= 1 ? patternColor : blendHex(fill, patternColor, coverage);
 }
 
 // =============================================================================

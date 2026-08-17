@@ -103,7 +103,7 @@ function renderCellBordersInStyle(xml: XmlSink, borders: TableBorders): void {
       xml.leafNode(`w:${side}`, {
         "w:val": b.style,
         "w:sz": String(b.size ?? 4),
-        "w:space": String(b.space ?? 0),
+        "w:space": String(Math.max(0, Math.round(b.space ?? 0))),
         "w:color": b.color ?? "auto"
       });
     }
@@ -120,7 +120,7 @@ function renderTableBordersInStyle(xml: XmlSink, borders: TableBorders): void {
       xml.leafNode(`w:${side}`, {
         "w:val": b.style,
         "w:sz": String(b.size ?? 4),
-        "w:space": String(b.space ?? 0),
+        "w:space": String(Math.max(0, Math.round(b.space ?? 0))),
         "w:color": b.color ?? "auto"
       });
     }

@@ -2334,3 +2334,46 @@ describe("Standalone pdf() API", () => {
     expect(text).toContain("/Subtype /Image");
   });
 });
+
+describe("auto-discovered fallback font in a workbook", () => {
+  // A face that covers only the two CJK glyphs used below, so discovery is
+  // deterministic regardless of the fonts installed on the test host.
+  const CJK = [0x4e2d, 0x6587];
+
+  beforeEach(() => {
+    _setCandidatesForTest([
+      buildTtfWithCmap(
+        CJK.map((cp, index) => ({ start: cp, end: cp, delta: index + 1 - cp })),
+        CJK.length + 1,
+        { familyName: "FallbackCjkTest", advanceWidths: [500, 1000, 1000] }
+      )
+    ]);
+  });
+  afterEach(() => {
+    resetFontDiscoveryCache();
+  });
+
+  it("keeps bold and italic on Latin cells while a CJK cell uses the fallback", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", "Bold");
+    cellSetFont(getCell(ws, "A1"), { bold: true });
+    Cell.setValue(ws, "A2", "Italic");
+    cellSetFont(getCell(ws, "A2"), { italic: true });
+    Cell.setValue(ws, "A3", "\u4e2d\u6587");
+
+    const pdf = await excelToPdf(wb);
+    const text = pdfToString(pdf);
+
+    // The discovered face lends glyphs for the two CJK code points only.
+    // Before, it replaced the
+    // document font outright and every cell lost its weight and slant.
+    expect(text).toContain("/Helvetica-Bold");
+    expect(text).toContain("/Helvetica-Oblique");
+    expect(text).toContain("FallbackCjkTest");
+
+    const page = (await readPdf(pdf)).pages[0];
+    expect(page.text).toContain("\u4e2d\u6587");
+    expect(page.text).toContain("Bold");
+  });
+});

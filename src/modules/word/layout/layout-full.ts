@@ -21,12 +21,17 @@ import { extractMathText, isHyperlink, isRun } from "@word/core/text-utils";
 import { layoutDocument } from "@word/layout/layout";
 import type { LayoutOptions, LayoutResult } from "@word/layout/layout";
 import {
+  DEFAULT_FONT_SIZE_PT,
   DEFAULT_PAGE_HEIGHT_TWIPS,
   DEFAULT_PAGE_MARGIN_TWIPS,
-  DEFAULT_PAGE_WIDTH_TWIPS
+  DEFAULT_PAGE_WIDTH_TWIPS,
+  LINE_HEIGHT_FACTOR,
+  resolveCellMarginsTwips
 } from "@word/layout/layout-constants";
 import type {
   LayoutAltChunk,
+  LayoutBorderEdge,
+  LayoutBorders,
   LayoutChart,
   LayoutCheckBox,
   LayoutDocument,
@@ -47,7 +52,13 @@ import type {
   PageContent,
   PageGeometry
 } from "@word/layout/layout-model";
-import { resolveStyle } from "@word/query/style-resolve";
+import {
+  resolveRunStyle,
+  resolveShadingFill,
+  resolveStyle,
+  resolveTableCellFill
+} from "@word/query/style-resolve";
+import type { StyleResolveContext } from "@word/query/style-resolve";
 import type {
   AltChunk,
   BodyContent,
@@ -64,14 +75,18 @@ import type {
   MathBlock,
   OpaqueDrawing,
   Paragraph,
+  ParagraphBorders,
   ParagraphChild,
   ParagraphProperties,
   NumberFormat,
   Run,
+  SectionProperties,
   StructuredDocumentTag,
   Table,
   TableBorders,
+  TableCellProperties,
   TableOfContents,
+  TableProperties,
   TextBox
 } from "@word/types";
 import { EMU_PER_POINT, twipsToPt } from "@word/units";
@@ -135,21 +150,37 @@ export function layoutDocumentFull(doc: DocxDocument, options?: FullLayoutOption
   // counters increment correctly across pages. Stored in a module-level
   // context so that every `layoutParagraph` call — including those reached
   // through tables, text boxes, SDTs, footnotes, etc. — can render markers
-  // without threading the map through every container function. Layout runs
-  // fully synchronously (no `await`), so a single shared slot is safe.
+  // without threading the map through every container function.
   const listMarkers = computeListMarkers(doc);
+  // The previous values are restored rather than cleared. Layout is
+  // synchronous, but it is not un-reentrant: a caller's `measureText` callback
+  // can lay out another document (to size a caption, say), and clearing the
+  // slots on the way out of the inner call left the outer one resolving styles,
+  // list markers and contextual spacing against nothing for every remaining
+  // paragraph. `layout.ts` already saves and restores; this now matches.
+  const previousListMarkers = activeListMarkers;
+  const previousDoc = activeDoc;
+  const previousContextualSpacing = activeContextualSpacing;
   activeListMarkers = listMarkers;
   activeDoc = doc;
+  // `w:contextualSpacing` needs each paragraph's *siblings*, which no single
+  // `layoutParagraph` call can see. Resolved once here for the same reason and
+  // through the same mechanism as the list markers.
+  activeContextualSpacing = computeContextualSpacing(doc);
   try {
     return layoutDocumentFullInner(doc, options, layoutResult, listMarkers);
   } finally {
-    activeListMarkers = undefined;
-    activeDoc = undefined;
+    activeListMarkers = previousListMarkers;
+    activeDoc = previousDoc;
+    activeContextualSpacing = previousContextualSpacing;
   }
 }
 
 /** Active list-marker map for the in-flight layout (see layoutDocumentFull). */
 let activeListMarkers: ReadonlyMap<Paragraph, ListMarker> | undefined;
+
+/** Active contextual-spacing map for the in-flight layout. */
+let activeContextualSpacing: ReadonlyMap<Paragraph, ContextualSpacing> | undefined;
 
 /**
  * Active document for the in-flight layout, so `layoutParagraph` can resolve
@@ -170,48 +201,180 @@ function layoutDocumentFullInner(
   // (a later page may still have room thanks to less body content
   // or fewer of its own newly-introduced notes).
   const pages: LayoutPage[] = [];
-  const bodyPageCount = layoutResult.pageCount;
   let pendingFootnoteIds: readonly number[] = [];
+  // Blocks the previous page could not hold. Pass 2 measures for real, so it —
+  // not the estimating paginator — decides what fits; see `BuildPageResult`.
+  let carried: readonly CarriedBlock[] = [];
+  // Where the flow has got to in `doc.body`; see `FlowCursor`.
+  const flow: FlowCursor = { nextItem: 0 };
 
-  for (let pageNum = 1; pageNum <= bodyPageCount; pageNum++) {
-    const result = buildPage(doc, pageNum, layoutResult, options, pendingFootnoteIds, listMarkers);
+  // Each section brings its own paper size, margins and headers, so every page
+  // has to know which one it belongs to and how far into it it is (`titlePage`
+  // selects the "first" header on a section's own first page).
+  const sectionPropsList = collectSectionProperties(doc);
+  const sectionOf = (itemIndex: number): number =>
+    layoutResult.contentSections[itemIndex] ?? sectionPropsList.length - 1;
+  let sectionIndex = doc.body.length > 0 ? sectionOf(0) : sectionPropsList.length - 1;
+  let pageInSection = 1;
+
+  // Emit pages until the body is exhausted and nothing is left carried. Every
+  // iteration either advances `flow.nextItem` or places part of a carried block
+  // (a page that starts empty always places at least one line or row — see
+  // `splitLayoutParagraph`), so this terminates. `maxPages` only guards a
+  // degenerate geometry with no usable content height at all.
+  const maxPages = 20_000;
+  do {
+    const result = buildPage(
+      doc,
+      pages.length + 1,
+      layoutResult,
+      options,
+      pendingFootnoteIds,
+      listMarkers,
+      carried,
+      flow,
+      { index: sectionIndex, props: sectionPropsList[sectionIndex], pageInSection }
+    );
     pages.push(result.page);
     pendingFootnoteIds = result.deferredFootnoteIds;
-  }
+    if (result.page.content.length === 0 && carried.length > 0) {
+      // Nothing could be placed at all — stop rather than loop forever.
+      break;
+    }
+    carried = result.carriedContent;
 
-  // Defensive: if the last page still has deferred footnotes, append
-  // a synthetic page that hosts them. Without this, references would
-  // silently lose their content. This is rare (it only fires when an
-  // oversized footnote stack on the last body page didn't fit).
-  if (pendingFootnoteIds.length > 0 && bodyPageCount > 0) {
+    // Which section the next page belongs to. Anything still carried belongs to
+    // the section it came from, so the section only advances once the carry is
+    // clear and the flow has crossed a boundary.
+    const nextSection =
+      carried.length === 0 && flow.nextItem < doc.body.length
+        ? sectionOf(flow.nextItem)
+        : sectionIndex;
+    if (nextSection !== sectionIndex) {
+      // The closing section's break type decides the parity the next one starts
+      // on; Word inserts a blank page to reach it.
+      const boundary = sectionBoundary(
+        sectionPropsList[sectionIndex],
+        sectionPropsList[nextSection]
+      );
+      sectionIndex = nextSection;
+      pageInSection = 1;
+      const nextPageNumber = pages.length + 1;
+      const wrongParity =
+        (boundary.parity === "odd" && nextPageNumber % 2 === 0) ||
+        (boundary.parity === "even" && nextPageNumber % 2 === 1);
+      if (wrongParity && pages.length < maxPages) {
+        const blank = buildPage(
+          doc,
+          nextPageNumber,
+          layoutResult,
+          options,
+          [],
+          listMarkers,
+          [],
+          undefined,
+          { index: sectionIndex, props: sectionPropsList[sectionIndex], pageInSection: 0 }
+        );
+        pages.push(blank.page);
+      }
+    } else {
+      pageInSection++;
+    }
+  } while ((flow.nextItem < doc.body.length || carried.length > 0) && pages.length < maxPages);
+
+  // Notes still queued after the body runs out get pages of their own, until the
+  // queue drains. One extra page is not enough: three notes each nearly a page
+  // tall put the first on the body page, the second on the extra page, and
+  // dropped the third entirely.
+  while (pendingFootnoteIds.length > 0 && pages.length > 0 && pages.length < maxPages) {
     const overflowResult = buildPage(
       doc,
-      bodyPageCount + 1,
-      // Reuse the last page's `LayoutResult` shape: contentPages
-      // entries for already-placed body items still point at earlier
-      // pages, so the synthetic page won't pick up extra body
-      // content; only the carried footnote queue renders.
+      pages.length + 1,
       layoutResult,
       options,
       pendingFootnoteIds,
       listMarkers
+      // No flow cursor and no carried content: this page hosts only the
+      // deferred footnote queue.
     );
     pages.push(overflowResult.page);
+    const remaining = overflowResult.deferredFootnoteIds;
+    if (remaining.length >= pendingFootnoteIds.length) {
+      // A note taller than a whole page can never shrink the queue; it is laid
+      // out on this page (overflowing it) rather than looping forever.
+      break;
+    }
+    pendingFootnoteIds = remaining;
+  }
+
+  // Bookmark pages and section-break page indices have to describe the pages
+  // that were actually produced, not the estimate's. Both are remapped through
+  // where pass 2 really put each body item.
+  const itemPage = new Map<number, number>();
+  for (const page of pages) {
+    for (const block of page.content) {
+      if (block.sourceIndex >= 0 && !itemPage.has(block.sourceIndex)) {
+        itemPage.set(block.sourceIndex, page.pageNumber);
+      }
+    }
   }
 
   return {
     pages,
     totalPages: pages.length,
-    bookmarkPages: layoutResult.bookmarkPages,
-    sectionBreaks: computeSectionBreaks(layoutResult)
+    bookmarkPages: remapBookmarkPages(pages, layoutResult),
+    sectionBreaks: computeSectionBreaks(layoutResult, itemPage)
   };
+}
+
+/**
+ * Bookmark name → page number, keyed to the pages pass 2 produced.
+ *
+ * The paginator records the page it *estimated* for each bookmark; once pass 2
+ * re-flows content to its own measurements those numbers can be off by a page or
+ * more, which would send a PDF outline entry to the wrong place.
+ */
+function remapBookmarkPages(
+  pages_: readonly LayoutPage[],
+  fallback: LayoutResult
+): ReadonlyMap<string, number> {
+  const pages = new Map<string, number>();
+  // Read the placed blocks rather than the source body: a paragraph split across
+  // a page boundary reports per-line bookmark names, so a bookmark in the part
+  // that spilled over resolves to the page it actually landed on instead of the
+  // page the paragraph started on.
+  for (const page of pages_) {
+    const visit = (blocks: readonly PageContent[] | readonly (LayoutParagraph | LayoutTable)[]) => {
+      for (const block of blocks) {
+        if (block.type === "paragraph") {
+          for (const names of block.lineBookmarks ?? []) {
+            for (const name of names) {
+              if (!pages.has(name)) {
+                pages.set(name, page.pageNumber);
+              }
+            }
+          }
+        } else if (block.type === "table") {
+          for (const cell of block.cells) {
+            visit(cell.content);
+          }
+        }
+      }
+    };
+    visit(page.content);
+  }
+  // Anything pass 2 never placed keeps the paginator's estimate.
+  for (const [name, page] of fallback.bookmarkPages) {
+    if (!pages.has(name)) {
+      pages.set(name, page);
+    }
+  }
+  return pages;
 }
 
 // =============================================================================
 // Internal: Page Building
 // =============================================================================
-
-const DEFAULT_FONT_SIZE_PT = 12;
 
 /**
  * Per-line wrap exclusion zone (a horizontal band that text must avoid).
@@ -365,6 +528,323 @@ function availableSlotForLine(
 interface BuildPageResult {
   readonly page: LayoutPage;
   readonly deferredFootnoteIds: readonly number[];
+  /**
+   * Blocks (or block remainders) that did not fit and must start the next page.
+   *
+   * The paginator in `layout.ts` estimates heights independently and cannot
+   * split a block at all — its item→page map holds exactly one page per body
+   * item. Pass 2 has the real measurements, so it owns the final fit decision:
+   * anything that would cross the bottom margin is split here and carried
+   * forward. Without this, a table or a paragraph taller than the space left
+   * simply ran off the page.
+   */
+  readonly carriedContent: readonly CarriedBlock[];
+}
+
+/** A laid-out block awaiting placement at the top of the next page. */
+type CarriedBlock =
+  | { readonly kind: "paragraph"; readonly block: LayoutParagraph }
+  | { readonly kind: "table"; readonly block: LayoutTable; readonly headerRows: number };
+
+/**
+ * How far through `doc.body` page building has got, threaded from page to page.
+ *
+ * Pass 2 measures for real, so it — not the estimating paginator — decides which
+ * page each block lands on. It walks the body once, filling each page until the
+ * next block does not fit, and only honours the paginator's *forced* breaks.
+ * Selecting items by the paginator's page number instead meant every
+ * disagreement between the two showed up in the output: content overflowed the
+ * bottom margin where the estimate was too optimistic, and pages stopped early,
+ * leaving a blank gap, where it was too pessimistic.
+ */
+interface FlowCursor {
+  /** Index of the next body item to place. */
+  nextItem: number;
+}
+
+/**
+ * Split a laid-out paragraph at a page boundary.
+ *
+ * `availableHeight` is the space left on the page, measured from the
+ * paragraph's own top (`rect.y`). Lines that fit stay in `head`; the rest are
+ * re-based to the top of the next page and returned as `tail`. `head` drops its
+ * space-after (it does not end the paragraph) and `tail` drops its space-before.
+ *
+ * Word's widow/orphan control forbids leaving a single line stranded, so a
+ * paragraph is only split where both sides keep at least two lines — unless the
+ * paragraph is taller than a whole page, where refusing to split would put it
+ * off the page altogether.
+ *
+ * `atPageTop` says the paragraph starts a fresh page, so moving it down again
+ * would be pointless: at least one line is emitted even if it does not fit,
+ * which is both what Word does with an over-tall line and what guarantees the
+ * page loop makes progress instead of carrying the same block forever.
+ */
+function splitLayoutParagraph(
+  para: LayoutParagraph,
+  availableHeight: number,
+  fullPageHeight: number,
+  atPageTop: boolean
+): { head: LayoutParagraph | null; tail: LayoutParagraph | null } {
+  const lines = para.lines;
+  if (lines.length === 0) {
+    return atPageTop ? { head: para, tail: null } : { head: null, tail: para };
+  }
+
+  // How many leading lines fit in the space left.
+  let fitCount = 0;
+  while (fitCount < lines.length) {
+    const line = lines[fitCount];
+    if (line.y + line.height > availableHeight) {
+      break;
+    }
+    fitCount++;
+  }
+
+  // A `w:br w:type="page"` inside the paragraph overrides fit: everything up to
+  // and including its line stays, the rest continues on the next page. Widow
+  // control does not apply — the author asked for the break.
+  const forced = para.pageBreakAfterLines?.find(index => index + 1 <= fitCount);
+  if (forced !== undefined && forced + 1 < lines.length) {
+    return sliceParagraphAtLine(para, forced + 1);
+  }
+
+  if (fitCount >= lines.length) {
+    // Every line fits and only the trailing space-after spills. Word does not
+    // render space-after across a page break, so trim the box to its last line
+    // rather than pushing a paragraph whose text fits onto the next page.
+    const last = lines[lines.length - 1];
+    const contentBottom = last.y + last.height;
+    return {
+      head:
+        para.rect.height > availableHeight
+          ? {
+              ...para,
+              rect: { ...para.rect, height: contentBottom },
+              // The trimmed box ends at the text, so nothing is inset below it.
+              ...(para.decorationInsets
+                ? { decorationInsets: { ...para.decorationInsets, bottom: 0 } }
+                : {})
+            }
+          : para,
+      tail: null
+    };
+  }
+
+  if (fitCount === 0) {
+    if (!atPageTop) {
+      return { head: null, tail: para };
+    }
+    fitCount = 1; // an over-tall line still has to go somewhere
+  } else {
+    const mustSplit = atPageTop || para.rect.height > fullPageHeight;
+    const widowSafe = fitCount >= 2 && lines.length - fitCount >= 2;
+    if (!widowSafe && !mustSplit) {
+      return { head: null, tail: para };
+    }
+  }
+
+  return sliceParagraphAtLine(para, fitCount);
+}
+
+/**
+ * Cut a laid-out paragraph so that `count` lines stay and the rest continue at
+ * the top of the next page.
+ *
+ * The head keeps its space-before but loses its space-after (it does not end the
+ * paragraph); the tail is the mirror image. Insets are relative to `rect`, so
+ * adjusting them is all the decoration needs. Per-line note ids are sliced
+ * alongside the lines so each note follows its own reference.
+ */
+function sliceParagraphAtLine(
+  para: LayoutParagraph,
+  count: number
+): { head: LayoutParagraph; tail: LayoutParagraph } {
+  const headLines = para.lines.slice(0, count);
+  const tailLines = para.lines.slice(count);
+  const headBottom = headLines[headLines.length - 1].y + headLines[headLines.length - 1].height;
+  const shift = tailLines[0].y;
+  const insets = para.decorationInsets;
+  const noteIds = para.lineNoteIds;
+  const bookmarks = para.lineBookmarks;
+  const breaks = para.pageBreakAfterLines;
+  return {
+    head: {
+      ...para,
+      rect: { ...para.rect, height: headBottom },
+      lines: headLines,
+      ...(noteIds ? { lineNoteIds: noteIds.slice(0, count) } : {}),
+      ...(bookmarks ? { lineBookmarks: bookmarks.slice(0, count) } : {}),
+      ...(breaks ? { pageBreakAfterLines: breaks.filter(i => i < count) } : {}),
+      ...(insets ? { decorationInsets: { ...insets, bottom: 0 } } : {})
+    },
+    tail: {
+      ...para,
+      rect: { ...para.rect, y: 0, height: para.rect.height - shift },
+      lines: tailLines.map(line => ({ ...line, y: line.y - shift })),
+      ...(noteIds ? { lineNoteIds: noteIds.slice(count) } : {}),
+      ...(bookmarks ? { lineBookmarks: bookmarks.slice(count) } : {}),
+      ...(breaks
+        ? { pageBreakAfterLines: breaks.filter(i => i >= count).map(i => i - count) }
+        : {}),
+      ...(insets ? { decorationInsets: { ...insets, top: 0 } } : {})
+    }
+  };
+}
+
+/**
+ * Split a laid-out table at a page boundary, on a row edge.
+ *
+ * Rows are never broken mid-height: a row that does not fit entirely moves to
+ * the next page whole. Rows marked `tableHeader` repeat at the top of the
+ * continuation so a table spanning pages keeps its column labels — which is
+ * what Word does and what the paginator in `layout.ts` already assumed.
+ *
+ * `atPageTop` has the same role as in `splitLayoutParagraph`: on a fresh page
+ * at least one row is emitted, so a row taller than the page overflows rather
+ * than being carried forever.
+ */
+function splitLayoutTable(
+  table: LayoutTable,
+  availableHeight: number,
+  headerRowCount: number,
+  atPageTop: boolean
+): { head: LayoutTable | null; tail: LayoutTable | null } {
+  if (table.cells.length === 0) {
+    return { head: table, tail: null };
+  }
+
+  // Row boundaries in table-relative coordinates.
+  const rowTop = new Map<number, number>();
+  const rowBottom = new Map<number, number>();
+  let maxRow = 0;
+  for (const cell of table.cells) {
+    const top = cell.rect.y;
+    const bottom = top + cell.rect.height;
+    rowTop.set(cell.row, Math.min(rowTop.get(cell.row) ?? top, top));
+    rowBottom.set(cell.row, Math.max(rowBottom.get(cell.row) ?? bottom, bottom));
+    maxRow = Math.max(maxRow, cell.row);
+  }
+  const rows = [...rowTop.keys()].sort((a, b) => a - b);
+
+  // First row index (in `rows`) that does not fit in the space left.
+  let fitRows = 0;
+  while (fitRows < rows.length && (rowBottom.get(rows[fitRows]) ?? 0) <= availableHeight) {
+    fitRows++;
+  }
+
+  if (fitRows >= rows.length) {
+    return { head: table, tail: null };
+  }
+
+  if (fitRows === 0 || (fitRows <= headerRowCount && !atPageTop)) {
+    // Nothing, or nothing but repeated header rows, would land here. Move the
+    // table down rather than leave a dangling header — unless this is already a
+    // fresh page, where at least one row has to be emitted.
+    if (!atPageTop) {
+      return { head: null, tail: table };
+    }
+    fitRows = Math.max(1, Math.min(headerRowCount + 1, rows.length));
+  }
+
+  const splitRow = rows[fitRows];
+  const headCells = table.cells.filter(c => c.row < splitRow);
+  const headHeight = rowBottom.get(rows[fitRows - 1]) ?? table.rect.height;
+
+  // The continuation repeats the header rows, then continues from `splitRow`.
+  const repeated = table.cells.filter(c => c.row < headerRowCount && c.row < splitRow);
+  const repeatedHeight =
+    repeated.length > 0 ? Math.max(...repeated.map(c => c.rect.y + c.rect.height)) : 0;
+  const shift = (rowTop.get(splitRow) ?? 0) - repeatedHeight;
+
+  const tailCells = [
+    // Repeated header rows already sit at the top of the table.
+    ...repeated,
+    ...table.cells
+      .filter(c => c.row >= splitRow)
+      .map(c => ({ ...c, rect: { ...c.rect, y: c.rect.y - shift } }))
+  ];
+
+  return {
+    head: {
+      ...table,
+      rect: { ...table.rect, height: headHeight },
+      cells: headCells
+    },
+    tail: {
+      ...table,
+      rect: { ...table.rect, y: 0, height: table.rect.height - shift },
+      cells: tailCells
+    }
+  };
+}
+
+/** Count the leading rows a table repeats on every page it spans. */
+function countRepeatedHeaderRows(table: Table): number {
+  let count = 0;
+  for (const row of table.rows) {
+    if (row.properties?.tableHeader !== true) {
+      break;
+    }
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Every section's properties, indexed by the section numbers `layout.ts` reports
+ * in `contentSections`.
+ *
+ * ECMA-376 stores a section's setup on the *last* paragraph of that section; the
+ * final section's lives on `doc.sectionProperties`. Pass 2 used only the final
+ * one for the whole document, so a document with sections rendered every page at
+ * the last section's paper size and margins, and never broke where a section
+ * boundary demanded it.
+ */
+function collectSectionProperties(doc: DocxDocument): (SectionProperties | undefined)[] {
+  const sections: (SectionProperties | undefined)[] = [];
+  for (const item of doc.body) {
+    if (item.type === "paragraph" && item.properties?.sectionProperties) {
+      sections.push(item.properties.sectionProperties);
+    }
+  }
+  // The trailing section is the one described by the document-level properties.
+  sections.push(doc.sectionProperties);
+  return sections;
+}
+
+/**
+ * How the boundary between two sections behaves.
+ *
+ * The break type lives on the sectPr of the section being *closed*, which is the
+ * convention `layout.ts` already paginates by — the two passes have to agree or
+ * they disagree about the page count. `continuous` keeps the following content on
+ * the same page unless the paper size changes, which forces one regardless.
+ */
+function sectionBoundary(
+  closing: SectionProperties | undefined,
+  next: SectionProperties | undefined
+): { readonly startsPage: boolean; readonly parity: "odd" | "even" | undefined } {
+  const breakType = closing?.breakType ?? "nextPage";
+  if (breakType === "continuous") {
+    const sameWidth =
+      (closing?.pageSize?.width ?? DEFAULT_PAGE_WIDTH_TWIPS) ===
+      (next?.pageSize?.width ?? DEFAULT_PAGE_WIDTH_TWIPS);
+    const sameHeight =
+      (closing?.pageSize?.height ?? DEFAULT_PAGE_HEIGHT_TWIPS) ===
+      (next?.pageSize?.height ?? DEFAULT_PAGE_HEIGHT_TWIPS);
+    return { startsPage: !(sameWidth && sameHeight), parity: undefined };
+  }
+  return {
+    startsPage: true,
+    parity: breakType === "oddPage" ? "odd" : breakType === "evenPage" ? "even" : undefined
+  };
+}
+
+/** The properties of section `index`, or the document's when out of range. */
+function sectionPropsOf(doc: DocxDocument, index: number): SectionProperties | undefined {
+  const sections = collectSectionProperties(doc);
+  return sections[index] ?? doc.sectionProperties;
 }
 
 function buildPage(
@@ -373,9 +853,16 @@ function buildPage(
   layout: LayoutResult,
   options: FullLayoutOptions | undefined,
   pendingFootnoteIds: readonly number[],
-  listMarkers?: ReadonlyMap<Paragraph, ListMarker>
+  listMarkers?: ReadonlyMap<Paragraph, ListMarker>,
+  carriedIn: readonly CarriedBlock[] = [],
+  flow?: FlowCursor,
+  section?: {
+    readonly index: number;
+    readonly props: SectionProperties | undefined;
+    readonly pageInSection: number;
+  }
 ): BuildPageResult {
-  const sectionProps = doc.sectionProperties;
+  const sectionProps = section ? section.props : doc.sectionProperties;
   const geometry = computePageGeometry(sectionProps, options?.pageGeometry);
   const content: PageContent[] = [];
   const imageMap = buildImageMap(doc.images);
@@ -387,6 +874,12 @@ function buildPage(
    * own newly-introduced notes.
    */
   const footnoteRefIds: number[] = [...pendingFootnoteIds];
+  /**
+   * Notes belonging to blocks this page could not hold at all. They follow their
+   * block to the next page; leaving them here would print a note whose reference
+   * is not on the page.
+   */
+  const carriedFootnoteRefs: number[] = [];
 
   /**
    * Wrap exclusion zones from floats with `square` / `tight` /
@@ -400,13 +893,178 @@ function buildPage(
 
   let cursorY = 0; // relative to content area top
 
-  for (let i = 0; i < doc.body.length; i++) {
-    if (layout.contentPages[i] !== pageNumber) {
+  /**
+   * Blocks this page could not hold. Once the first one overflows, everything
+   * after it must follow — pushing a later block up past an earlier one would
+   * reorder the document.
+   */
+  const carriedOut: CarriedBlock[] = [];
+
+  /**
+   * Collapse the space above the document's very first block.
+   *
+   * CSS collapses a container's first child's top margin, which is why VS Code's
+   * stylesheet can write `h1 { margin-top: 0 }` and still give every other
+   * heading 24px of air. Without it a document opens with its title pushed an
+   * arbitrary distance below the top margin, which no typesetter would do.
+   * Later pages keep their space-before: Word only drops it across a page break
+   * when explicitly asked to (`w:suppressSpBfAfterPgBrk`).
+   */
+  const collapseLeadingSpace = (laid: LayoutParagraph): LayoutParagraph => {
+    const lead = laid.lines[0]?.y ?? 0;
+    if (lead <= 0) {
+      return laid;
+    }
+    return {
+      ...laid,
+      rect: { ...laid.rect, height: laid.rect.height - lead },
+      lines: laid.lines.map(line => ({ ...line, y: line.y - lead })),
+      ...(laid.decorationInsets ? { decorationInsets: { ...laid.decorationInsets, top: 0 } } : {})
+    };
+  };
+
+  /**
+   * Place a paragraph, splitting it at the bottom margin when it does not fit.
+   * Returns false once the page is closed, so the caller stops placing.
+   */
+  const placeParagraph = (laid: LayoutParagraph): boolean => {
+    if (carriedOut.length > 0) {
+      carriedOut.push({ kind: "paragraph", block: laid });
+      return false;
+    }
+    const available = geometry.contentHeight - laid.rect.y;
+    // An internal page break must be honoured even when the whole paragraph
+    // would otherwise fit on this page.
+    const forcedBreakLine = laid.pageBreakAfterLines?.[0];
+    const hasForcedBreak = forcedBreakLine !== undefined && forcedBreakLine + 1 < laid.lines.length;
+    if (laid.rect.height <= available && !hasForcedBreak) {
+      content.push(laid);
+      cursorY = laid.rect.y + laid.rect.height;
+      return true;
+    }
+    if (
+      hasForcedBreak &&
+      laid.lines[forcedBreakLine].y + laid.lines[forcedBreakLine].height <= available
+    ) {
+      const cut = sliceParagraphAtLine(laid, forcedBreakLine + 1);
+      content.push(cut.head);
+      cursorY = cut.head.rect.y + cut.head.rect.height;
+      carriedOut.push({ kind: "paragraph", block: cut.tail });
+      return false;
+    }
+    const atPageTop = content.length === 0 && laid.rect.y <= 0.01;
+    const { head, tail } = splitLayoutParagraph(laid, available, geometry.contentHeight, atPageTop);
+    if (head) {
+      content.push(head);
+      cursorY = head.rect.y + head.rect.height;
+    }
+    if (tail) {
+      carriedOut.push({ kind: "paragraph", block: tail });
+      return false;
+    }
+    return true;
+  };
+
+  /** Place a table, splitting it on a row edge when it does not fit. */
+  const placeTable = (laid: LayoutTable, headerRows: number): boolean => {
+    if (carriedOut.length > 0) {
+      carriedOut.push({ kind: "table", block: laid, headerRows });
+      return false;
+    }
+    const available = geometry.contentHeight - laid.rect.y;
+    if (laid.rect.height <= available) {
+      content.push(laid);
+      cursorY = laid.rect.y + laid.rect.height;
+      return true;
+    }
+    const atPageTop = content.length === 0 && laid.rect.y <= 0.01;
+    const { head, tail } = splitLayoutTable(laid, available, headerRows, atPageTop);
+    if (head) {
+      content.push(head);
+      cursorY = head.rect.y + head.rect.height;
+    }
+    if (tail) {
+      carriedOut.push({ kind: "table", block: tail, headerRows });
+      return false;
+    }
+    return true;
+  };
+
+  // Remainders carried from the previous page go first, at the content top.
+  for (const carried of carriedIn) {
+    if (carried.kind === "paragraph") {
+      const rebased: LayoutParagraph = {
+        ...carried.block,
+        rect: { ...carried.block.rect, y: cursorY }
+      };
+      if (!placeParagraph(rebased)) {
+        break;
+      }
+    } else {
+      // Cell rects are table-relative, so moving the table is enough.
+      const rebased: LayoutTable = {
+        ...carried.block,
+        rect: { ...carried.block.rect, y: cursorY }
+      };
+      if (!placeTable(rebased, carried.headerRows)) {
+        break;
+      }
+    }
+  }
+
+  // Which body items this page draws from. In flow mode the page takes items in
+  // order from the shared cursor and stops when one no longer fits; otherwise
+  // (the footnote-only spill page) it takes the paginator's assignment.
+  const flowMode = flow !== undefined;
+  const startItem = flowMode ? flow.nextItem : 0;
+  let placedItems = 0;
+  let stopFlow = false;
+
+  /** A body item's effective `w:keepNext` — "do not end a page on me". */
+  const keepsWithNext = (index: number): boolean => {
+    const item = doc.body[index];
+    if (!item || item.type !== "paragraph" || !activeDoc) {
+      return false;
+    }
+    return resolveStyle(activeDoc, item).paragraphProperties.keepNext === true;
+  };
+
+  for (let i = startItem; i < doc.body.length; i++) {
+    if (flowMode) {
+      if (stopFlow || carriedOut.length > 0) {
+        break;
+      }
+      // A forced break (explicit page break or section break) must be honoured
+      // even when the rest of the page is empty.
+      if (layout.forcedBreakBefore[i] && (content.length > 0 || placedItems > 0)) {
+        break;
+      }
+      // A section boundary ends the page when the section being closed says so,
+      // because the next section may use different paper, margins and headers.
+      if (
+        section !== undefined &&
+        layout.contentSections[i] !== section.index &&
+        (content.length > 0 || placedItems > 0) &&
+        sectionBoundary(section.props, sectionPropsOf(doc, layout.contentSections[i])).startsPage
+      ) {
+        break;
+      }
+    } else if (layout.contentPages[i] !== pageNumber) {
       continue;
     }
 
     const item = doc.body[i];
-    collectFootnoteRefsFromBody(item, footnoteRefIds);
+    // Collected into a per-item list first. A block that turns out not to fit is
+    // carried whole to the next page, and its notes have to travel with it —
+    // adding them to the page's list up front left the note on a page whose
+    // reference had moved on.
+    const itemFootnoteRefs: number[] = [];
+    collectFootnoteRefsFromBody(item, itemFootnoteRefs);
+    const contentBefore = content.length;
+    // A top-level paragraph reports which of its notes are referenced from which
+    // line, so a split hands each note to the right page. Other block kinds are
+    // not split, and their whole-item list is exact.
+    const usesLineAttribution = item.type === "paragraph" && itemFootnoteRefs.length > 0;
     const pageContext: PageLayoutContext = {
       exclusions: pageExclusions,
       contentWidth: geometry.contentWidth
@@ -422,14 +1080,23 @@ function buildPage(
           imageMap,
           listMarkers
         );
-        content.push({ ...laid, sourceIndex: i });
-        cursorY = laid.rect.y + laid.rect.height;
+        const positioned = { ...laid, sourceIndex: i };
+        if (
+          !placeParagraph(
+            pageNumber === 1 && content.length === 0 && startItem === 0
+              ? collapseLeadingSpace(positioned)
+              : positioned
+          )
+        ) {
+          stopFlow = true;
+        }
         break;
       }
       case "table": {
         const laid = layoutTable(item, cursorY, geometry.contentWidth, i, options, imageMap);
-        content.push(laid);
-        cursorY = laid.rect.y + laid.rect.height;
+        if (!placeTable(laid, countRepeatedHeaderRows(item))) {
+          stopFlow = true;
+        }
         break;
       }
       case "floatingImage": {
@@ -560,10 +1227,100 @@ function buildPage(
         );
       }
     }
+
+    // Whether any part of the item landed here decides where its notes go.
+    if (itemFootnoteRefs.length > 0) {
+      const placed = content.length > contentBefore;
+      if (!placed) {
+        carriedFootnoteRefs.push(...itemFootnoteRefs);
+      } else if (usesLineAttribution) {
+        // Split-aware: the placed slice reports its own lines' notes, and
+        // whatever is left over travels with the carried remainder.
+        const block = content[content.length - 1];
+        const kept =
+          block.type === "paragraph" && block.lineNoteIds
+            ? block.lineNoteIds.flat()
+            : itemFootnoteRefs;
+        footnoteRefIds.push(...kept);
+        const keptSet = new Set(kept);
+        for (const id of itemFootnoteRefs) {
+          if (!keptSet.has(id)) {
+            carriedFootnoteRefs.push(id);
+          }
+        }
+      } else {
+        footnoteRefIds.push(...itemFootnoteRefs);
+      }
+    }
+
+    if (flowMode) {
+      // A block that was split leaves its remainder in `carriedOut`; the item
+      // itself is done either way, so the cursor always advances and the flow
+      // cannot revisit it.
+      flow.nextItem = i + 1;
+      placedItems++;
+    }
   }
 
-  const header = layoutHeader(doc, pageNumber, geometry, options, imageMap);
-  const footer = layoutFooter(doc, pageNumber, geometry, options, imageMap);
+  if (flowMode) {
+    // `w:keepNext` after the fact, rather than by looking ahead.
+    //
+    // A predictive check has to guess how much of the *next* block counts as
+    // "started", and it has to do so for a whole chain of `keepNext` paragraphs
+    // at once. Getting that wrong is expensive in both directions: demanding the
+    // entire chain fit gave every heading in a run its own page, and the repeated
+    // trial layouts were quadratic in the chain length.
+    //
+    // Deciding afterwards needs no prediction. If the page ends on a `keepNext`
+    // paragraph and there is more to come, hand it to the next page — repeatedly,
+    // so a run of headings travels together. The page must keep at least one
+    // block, since a heading alone on a page is better than an empty one.
+    const more = flow.nextItem < doc.body.length || carriedOut.length > 0;
+    if (more) {
+      // Length of the trailing run of `keepNext` paragraphs.
+      let run = 0;
+      while (run < content.length) {
+        const block = content[content.length - 1 - run];
+        if (block.type !== "paragraph" || block.sourceIndex < 0) {
+          break;
+        }
+        if (!keepsWithNext(block.sourceIndex)) {
+          break;
+        }
+        run++;
+      }
+      // Move the whole run down together — but only if something that is not
+      // part of it stays behind. When the entire page is one `keepNext` run the
+      // request cannot be met (a page has to hold something), and Word likewise
+      // lets the break stand rather than emitting a page per paragraph.
+      if (run > 0 && run < content.length) {
+        const moved = content.splice(content.length - run, run);
+        cursorY = moved[0].rect.y;
+        for (let k = moved.length - 1; k >= 0; k--) {
+          carriedOut.unshift({ kind: "paragraph", block: moved[k] as LayoutParagraph });
+        }
+      }
+    }
+  }
+
+  const header = layoutHeader(
+    doc,
+    pageNumber,
+    section?.pageInSection ?? pageNumber,
+    sectionProps,
+    geometry,
+    options,
+    imageMap
+  );
+  const footer = layoutFooter(
+    doc,
+    pageNumber,
+    section?.pageInSection ?? pageNumber,
+    sectionProps,
+    geometry,
+    options,
+    imageMap
+  );
 
   // Compute the absolute (page-y) lower edge of body content so the
   // footnote layout knows how much vertical room is actually free.
@@ -605,7 +1362,10 @@ function buildPage(
       ...(footnoteResult.laid.length > 0 ? { footnoteArea: footnoteResult.laid } : {}),
       ...(footnoteSeparator ? { footnoteSeparator } : {})
     },
-    deferredFootnoteIds: footnoteResult.deferred
+    // Notes deferred for want of room come first; those following a carried
+    // block come after, matching reading order on the next page.
+    deferredFootnoteIds: [...footnoteResult.deferred, ...carriedFootnoteRefs],
+    carriedContent: carriedOut
   };
 }
 
@@ -878,13 +1638,17 @@ function collectFootnoteRefsFromRun(run: Run, out: number[]): void {
 function pickHeaderFooterRef(
   refs: readonly { readonly type: string; readonly rId: string }[],
   pageNumber: number,
+  pageInSection: number,
   titlePage: boolean,
   evenAndOdd: boolean
 ): { readonly type: string; readonly rId: string } | undefined {
   const find = (t: string): { readonly type: string; readonly rId: string } | undefined =>
     refs.find(r => r.type === t);
 
-  if (titlePage && pageNumber === 1) {
+  // `titlePage` is per section — its "first" header belongs to the first page of
+  // *that* section. Even/odd is per document, since it follows the printed page
+  // number.
+  if (titlePage && pageInSection === 1) {
     const first = find("first");
     if (first) {
       return first;
@@ -916,17 +1680,21 @@ function pickHeaderFooterRef(
 function layoutHeader(
   doc: DocxDocument,
   pageNumber: number,
+  pageInSection: number,
+  sectionProps: SectionProperties | undefined,
   geometry: PageGeometry,
   options: FullLayoutOptions | undefined,
   imageMap: ReadonlyMap<string, ImageDef>
 ): (LayoutParagraph | LayoutTable)[] {
-  const refs = doc.sectionProperties?.headers;
+  const refs = sectionProps?.headers;
   if (!refs || refs.length === 0) {
     return [];
   }
-  const titlePage = doc.sectionProperties?.titlePage === true;
+  // `titlePage` picks the "first" reference on the first page *of its section*,
+  // not of the document.
+  const titlePage = sectionProps?.titlePage === true;
   const evenAndOdd = doc.settings?.evenAndOddHeaders === true;
-  const ref = pickHeaderFooterRef(refs, pageNumber, titlePage, evenAndOdd);
+  const ref = pickHeaderFooterRef(refs, pageNumber, pageInSection, titlePage, evenAndOdd);
   if (!ref) {
     return [];
   }
@@ -947,17 +1715,19 @@ function layoutHeader(
 function layoutFooter(
   doc: DocxDocument,
   pageNumber: number,
+  pageInSection: number,
+  sectionProps: SectionProperties | undefined,
   geometry: PageGeometry,
   options: FullLayoutOptions | undefined,
   imageMap: ReadonlyMap<string, ImageDef>
 ): (LayoutParagraph | LayoutTable)[] {
-  const refs = doc.sectionProperties?.footers;
+  const refs = sectionProps?.footers;
   if (!refs || refs.length === 0) {
     return [];
   }
-  const titlePage = doc.sectionProperties?.titlePage === true;
+  const titlePage = sectionProps?.titlePage === true;
   const evenAndOdd = doc.settings?.evenAndOddHeaders === true;
-  const ref = pickHeaderFooterRef(refs, pageNumber, titlePage, evenAndOdd);
+  const ref = pickHeaderFooterRef(refs, pageNumber, pageInSection, titlePage, evenAndOdd);
   if (!ref) {
     return [];
   }
@@ -1055,13 +1825,19 @@ function computePageGeometry(
   };
 }
 
-function computeSectionBreaks(layout: LayoutResult): number[] {
+function computeSectionBreaks(
+  layout: LayoutResult,
+  itemPage: ReadonlyMap<number, number>
+): number[] {
   const breaks: number[] = [0]; // First section starts at page 0
   let prevSection = 0;
   for (let i = 0; i < layout.contentPages.length; i++) {
     const section = layout.contentSections[i];
     if (section > prevSection) {
-      breaks.push(layout.contentPages[i] - 1);
+      // Prefer the page pass 2 actually placed the item on; fall back to the
+      // paginator's estimate for an item pass 2 never emitted.
+      const page = itemPage.get(i) ?? layout.contentPages[i];
+      breaks.push(page - 1);
       prevSection = section;
     }
   }
@@ -1092,6 +1868,102 @@ interface ListMarker {
  * level's `NumberFormat` (decimal / lower-upper letter / lower-upper roman),
  * falling back to decimal for formats we don't render numerically.
  */
+/** What a paragraph's neighbours change about its own spacing and decoration. */
+interface ContextualSpacing {
+  /** Suppress space-before (`w:contextualSpacing`, same style above). */
+  readonly before: boolean;
+  /** Suppress space-after (`w:contextualSpacing`, same style below). */
+  readonly after: boolean;
+  /** The paragraph above shares this one's borders and shading. */
+  readonly mergeDecorationTop: boolean;
+  /** The paragraph below shares this one's borders and shading. */
+  readonly mergeDecorationBottom: boolean;
+}
+
+/**
+ * Resolve `w:contextualSpacing` — "ignore spacing above and below when using
+ * identical styles" — for every paragraph in the document.
+ *
+ * Word suppresses a paragraph's own space-before when the paragraph directly
+ * above uses the same style, and its space-after when the one below does. That
+ * is what keeps a bulleted list tight while still separating the list as a whole
+ * from surrounding body text; Word's `ListParagraph` style sets the flag. The
+ * layout engine ignored it, so every list item carried its full spacing and
+ * lists rendered looser than in Word.
+ *
+ * Adjacency is judged among *siblings*, so each table cell, text box and
+ * footnote forms its own run of paragraphs, and a non-paragraph block (a nested
+ * table, an image frame) between two paragraphs breaks the run.
+ */
+function computeContextualSpacing(doc: DocxDocument): Map<Paragraph, ContextualSpacing> {
+  const out = new Map<Paragraph, ContextualSpacing>();
+
+  /**
+   * A paragraph's decoration reduced to a comparable key, or "" for none.
+   *
+   * Two adjacent paragraphs sharing a key are one decorated block: a two-
+   * paragraph block quote is one bar, a code block is one frame.
+   */
+  const decorationKey = (item: BodyContent | Paragraph | Table | undefined): string => {
+    if (!item || item.type !== "paragraph") {
+      return "";
+    }
+    const effective = resolveStyle(doc, item).paragraphProperties;
+    const borders = resolveParagraphBorders(effective.borders);
+    const fill = resolveShadingFill(effective.shading);
+    if (!borders && !fill) {
+      return "";
+    }
+    return JSON.stringify({ borders: borders ?? null, fill: fill ?? null });
+  };
+
+  const visit = (items: readonly BodyContent[] | readonly (Paragraph | Table)[]): void => {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type === "table") {
+        for (const row of item.rows) {
+          for (const cell of row.cells) {
+            visit(cell.content);
+          }
+        }
+        continue;
+      }
+      if (item.type !== "paragraph") {
+        continue;
+      }
+      const previous = items[i - 1];
+      const next = items[i + 1];
+
+      // Contextual spacing: the flag is inheritable (that is how
+      // `ListParagraph` carries it) and compares by style identity.
+      const effective = resolveStyle(doc, item).paragraphProperties;
+      const styleId = item.properties?.style;
+      const sameStyle = (other: (typeof items)[number] | undefined): boolean =>
+        other?.type === "paragraph" && other.properties?.style === styleId;
+      const contextual = effective.contextualSpacing === true;
+
+      // Decoration runs: a shared bar or frame must not be interrupted by the
+      // space between the paragraphs it spans, so the shared edge is not inset.
+      const own = decorationKey(item);
+      const mergeTop = own !== "" && decorationKey(previous) === own;
+      const mergeBottom = own !== "" && decorationKey(next) === own;
+
+      if (!contextual && !mergeTop && !mergeBottom) {
+        continue;
+      }
+      out.set(item, {
+        before: contextual && sameStyle(previous),
+        after: contextual && sameStyle(next),
+        mergeDecorationTop: mergeTop,
+        mergeDecorationBottom: mergeBottom
+      });
+    }
+  };
+
+  visit(doc.body);
+  return out;
+}
+
 function computeListMarkers(doc: DocxDocument): Map<Paragraph, ListMarker> {
   const markers = new Map<Paragraph, ListMarker>();
   const instances = doc.numberingInstances;
@@ -1159,7 +2031,12 @@ function computeListMarkers(doc: DocxDocument): Map<Paragraph, ListMarker> {
     }
 
     seenNumIds.add(numbering.numId);
-    const indentPt = (level + 1) * 36; // 0.5" per level
+    // Indent: prefer the numbering level's own `w:lvl/w:pPr/w:ind`, which is
+    // where Word records a list's real geometry (and where any customised
+    // list puts it). Only fall back to the conventional half inch per level
+    // when the level definition is silent.
+    const levelIndent = levelDef.paragraphProperties?.indent?.left;
+    const indentPt = levelIndent != null ? twipsToPt(levelIndent) : (level + 1) * 36;
 
     if (levelDef.format === "bullet") {
       // Bullet symbol. Word authors bullets with Symbol/Wingdings private-use
@@ -1303,27 +2180,49 @@ function layoutParagraph(
   options?: FullLayoutOptions,
   pageContext?: PageLayoutContext,
   imageMap?: ReadonlyMap<string, ImageDef>,
-  listMarkers?: ReadonlyMap<Paragraph, ListMarker>
+  listMarkers?: ReadonlyMap<Paragraph, ListMarker>,
+  styleContext?: StyleResolveContext
 ): LayoutParagraph {
   const props = para.properties;
-  const spacing = props?.spacing;
-  // Resolve effective run properties from the paragraph's style chain. When
-  // the style supplies a concrete font size we honour it; only when it does
-  // not do we fall back to the heuristic heading scale so headings stay
+  // Resolve the effective paragraph *and* run properties from the style chain
+  // (own props → Heading1 → Normal → docDefaults). Reading `para.properties`
+  // directly would drop everything a named style contributes — which is where
+  // heading spacing, quote indents and default body spacing live, so headings
+  // ended up with zero space before/after and collided with their neighbours.
+  //
+  // `styleContext` carries the paragraph's position inside a table when there
+  // is one, which is what lets a table style's conditional formats (header row,
+  // banded rows, corner cells) reach the cell's text.
+  const resolved = activeDoc ? resolveStyle(activeDoc, para, styleContext) : undefined;
+  const styleRunProps = resolved?.runProperties;
+  // `resolveStyle` strips `style` from the merged result (it is the selector,
+  // not an inherited value); put it back so the heading-level heuristic can
+  // still recognise a "Heading2" style name.
+  const effective: ParagraphProperties | undefined = resolved
+    ? props?.style
+      ? { ...resolved.paragraphProperties, style: props.style }
+      : resolved.paragraphProperties
+    : props;
+  const spacing = effective?.spacing;
+  // When the style supplies a concrete font size we honour it; only when it
+  // does not do we fall back to the heuristic heading scale so headings stay
   // distinct in documents lacking a styles table.
-  const styleRunProps = activeDoc ? resolveStyle(activeDoc, para).runProperties : undefined;
   const styleHasSize = styleRunProps?.size != null;
-  const headingScale = styleHasSize ? 1 : getHeadingFontScale(getHeadingLevel(props));
+  const headingScale = styleHasSize ? 1 : getHeadingFontScale(getHeadingLevel(effective));
 
-  // Space before
+  // Space before. `w:contextualSpacing` drops it when the paragraph above uses
+  // the same style (see `computeContextualSpacing`).
+  const contextual = activeContextualSpacing?.get(para);
   let spaceBefore = 0;
-  if (spacing?.beforeAutoSpacing) {
+  if (contextual?.before) {
+    spaceBefore = 0;
+  } else if (spacing?.beforeAutoSpacing) {
     spaceBefore = 5;
   } else if (spacing?.before != null) {
     spaceBefore = twipsToPt(spacing.before);
   }
 
-  const indent = props?.indent;
+  const indent = effective?.indent;
   // Prefer an explicitly threaded map; fall back to the active layout's
   // shared map so list markers also render inside tables, text boxes, SDTs,
   // footnotes, etc. (whose layoutParagraph calls don't thread it through).
@@ -1333,11 +2232,56 @@ function layoutParagraph(
   // list items) still wins when larger.
   const markerIndentPt = marker ? marker.indentPt : 0;
   const leftIndentPt = Math.max(indent?.left ? twipsToPt(indent.left) : 0, markerIndentPt);
-  const firstLineIndentPt = indent?.firstLine ? twipsToPt(indent.firstLine) : 0;
-  const alignment = props?.alignment ?? "left";
+  const alignment = effective?.alignment ?? "left";
 
-  // Line height
-  let lineHeightPt = DEFAULT_FONT_SIZE_PT * 1.2;
+  // Collect runs
+  const segments = collectParagraphSegments(para, styleRunProps);
+  // Inject the list marker (bullet / number) as a leading text run so it
+  // renders inline at the start of the first line, inheriting the first
+  // text run's formatting (font / size) for visual consistency.
+  let markerWidthPt = 0;
+  if (marker) {
+    let firstRunProps: Run["properties"];
+    for (const s of segments) {
+      if (isTextSegment(s)) {
+        firstRunProps = s.properties;
+        break;
+      }
+    }
+    segments.unshift({ text: marker.text, properties: firstRunProps });
+    markerWidthPt = measureLayoutText(
+      marker.text,
+      resolveRunFontName(firstRunProps),
+      getRunFontSizePt(firstRunProps) * headingScale,
+      options,
+      firstRunProps?.bold,
+      firstRunProps?.italic
+    );
+  }
+
+  /**
+   * How far the first line starts *left* of the paragraph's left indent.
+   *
+   * `w:hanging` states it directly. A list gets it implicitly: the marker is
+   * injected inline, so hanging it by exactly its own width makes the text that
+   * follows land on the left indent — and every wrapped line, which starts at
+   * the left indent, then aligns with the text rather than sitting under the
+   * marker. Without this a wrapped list item ran back out to the marker's
+   * column, which is the single most obvious way a rendered list looks wrong.
+   */
+  const hangingIndentPt = indent?.hanging ? twipsToPt(indent.hanging) : marker ? markerWidthPt : 0;
+  // A hanging indent is a negative first-line indent; the two are mutually
+  // exclusive in OOXML, and `w:hanging` wins where both appear.
+  const firstLineIndentPt =
+    hangingIndentPt > 0 ? -hangingIndentPt : indent?.firstLine ? twipsToPt(indent.firstLine) : 0;
+
+  // Line height. The natural height comes from the paragraph's largest run,
+  // so a 24 pt heading gets a 24 pt-sized line box instead of the document
+  // default's — without this every paragraph shared one 14.4 pt line height
+  // and large text overlapped the text around it.
+  const naturalLineHeightPt =
+    naturalParagraphLineHeightPt(segments, props, styleRunProps) * headingScale;
+  let lineHeightPt = naturalLineHeightPt;
   if (spacing?.line) {
     const rule = spacing.lineRule ?? "auto";
     switch (rule) {
@@ -1345,31 +2289,19 @@ function layoutParagraph(
         lineHeightPt = twipsToPt(spacing.line);
         break;
       case "atLeast":
-        lineHeightPt = Math.max(twipsToPt(spacing.line), lineHeightPt);
+        lineHeightPt = Math.max(twipsToPt(spacing.line), naturalLineHeightPt);
         break;
       case "auto":
-        lineHeightPt = DEFAULT_FONT_SIZE_PT * 1.2 * (spacing.line / 240);
+        lineHeightPt = naturalLineHeightPt * (spacing.line / 240);
         break;
     }
   }
-  lineHeightPt *= headingScale;
 
-  // Collect runs
-  const segments = mergeStyleRunProps(collectParagraphSegments(para), styleRunProps);
-  // Inject the list marker (bullet / number) as a leading text run so it
-  // renders inline at the start of the first line, inheriting the first
-  // text run's formatting (font / size) for visual consistency.
-  if (marker) {
-    let firstRunProps: Run["properties"];
-    for (const s of segments) {
-      if (!("type" in s) || s.type === undefined) {
-        firstRunProps = (s as TextSegment).properties;
-        break;
-      }
-    }
-    segments.unshift({ text: marker.text, properties: firstRunProps });
-  }
-  const fullAvailableWidth = contentWidth - leftIndentPt;
+  // The text column: the content width less both indents. Ignoring the right
+  // indent let a block quote's or code block's right padding reduce nothing, so
+  // its text ran to the same right edge as body text.
+  const rightIndentForWrapPt = indent?.right ? twipsToPt(indent.right) : 0;
+  const fullAvailableWidth = Math.max(1, contentWidth - leftIndentPt - rightIndentForWrapPt);
 
   // When a page has wrap exclusions (square / tight / through floats)
   // we wrap line-by-line, asking the page context for the widest free
@@ -1404,6 +2336,9 @@ function layoutParagraph(
 
   // Build line boxes
   const lineBoxes: LineBox[] = [];
+  const lineNoteIds: number[][] = [];
+  const lineBookmarks: string[][] = [];
+  const pageBreakAfterLines: number[] = [];
   let yOffset = spaceBefore;
 
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
@@ -1425,6 +2360,10 @@ function layoutParagraph(
     let lineWidth = 0;
     let lineMaxHeight = lineHeightPt;
     for (const seg of lineSegments) {
+      if ("type" in seg && seg.type === "break") {
+        // A hard break draws nothing; it only ended the previous line.
+        continue;
+      }
       if ("type" in seg && seg.type === "image") {
         const w = emuToPt(seg.content.width);
         const h = emuToPt(seg.content.height);
@@ -1456,6 +2395,9 @@ function layoutParagraph(
     xPos += lineLeftIndent;
 
     for (const seg of lineSegments) {
+      if ("type" in seg && seg.type === "break") {
+        continue;
+      }
       if ("type" in seg && seg.type === "image") {
         const widthPt = emuToPt(seg.content.width);
         const heightPt = emuToPt(seg.content.height);
@@ -1522,18 +2464,32 @@ function layoutParagraph(
       runs,
       alignment: mappedAlignment
     });
+    // Which notes are referenced from this line, so a page split can hand each
+    // note to the page holding its reference.
+    lineNoteIds.push(lineSegments.flatMap(seg => (isTextSegment(seg) ? (seg.noteIds ?? []) : [])));
+    lineBookmarks.push(
+      lineSegments.flatMap(seg => (isTextSegment(seg) ? (seg.bookmarks ?? []) : []))
+    );
+    if (lineSegments.some(seg => "type" in seg && seg.type === "break" && seg.pageBreak === true)) {
+      pageBreakAfterLines.push(lineIdx);
+    }
 
     yOffset += lineMaxHeight;
   }
 
-  // If empty paragraph, still advance by one line
-  if (lineBoxes.length === 0) {
+  // An empty paragraph still occupies a line — except a thematic break, whose
+  // whole content *is* its border. Reserving a line for it made a Markdown
+  // `---` nearly three times as tall as the `hr` it stands for.
+  if (lineBoxes.length === 0 && effective?.thematicBreak !== true) {
     yOffset += lineHeightPt;
   }
 
-  // Space after
+  // Space after — suppressed by `w:contextualSpacing` when the paragraph below
+  // uses the same style.
   let spaceAfter = 0;
-  if (spacing?.afterAutoSpacing) {
+  if (contextual?.after) {
+    spaceAfter = 0;
+  } else if (spacing?.afterAutoSpacing) {
     spaceAfter = 5;
   } else if (spacing?.after != null) {
     spaceAfter = twipsToPt(spacing.after);
@@ -1541,11 +2497,94 @@ function layoutParagraph(
 
   const totalHeight = yOffset + spaceAfter;
 
+  // Where borders and shading sit relative to `rect`. Word paints them around
+  // the *text*, so the space-before and space-after are inset away, and across
+  // the indented text column rather than the full content width.
+  let borders = resolveParagraphBorders(effective?.borders);
+  const backgroundColor = resolveShadingFill(effective?.shading);
+  const decorated = borders !== undefined || backgroundColor !== undefined;
+
+  // Adjacent paragraphs sharing a decoration form one block — a two-paragraph
+  // block quote is one bar, a fenced code block one frame. The shared edge is
+  // not inset (so the bar and the fill run continuously through the space
+  // between them) and its horizontal rule is dropped (so no line is drawn
+  // across the middle of the block).
+  if (borders && (contextual?.mergeDecorationTop || contextual?.mergeDecorationBottom)) {
+    const { top, bottom, ...sides } = borders;
+    // At an internal boundary the block's own top/bottom rule would cut across
+    // the middle of it. `w:between` is the border OOXML defines *for* that
+    // boundary; drawn as the lower paragraph's top edge it appears exactly once
+    // per boundary. Absent a `w:between`, the boundary is left open.
+    const between = resolveBorderEdge(effective?.borders?.between);
+    borders = {
+      ...sides,
+      ...(contextual.mergeDecorationTop ? (between ? { top: between } : {}) : top ? { top } : {}),
+      ...(contextual.mergeDecorationBottom ? {} : bottom ? { bottom } : {})
+    };
+  }
+
   return {
     type: "paragraph",
     rect: { x: 0, y: startY, width: contentWidth, height: totalHeight },
     lines: lineBoxes,
+    ...(borders ? { borders } : {}),
+    ...(backgroundColor ? { backgroundColor } : {}),
+    ...(lineNoteIds.some(ids => ids.length > 0) ? { lineNoteIds } : {}),
+    ...(lineBookmarks.some(names => names.length > 0) ? { lineBookmarks } : {}),
+    ...(pageBreakAfterLines.length > 0 ? { pageBreakAfterLines } : {}),
+    ...(decorated
+      ? {
+          decorationInsets: {
+            left: leftIndentPt,
+            right: rightIndentForWrapPt,
+            top: contextual?.mergeDecorationTop ? 0 : spaceBefore,
+            bottom: contextual?.mergeDecorationBottom ? 0 : spaceAfter
+          }
+        }
+      : {}),
     sourceIndex: 0 // overwritten by caller
+  };
+}
+
+/**
+ * Resolve `w:pBdr` to drawable edges, or undefined when nothing is drawn.
+ *
+ * `w:sz` is in eighths of a point and `w:space` in whole points. A border
+ * declared without a size is a hairline, matching how Word renders one.
+ */
+/**
+ * One `w:pBdr` edge as a drawable stroke, or undefined when it draws nothing.
+ *
+ * `w:sz` is in eighths of a point and `w:space` in whole points. An edge declared
+ * without a size is a hairline, which is how Word renders one.
+ */
+function resolveBorderEdge(b: Border | undefined): LayoutBorderEdge | undefined {
+  if (!b || b.style === "none" || b.style === "nil") {
+    return undefined;
+  }
+  const width = b.size != null ? b.size / 8 : 0.5;
+  const color = !b.color || b.color === "auto" ? "000000" : b.color.replace(/^#/, "");
+  return { width: Math.max(0.25, width), color, space: b.space ?? 0 };
+}
+
+function resolveParagraphBorders(borders: ParagraphBorders | undefined): LayoutBorders | undefined {
+  if (!borders) {
+    return undefined;
+  }
+  const top = resolveBorderEdge(borders.top);
+  const bottom = resolveBorderEdge(borders.bottom);
+  // `w:bar` is a vertical bar down the paragraph's leading edge — the same
+  // stroke as `w:left` for a left-to-right layout.
+  const left = resolveBorderEdge(borders.left ?? borders.bar);
+  const right = resolveBorderEdge(borders.right);
+  if (!top && !bottom && !left && !right) {
+    return undefined;
+  }
+  return {
+    ...(top ? { top } : {}),
+    ...(bottom ? { bottom } : {}),
+    ...(left ? { left } : {}),
+    ...(right ? { right } : {})
   };
 }
 
@@ -1581,9 +2620,27 @@ function layoutTable(
   const cells: LayoutTableCell[] = [];
   let cursorY = 0;
 
+  // Table-style context, shared by every cell in this table. A table style's
+  // conditional formats (`firstRow`, `lastRow`, banding, corner cells) are
+  // resolved per cell position, so each cell's paragraphs need to know where
+  // they sit. Without this, Word's built-in table styles lost their bold header
+  // row and banded shading in the output.
+  const totalRows = table.rows.length;
+  const tableStyleId = table.properties?.style;
+  const tblLook = table.properties?.look;
+
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     let maxRowHeight = DEFAULT_FONT_SIZE_PT * 1.5; // minimum row height
+    // `w:trHeight`: `exact` fixes the row height outright, `atLeast` raises the
+    // floor. Ignoring it let a table with declared row heights render squashed —
+    // and, now that this pass owns pagination, shifted everything after it.
+    const declaredHeight = row.properties?.height;
+    const declaredHeightPt =
+      declaredHeight?.value != null ? twipsToPt(declaredHeight.value) : undefined;
+    if (declaredHeightPt !== undefined && declaredHeight?.rule !== "auto") {
+      maxRowHeight = Math.max(maxRowHeight, declaredHeightPt);
+    }
 
     // Track the grid column each cell occupies, honouring gridSpan so a
     // 2-wide cell pushes the next cell two grid columns to the right.
@@ -1596,41 +2653,90 @@ function layoutTable(
       const cellX = colOffsets[startCol] ?? 0;
       const cellWidth = (colOffsets[endCol] ?? contentWidth) - cellX;
       const cellContent: (LayoutParagraph | LayoutTable)[] = [];
-      let cellCursorY = 2; // cell padding top
+      // Word's cell margins (`w:tblCellMar` / `w:tcMar`) inset the content from
+      // all four borders. Both the horizontal inset and the reduced wrap width
+      // matter: subtracting the margins from the available width alone (as this
+      // did) left every cell's text flush against its left border.
+      const margins = resolveCellMarginsPt(table.properties, cell.properties);
+      const innerWidth = Math.max(1, cellWidth - margins.left - margins.right);
+      let cellCursorY = margins.top;
+      const cellStyleContext: StyleResolveContext | undefined = tableStyleId
+        ? {
+            tableContext: {
+              tableStyleId,
+              tblLook,
+              rowIndex: ri,
+              colIndex: startCol,
+              totalRows,
+              totalCols: Math.max(numCols, colWidths.length),
+              rowBandSize: table.properties?.rowBandSize,
+              colBandSize: table.properties?.colBandSize
+            }
+          }
+        : undefined;
 
       for (const block of cell.content) {
         if (block.type === "paragraph") {
           const laid = layoutParagraph(
             block,
             cellCursorY,
-            cellWidth - 4,
+            innerWidth,
             options,
             undefined,
-            imageMap
+            imageMap,
+            undefined,
+            cellStyleContext
           );
-          cellContent.push({ ...laid, sourceIndex: -1 });
+          // Shift the content right by the left margin. Renderers position a
+          // cell's content at `cell.rect.x + inner.rect.x`, so the inset has to
+          // live in the block's own origin.
+          cellContent.push({
+            ...laid,
+            rect: { ...laid.rect, x: laid.rect.x + margins.left },
+            sourceIndex: -1
+          });
           cellCursorY = laid.rect.y + laid.rect.height;
         } else if (block.type === "table") {
           // Nested table: lay it out within the cell's content width and
           // stack it below preceding content. The PDF/SVG renderers
           // already translate nested `LayoutTable` rects by the cell
           // origin, so emitting it here is all that's needed.
-          const laidNested = layoutTable(block, cellCursorY, cellWidth - 4, -1, options, imageMap);
-          cellContent.push(laidNested);
+          const laidNested = layoutTable(block, cellCursorY, innerWidth, -1, options, imageMap);
+          cellContent.push({
+            ...laidNested,
+            rect: { ...laidNested.rect, x: laidNested.rect.x + margins.left }
+          });
           cellCursorY = laidNested.rect.y + laidNested.rect.height;
         }
       }
 
-      const cellHeight = cellCursorY + 2; // cell padding bottom
+      const cellHeight = cellCursorY + margins.bottom;
       if (cellHeight > maxRowHeight) {
         maxRowHeight = cellHeight;
       }
 
+      // Background shading: cell `w:shd` → table `w:shd` → the table style's
+      // conditional formats (header band, row stripes, corner cells). Resolved
+      // through the shared helper so this and the SVG renderer paint the same
+      // colour — the field exists on `LayoutTableCell` and both renderers draw
+      // it, but nothing ever filled it in, so every table came out white.
+      const backgroundColor = activeDoc
+        ? resolveTableCellFill(activeDoc, table, cell, {
+            rowIndex: ri,
+            colIndex: startCol,
+            totalRows,
+            totalCols: Math.max(numCols, colWidths.length)
+          })
+        : undefined;
+
       cells.push({
-        rect: { x: cellX, y: startY + cursorY, width: cellWidth, height: cellHeight },
+        // Table-relative, like `x`. Renderers add the table's origin to both;
+        // emitting an absolute `y` here made them add it twice.
+        rect: { x: cellX, y: cursorY, width: cellWidth, height: cellHeight },
         row: ri,
         col: ci,
         content: cellContent,
+        ...(backgroundColor ? { backgroundColor } : {}),
         borders: resolveCellBorders(
           table.properties?.borders,
           cell.properties?.borders,
@@ -1642,6 +2748,12 @@ function layoutTable(
       });
 
       gridCol += span;
+    }
+
+    // An `exact` rule clamps the row even when its content is taller; Word
+    // clips the overflow rather than growing the row.
+    if (declaredHeightPt !== undefined && declaredHeight?.rule === "exact") {
+      maxRowHeight = declaredHeightPt;
     }
 
     // Normalize cell heights to row max
@@ -1693,14 +2805,24 @@ function resolveCellBorders(
     return { width: Math.max(0.25, width), color };
   };
 
-  const top = edge(cellBorders?.top, tableBorders?.top, tableBorders?.insideH, isTopRow);
+  // `border-collapse`: every interior rule is shared by two cells and must be
+  // drawn once. Each cell owns its bottom and right edges (plus the table's
+  // outer top and left); the neighbour's coincident top/left is dropped unless
+  // that cell declares one itself. Emitting both stroked every interior rule
+  // twice, and the second stroke overpainted the first — a table style's darker
+  // header rule came out in the lighter body-rule colour.
+  const top = isTopRow
+    ? edge(cellBorders?.top, tableBorders?.top, tableBorders?.insideH, true)
+    : edge(cellBorders?.top, undefined, undefined, false);
   const bottom = edge(
     cellBorders?.bottom,
     tableBorders?.bottom,
     tableBorders?.insideH,
     isBottomRow
   );
-  const left = edge(cellBorders?.left, tableBorders?.left, tableBorders?.insideV, isLeftCol);
+  const left = isLeftCol
+    ? edge(cellBorders?.left, tableBorders?.left, tableBorders?.insideV, true)
+    : edge(cellBorders?.left, undefined, undefined, false);
   const right = edge(cellBorders?.right, tableBorders?.right, tableBorders?.insideV, isRightCol);
 
   if (!top && !bottom && !left && !right) {
@@ -1711,6 +2833,27 @@ function resolveCellBorders(
     ...(bottom ? { bottom } : {}),
     ...(left ? { left } : {}),
     ...(right ? { right } : {})
+  };
+}
+
+/**
+ * A cell's effective inner margins, converted to points.
+ *
+ * The cascade itself (cell `w:tcMar` → table `w:tblCellMar` → Word's defaults)
+ * lives in `layout-constants` so the paginator derives exactly the same numbers;
+ * a hardcoded guess in each was how the two passes came to disagree about how
+ * tall every table row is.
+ */
+function resolveCellMarginsPt(
+  tableProps: TableProperties | undefined,
+  cellProps: TableCellProperties | undefined
+): { top: number; right: number; bottom: number; left: number } {
+  const twips = resolveCellMarginsTwips(tableProps, cellProps);
+  return {
+    top: twipsToPt(twips.top),
+    right: twipsToPt(twips.right),
+    bottom: twipsToPt(twips.bottom),
+    left: twipsToPt(twips.left)
   };
 }
 
@@ -1750,6 +2893,22 @@ interface TextSegment {
   readonly type?: undefined;
   readonly text: string;
   readonly properties: Run["properties"];
+  /**
+   * Footnote / endnote ids whose reference mark this segment *is*.
+   *
+   * Carried through wrapping so the paragraph can report which line each note is
+   * referenced from. That is what lets a paragraph split across a page boundary
+   * hand each note to the page its reference actually landed on.
+   */
+  readonly noteIds?: readonly number[];
+  /**
+   * Bookmark names that start at this point in the paragraph.
+   *
+   * Carried through wrapping for the same reason as `noteIds`: a bookmark in the
+   * part of a paragraph that spills onto the next page belongs to that page, and
+   * the only way to know is to see which line its marker landed on.
+   */
+  readonly bookmarks?: readonly string[];
 }
 
 /**
@@ -1766,11 +2925,38 @@ interface ImageSegment {
 }
 
 /**
- * Paragraph-level token: either a text segment or an inline image.
+ * A hard line break (`<w:br/>`).
+ *
+ * It has to be its own token rather than a `"\n"` inside a text segment: the
+ * wrap engines split text on `/\s+/`, which swallowed the newline as ordinary
+ * whitespace, so every hard break vanished — a fenced code block collapsed onto
+ * one line and Word's Shift+Enter did nothing.
+ */
+interface BreakSegment {
+  readonly type: "break";
+  /** Run properties the break inherits, so it can size an empty line. */
+  readonly properties?: Run["properties"];
+  /**
+   * A `w:br w:type="page"` rather than a line break.
+   *
+   * It ends the line like any hard break, but it also ends the *page*. Treating
+   * one as a plain line break — and separately telling the paginator to move the
+   * whole paragraph down — put the text before the break on the wrong page.
+   */
+  readonly pageBreak?: boolean;
+}
+
+/**
+ * Paragraph-level token: a text segment, an inline image, or a hard break.
  * Returned by `collectParagraphSegments` so wrap algorithms can
  * thread images through without losing them.
  */
-type ParagraphSegment = TextSegment | ImageSegment;
+type ParagraphSegment = TextSegment | ImageSegment | BreakSegment;
+
+/** Whether a segment carries drawable text (as opposed to an image or a break). */
+function isTextSegment(seg: ParagraphSegment): seg is TextSegment {
+  return !("type" in seg) || seg.type === undefined;
+}
 
 /**
  * Walk a paragraph's children and emit a flat sequence of paragraph
@@ -1780,37 +2966,53 @@ type ParagraphSegment = TextSegment | ImageSegment;
  * descended into; bookmark / comment / track-change wrappers are
  * ignored for layout purposes.
  */
-function collectParagraphSegments(para: Paragraph): ParagraphSegment[] {
+function collectParagraphSegments(
+  para: Paragraph,
+  styleRunProps: Run["properties"] | undefined
+): ParagraphSegment[] {
   const segments: ParagraphSegment[] = [];
   for (const child of para.children) {
     if (isRun(child)) {
-      pushRunSegments(child, segments);
+      pushRunSegments(child, segments, effectiveRunProps(child, styleRunProps));
     } else if (isHyperlink(child)) {
       for (const run of child.children) {
-        pushRunSegments(run, segments);
+        pushRunSegments(run, segments, effectiveRunProps(run, styleRunProps));
       }
+    } else if ("type" in child && child.type === "bookmarkStart" && "name" in child) {
+      // An empty marker segment: it draws nothing, but it records the position so
+      // a split can tell which page the bookmark ended up on.
+      segments.push({ text: "", properties: undefined, bookmarks: [child.name] });
     }
   }
   return segments;
 }
 
 /**
- * Overlay resolved paragraph-style run properties under each segment's own
- * (inline) properties, so style-defined size/color/font apply when a run does
- * not override them. Inline run properties always win.
+ * A run's effective formatting: document defaults → paragraph style → the
+ * run's own character style chain (`w:rStyle`) → its direct properties.
+ *
+ * `resolveRunStyle` implements exactly that precedence. Consulting only the
+ * paragraph style made every *character* style invisible to layout — Word's
+ * `Strong`, `Emphasis`, `Hyperlink` and `Code Char` among them — so a `Strong`
+ * run was measured and drawn at body weight, and a run whose font size came
+ * from a character style was measured with the wrong metrics and given a line
+ * box sized for body text.
+ *
+ * The `run.properties.style` guard keeps the common case (no character style)
+ * on the cheap object-spread path.
  */
-function mergeStyleRunProps(
-  segments: ParagraphSegment[],
+function effectiveRunProps(
+  run: Run,
   styleRunProps: Run["properties"] | undefined
-): ParagraphSegment[] {
-  if (!styleRunProps) {
-    return segments;
+): Run["properties"] {
+  if (activeDoc && run.properties?.style) {
+    return resolveRunStyle(activeDoc, run, styleRunProps).runProperties;
   }
-  return segments.map(seg => {
-    const own = seg.properties;
-    const merged = own ? { ...styleRunProps, ...own } : styleRunProps;
-    return { ...seg, properties: merged } as ParagraphSegment;
-  });
+  const own = run.properties;
+  if (!styleRunProps) {
+    return own;
+  }
+  return own ? { ...styleRunProps, ...own } : styleRunProps;
 }
 
 /**
@@ -1818,27 +3020,62 @@ function mergeStyleRunProps(
  * relative order of text fragments and inline images. Consecutive
  * text-bearing entries are coalesced into one `TextSegment` so the
  * wrap engine sees fewer atoms.
+ *
+ * `properties` is the run's *effective* formatting (see `effectiveRunProps`),
+ * not `run.properties` — every segment must carry the resolved values so
+ * measurement, line height and drawing all agree.
  */
-function pushRunSegments(run: Run, out: ParagraphSegment[]): void {
+function pushRunSegments(run: Run, out: ParagraphSegment[], properties: Run["properties"]): void {
   let pending = "";
+  const flush = () => {
+    if (pending.length > 0) {
+      out.push({ text: pending, properties });
+      pending = "";
+    }
+  };
   for (const item of run.content) {
     if (item.type === "text") {
       pending += item.text;
     } else if (item.type === "tab") {
       pending += "    ";
     } else if (item.type === "break") {
-      pending += "\n";
+      // A hard break ends the current line; see `BreakSegment`.
+      flush();
+      const isPageBreak = (item as { breakType?: string }).breakType === "page";
+      out.push({ type: "break", properties, ...(isPageBreak ? { pageBreak: true } : {}) });
     } else if (item.type === "image") {
-      if (pending.length > 0) {
-        out.push({ text: pending, properties: run.properties });
-        pending = "";
+      flush();
+      out.push({ type: "image", content: item, properties });
+    } else if (item.type === "footnoteRef" || item.type === "endnoteRef") {
+      // The reference mark itself. Without it a note printed at the foot of the
+      // page with nothing in the text pointing at it — and, because the mark was
+      // absent from the line boxes, there was no way to tell which page a
+      // reference had landed on when its paragraph was split.
+      flush();
+      const mark = noteMarkFor(item.type, item.id);
+      if (mark.length > 0) {
+        out.push({ text: mark, properties, noteIds: [item.id] });
       }
-      out.push({ type: "image", content: item, properties: run.properties });
     }
   }
-  if (pending.length > 0) {
-    out.push({ text: pending, properties: run.properties });
+  flush();
+}
+
+/**
+ * The text of a note's reference mark: its position among the document's notes,
+ * numbered from 1 as Word does by default.
+ *
+ * Ids at or below zero are the separator and continuation pseudo-notes ECMA-376
+ * stores alongside the real ones; they are never referenced from the text.
+ */
+function noteMarkFor(kind: "footnoteRef" | "endnoteRef", id: number): string {
+  const notes = kind === "footnoteRef" ? activeDoc?.footnotes : activeDoc?.endnotes;
+  if (!notes) {
+    return "";
   }
+  const numbered = notes.filter(n => n.id > 0);
+  const index = numbered.findIndex(n => n.id === id);
+  return index >= 0 ? String(index + 1) : "";
 }
 
 /**
@@ -1870,12 +3107,28 @@ function wrapSegmentsToLinesWithExclusions(
     readonly width: number;
     readonly isSpace: boolean;
     readonly isImage: boolean;
+    /** A hard break: ends the line it lands on and draws nothing. */
+    readonly isBreak?: boolean;
     readonly text?: string;
     readonly properties?: Run["properties"];
     readonly imageContent?: InlineImageContent;
+    /** Note ids whose reference mark this atom is (see `TextSegment.noteIds`). */
+    readonly noteIds?: readonly number[];
+    /** A `w:br w:type="page"` (see `BreakSegment.pageBreak`). */
+    readonly isPageBreak?: boolean;
   };
   const atoms: Atom[] = [];
   for (const seg of segments) {
+    if ("type" in seg && seg.type === "break") {
+      atoms.push({
+        width: 0,
+        isSpace: false,
+        isImage: false,
+        isBreak: true,
+        properties: seg.properties
+      });
+      continue;
+    }
     if ("type" in seg && seg.type === "image") {
       atoms.push({
         width: emuToPt(seg.content.width),
@@ -1907,7 +3160,8 @@ function wrapSegmentsToLinesWithExclusions(
         ),
         properties: seg.properties,
         isSpace: /^\s+$/.test(tok),
-        isImage: false
+        isImage: false,
+        ...(seg.noteIds ? { noteIds: seg.noteIds } : {})
       });
     }
   }
@@ -1921,6 +3175,9 @@ function wrapSegmentsToLinesWithExclusions(
 
   let cursorAtom = 0;
   let lineIdx = 0;
+  // The first line of the paragraph is not the result of a wrap, so its leading
+  // whitespace is the author's.
+  let openedByWrap = false;
   while (cursorAtom < atoms.length) {
     const lineY = paragraphTopPageY + lineIdx * lineHeightPt;
     const slot = availableSlotForLine(pageContext, lineY, lineHeightPt);
@@ -1960,23 +3217,64 @@ function wrapSegmentsToLinesWithExclusions(
       continue;
     }
 
-    // Greedily pack atoms into the line until the next atom would
-    // overflow `usable`. A leading whitespace atom on a fresh line is
-    // dropped (matches typical text engines).
-    if (atoms[cursorAtom].isSpace) {
+    // Greedily pack atoms into the line until the next atom would overflow
+    // `usable`. Whitespace that opens a *wrapped* line is dropped — it is the
+    // separator the break consumed. After a hard break it is the author's
+    // (a code block's indentation), so it stays.
+    if (openedByWrap && atoms[cursorAtom].isSpace) {
       cursorAtom++;
       if (cursorAtom >= atoms.length) {
         break;
       }
     }
+    openedByWrap = true;
     const lineAtoms: Atom[] = [];
     let lineWidth = 0;
     while (cursorAtom < atoms.length) {
       const atom = atoms[cursorAtom];
-      const next = lineWidth + atom.width;
-      if (next > usable && lineAtoms.length > 0) {
-        // Atom would overflow; commit the line and go to next.
+      if (atom.isBreak) {
+        // A leading page break is a break-before and leaves no blank line —
+        // see the sister case in `wrapSegmentsToLines`.
+        if (atom.isPageBreak && lines.length === 0 && lineAtoms.length === 0) {
+          cursorAtom++;
+          openedByWrap = false;
+          continue;
+        }
+        // A hard break closes this line even though there is room left, and
+        // whatever follows keeps its leading whitespace. Kept on the line so a
+        // page break's position survives (see `BreakSegment.pageBreak`).
+        lineAtoms.push(atom);
+        cursorAtom++;
+        openedByWrap = false;
         break;
+      }
+      const next = lineWidth + atom.width;
+      if (next > usable) {
+        if (lineAtoms.length > 0) {
+          // Atom would overflow; commit the line and go to next.
+          break;
+        }
+        if (!atom.isImage && atom.text !== undefined) {
+          // Alone on the line and still too wide: break inside the token, the
+          // way CSS `overflow-wrap: break-word` does. An image is left whole —
+          // there is nothing to break — and overflows as Word lets it.
+          const measure = memoizedWordMeasure(
+            resolveRunFontName(atom.properties),
+            getRunFontSizePt(atom.properties) * headingScale,
+            options,
+            atom.properties?.bold,
+            atom.properties?.italic
+          );
+          const { head, tail } = splitTextToFit(atom.text, measure, usable);
+          if (tail.length > 0) {
+            // Replace the atom with its remainder so the next line continues
+            // from the break point.
+            atoms[cursorAtom] = { ...atom, text: tail, width: measure(tail) };
+            lineAtoms.push({ ...atom, text: head, width: measure(head) });
+            lineWidth += measure(head);
+            break;
+          }
+        }
       }
       lineAtoms.push(atom);
       lineWidth = next;
@@ -1994,6 +3292,14 @@ function wrapSegmentsToLinesWithExclusions(
     // standalone.
     const merged: ParagraphSegment[] = [];
     for (const atom of lineAtoms) {
+      if (atom.isBreak) {
+        merged.push({
+          type: "break",
+          properties: atom.properties,
+          ...(atom.isPageBreak ? { pageBreak: true } : {})
+        });
+        continue;
+      }
       if (atom.isImage) {
         merged.push({
           type: "image",
@@ -2005,12 +3311,22 @@ function wrapSegmentsToLinesWithExclusions(
       const last = merged[merged.length - 1];
       const lastIsText = last && !("type" in last);
       if (lastIsText && (last as TextSegment).properties === atom.properties) {
+        const previous = last as TextSegment;
+        const noteIds =
+          previous.noteIds || atom.noteIds
+            ? [...(previous.noteIds ?? []), ...(atom.noteIds ?? [])]
+            : undefined;
         merged[merged.length - 1] = {
-          text: (last as TextSegment).text + atom.text!,
-          properties: atom.properties
+          text: previous.text + atom.text!,
+          properties: atom.properties,
+          ...(noteIds ? { noteIds } : {})
         };
       } else {
-        merged.push({ text: atom.text!, properties: atom.properties });
+        merged.push({
+          text: atom.text!,
+          properties: atom.properties,
+          ...(atom.noteIds ? { noteIds: atom.noteIds } : {})
+        });
       }
     }
 
@@ -2027,6 +3343,67 @@ function wrapSegmentsToLinesWithExclusions(
   return { lines, slots };
 }
 
+/**
+ * A measuring function for one run's formatting, caching short strings.
+ *
+ * Character-level breaking measures the same code points repeatedly — a CJK
+ * paragraph reuses a few hundred distinct glyphs across thousands of positions —
+ * so the cache turns that from a hot path into a lookup.
+ */
+function memoizedWordMeasure(
+  fontName: string,
+  fontSize: number,
+  options: FullLayoutOptions | undefined,
+  bold: boolean | undefined,
+  italic: boolean | undefined
+): (text: string) => number {
+  const cache = new Map<string, number>();
+  return (text: string): number => {
+    if (text.length > 8) {
+      return measureLayoutText(text, fontName, fontSize, options, bold, italic);
+    }
+    const hit = cache.get(text);
+    if (hit !== undefined) {
+      return hit;
+    }
+    const width = measureLayoutText(text, fontName, fontSize, options, bold, italic);
+    cache.set(text, width);
+    return width;
+  };
+}
+
+/**
+ * The longest prefix of `text` that fits `room`, and the rest.
+ *
+ * Breaks fall on code-point boundaries, so a surrogate pair is never split into
+ * two halves that render as replacement characters. At least one code point is
+ * always taken, which guarantees the caller makes progress even in a column too
+ * narrow for a single glyph.
+ *
+ * Widths are accumulated per code point rather than re-measuring every prefix:
+ * the engine's own metrics are additive, and quadratic re-measurement of a long
+ * CJK paragraph would dominate layout.
+ */
+function splitTextToFit(
+  text: string,
+  measure: (s: string) => number,
+  room: number
+): { head: string; tail: string } {
+  let head = "";
+  let width = 0;
+  let index = 0;
+  for (const ch of text) {
+    const chWidth = measure(ch);
+    if (head.length > 0 && width + chWidth > room) {
+      break;
+    }
+    head += ch;
+    width += chWidth;
+    index += ch.length;
+  }
+  return { head, tail: text.slice(index) };
+}
+
 function wrapSegmentsToLines(
   segments: ParagraphSegment[],
   availableWidth: number,
@@ -2040,7 +3417,29 @@ function wrapSegmentsToLines(
   let isFirstLine = true;
   let effectiveWidth = availableWidth - firstLineIndent;
 
+  /**
+   * Commit the current line, trimming the whitespace that ran off its end.
+   *
+   * Trailing spaces are invisible in left-aligned text but they widen the line
+   * for centring and right-alignment, and they leave the paragraph's measured
+   * width wrong.
+   */
   const flushLine = (): void => {
+    while (currentLine.length > 0) {
+      const last = currentLine[currentLine.length - 1];
+      if (!isTextSegment(last)) {
+        break;
+      }
+      const trimmed = last.text.replace(/\s+$/, "");
+      if (trimmed === last.text) {
+        break;
+      }
+      currentLine.pop();
+      if (trimmed.length > 0) {
+        currentLine.push({ ...last, text: trimmed });
+        break;
+      }
+    }
     lines.push(currentLine);
     currentLine = [];
     currentLineWidth = 0;
@@ -2050,7 +3449,39 @@ function wrapSegmentsToLines(
     }
   };
 
+  /**
+   * Whether whitespace opening the current line should be dropped.
+   *
+   * Only true when the line was opened by *wrapping*: the space is then the
+   * separator the break consumed and keeping it indents the line by a stray
+   * space. After a hard break — and at the start of the paragraph — leading
+   * whitespace is the author's, and in a code block it is the indentation.
+   */
+  let dropLeadingSpace = false;
+
+  /** True when nothing has been placed on the line being built yet. */
+  const lineIsEmpty = (): boolean => currentLine.length === 0;
+  /** True when whitespace at this position must be discarded. */
+  const skipOpeningSpace = (): boolean => dropLeadingSpace && lineIsEmpty();
+
   for (const segment of segments) {
+    if ("type" in segment && segment.type === "break") {
+      // A *page* break at the very start of a paragraph is a break-before: the
+      // block-level machinery has already moved the paragraph, and Word leaves no
+      // blank line behind. A leading *line* break does produce an empty line.
+      if (segment.pageBreak === true && lines.length === 0 && currentLine.length === 0) {
+        dropLeadingSpace = false;
+        continue;
+      }
+      // A hard break closes the current line even though there is room left,
+      // and whatever follows keeps its leading whitespace. The marker is kept on
+      // the line so a page break's position is recoverable; the line-box builder
+      // draws nothing for it.
+      currentLine.push(segment);
+      flushLine();
+      dropLeadingSpace = false;
+      continue;
+    }
     if ("type" in segment && segment.type === "image") {
       // Inline images are unbreakable atoms.  Width comes from the
       // source EMU; if the image alone exceeds the line we still
@@ -2062,6 +3493,7 @@ function wrapSegmentsToLines(
         currentLineWidth + imageWidth <= effectiveWidth || currentLine.length === 0;
       if (!fitsCurrent) {
         flushLine();
+        dropLeadingSpace = true;
       }
       currentLine.push(segment);
       currentLineWidth += imageWidth;
@@ -2081,51 +3513,108 @@ function wrapSegmentsToLines(
     );
 
     if (currentLineWidth + segmentWidth <= effectiveWidth) {
-      // Whole segment fits on the current line — fast path.
+      // Whole segment fits on the current line — fast path. Whitespace that
+      // would open a line is dropped: it is the separator the wrap consumed,
+      // and keeping it indents the line by a stray space.
+      if (skipOpeningSpace()) {
+        const opened = text.replace(/^\s+/, "");
+        if (opened.length === 0) {
+          continue;
+        }
+        if (opened !== text) {
+          currentLine.push({ ...segment, text: opened });
+          currentLineWidth += measureLayoutText(
+            opened,
+            fontName,
+            fontSize,
+            options,
+            segment.properties?.bold,
+            segment.properties?.italic
+          );
+          continue;
+        }
+      }
       currentLine.push(segment);
       currentLineWidth += segmentWidth;
     } else {
-      // Segment does not fit — split it into words and wrap. The inner
-      // loop's `currentLine.length === 0 && bufferedText.length === 0`
-      // guard guarantees at least one word per line (preventing a dead
-      // loop when even a single word is wider than the line).
+      // Segment does not fit — break it at word boundaries, and at code-point
+      // boundaries for a token too wide for any line (CSS `overflow-wrap:
+      // break-word`). Without the second rule a long URL, a hex digest or any
+      // space-less script ran straight off the right edge: a CJK paragraph
+      // measured 924pt in a 468pt column.
+      const measureWord = memoizedWordMeasure(
+        fontName,
+        fontSize,
+        options,
+        segment.properties?.bold,
+        segment.properties?.italic
+      );
       const words = text.split(/(\s+)/);
       let bufferedText = "";
       let bufferedWidth = 0;
 
+      /** Commit what is buffered and close the line, as a wrap. */
+      const wrapHere = (): void => {
+        if (bufferedText.length > 0) {
+          currentLine.push({ text: bufferedText, properties: segment.properties });
+        }
+        flushLine();
+        dropLeadingSpace = true;
+        bufferedText = "";
+        bufferedWidth = 0;
+      };
+
       for (const word of words) {
-        const wordWidth = measureLayoutText(
-          word,
-          fontName,
-          fontSize,
-          options,
-          segment.properties?.bold,
-          segment.properties?.italic
-        );
-        if (
-          currentLineWidth + bufferedWidth + wordWidth <= effectiveWidth ||
-          (currentLine.length === 0 && bufferedText.length === 0)
-        ) {
-          bufferedText += word;
-          bufferedWidth += wordWidth;
-        } else {
-          if (bufferedText.length > 0) {
-            currentLine.push({ text: bufferedText, properties: segment.properties });
+        const isSpace = /^\s+$/.test(word);
+
+        let remainder = word;
+        let remainderWidth = measureWord(word);
+        // Each pass either buffers the whole remainder, closes the line, or
+        // takes at least one code point off the front, so this terminates.
+        while (remainder.length > 0) {
+          // Whitespace never opens a wrapped line — see the fast path above.
+          // Re-checked every pass, not once before the loop: a space that fits
+          // the line it was measured against can still be pushed to the next
+          // one by the word that follows it, and it must be dropped then too.
+          if (isSpace && skipOpeningSpace() && bufferedText.length === 0) {
+            break;
           }
-          flushLine();
-          bufferedText = word;
-          bufferedWidth = wordWidth;
+          const room = effectiveWidth - currentLineWidth - bufferedWidth;
+          if (remainderWidth <= room) {
+            bufferedText += remainder;
+            bufferedWidth += remainderWidth;
+            break;
+          }
+          if (currentLine.length > 0 || bufferedText.length > 0) {
+            // Something is already on the line — try the token again on a
+            // fresh one, intact. Only a token that cannot fit a line *by
+            // itself* is ever broken mid-word.
+            wrapHere();
+            continue;
+          }
+          // Fresh line and still too wide: break inside the token.
+          const { head, tail } = splitTextToFit(remainder, measureWord, room);
+          bufferedText += head;
+          bufferedWidth += measureWord(head);
+          remainder = tail;
+          if (remainder.length === 0) {
+            break;
+          }
+          remainderWidth = measureWord(remainder);
+          wrapHere();
         }
       }
       if (bufferedText.length > 0) {
-        currentLine.push({ text: bufferedText, properties: segment.properties });
+        currentLine.push({ ...segment, text: bufferedText });
         currentLineWidth += bufferedWidth;
       }
     }
   }
 
   if (currentLine.length > 0) {
-    lines.push(currentLine);
+    // Through `flushLine`, so the last line has its trailing whitespace trimmed
+    // like every other one.
+    flushLine();
   }
 
   if (lines.length === 0 && segments.length > 0) {
@@ -2187,6 +3676,43 @@ function getRunFontSizePt(props: Run["properties"]): number {
     return base * 0.65;
   }
   return base;
+}
+
+/**
+ * The natural (single-spaced) line height of a paragraph, in points.
+ *
+ * Word sizes a line from the tallest run on it. We approximate that with the
+ * paragraph's largest run font size — one height for the whole paragraph —
+ * which keeps wrapping and pagination arithmetic simple while still giving a
+ * 24 pt heading a 24 pt-sized line box.
+ *
+ * Sub/superscript runs are deliberately measured at their shrunken size (they
+ * ride the surrounding text's line), and an empty paragraph falls back to its
+ * paragraph-mark run properties, then the style's, then the document default.
+ */
+function naturalParagraphLineHeightPt(
+  segments: readonly ParagraphSegment[],
+  props: ParagraphProperties | undefined,
+  styleRunProps: Run["properties"] | undefined
+): number {
+  let maxPt = 0;
+  for (const seg of segments) {
+    if (!isTextSegment(seg)) {
+      continue;
+    }
+    const size = getRunFontSizePt(seg.properties);
+    if (size > maxPt) {
+      maxPt = size;
+    }
+  }
+  if (maxPt === 0) {
+    // Only images and/or hard breaks: fall back to the paragraph mark's size,
+    // then the style's, then the document default, so an empty line still has
+    // the height the author asked for.
+    const fromBreak = segments.find(seg => "type" in seg && seg.type === "break")?.properties;
+    maxPt = getRunFontSizePt(props?.markRunProperties ?? styleRunProps ?? fromBreak);
+  }
+  return maxPt * LINE_HEIGHT_FACTOR;
 }
 
 function resolveRunFontName(props: Run["properties"]): string {

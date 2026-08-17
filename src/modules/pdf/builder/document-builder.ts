@@ -1446,13 +1446,19 @@ export class PdfDocumentBuilder {
       // Failures are non-fatal: discovery is best-effort and users who
       // need guaranteed rendering should still call `embedFont` with a
       // font they control.
+      //
+      // It is registered as a *fallback*, not as the document font: it only
+      // lends glyphs for the code points WinAnsi cannot encode. Registering it
+      // as the document font would route every run through one regular face,
+      // so a single `→` would strip bold, italic and monospace from the whole
+      // document and desynchronise the widths already measured during layout.
       const nonWinAnsi = this._fontManager.getType3CodePoints();
       if (nonWinAnsi.size > 0) {
         // Try auto-discovery unless the caller opted out.
         if (!snapshot.disableFontAutoDiscovery) {
           const discovered = findSystemFontForCodePoints(nonWinAnsi);
           if (discovered) {
-            this._fontManager.registerEmbeddedFont(discovered);
+            this._fontManager.registerFallbackFont(discovered);
             snapshot.onWarning?.(
               `Auto-embedded system font '${discovered.familyName}' to render ${nonWinAnsi.size} non-WinAnsi character(s). ` +
                 `Call embedFont(bytes) explicitly for deterministic output.`

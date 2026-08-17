@@ -286,8 +286,11 @@ export function renderParagraphProperties(
     xml.leafNode("w:textDirection", { "w:val": pPr.textDirection });
   }
 
-  if (pPr.thematicBreak) {
-    // Thematic break is rendered as a bottom border
+  // A thematic break is drawn as a bottom border. Only synthesise one when the
+  // paragraph has no borders of its own: `w:pPr` permits a single `w:pBdr`, and
+  // emitting a second produced invalid XML whose duplicate element made readers
+  // drop the paragraph's real border settings.
+  if (pPr.thematicBreak && !pPr.borders) {
     xml.openNode("w:pBdr");
     xml.leafNode("w:bottom", {
       "w:val": "single",

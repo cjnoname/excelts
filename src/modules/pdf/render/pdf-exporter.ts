@@ -301,7 +301,11 @@ function registerSystemFontForCodePoints(
 ): void {
   const ttf = findSystemFontForCodePoints(codePoints);
   if (ttf) {
-    fontManager.registerEmbeddedFont(ttf);
+    // A discovered font lends glyphs for the code points WinAnsi cannot encode;
+    // it does not become the document font. Registering it as the document font
+    // routed every cell through one regular face, so a single CJK character
+    // stripped bold and italic from the whole workbook.
+    fontManager.registerFallbackFont(ttf);
   }
 }
 

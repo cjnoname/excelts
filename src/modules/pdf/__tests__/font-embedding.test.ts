@@ -720,3 +720,123 @@ describe("Font Integration with excelToPdf", () => {
     expect(roundtrip.text).toContain(text);
   });
 });
+
+describe("auto-discovered fallback fonts", () => {
+  /** A face covering `→` (U+2192) and nothing else interesting. */
+  const arrowFont = () =>
+    parseTtf(buildTtfWithCmap([{ start: 0x2192, end: 0x2192, delta: 1 - 0x2192 }], 2));
+
+  it("keeps the requested Type1 face for text the standard fonts can draw", () => {
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const bold = manager.resolveFont("Helvetica", true, false);
+    // A fallback face lends glyphs; it must not become the document font, or a
+    // single non-WinAnsi character would strip bold from the whole document.
+    expect(manager.resolveRenderResourceName(bold)).toBe(bold);
+    expect(manager.hasFallbackFont()).toBe(true);
+  });
+
+  it("takes over the whole run for an explicitly embedded document font", () => {
+    const manager = new FontManager();
+    const resource = manager.registerEmbeddedFont(arrowFont());
+    const bold = manager.resolveFont("Helvetica", true, false);
+    // `embedFont` means "render this document with this font" — unchanged.
+    expect(manager.resolveRenderResourceName(bold)).toBe(resource);
+    expect(manager.hasFallbackFont()).toBe(false);
+  });
+
+  it("routes only the code points WinAnsi cannot encode to the fallback face", () => {
+    const manager = new FontManager();
+    const resource = manager.registerFallbackFont(arrowFont());
+    expect(manager.fallbackResourceFor(0x2192)).toBe(resource); // →
+    expect(manager.fallbackResourceFor(0x41)).toBeNull(); // A — WinAnsi
+    // A code point the fallback has no glyph for still needs a Type3 glyph.
+    expect(manager.fallbackResourceFor(0x4e2d)).toBeNull(); // U+4E2D, outside the face
+    expect(manager.needsType3(0x4e2d)).toBe(true);
+    expect(manager.needsType3(0x2192)).toBe(false);
+    expect(manager.needsType3(0x41)).toBe(false);
+  });
+
+  it("measures each code point with the face that draws it", () => {
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const plain = manager.resolveFont("Helvetica", false, false);
+    const bold = manager.resolveFont("Helvetica", true, false);
+    // Bold metrics must still differ from regular: measuring everything with
+    // one fallback face is what desynchronised layout from rendering.
+    // ("i" is 222/1000 in Helvetica and 278/1000 in Helvetica-Bold.)
+    expect(manager.measureText("iiii", bold, 12)).not.toBeCloseTo(
+      manager.measureText("iiii", plain, 12),
+      3
+    );
+    // A mixed run costs the Type1 width of "A" plus the fallback's advance.
+    const mixed = manager.measureText("A\u2192", plain, 12);
+    const latinOnly = manager.measureText("A", plain, 12);
+    expect(mixed).toBeGreaterThan(latinOnly);
+  });
+
+  it("preserves bold, italic and monospace in a document containing an arrow", async () => {
+    const { Pdf } = await import("@pdf/index");
+    const doc = new Pdf.Builder();
+    const page = doc.addPage();
+    page.drawText("bold", { x: 72, y: 720, bold: true });
+    page.drawText("italic", { x: 72, y: 700, italic: true });
+    page.drawText("mono", { x: 72, y: 680, fontFamily: "Courier New" });
+    page.drawText("arrow \u2192", { x: 72, y: 660 });
+    const bytes = await doc.build();
+    const text = Buffer.from(bytes).toString("latin1");
+
+    // All three standard faces must survive alongside whatever draws the arrow.
+    expect(text).toContain("/Helvetica-Bold");
+    expect(text).toContain("/Helvetica-Oblique");
+    expect(text).toContain("/Courier");
+  });
+});
+
+describe("fallback fonts and grapheme clusters", () => {
+  /** A face covering the heart and its presentation selector, nothing else. */
+  const heartFont = () =>
+    parseTtf(
+      buildTtfWithCmap(
+        [
+          { start: 0x2764, end: 0x2764, delta: 1 - 0x2764 },
+          { start: 0xfe0f, end: 0xfe0f, delta: 2 - 0xfe0f }
+        ],
+        3
+      )
+    );
+
+  it("routes a whole cluster to one face, not its code points separately", () => {
+    // Subsetting keys a cluster — base plus the selectors and joiners after it —
+    // under one sequence. Choosing a face per code point sent a lone variation
+    // selector to the fallback, where the sequence had never been registered, and
+    // the glyph encoded as `.notdef`.
+    const manager = new FontManager();
+    const resource = manager.registerFallbackFont(heartFont());
+    // The heart is non-WinAnsi and covered, so it belongs to the fallback…
+    expect(manager.fallbackResourceFor(0x2764)).toBe(resource);
+    // …while an ASCII base stays with the standard face, selector and all.
+    expect(manager.fallbackResourceFor(0x41)).toBeNull();
+  });
+
+  it("keeps every drawable glyph when a document mixes both", async () => {
+    const { Pdf } = await import("@pdf/index");
+    const doc = new Pdf.Builder();
+    doc.addPage().drawText("A\uFE0F\u2764\uFE0F ok", { x: 72, y: 700, fontSize: 12 });
+    const roundtrip = await Pdf.read(await doc.build());
+    // The heart survives; it used to encode as `.notdef` and extract as U+FFFD.
+    expect(roundtrip.text).toContain("\u2764");
+    expect(roundtrip.text).not.toContain("\uFFFD");
+
+    // And the pieces sit flush against each other. A variation selector the
+    // standard face cannot encode used to be drawn as a space, opening a gap
+    // between the base character and what followed it. (The extracted string
+    // gains a separator between fragments — that is the reader's own heuristic,
+    // so geometry is what this asserts.)
+    const fragments = roundtrip.pages[0]!.textFragments;
+    const first = fragments.find(f => f.text.includes("A"))!;
+    const heart = fragments.find(f => f.text.includes("\u2764"))!;
+    // "A" at 12pt Helvetica advances 0.667 em = 8.004pt.
+    expect(heart.x - first.x).toBeCloseTo(8.004, 2);
+  });
+});

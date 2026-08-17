@@ -12,6 +12,7 @@
 
 import { parseImageDimensions } from "@pdf/builder/image-utils";
 import { PdfContentStream } from "@pdf/core/pdf-stream";
+import { graphemeClusters, isGlyphShapingControl } from "@pdf/font/font-embedder";
 import type { FontManager } from "@pdf/font/font-manager";
 import {
   CELL_PADDING_H,
@@ -1374,17 +1375,15 @@ function renderTextBlock(
     return sink.toString();
   }
 
-  // Type3 splitting only applies when there is no embedded font but Type3
-  // fallback glyphs were generated. Otherwise the run renders as a single
-  // BT/ET pair, choosing the resource name from the now-settled state:
-  // if an embedded font exists (possibly auto-discovered at build time,
-  // after this run was drawn against a Type1 resource), the run must use it
-  // so `emitText` → `encodeText` produces CIDFont hex; without that switch
-  // the stale Type1 resource name would make `encodeText` return null and
-  // non-WinAnsi characters would degrade to spaces via the WinAnsi fallback.
-  const useType3 = fontManager.hasType3Fonts() && !fontManager.hasEmbeddedFont();
+  // Per-code-point splitting applies whenever some code points are drawn by a
+  // face other than the requested Type1 one: Type3 glyphs, or an embedded
+  // *fallback* face lending glyphs. A *document* font (explicit `embedFont`)
+  // draws the whole run itself, so no splitting is involved.
+  const useSplit =
+    (fontManager.hasType3Fonts() || fontManager.hasFallbackFont()) &&
+    !(fontManager.hasEmbeddedFont() && !fontManager.hasFallbackFont());
 
-  if (!useType3) {
+  if (!useSplit) {
     const resourceName = fontManager.resolveRenderResourceName(type1ResourceName);
     sink.beginText();
     if (renderingMode !== 0) {
@@ -1397,30 +1396,26 @@ function renderTextBlock(
     return sink.toString();
   }
 
-  // Type3 path: split into runs and advance origin along text direction
+  // Split path: alternate between the requested Type1 face and the faces that
+  // lend individual glyphs, advancing the origin along the text direction.
   const runs = splitTextRuns(text, fontManager);
   let curTx = tx;
   let curTy = ty;
   for (const run of runs) {
+    const resourceName = run.resourceName ?? type1ResourceName;
     sink.beginText();
     if (renderingMode !== 0) {
       sink.setTextRenderingMode(renderingMode);
     }
-    if (run.type3) {
-      sink.setFont(run.type3.resourceName, fontSize);
-      sink.setTextMatrix(a, b, c, d, curTx, curTy);
-      sink.showTextHex(run.type3.hex);
+    sink.setFont(resourceName, fontSize);
+    sink.setTextMatrix(a, b, c, d, curTx, curTy);
+    if (run.type3Hex !== null) {
+      sink.showTextHex(run.type3Hex);
     } else {
-      sink.setFont(type1ResourceName, fontSize);
-      sink.setTextMatrix(a, b, c, d, curTx, curTy);
-      emitText(sink, fontManager, run.text, type1ResourceName);
+      emitText(sink, fontManager, run.text, resourceName);
     }
     sink.endText();
-    const w = fontManager.measureText(
-      run.text,
-      run.type3?.resourceName ?? type1ResourceName,
-      fontSize
-    );
+    const w = fontManager.measureText(run.text, resourceName, fontSize);
     // Advance along the text direction (first column of the matrix)
     curTx += a * w;
     curTy += b * w;
@@ -1432,83 +1427,129 @@ function renderTextBlock(
 // Mixed-Font Text Run Splitting
 // =============================================================================
 
-/** A segment of text that uses either a Type1 or Type3 font. */
+/** A run of text drawn by exactly one font resource. */
 interface TextRun {
   /** The text content of this run. */
   text: string;
   /**
-   * Non-null if this run should be rendered with a Type3 font. `hex` holds
-   * the run's single-byte codes for one `Tj` (`<XXYY…>`).
+   * The resource that draws it, or null to use the caller's Type1 resource.
+   * Set for Type3 fallback fonts and for an embedded fallback face.
    */
-  type3: { resourceName: string; hex: string } | null;
+  resourceName: string | null;
+  /**
+   * Non-null for a Type3 run: the run's single-byte codes for one `Tj`
+   * (`<XXYY…>`). Type3 fonts are single-byte encoded, so a whole run of them
+   * becomes one text-showing operation.
+   */
+  type3Hex: string | null;
 }
 
 /**
  * Split a line of text into the fewest possible runs, where each run is
  * rendered by exactly one font resource.
  *
- * Consecutive WinAnsi characters merge into a single Type1 run, and
- * consecutive non-WinAnsi characters that resolve to the *same* Type3
- * fallback font merge into a single Type3 run (Type3 fonts are single-byte
- * encoded, so the run becomes one multi-byte `Tj`). A boundary is only
- * introduced where the font resource actually changes — at a
- * WinAnsi/non-WinAnsi transition, or at a Type3 font partition boundary
- * (every 255 distinct non-WinAnsi code points).
+ * Consecutive characters the requested Type1 face can draw merge into one run;
+ * so do consecutive characters that resolve to the *same* fallback resource —
+ * whether that is an embedded fallback face or one Type3 partition. A boundary
+ * appears only where the resource actually changes: at a WinAnsi/non-WinAnsi
+ * transition, at a Type3 partition boundary (every 255 distinct non-WinAnsi
+ * code points), or between Type3 and embedded-fallback coverage.
  *
  * Merging matters beyond stream size: one `Tj` per glyph makes every glyph a
  * separate text-showing operation, so PDF text extractors (including this
  * package's reader) recover `机`, `密` as two fragments instead of the word
  * `机密`. Keeping runs whole preserves word boundaries for copy/paste and
- * search in the Type3 fallback path.
+ * search.
  *
- * Non-WinAnsi characters that were tracked but have no Type3 glyph join the
- * Type1 run (the WinAnsi encoder renders them as a space).
+ * Non-WinAnsi characters that no face can draw join the Type1 run (the WinAnsi
+ * encoder renders them as a space).
  */
+/** A cluster with its joiners and variation selectors removed. */
+function stripShapingControls(cluster: string): string {
+  let out = "";
+  for (const char of cluster) {
+    if (!isGlyphShapingControl(char.codePointAt(0)!)) {
+      out += char;
+    }
+  }
+  return out;
+}
+
 function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
   const runs: TextRun[] = [];
 
-  // The run being accumulated. `pendingResource` is null for a WinAnsi/Type1
-  // run; `pendingCodePoints` is only needed by Type3 runs (to build the hex).
+  // The run being accumulated. `pendingResource` is null for a Type1 run;
+  // `pendingCodePoints` is only needed by Type3 runs (to build the hex).
   let pendingText = "";
   let pendingResource: string | null = null;
+  let pendingIsType3 = false;
   let pendingCodePoints: number[] = [];
 
   const flush = () => {
     if (!pendingText) {
       return;
     }
-    const resource = pendingResource;
-    const hex = resource === null ? null : fontManager.encodeType3Run(pendingCodePoints, resource);
+    const hex =
+      pendingIsType3 && pendingResource !== null
+        ? fontManager.encodeType3Run(pendingCodePoints, pendingResource)
+        : null;
+    // A Type3 resource that cannot encode the run is unusable — fall back to
+    // the caller's Type1 face rather than emitting a broken show operator.
+    const usable = !pendingIsType3 || hex !== null;
     runs.push({
       text: pendingText,
-      type3: resource !== null && hex !== null ? { resourceName: resource, hex } : null
+      resourceName: usable ? pendingResource : null,
+      type3Hex: hex
     });
     pendingText = "";
     pendingResource = null;
+    pendingIsType3 = false;
     pendingCodePoints = [];
   };
 
-  for (let i = 0; i < text.length; i++) {
-    const cp = text.codePointAt(i)!;
-    const ch = String.fromCodePoint(cp);
-    if (cp > 0xffff) {
-      i++; // skip low surrogate
+  // Whole grapheme clusters, not code points. Subsetting registers a cluster —
+  // base plus the variation selectors and joiners that follow it — under one
+  // sequence, so cutting inside one leaves the tail looking up a sequence that
+  // was never registered and it encodes as `.notdef`: drawing "A\uFE0F❤\uFE0F"
+  // put `A` on the Type1 face, sent the lone selector to the fallback, and lost
+  // the heart entirely.
+  for (const cluster of graphemeClusters(text)) {
+    // The cluster's face is decided by the character it actually draws; the
+    // shaping controls travel with it. A control alone never chooses a face.
+    let base = cluster.codePointAt(0)!;
+    for (const char of cluster) {
+      const cp = char.codePointAt(0)!;
+      if (!isGlyphShapingControl(cp)) {
+        base = cp;
+        break;
+      }
     }
 
-    // Which font resource will render this character: a Type3 fallback font,
-    // or null for the Type1/WinAnsi run (also used when a tracked code point
-    // has no Type3 glyph).
-    const resource = fontManager.needsType3(cp)
-      ? (fontManager.resolveType3(cp)?.resourceName ?? null)
-      : null;
+    const fallback = fontManager.fallbackResourceFor(base);
+    const isType3 = fallback === null && fontManager.needsType3(base);
+    const resource =
+      fallback ?? (isType3 ? (fontManager.resolveType3(base)?.resourceName ?? null) : null);
 
-    if (resource !== pendingResource) {
+    if (resource !== pendingResource || (resource !== null && isType3 !== pendingIsType3)) {
       flush();
       pendingResource = resource;
+      pendingIsType3 = resource !== null && isType3;
     }
-    pendingText += ch;
-    if (resource !== null) {
-      pendingCodePoints.push(cp);
+    // The standard-14 faces have no glyph for a shaping control and the WinAnsi
+    // encoder substitutes a space for anything it cannot represent — which put a
+    // stray space after every character carrying a variation selector. A face
+    // that *can* represent them keeps the whole cluster, because its subset is
+    // keyed by the full sequence.
+    pendingText += resource === null ? stripShapingControls(cluster) : cluster;
+    if (pendingIsType3) {
+      // Type3 fonts are single-byte encoded and have no notion of a cluster;
+      // only the drawable code points get a glyph.
+      for (const char of cluster) {
+        const cp = char.codePointAt(0)!;
+        if (!isGlyphShapingControl(cp)) {
+          pendingCodePoints.push(cp);
+        }
+      }
     }
   }
 
