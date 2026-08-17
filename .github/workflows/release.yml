@@ -89,11 +89,18 @@ jobs:
           if [ "$(npm view @documonster/mcp@${VERSION} version 2>/dev/null || true)" = "$VERSION" ]; then
             echo "@documonster/mcp@${VERSION} is already published — skipping"
           else
-            pnpm publish --tag canary --no-git-checks
+            # `--access public` must be explicit: pnpm does not apply the
+            # package's `publishConfig.access`, and a scoped package defaults to
+            # restricted, which publishes "successfully" but is invisible to
+            # everyone but the owner.
+            pnpm publish --tag canary --access public --no-git-checks
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Deliberately unauthenticated: an anonymous read is the only thing that
+      # proves the packages are actually installable by a user. An authenticated
+      # `npm view` also succeeds for a restricted package.
       - name: Verify canary publishes
         run: |
           echo "Waiting for npm registry to propagate..."
@@ -103,6 +110,7 @@ jobs:
             PUBLISHED_VERSION=$(npm view "${PACKAGE}@${EXPECTED_VERSION}" version 2>/dev/null || echo "NOT_FOUND")
             if [ "$PUBLISHED_VERSION" != "$EXPECTED_VERSION" ]; then
               echo "ERROR: Expected ${PACKAGE}@${EXPECTED_VERSION} but found ${PUBLISHED_VERSION}"
+              echo "If the package published but reads as NOT_FOUND, check that it is public: npm access get status ${PACKAGE}"
               exit 1
             fi
             echo "Verified: ${PACKAGE}@${EXPECTED_VERSION} is live on npm"
@@ -233,14 +241,15 @@ jobs:
           fi
           if echo "$VERSION" | grep -q "beta\|alpha\|rc"; then
             echo "Publishing @documonster/mcp@${VERSION} with --tag beta"
-            pnpm publish --tag beta --no-git-checks
+            pnpm publish --tag beta --access public --no-git-checks
           else
             echo "Publishing @documonster/mcp@${VERSION} as latest"
-            pnpm publish --no-git-checks
+            pnpm publish --access public --no-git-checks
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Unauthenticated on purpose — see the canary job's verify step.
       - name: Verify publish
         working-directory: packages/mcp
         run: |
@@ -250,6 +259,7 @@ jobs:
           PUBLISHED_VERSION=$(npm view @documonster/mcp@${EXPECTED_VERSION} version 2>/dev/null || echo "NOT_FOUND")
           if [ "$PUBLISHED_VERSION" != "$EXPECTED_VERSION" ]; then
             echo "ERROR: Expected version ${EXPECTED_VERSION} but found ${PUBLISHED_VERSION} on npm registry"
+            echo "If the publish step succeeded, check the package is public: npm access get status @documonster/mcp"
             exit 1
           fi
           echo "Verified: @documonster/mcp@${EXPECTED_VERSION} is live on npm"

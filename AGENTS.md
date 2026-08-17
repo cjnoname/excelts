@@ -137,6 +137,14 @@ Canaries follow the same rule. Both manifests receive the deterministic version
 not contain a timestamp: a retry after only one package published must reproduce
 the same version so the idempotent checks can skip it and finish the pair.
 
+**A scoped package needs `--access public` on the command line.** pnpm does not
+apply `publishConfig.access`, and npm defaults a scoped package to restricted, so
+`pnpm publish` prints `✅ Published` while the package stays invisible to
+everyone but the owner — `documonster` is unscoped and never showed this. The
+publish steps therefore pass `--access public`, and every verify step reads the
+registry **unauthenticated**, because an authenticated read succeeds for a
+restricted package and would hide the problem.
+
 Do not try to give the satellite its own version line with the `linked-versions`
 plugin: it skips any package whose component resolves to empty, and the core's
 component is empty by design (`include-component-in-tag: false`, which is what
