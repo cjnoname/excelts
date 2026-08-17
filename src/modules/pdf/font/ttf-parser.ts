@@ -257,7 +257,12 @@ export function parseTtf(data: Uint8Array, collectionIndex = 0): TtfFont {
     throw new PdfFontError("TrueType collection index must not be negative");
   }
   if (data.byteLength < 4) {
-    throw new PdfFontError("Invalid TrueType font: header is truncated");
+    throw new PdfFontError(
+      data.byteLength === 0
+        ? "Font data is empty. Check that the font file was read completely."
+        : `Font data is only ${data.byteLength} byte(s), too short to be a font. ` +
+            "Check that the font file was read completely."
+    );
   }
 
   const r = new BEReader(data);
@@ -318,6 +323,41 @@ function parseTtfAtOffset(data: Uint8Array, offset: number): TtfFont {
 }
 
 /**
+ * Explain an unsupported font signature in terms of the format the caller
+ * actually supplied.
+ *
+ * The subsetting embedder needs `glyf` outlines, so anything else has to be
+ * rejected — but "bad sfVersion 0x774f4632" tells the caller nothing, while
+ * "WOFF2" tells them exactly which file they picked and what to do about it.
+ * These four cover the formats that get mistaken for a .ttf in practice: web
+ * fonts copied from a site, an .otf renamed, and a font archive.
+ */
+function describeUnsupportedFont(sfVersion: number): string {
+  switch (sfVersion) {
+    case 0x4f54544f: // 'OTTO'
+      return "CFF-flavored OpenType (.otf) is not supported. Use a TrueType (.ttf) font.";
+    case 0x774f4646: // 'wOFF'
+      return "This is a WOFF web font, not a raw font file. Decompress it to a .ttf first.";
+    case 0x774f4632: // 'wOF2'
+      return "This is a WOFF2 web font, not a raw font file. Decompress it to a .ttf first.";
+    case 0x504b0304: // 'PK\x03\x04'
+      return "This is a ZIP archive, not a font. Extract the .ttf from it first.";
+    default: {
+      const ascii = String.fromCharCode(
+        (sfVersion >>> 24) & 0xff,
+        (sfVersion >>> 16) & 0xff,
+        (sfVersion >>> 8) & 0xff,
+        sfVersion & 0xff
+      ).replace(/[^\x20-\x7e]/g, ".");
+      return (
+        `Unrecognized font signature 0x${sfVersion.toString(16).padStart(8, "0")} ("${ascii}"). ` +
+        "Use a TrueType (.ttf) font."
+      );
+    }
+  }
+}
+
+/**
  * Core TTF parsing after the first 4 bytes (sfVersion) have been read.
  */
 function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): TtfFont {
@@ -325,12 +365,7 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
   // TrueType: 0x00010000 or 'true' (0x74727565)
   // OpenType with CFF: 'OTTO' (0x4F54544F) — not supported for subsetting
   if (sfVersion !== 0x00010000 && sfVersion !== 0x74727565) {
-    if (sfVersion === 0x4f54544f) {
-      throw new PdfFontError(
-        "CFF-flavored OpenType (.otf) is not supported. Use a TrueType (.ttf) font."
-      );
-    }
-    throw new PdfFontError(`Invalid TrueType font: bad sfVersion 0x${sfVersion.toString(16)}`);
+    throw new PdfFontError(describeUnsupportedFont(sfVersion));
   }
 
   const fontOffset = r.offset - 4;

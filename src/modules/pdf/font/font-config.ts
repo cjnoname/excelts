@@ -165,6 +165,20 @@ function compileFaces(faces: PdfFontFaces, label: string): CompiledPdfFontFaces 
   });
 }
 
+/**
+ * Compile one face, failing on any font this writer cannot embed.
+ *
+ * Every supplied face is required to parse, including the optional ones: `bold?`
+ * means the caller may omit it, not that a broken file is acceptable. Silently
+ * dropping an unusable face would produce a document whose bold runs are quietly
+ * drawn in regular, which the caller has no way to detect and no way to turn
+ * back into an error. Failing here keeps both options open — a caller that
+ * genuinely wants the degraded output can catch this and omit the face.
+ *
+ * `parseTtf` reports what is wrong with the font but knows nothing about where
+ * it came from, so its message is wrapped with the face's position in the
+ * config (`default.bold`, `family 'Song'.italic`) and chained as `cause`.
+ */
 function compileFace(source: PdfFontSource, label: string): CompiledPdfFontFace {
   const direct = source instanceof Uint8Array;
   if (!direct && (source === null || typeof source !== "object")) {
@@ -176,8 +190,15 @@ function compileFace(source: PdfFontSource, label: string): CompiledPdfFontFace 
     throw new PdfFontError(`PDF font source for ${label} must contain Uint8Array data`);
   }
   const data = sourceData.slice();
-  const font = parseTtf(data, collectionIndex);
-  return Object.freeze({ data, collectionIndex, font });
+  try {
+    return Object.freeze({ data, collectionIndex, font: parseTtf(data, collectionIndex) });
+  } catch (error) {
+    throw new PdfFontError(
+      `PDF font face ${label} could not be parsed: ` +
+        (error instanceof Error ? error.message : String(error)),
+      { cause: error }
+    );
+  }
 }
 
 function cleanFamilyName(value: unknown, label: string): string {

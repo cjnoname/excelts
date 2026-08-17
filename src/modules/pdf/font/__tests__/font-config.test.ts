@@ -130,6 +130,73 @@ describe("compilePdfFontConfig", () => {
     ).toThrow("must not be empty");
   });
 
+  it("names the offending face and keeps the underlying cause", () => {
+    // A config can hold a dozen font files; an error that only says the font is
+    // invalid leaves the caller guessing which one to replace.
+    let thrown: unknown;
+    try {
+      compilePdfFontConfig({
+        default: { regular: buildFont("Default"), bold: new Uint8Array([1, 2, 3, 4]) }
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(PdfFontError);
+    expect((thrown as Error).message).toContain("default.bold");
+    expect((thrown as Error).cause).toBeInstanceOf(PdfFontError);
+  });
+
+  it("names the offending face inside a named family too", () => {
+    expect(() =>
+      compilePdfFontConfig({
+        default: { regular: buildFont("Default") },
+        families: [
+          {
+            name: "Song",
+            faces: { regular: buildFont("Song"), italic: new Uint8Array([1, 2, 3, 4]) }
+          }
+        ]
+      })
+    ).toThrow("family 'Song'.italic");
+  });
+
+  it("rejects a supplied optional face rather than silently dropping it", () => {
+    // `bold?` means the caller may omit it, not that a broken file is accepted:
+    // dropping it would draw bold runs in regular with no way to notice.
+    expect(() =>
+      compilePdfFontConfig({
+        default: { regular: buildFont("Default"), bold: new Uint8Array([1, 2, 3, 4]) }
+      })
+    ).toThrow(PdfFontError);
+  });
+
+  it("explains which format was supplied instead of a TrueType font", () => {
+    const signature = (bytes: number[]) =>
+      new Uint8Array([...bytes, ...(new Array(60).fill(0) as number[])]);
+    const cases: Array<[number[], string]> = [
+      [[0x4f, 0x54, 0x54, 0x4f], "CFF-flavored OpenType"],
+      [[0x77, 0x4f, 0x46, 0x32], "WOFF2"],
+      [[0x77, 0x4f, 0x46, 0x46], "WOFF"],
+      [[0x50, 0x4b, 0x03, 0x04], "ZIP archive"],
+      [[0x89, 0x50, 0x4e, 0x47], '(".PNG")']
+    ];
+    for (const [bytes, expected] of cases) {
+      expect(() => compilePdfFontConfig({ default: { regular: signature(bytes) } })).toThrow(
+        expected
+      );
+    }
+  });
+
+  it("says the data is empty or too short instead of blaming the header", () => {
+    expect(() => compilePdfFontConfig({ default: { regular: new Uint8Array(0) } })).toThrow(
+      "Font data is empty"
+    );
+    expect(() => compilePdfFontConfig({ default: { regular: new Uint8Array([1, 2]) } })).toThrow(
+      "only 2 byte(s)"
+    );
+  });
+
   it("clones input bytes and freezes the compiled configuration", () => {
     const bytes = buildFont("Snapshot");
     const compiled = compilePdfFontConfig({
