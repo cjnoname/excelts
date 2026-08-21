@@ -33,7 +33,13 @@ import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { emitTextBlock, alphaGsName } from "@pdf/render/page-renderer";
 import type { PdfColor, PdfExportOptions } from "@pdf/types";
-import { hexToRgb01 } from "@utils/theme-colors";
+import {
+  parseCssColor,
+  parseSvgAttributes,
+  parseSvgNumberList,
+  parseSvgRotate,
+  parseSvgTextRuns
+} from "@utils/svg-lex";
 
 // =============================================================================
 // Types
@@ -140,7 +146,7 @@ export interface DrawEllipseOptions {
 }
 
 /** Line drawing options. */
-export interface DrawLineOptions {
+export interface DrawLineOptions extends StrokeShapeOptions {
   /** Start X. */
   x1: number;
   /** Start Y. */
@@ -157,8 +163,37 @@ export interface DrawLineOptions {
   dashPattern?: number[];
 }
 
+/**
+ * How a stroke's corners and ends are shaped.
+ *
+ * `j` and `J` have always been available in the content stream; these were simply
+ * not reachable from the builder, so a caller who wanted a rounded polyline — a
+ * smoothed line chart, for instance — got mitred corners and flat ends.
+ */
+export interface StrokeShapeOptions {
+  /** Corner shape where two segments meet. Default: `"miter"`. */
+  lineJoin?: "miter" | "round" | "bevel";
+  /** End shape of an open stroke. Default: `"butt"`. */
+  lineCap?: "butt" | "round" | "square";
+}
+
 /** Path drawing options. */
-export interface DrawPathOptions {
+export interface DrawPathOptions extends StrokeShapeOptions {
+  /**
+   * Winding rule for the fill. Defaults to `"nonzero"`, as PDF and SVG both do.
+   *
+   * It matters for a compound path — a ring, a shape with a hole, a self-intersecting
+   * outline — where the two rules describe different regions.
+   */
+  fillRule?: "nonzero" | "evenodd";
+  /**
+   * Dash pattern for the stroke. Solid when omitted.
+   *
+   * `drawLine` has always carried one, but a path had no way to express it, so a dashed
+   * polyline of three or more points — a chart's connector lines, a leader — came out
+   * solid in a PDF while SVG and the rasteriser dashed it.
+   */
+  dashPattern?: number[];
   /** Fill color. Omit for no fill. */
   fill?: PdfColor;
   /** Stroke color. Omit for no stroke. */
@@ -213,6 +248,23 @@ export interface DrawSvgOptions {
   /** Destination height in points. If omitted, uses the SVG height/viewBox height. */
   height?: number;
 }
+
+/**
+ * How much of the SVG feature set `drawSvg` understands.
+ *
+ * Supported: `rect` (incl. percentage sizes), `line`, `circle`, `ellipse`,
+ * `polyline`, `polygon`, `path` (all commands), `text` with `tspan`,
+ * `text-anchor`, `font-family` / `font-weight` / `font-style` and a
+ * `rotate()` transform; `fill` / `stroke` with CSS colours including
+ * `#RRGGBBAA` and `rgb()` / `rgba()`; `fill-opacity`, `stroke-opacity`,
+ * `opacity`, `stroke-width`; `viewBox` with `preserveAspectRatio`.
+ *
+ * Not supported, and silently ignored: `<g>` and element `transform` other
+ * than `rotate()`, `style` / CSS, `clipPath`, `mask`, `filter`, gradients and
+ * patterns, `stroke-dasharray`, `stroke-linecap` / `stroke-linejoin`,
+ * `fill-rule`, `use`, `image`, and nested `<svg>`. Input is expected to be the
+ * chart engine's own output or comparably simple markup.
+ */
 
 /** Document metadata. */
 export interface DocumentMetadata {
@@ -620,20 +672,21 @@ export class PdfPageBuilder {
    */
   drawRect(options: DrawRectOptions): this {
     this._stream.save();
-
-    if (options.borderRadius && options.borderRadius > 0) {
-      this._stream.roundedRect(
-        options.x,
-        options.y,
-        options.width,
-        options.height,
-        options.borderRadius
-      );
-    } else {
-      this._stream.rect(options.x, options.y, options.width, options.height);
-    }
-
-    this._paintPath(options.fill, options.stroke, options.lineWidth);
+    const buildPath = (): void => {
+      if (options.borderRadius && options.borderRadius > 0) {
+        this._stream.roundedRect(
+          options.x,
+          options.y,
+          options.width,
+          options.height,
+          options.borderRadius
+        );
+      } else {
+        this._stream.rect(options.x, options.y, options.width, options.height);
+      }
+    };
+    buildPath();
+    this._paintPath(options.fill, options.stroke, options.lineWidth, "nonzero", buildPath);
     this._stream.restore();
     return this;
   }
@@ -643,8 +696,11 @@ export class PdfPageBuilder {
    */
   drawCircle(options: DrawCircleOptions): this {
     this._stream.save();
-    this._stream.circle(options.cx, options.cy, options.r);
-    this._paintPath(options.fill, options.stroke, options.lineWidth);
+    const buildCircle = (): void => {
+      this._stream.circle(options.cx, options.cy, options.r);
+    };
+    buildCircle();
+    this._paintPath(options.fill, options.stroke, options.lineWidth, "nonzero", buildCircle);
     this._stream.restore();
     return this;
   }
@@ -654,8 +710,11 @@ export class PdfPageBuilder {
    */
   drawEllipse(options: DrawEllipseOptions): this {
     this._stream.save();
-    this._stream.ellipse(options.cx, options.cy, options.rx, options.ry);
-    this._paintPath(options.fill, options.stroke, options.lineWidth);
+    const buildEllipse = (): void => {
+      this._stream.ellipse(options.cx, options.cy, options.rx, options.ry);
+    };
+    buildEllipse();
+    this._paintPath(options.fill, options.stroke, options.lineWidth, "nonzero", buildEllipse);
     this._stream.restore();
     return this;
   }
@@ -671,6 +730,7 @@ export class PdfPageBuilder {
     this._applyAlpha(color.a);
     this._stream.setStrokeColor(color);
     this._stream.setLineWidth(lineWidth);
+    this._applyStrokeShape(options);
     if (options.dashPattern && options.dashPattern.length > 0) {
       this._stream.setDashPattern(options.dashPattern);
     }
@@ -687,28 +747,54 @@ export class PdfPageBuilder {
   drawPath(ops: PathOp[], options?: DrawPathOptions): this {
     this._stream.save();
 
-    for (const op of ops) {
-      switch (op.op) {
-        case "move":
-          this._stream.moveTo(op.x, op.y);
-          break;
-        case "line":
-          this._stream.lineTo(op.x, op.y);
-          break;
-        case "curve":
-          this._stream.curveTo(op.x1, op.y1, op.x2, op.y2, op.x3, op.y3);
-          break;
-        case "close":
-          this._stream.closePath();
-          break;
+    const applyPathState = (): void => {
+      if (!options) {
+        return;
       }
-    }
+      this._applyStrokeShape(options);
+      if (options.dashPattern && options.dashPattern.length > 0) {
+        this._stream.setDashPattern(options.dashPattern);
+      }
+    };
+    const emitOps = (): void => {
+      for (const op of ops) {
+        switch (op.op) {
+          case "move":
+            this._stream.moveTo(op.x, op.y);
+            break;
+          case "line":
+            this._stream.lineTo(op.x, op.y);
+            break;
+          case "curve":
+            this._stream.curveTo(op.x1, op.y1, op.x2, op.y2, op.x3, op.y3);
+            break;
+          case "close":
+            this._stream.closePath();
+            break;
+        }
+      }
+    };
+    applyPathState();
+    emitOps();
 
     if (options?.closePath) {
       this._stream.closePath();
     }
 
-    this._paintPath(options?.fill, options?.stroke, options?.lineWidth);
+    const rebuild = (): void => {
+      applyPathState();
+      emitOps();
+      if (options?.closePath) {
+        this._stream.closePath();
+      }
+    };
+    this._paintPath(
+      options?.fill,
+      options?.stroke,
+      options?.lineWidth,
+      options?.fillRule ?? "nonzero",
+      rebuild
+    );
     this._stream.restore();
     return this;
   }
@@ -869,60 +955,114 @@ export class PdfPageBuilder {
    */
   drawSvg(options: DrawSvgOptions): this {
     const parsed = parseSimpleSvg(options.svg);
-    const scaleX = (options.width ?? parsed.width) / parsed.width;
-    const scaleY = (options.height ?? parsed.height) / parsed.height;
-    const mapX = (x: number) => options.x + x * scaleX;
-    const mapY = (y: number) => options.y + (options.height ?? parsed.height) - y * scaleY;
+    const destWidth = options.width ?? parsed.width;
+    const destHeight = options.height ?? parsed.height;
+    // Element coordinates live in the user space the `viewBox` declares, so the
+    // scale is destination-over-*user*, not destination-over-root, and the user
+    // origin has to be subtracted. Aspect ratio is not preserved: this API takes
+    // an explicit destination box and stretches to fill it (equivalent to
+    // `preserveAspectRatio="none"`), which is the predictable contract for a
+    // caller that just asked for a rectangle.
+    const view = resolveSvgViewport(parsed, destWidth, destHeight);
+    const { scaleX, scaleY } = view;
+    const mapX = (x: number) => options.x + view.offsetX + (x - parsed.userMinX) * scaleX;
+    const mapY = (y: number) =>
+      options.y + destHeight - view.offsetY - (y - parsed.userMinY) * scaleY;
     // `opacity` applies to both fill and stroke per SVG spec; multiply it
     // in alongside the channel-specific `fill-opacity` / `stroke-opacity`
     // so every SVG form authors emit (inline rgba, channel opacity, or
     // element-wide opacity) ends up driving `/ExtGState` consistently.
+    // SVG's initial values are `fill: black` and `stroke: none`, and a missing
+    // attribute is *not* the same as an explicit `none`. Treating both as
+    // "undefined" and letting the PDF primitives pick their own defaults got it
+    // wrong in both directions: a bare `<rect/>` came out as a black *outline*
+    // (and a bare `<path/>` vanished entirely) instead of a black fill, while
+    // `<line stroke="none"/>` and `<text fill="none">` were drawn in black
+    // because `drawLine` / `drawText` fall back to black for a missing colour.
     const fillColor = (attrs: Record<string, string>): PdfColor | undefined => {
-      const base = attrs.fill ? svgColorToPdf(attrs.fill) : undefined;
+      const base = attrs.fill === undefined ? BLACK : svgColorToPdf(attrs.fill);
       return withSvgOpacity(withSvgOpacity(base, attrs["fill-opacity"]), attrs.opacity);
     };
     const strokeColor = (attrs: Record<string, string>): PdfColor | undefined => {
-      const base = attrs.stroke ? svgColorToPdf(attrs.stroke) : undefined;
+      const base = attrs.stroke === undefined ? undefined : svgColorToPdf(attrs.stroke);
       return withSvgOpacity(withSvgOpacity(base, attrs["stroke-opacity"]), attrs.opacity);
+    };
+    // `stroke-width` is authored in user units and has to follow the same scale
+    // as the geometry. A PDF line width is one scalar, so a non-uniform scale
+    // uses the geometric mean — the uniform-equivalent factor. This was ignored
+    // entirely, so every stroked element came out at the PDF default width
+    // while the raster backend honoured the attribute: the same chart SVG had
+    // visibly different stroke weights in a PNG and in a PDF.
+    const uniformScale = Math.sqrt(Math.abs(scaleX * scaleY)) || 1;
+    const strokeWidth = (attrs: Record<string, string>): number | undefined => {
+      const raw = attrs["stroke-width"];
+      if (raw === undefined) {
+        return undefined;
+      }
+      const value = Number.parseFloat(raw);
+      return Number.isFinite(value) && value >= 0 ? value * uniformScale : undefined;
     };
 
     for (const element of parsed.elements) {
       if (element.name === "rect") {
-        const rectWidth = lengthAttr(element, "width", parsed.width, 0);
-        const rectHeight = lengthAttr(element, "height", parsed.height, 0);
+        const rectWidth = lengthAttr(element, "width", parsed.userWidth, 0);
+        const rectHeight = lengthAttr(element, "height", parsed.userHeight, 0);
         this.drawRect({
-          x: mapX(lengthAttr(element, "x", parsed.width, 0)),
-          y: mapY(lengthAttr(element, "y", parsed.height, 0) + rectHeight),
+          x: mapX(lengthAttr(element, "x", parsed.userWidth, 0)),
+          y: mapY(lengthAttr(element, "y", parsed.userHeight, 0) + rectHeight),
           width: rectWidth * scaleX,
           height: rectHeight * scaleY,
           fill: fillColor(element.attrs),
-          stroke: strokeColor(element.attrs)
+          stroke: strokeColor(element.attrs),
+          lineWidth: strokeWidth(element.attrs)
         });
       } else if (element.name === "line") {
+        // `stroke` is the only paint a line has, and its initial value is
+        // `none` — so an unstroked line draws nothing rather than falling back
+        // to `drawLine`'s black default.
+        const color = strokeColor(element.attrs);
+        if (!color) {
+          continue;
+        }
         this.drawLine({
           x1: mapX(numAttr(element, "x1", 0)),
           y1: mapY(numAttr(element, "y1", 0)),
           x2: mapX(numAttr(element, "x2", 0)),
           y2: mapY(numAttr(element, "y2", 0)),
-          color: strokeColor(element.attrs)
+          color,
+          lineWidth: strokeWidth(element.attrs)
         });
-      } else if (element.name === "circle") {
-        this.drawCircle({
+      } else if (element.name === "circle" || element.name === "ellipse") {
+        // A circle under a non-uniform scale is an ellipse. The old code drew a
+        // circle of `r * max(scaleX, scaleY)`, which both distorted the shape
+        // and overflowed the destination box on the narrow axis.
+        const rx = element.name === "circle" ? numAttr(element, "r", 0) : numAttr(element, "rx", 0);
+        const ry = element.name === "circle" ? numAttr(element, "r", 0) : numAttr(element, "ry", 0);
+        this.drawEllipse({
           cx: mapX(numAttr(element, "cx", 0)),
           cy: mapY(numAttr(element, "cy", 0)),
-          r: numAttr(element, "r", 0) * Math.max(scaleX, scaleY),
+          rx: rx * scaleX,
+          ry: ry * scaleY,
           fill: fillColor(element.attrs),
-          stroke: strokeColor(element.attrs)
+          stroke: strokeColor(element.attrs),
+          lineWidth: strokeWidth(element.attrs)
         });
       } else if (element.name === "polyline" || element.name === "polygon") {
         const ops = svgPointsToPath(element.attrs.points ?? "", element.name === "polygon").map(
           op => transformPathOp(op, mapX, mapY)
         );
-        const stroke =
-          strokeColor(element.attrs) ?? (element.name === "polyline" ? BLACK : undefined);
+        const stroke = strokeColor(element.attrs);
+        // A `polyline` is filled too under SVG's initial `fill: black`; the
+        // chart emitters always set an explicit `fill` (often `none`) plus a
+        // stroke, so this only changes behaviour for unpainted input.
+        const fill = fillColor(element.attrs);
+        if (!fill && !stroke) {
+          continue;
+        }
         this.drawPath(ops, {
-          fill: element.name === "polygon" ? fillColor(element.attrs) : undefined,
+          fill,
           stroke,
+          lineWidth: strokeWidth(element.attrs),
           closePath: element.name === "polygon"
         });
       } else if (element.name === "path" && element.attrs.d) {
@@ -934,18 +1074,85 @@ export class PdfPageBuilder {
         }
         this.drawPath(ops, {
           fill,
-          stroke
+          stroke,
+          lineWidth: strokeWidth(element.attrs)
         });
       } else if (element.name === "text") {
-        this.drawText(xmlDecodeBasic(element.text), {
-          x: mapX(numAttr(element, "x", 0)),
-          y: mapY(numAttr(element, "y", 0)),
-          fontSize: numAttr(element, "font-size", 12) * Math.max(scaleX, scaleY),
-          color: fillColor(element.attrs)
-        });
+        this._drawSvgText(element, mapX, mapY, scaleX, scaleY, fillColor);
       }
     }
     return this;
+  }
+
+  /**
+   * Draw one SVG `<text>` element, including its `<tspan>` paragraphs.
+   *
+   * Everything here used to be dropped: the element's inner markup was handed
+   * to `drawText` verbatim, so a multi-paragraph chart title rendered its own
+   * `<tspan …>` tags as literal glyphs, and `text-anchor`, `transform`,
+   * `font-family`, `font-weight` and `font-style` were all ignored. Chart SVG is
+   * the documented input for `drawSvg`, and chart SVG uses every one of those.
+   */
+  private _drawSvgText(
+    element: SimpleSvgElement,
+    mapX: (x: number) => number,
+    mapY: (y: number) => number,
+    scaleX: number,
+    scaleY: number,
+    fillColor: (attrs: Record<string, string>) => PdfColor | undefined
+  ): void {
+    const originX = numAttr(element, "x", 0);
+    const originY = numAttr(element, "y", 0);
+    const fontSize = numAttr(element, "font-size", 12) * Math.max(scaleX, scaleY);
+    const anchorAttr = element.attrs["text-anchor"];
+    const anchor =
+      anchorAttr === "middle" ? "middle" : anchorAttr === "end" ? "end" : ("start" as const);
+    const family = element.attrs["font-family"]
+      ?.split(",")[0]
+      ?.trim()
+      .replace(/^['"]|['"]$/g, "");
+    const bold =
+      element.attrs["font-weight"] === "bold" || Number(element.attrs["font-weight"]) >= 600;
+    const italic =
+      element.attrs["font-style"] === "italic" || element.attrs["font-style"] === "oblique";
+    const rotate = parseSvgRotate(element.attrs.transform);
+    // Baseline offsets resolve against the element's own font size, in user
+    // units, before the destination scale is applied.
+    const userFontSize = numAttr(element, "font-size", 12);
+    const paint = fillColor(element.attrs);
+
+    for (const run of parseSvgTextRuns(element.text, userFontSize)) {
+      if (run.text === "") {
+        continue;
+      }
+      // Unrotated baseline in user space, then rotate about the transform's
+      // centre. Doing it in this order is what makes a rotated *multi-line*
+      // label stack along its own down axis, the way nested `<tspan dy>` does
+      // inside an SVG `transform="rotate(...)"`.
+      const baseX = run.x ?? originX;
+      const baseY = originY + run.dy;
+      const placed = rotate ? rotatePointSvg(baseX, baseY, rotate) : { x: baseX, y: baseY };
+      if (!paint) {
+        // `fill="none"` hides the glyphs; `drawText` would otherwise fall back
+        // to black and make hidden text visible.
+        continue;
+      }
+      this.drawText(run.text, {
+        x: mapX(placed.x),
+        y: mapY(placed.y),
+        fontSize,
+        color: paint,
+        anchor,
+        ...(family ? { fontFamily: family } : {}),
+        ...(bold ? { bold } : {}),
+        ...(italic ? { italic } : {}),
+        // `mapY` flips the Y axis, and a reflection reverses the sense of a
+        // rotation: an SVG `rotate(-90)` reads bottom-to-top, so in PDF's Y-up
+        // space that is `+90`. Passing the SVG angle through unchanged mirrored
+        // every rotated label.
+        ...(rotate ? { rotation: -rotate.angle } : {})
+      });
+    }
   }
 
   // ===========================================================================
@@ -965,46 +1172,88 @@ export class PdfPageBuilder {
   // ===========================================================================
 
   /** @internal */
+  /**
+   * Set the stroke's corner and end shapes, when they are not the PDF defaults.
+   *
+   * Emitting nothing for `miter` / `butt` keeps the content stream unchanged for the
+   * overwhelming majority of strokes.
+   */
+  private _applyStrokeShape(options: StrokeShapeOptions): void {
+    if (options.lineJoin !== undefined && options.lineJoin !== "miter") {
+      this._stream.setLineJoin(options.lineJoin === "round" ? 1 : 2);
+    }
+    if (options.lineCap !== undefined && options.lineCap !== "butt") {
+      this._stream.setLineCap(options.lineCap === "round" ? 1 : 2);
+    }
+  }
+
   private _paintPath(
     fill: PdfColor | undefined,
     stroke: PdfColor | undefined,
-    lineWidth: number | undefined
+    lineWidth: number | undefined,
+    fillRule: "nonzero" | "evenodd" = "nonzero",
+    rebuildPath?: () => void
   ): void {
     const hasFill = fill !== undefined;
     const hasStroke = stroke !== undefined;
 
-    // Apply alpha ExtGState before setting colours. `_paintPath` callers
-    // all wrap this in save()/restore(), so the graphics state mutation is
-    // local to this path. When fill and stroke carry different alphas,
-    // the second `setGraphicsState` overrides the first — this matches
-    // pdf-exporter's behaviour and real-world use (alpha parity across
-    // fill/stroke for the same object is overwhelmingly common).
+    if (!hasFill && !hasStroke) {
+      // Default: stroke with black, 1pt.
+      this._stream.setStrokeColor(BLACK);
+      this._stream.setLineWidth(1);
+      this._stream.stroke();
+      return;
+    }
+
+    const paintFill = (): void => {
+      this._applyAlpha(fill!.a);
+      this._stream.setFillColor(fill!);
+      if (fillRule === "evenodd") {
+        this._stream.fillEvenOdd();
+      } else {
+        this._stream.fill();
+      }
+    };
+    const paintStroke = (): void => {
+      this._applyAlpha(stroke!.a);
+      this._stream.setStrokeColor(stroke!);
+      this._stream.setLineWidth(lineWidth ?? 1);
+      this._stream.stroke();
+    };
+
+    // `ca` and `CA` live in one graphics state, so a shape whose fill and stroke carry
+    // different alphas cannot be painted in one pass — the second `setGraphicsState`
+    // overwrote the first and both came out at one transparency. Painting consumes the
+    // current path, so the second pass needs it rebuilt; when a caller cannot rebuild
+    // it, one pass at the fill's alpha is still better than none.
+    if (hasFill && hasStroke && (fill.a ?? 1) !== (stroke.a ?? 1) && rebuildPath !== undefined) {
+      paintFill();
+      this._stream.restore();
+      this._stream.save();
+      rebuildPath();
+      paintStroke();
+      return;
+    }
+
     if (hasFill) {
       this._applyAlpha(fill.a);
     }
     if (hasStroke) {
       this._applyAlpha(stroke.a);
     }
-
-    if (hasFill) {
+    if (hasFill && hasStroke) {
       this._stream.setFillColor(fill);
-    }
-    if (hasStroke) {
       this._stream.setStrokeColor(stroke);
       this._stream.setLineWidth(lineWidth ?? 1);
-    }
-
-    if (hasFill && hasStroke) {
-      this._stream.fillAndStroke();
+      if (fillRule === "evenodd") {
+        this._stream.fillEvenOddAndStroke();
+      } else {
+        this._stream.fillAndStroke();
+      }
     } else if (hasFill) {
-      this._stream.fill();
-    } else if (hasStroke) {
-      this._stream.stroke();
+      paintFill();
     } else {
-      // Default: stroke with black, 1pt
-      this._stream.setStrokeColor(BLACK);
-      this._stream.setLineWidth(1);
-      this._stream.stroke();
+      paintStroke();
     }
   }
 
@@ -2463,82 +2712,112 @@ interface SimpleSvgElement {
 }
 
 interface SimpleSvgDocument {
+  /** Root width in the *parent* coordinate system. */
   width: number;
+  /** Root height in the parent coordinate system. */
   height: number;
+  /**
+   * The user coordinate system the elements are authored in.
+   *
+   * With a `viewBox` this is the viewBox rectangle; without one it is the root
+   * width/height at the origin. Element coordinates are always relative to
+   * this, which is what the previous code missed: it read `viewBox` only to
+   * back-fill a missing width/height and then treated element coordinates as
+   * if they were already in the destination box. A `viewBox="0 0 100 50"` on a
+   * `width="200"` root therefore drew at half scale, and a non-zero
+   * `viewBox` origin shifted everything by that origin.
+   */
+  userMinX: number;
+  userMinY: number;
+  userWidth: number;
+  userHeight: number;
+  /** Raw `preserveAspectRatio`; absent means the spec default. */
+  preserveAspectRatio: string | undefined;
   elements: SimpleSvgElement[];
+}
+
+/**
+ * Resolve the viewBox → viewport transform, honouring `preserveAspectRatio`.
+ *
+ * SVG's initial value is `xMidYMid meet`: scale uniformly so the whole viewBox
+ * fits, then centre the result. This used to scale each axis independently,
+ * which is `preserveAspectRatio="none"` — so a square chart drawn into a wide
+ * box came out stretched instead of centred, disagreeing with every browser and
+ * with the SVG the chart engine itself emits.
+ *
+ * `slice` scales to *cover* the viewport instead of fitting inside it. Alignment
+ * keywords `xMin|xMid|xMax` and `YMin|YMid|YMax` are honoured; the `defer`
+ * prefix is accepted and ignored, as it only applies to referenced images.
+ */
+function resolveSvgViewport(
+  parsed: SimpleSvgDocument,
+  destWidth: number,
+  destHeight: number
+): { scaleX: number; scaleY: number; offsetX: number; offsetY: number } {
+  const rawScaleX = parsed.userWidth > 0 ? destWidth / parsed.userWidth : 1;
+  const rawScaleY = parsed.userHeight > 0 ? destHeight / parsed.userHeight : 1;
+  const spec = (parsed.preserveAspectRatio ?? "")
+    .trim()
+    .replace(/^defer\s+/i, "")
+    .split(/\s+/)
+    .filter(token => token !== "");
+  const align = spec[0] ?? "xMidYMid";
+  if (align === "none") {
+    return { scaleX: rawScaleX, scaleY: rawScaleY, offsetX: 0, offsetY: 0 };
+  }
+  const uniform =
+    spec[1] === "slice" ? Math.max(rawScaleX, rawScaleY) : Math.min(rawScaleX, rawScaleY);
+  const spare = (dest: number, used: number, mid: string, max: string): number => {
+    const slack = dest - used;
+    if (align.includes(max)) {
+      return slack;
+    }
+    return align.includes(mid) ? slack / 2 : 0;
+  };
+  return {
+    scaleX: uniform,
+    scaleY: uniform,
+    offsetX: spare(destWidth, parsed.userWidth * uniform, "xMid", "xMax"),
+    offsetY: spare(destHeight, parsed.userHeight * uniform, "YMid", "YMax")
+  };
 }
 
 function parseSimpleSvg(svg: string): SimpleSvgDocument {
   const svgTag = /<svg\b([^>]*)>/i.exec(svg);
-  const svgAttrs = parseSvgAttrs(svgTag?.[1] ?? "");
-  const viewBox = svgAttrs.viewBox?.split(/[\s,]+/).map(Number) ?? [];
-  const width = svgRootLength(svgAttrs.width, viewBox[2], 300);
-  const height = svgRootLength(svgAttrs.height, viewBox[3], 150);
+  const svgAttrs = parseSvgAttributes(svgTag?.[1] ?? "");
+  const viewBox = parseSvgNumberList(svgAttrs.viewBox);
+  const hasViewBox = viewBox.length >= 4 && viewBox[2] > 0 && viewBox[3] > 0;
+  const width = svgRootLength(svgAttrs.width, hasViewBox ? viewBox[2] : undefined, 300);
+  const height = svgRootLength(svgAttrs.height, hasViewBox ? viewBox[3] : undefined, 150);
+  const userMinX = hasViewBox ? viewBox[0] : 0;
+  const userMinY = hasViewBox ? viewBox[1] : 0;
+  const userWidth = hasViewBox ? viewBox[2] : width;
+  const userHeight = hasViewBox ? viewBox[3] : height;
   const elements: SimpleSvgElement[] = [];
   const elementRe =
-    /<(rect|line|circle|polyline|polygon|path)\b([^>]*)\/?>|<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
+    /<(rect|line|circle|ellipse|polyline|polygon|path)\b([^>]*)\/?>|<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
   let match: RegExpExecArray | null;
   while ((match = elementRe.exec(svg)) !== null) {
     if (match[1]) {
-      elements.push({ name: match[1], attrs: parseSvgAttrs(match[2] ?? ""), text: "" });
+      elements.push({ name: match[1], attrs: parseSvgAttributes(match[2] ?? ""), text: "" });
     } else {
-      elements.push({ name: "text", attrs: parseSvgAttrs(match[3] ?? ""), text: match[4] ?? "" });
+      elements.push({
+        name: "text",
+        attrs: parseSvgAttributes(match[3] ?? ""),
+        text: match[4] ?? ""
+      });
     }
   }
-  return { width, height, elements };
-}
-
-function parseSvgAttrs(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  // Manual parser avoids regex backtracking on uncontrolled input.
-  let i = 0;
-  const len = raw.length;
-  while (i < len) {
-    // Skip non-name characters
-    while (i < len && !isSvgNameChar(raw.charCodeAt(i))) {
-      i++;
-    }
-    if (i >= len) {
-      break;
-    }
-    // Read attribute name
-    const nameStart = i;
-    while (i < len && isSvgNameChar(raw.charCodeAt(i))) {
-      i++;
-    }
-    const name = raw.slice(nameStart, i);
-    // Expect `="`
-    if (i >= len || raw.charCodeAt(i) !== 61 /* = */) {
-      continue;
-    }
-    i++;
-    if (i >= len || raw.charCodeAt(i) !== 34 /* " */) {
-      continue;
-    }
-    i++;
-    // Read attribute value until closing quote
-    const valStart = i;
-    while (i < len && raw.charCodeAt(i) !== 34) {
-      i++;
-    }
-    attrs[name] = raw.slice(valStart, i);
-    if (i < len) {
-      i++; // skip closing quote
-    }
-  }
-  return attrs;
-}
-
-/** Check if a char code is valid in an SVG/XML attribute name (word chars, colon, hyphen). */
-function isSvgNameChar(c: number): boolean {
-  return (
-    (c >= 65 && c <= 90) || // A-Z
-    (c >= 97 && c <= 122) || // a-z
-    (c >= 48 && c <= 57) || // 0-9
-    c === 95 || // _
-    c === 58 || // :
-    c === 45 // -
-  );
+  return {
+    width,
+    height,
+    userMinX,
+    userMinY,
+    userWidth,
+    userHeight,
+    preserveAspectRatio: svgAttrs.preserveAspectRatio,
+    elements
+  };
 }
 
 function numAttr(element: SimpleSvgElement, name: string, fallback: number): number {
@@ -2588,50 +2867,15 @@ function svgRootLength(
  * are accepted (e.g. `rgb(100%, 0%, 0%)` ≡ red).
  */
 function svgColorToPdf(value: string): PdfColor | undefined {
-  if (!value || value === "none") {
+  // CSS/SVG semantics — notably `#RRGGBBAA`, alpha last. This used to delegate
+  // its hex branch to the OOXML reader, which is `#AARRGGBB`, so `#FF000080`
+  // arrived as opaque dark blue instead of translucent red.
+  const parsed = parseCssColor(value);
+  if (!parsed) {
     return undefined;
   }
-  const trimmed = value.trim();
-  // rgb(r,g,b) / rgba(r,g,b,a) — whitespace tolerant, supports 0..255 and 0..100%
-  const fnMatch = /^rgba?\(([^)]+)\)$/i.exec(trimmed);
-  if (fnMatch) {
-    const parts = fnMatch[1]
-      .split(/[\s,]+/)
-      .filter(Boolean)
-      .map(part => {
-        if (part.endsWith("%")) {
-          const pct = Number.parseFloat(part);
-          return Number.isFinite(pct) ? pct / 100 : undefined;
-        }
-        const num = Number.parseFloat(part);
-        return Number.isFinite(num) ? num : undefined;
-      });
-    if (parts.length < 3 || parts.slice(0, 3).some(p => p === undefined)) {
-      return undefined;
-    }
-    // The first three values are RGB in 0..255 when integer, already-0..1
-    // when expressed as percentages above. Detect by the original token
-    // to avoid mis-normalising `rgb(0.5, 0.5, 0.5)` as 0..255.
-    const rawTokens = fnMatch[1].split(/[\s,]+/).filter(Boolean);
-    const normaliseChannel = (v: number, idx: number): number => {
-      if (rawTokens[idx]?.endsWith("%")) {
-        return Math.max(0, Math.min(1, v));
-      }
-      return Math.max(0, Math.min(1, v / 255));
-    };
-    const color: PdfColor = {
-      r: normaliseChannel(parts[0]!, 0),
-      g: normaliseChannel(parts[1]!, 1),
-      b: normaliseChannel(parts[2]!, 2)
-    };
-    if (parts.length >= 4 && parts[3] !== undefined) {
-      // rgba's alpha is 0..1 by spec regardless of whether RGB used %.
-      color.a = Math.max(0, Math.min(1, parts[3]));
-    }
-    return color;
-  }
-  const hex = trimmed.startsWith("#") ? trimmed.slice(1) : trimmed;
-  return hexToRgb01(hex) ?? undefined;
+  const color: PdfColor = { r: parsed.r, g: parsed.g, b: parsed.b };
+  return parsed.a >= 1 ? color : { ...color, a: parsed.a };
 }
 
 /**
@@ -2667,11 +2911,7 @@ function withSvgOpacity(
 }
 
 function svgPointsToPath(points: string, close: boolean): PathOp[] {
-  const nums = points
-    .trim()
-    .split(/[\s,]+/)
-    .map(Number)
-    .filter(Number.isFinite);
+  const nums = parseSvgNumberList(points);
   const ops: PathOp[] = [];
   for (let i = 0; i + 1 < nums.length; i += 2) {
     ops.push(
@@ -2684,6 +2924,26 @@ function svgPointsToPath(points: string, close: boolean): PathOp[] {
     ops.push({ op: "close" });
   }
   return ops;
+}
+
+/**
+ * Rotate a point about a centre using SVG's `rotate()` convention: positive
+ * angles turn clockwise, because the user coordinate system has +Y downwards.
+ */
+function rotatePointSvg(
+  x: number,
+  y: number,
+  rotate: { angle: number; cx: number; cy: number }
+): { x: number; y: number } {
+  const radians = (rotate.angle * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = x - rotate.cx;
+  const dy = y - rotate.cy;
+  return {
+    x: rotate.cx + dx * cos - dy * sin,
+    y: rotate.cy + dx * sin + dy * cos
+  };
 }
 
 function transformPathOp(
@@ -2706,15 +2966,6 @@ function transformPathOp(
     };
   }
   return op;
-}
-
-function xmlDecodeBasic(value: string): string {
-  return value
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, "&");
 }
 
 /**

@@ -8,6 +8,12 @@
  * neutral utilities from `chart-utils` — so neither imports the other.
  */
 
+import { cssColour } from "@draw/colour";
+import { renderNode } from "@draw/render";
+import type { DrawSurface } from "@draw/surface";
+import { SvgSurface } from "@draw/svg";
+import { IDENTITY, rectNode } from "@draw/types";
+import type { DrawList, DrawNode, DrawPaint, DrawPathCommand } from "@draw/types";
 import type {
   ChartExAxis,
   ChartExDataEntry,
@@ -15,33 +21,48 @@ import type {
   ChartExSeries
 } from "@excel/chart/model/chart-ex-types";
 import type { ChartTitle, ShapeProperties } from "@excel/chart/model/types";
+import {
+  boxWhiskerNodes,
+  columnNodes,
+  funnelNodes,
+  hexagonPoints,
+  lineNode,
+  multilineTextNode,
+  paretoOverlayNodes,
+  polygonNode,
+  sunburstNodes,
+  textNode,
+  treemapNodes,
+  waterfallConnectorNodes,
+  waterfallNodes
+} from "@excel/chart/render/chart-ex-nodes";
+import type { WaterfallSpan } from "@excel/chart/render/chart-ex-nodes";
+import { createChartPdfDrawSurface } from "@excel/chart/render/chart-pdf-draw-surface";
 import type {
   ChartPdfDrawingSurface,
-  ChartPdfPathOp,
   ChartRenderOptions,
   RegionMapDataOptions,
   RegionMapMatchRule
 } from "@excel/chart/render/chart-renderer";
 import { renderSvgToPng } from "@excel/chart/render/chart-renderer";
+import { rasterizeDrawList } from "@excel/chart/render/draw-raster-png";
 import type { ResolvedRing, TopologyLike } from "@excel/chart/render/topojson";
 import { resolveTopologyObject } from "@excel/chart/render/topojson";
-import type { ChartRect, PdfColor } from "@excel/chart/shared/chart-utils";
+import type { ChartRect } from "@excel/chart/shared/chart-utils";
 import {
   COLORS,
   DEFAULT_HEIGHT,
   DEFAULT_WIDTH,
+  TEXT_LINE_HEIGHT_EM,
   clamp01,
-  escapeXml,
   escapeXmlAttr,
-  fmt,
   formatNumber,
-  hexToPdfColor,
   insetRect,
   interpolateColor,
-  polar,
   previewShapeFillColor,
-  valueToY,
-  withAlpha
+  singleLineLabel,
+  densifySparsePoints,
+  splitTextLines
 } from "@excel/chart/shared/chart-utils";
 import { getSpPrFill } from "@excel/chart/shared/shape-properties";
 import { ChartOptionsError } from "@excel/errors";
@@ -54,88 +75,125 @@ import { ChartOptionsError } from "@excel/errors";
 type SvgRect = ChartRect;
 
 /**
- * Return the maximum absolute value of `values`, floored at `min`.
- * Folds via a loop rather than `Math.max(min, ...values.map(...))`
- * — the spread form blows the JS call stack past ~100k elements.
- * Matches the defensive style used elsewhere in this file
- * (`valueRange`, `boxStats`, `buildBubbles`).
+ * One series' worth of drawing.
+ *
+ * `mode` is present only for a region map, which reports whether it drew from real
+ * topology, the built-in centroid preview or the hex-tile fallback. That is a fact
+ * about a *decision*, not about geometry, so only the SVG serialiser records it (as a
+ * `data-region-map-mode` attribute); every other backend just draws the nodes.
  */
-function maxAbsValue(values: readonly number[], min: number): number {
-  let max = min;
-  for (const v of values) {
-    const abs = Math.abs(v);
-    if (Number.isFinite(abs) && abs > max) {
-      max = abs;
+interface ChartExSeriesLayer {
+  readonly nodes: readonly DrawNode[];
+  readonly mode?: string;
+}
+
+/**
+ * Everything the three backends need to draw one ChartEx chart.
+ *
+ * The size, the title, the plot rectangle, the series list and the legend were each
+ * derived three times — once in {@link renderChartExSvg}, once in
+ * {@link chartExDrawList} and once in {@link drawChartExPdf}. Three readings of one
+ * model is precisely how the title came out 16pt in PDF and 18pt in SVG, and how the
+ * no-legend case ended up with different margins on different backends. Deriving it
+ * once removes the opportunity.
+ */
+interface ChartExPlan {
+  readonly width: number;
+  readonly height: number;
+  readonly backgroundColor: string;
+  readonly title?: DrawNode;
+  readonly series: readonly ChartExSeriesLayer[];
+  readonly legend: readonly DrawNode[];
+}
+
+/**
+ * Derive the shared plan.
+ *
+ * `boxWidth` / `boxHeight` are the drawing box, which is the render options' size for
+ * SVG and PNG and the destination rectangle's size for PDF.
+ */
+function chartExPlan(
+  model: ChartExModel,
+  options: ChartRenderOptions,
+  boxWidth: number,
+  boxHeight: number
+): ChartExPlan {
+  const title = options.title ?? chartTitleText(model.chartSpace.chart.title);
+  // Count the title's paragraphs so `getPlotRect` can expand the top margin: a
+  // three-line title under the default 52px margin overflowed into the plot.
+  const titleLineCount = title ? splitTextLines(title).length : 0;
+  const legend = model.chartSpace.chart.legend;
+  const plot = getPlotRect(
+    boxWidth,
+    boxHeight,
+    !!title,
+    titleLineCount,
+    legend !== undefined,
+    legend?.legendPos ?? "r"
+  );
+  const plotArea = model.chartSpace.chart.plotArea;
+  const seriesList = plotArea.plotAreaRegion?.series ?? plotArea.series ?? [];
+  const axis = findValueAxis(model);
+  // One index of the chart's data, not one per series: `resolveChartExRefs` used to
+  // rebuild it on every call, and the region-map paths called it a second time.
+  const dataById = new Map(model.chartSpace.chartData.data.map(entry => [entry.id, entry]));
+
+  const series: ChartExSeriesLayer[] = [];
+  seriesList.forEach((entry, index) => {
+    const nodes = chartExSeriesNodes(model, entry, plot, index, dataById, axis);
+    if (nodes) {
+      series.push({ nodes });
+      return;
     }
-  }
-  return max;
+    // Only a region map declines to produce plain nodes: it draws as labelled layers,
+    // and each layer becomes an entry so the SVG serialiser can wrap them individually.
+    const refs = resolveChartExRefs(entry, dataById);
+    const values = refs.values;
+    const categories =
+      refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
+    for (const layer of regionMapLayers(values, categories, entry, plot, options.regionMap, axis)) {
+      series.push({ nodes: layer.nodes, mode: layer.mode });
+    }
+  });
+
+  return {
+    width: boxWidth,
+    height: boxHeight,
+    backgroundColor: options.backgroundColor ?? "#fff",
+    ...(title ? { title: chartExTitleNode(title, boxWidth) } : {}),
+    series,
+    legend: legend
+      ? chartExLegendNodes(seriesList, boxWidth, boxHeight, titleLineCount, legend.legendPos)
+      : []
+  };
 }
 
 export function renderChartExSvg(model: ChartExModel, options: ChartRenderOptions = {}): string {
   const width = options.width ?? DEFAULT_WIDTH;
   const height = options.height ?? DEFAULT_HEIGHT;
-  const title = options.title ?? chartTitleText(model.chartSpace.chart.title);
-  // Count newlines in the title so `getPlotRect` can expand the top
-  // margin for multi-paragraph titles; a 3-line title with the default
-  // 52px top margin would otherwise overflow into the plot area.
-  const titleLineCount = title ? title.split(/\r?\n/).length : 0;
-  const plot = getPlotRect(width, height, !!title, titleLineCount);
-  const backgroundColor = options.backgroundColor ?? "#fff";
-  const series =
-    model.chartSpace.chart.plotArea.plotAreaRegion?.series ??
-    model.chartSpace.chart.plotArea.series ??
-    [];
-  const parts: string[] = [];
-  parts.push(
+  const plan = chartExPlan(model, options, width, height);
+  const parts: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
-  );
-  if (backgroundColor !== "transparent") {
-    parts.push(`<rect width="100%" height="100%" fill="${escapeXmlAttr(backgroundColor)}"/>`);
+  ];
+  if (plan.backgroundColor !== "transparent") {
+    // `width="100%"` rather than a node: the background is the document's, not a mark
+    // in the picture, and the percentage keeps it correct under any viewBox.
+    parts.push(`<rect width="100%" height="100%" fill="${escapeXmlAttr(plan.backgroundColor)}"/>`);
   }
-  if (title) {
-    // Multi-paragraph titles arrive as a `\n`-joined string from
-    // `chartTitleText`. SVG `<text>` normalises whitespace (including
-    // newlines) to spaces, so we must emit each paragraph as its own
-    // `<tspan>` with an explicit baseline offset to stack them
-    // vertically. Single-line titles stay on the fast path and emit a
-    // bare `<text>` node — matches the previous byte-for-byte output
-    // for the common case.
-    const lines = title.split(/\r?\n/);
-    if (lines.length === 1) {
-      parts.push(
-        `<text x="${fmt(width / 2)}" y="26" text-anchor="middle" font-family="Arial" font-size="18" fill="#222">${escapeXml(title)}</text>`
-      );
-    } else {
-      const lineHeightEm = 1.2;
-      const tspans = lines
-        .map(
-          (line, i) =>
-            `<tspan x="${fmt(width / 2)}"${i === 0 ? "" : ` dy="${lineHeightEm}em"`}>${escapeXml(line)}</tspan>`
-        )
-        .join("");
-      parts.push(
-        `<text x="${fmt(width / 2)}" y="26" text-anchor="middle" font-family="Arial" font-size="18" fill="#222">${tspans}</text>`
-      );
-    }
+  if (plan.title) {
+    parts.push(nodesToSvg([plan.title]));
   }
-  for (let i = 0; i < series.length; i++) {
-    renderChartExSeriesSvg(parts, model, series[i], plot, i, options);
-  }
-  // Only draw a legend when the model carries one. Previously this
-  // call was unconditional, producing a synthetic legend on charts that
-  // explicitly hid the legend (e.g. builder used `showLegend: false`,
-  // which stores `legend: undefined`). The classic renderer honours
-  // the legend model — ChartEx now matches.
-  if (model.chartSpace.chart.legend) {
-    renderChartExLegend(
-      parts,
-      series,
-      width,
-      height,
-      !!title,
-      model.chartSpace.chart.legend.legendPos
+  for (const layer of plan.series) {
+    // `data-region-map-mode` is attached here, at serialisation time, rather than
+    // carried through the display list — see {@link ChartExSeriesLayer}.
+    parts.push(
+      layer.mode === undefined
+        ? nodesToSvg(layer.nodes)
+        : `<g data-region-map-mode="${escapeXmlAttr(layer.mode)}">${nodesToSvg(layer.nodes)}</g>`
     );
   }
+  // Legend last so its swatches sit above the plot.
+  parts.push(nodesToSvg(plan.legend));
   parts.push("</svg>");
   return parts.join("");
 }
@@ -146,12 +204,56 @@ export async function renderChartExPng(
 ): Promise<Uint8Array> {
   const width = options.width ?? DEFAULT_WIDTH;
   const height = options.height ?? DEFAULT_HEIGHT;
-  return renderSvgToPng(renderChartExSvg(model, { ...options, width, height }), {
+  // In a browser, hand the SVG to the platform: its own engine beats the built-in
+  // rasteriser on fonts and anti-aliasing. On Node the display list goes straight
+  // to pixels, exactly as the classic renderer does.
+  //
+  // This used to rasterise by re-parsing the SVG this module had just produced,
+  // which is the round trip the classic path abandoned — and it lost the same
+  // things: a multi-paragraph title arrived as `<tspan>`s the scanner could not
+  // place, so all of its lines landed on one baseline, on top of each other.
+  if (typeof document !== "undefined" && typeof Image !== "undefined") {
+    return renderSvgToPng(renderChartExSvg(model, { ...options, width, height }), {
+      width,
+      height,
+      scale: options.scale,
+      dpi: options.dpi
+    });
+  }
+  return rasterizeDrawList(chartExDrawList(model, { ...options, width, height }), {
     width,
     height,
-    scale: options.scale,
-    dpi: options.dpi
+    ...(options.scale === undefined ? {} : { scale: options.scale }),
+    ...(options.dpi === undefined ? {} : { dpi: options.dpi })
   });
+}
+
+/**
+ * The whole chart as one display list.
+ *
+ * The SVG path cannot use this directly — it has to interleave the
+ * `<g data-region-map-mode>` wrappers that report which path drew a region map —
+ * but every other backend can, and the raster one does. Both are assembled from the
+ * same node builders, so they cannot disagree about the picture.
+ */
+function chartExDrawList(model: ChartExModel, options: ChartRenderOptions): DrawList {
+  const width = options.width ?? DEFAULT_WIDTH;
+  const height = options.height ?? DEFAULT_HEIGHT;
+  const plan = chartExPlan(model, options, width, height);
+  const children: DrawNode[] = [];
+  if (plan.backgroundColor !== "transparent") {
+    children.push(
+      rectNode({ x: 0, y: 0, width, height }, { fill: cssColour(plan.backgroundColor) })
+    );
+  }
+  if (plan.title) {
+    children.push(plan.title);
+  }
+  for (const layer of plan.series) {
+    children.push(...layer.nodes);
+  }
+  children.push(...plan.legend);
+  return { width, height, children };
 }
 
 /**
@@ -216,11 +318,11 @@ export function canRenderChartExAsVectorPdf(model: ChartExModel): boolean {
  * the SVG renderer, so the SVG and PDF paths stay equivalent by
  * construction.
  *
- * For any layout ID not in the set the function throws; callers
- * (notably `@pdf/excel-bridge.chartToPdf`) must pre-filter via
- * {@link canRenderChartExAsVectorPdf}. Filtering ahead of time rather
- * than silently skipping preserves "fail loud on unsupported" — a
- * silent no-op would produce an empty page and hide the mistake.
+ * A layout ID outside that set falls back to a clustered column — the dispatcher's
+ * `default` branch — which is why callers should gate on
+ * {@link canRenderChartExAsVectorPdf} rather than relying on this function to refuse.
+ * It used to close with a `throw` for the unsupported case, but the fallback meant
+ * control never reached it: the guard documented an intent the code did not carry out.
  */
 export function drawChartExPdf(
   surface: ChartPdfDrawingSurface,
@@ -228,95 +330,21 @@ export function drawChartExPdf(
   rect: { x: number; y: number; width: number; height: number },
   options: { title?: string; regionMap?: RegionMapDataOptions } = {}
 ): ChartPdfDrawingSurface {
-  const plotArea = model.chartSpace.chart.plotArea;
-  const seriesList = plotArea.plotAreaRegion?.series ?? plotArea.series ?? [];
-  const titleText = options.title ?? chartTitleText(model.chartSpace.chart.title);
-  // `titleHeight` must scale with the number of lines so multi-paragraph
-  // titles don't overflow the plot area. Line-height of 19.2 matches
-  // the 16pt font × 1.2 line-height applied below in the drawText loop.
-  const titleLines = titleText ? titleText.split(/\r?\n/).length : 0;
-  const titleHeight = titleText ? Math.max(28, 20 + titleLines * 19.2) : 0;
-
-  // Internal drawing uses SVG coordinates (y=0 at top, increasing downward).
-  // The `rect` parameter is in PDF coordinates (y=0 at page bottom).
-  // We compute the plot in SVG-local space (origin 0,0 at top-left of chart)
-  // then use a flipping surface to emit correct PDF coordinates.
-  const plot: SvgRect = {
-    x: 12,
-    y: titleHeight + 12,
-    width: Math.max(10, rect.width - 24),
-    height: Math.max(10, rect.height - titleHeight - 24)
-  };
-
-  // Y-flipping surface: converts SVG-local y to PDF-page y.
-  // Formula: pdfY = rect.y + rect.height - localY
-  // For rects: PDF rect(x, pdfBottomY, w, h) where pdfBottomY = rect.y + rect.height - (localY + h)
-  const flipY = (localY: number): number => rect.y + rect.height - localY;
-  const flipped: ChartPdfDrawingSurface = {
-    drawRect(o) {
-      surface.drawRect({
-        ...o,
-        x: rect.x + o.x,
-        y: flipY(o.y + o.height),
-        width: o.width,
-        height: o.height
-      });
-      return flipped;
+  // The same plan the SVG and raster paths draw, sized to the destination box. The
+  // plot rectangle used to be computed separately here, which is what let the legend
+  // cover the data and left the no-legend case on different margins entirely.
+  const plan = chartExPlan(
+    model,
+    {
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(options.regionMap === undefined ? {} : { regionMap: options.regionMap })
     },
-    drawLine(o) {
-      surface.drawLine({
-        ...o,
-        x1: rect.x + o.x1,
-        y1: flipY(o.y1),
-        x2: rect.x + o.x2,
-        y2: flipY(o.y2)
-      });
-      return flipped;
-    },
-    drawText(text, o) {
-      surface.drawText(text, {
-        ...o,
-        x: rect.x + o.x,
-        y: flipY(o.y)
-      });
-      return flipped;
-    },
-    drawCircle: surface.drawCircle
-      ? o => {
-          surface.drawCircle!({
-            ...o,
-            cx: rect.x + o.cx,
-            cy: flipY(o.cy)
-          });
-          return flipped;
-        }
-      : undefined,
-    drawPath: surface.drawPath
-      ? (ops, pathOpts) => {
-          const flippedOps: ChartPdfPathOp[] = ops.map(op => {
-            if (op.op === "close") {
-              return op;
-            }
-            if (op.op === "curve") {
-              return {
-                ...op,
-                x1: rect.x + op.x1,
-                y1: flipY(op.y1),
-                x2: rect.x + op.x2,
-                y2: flipY(op.y2),
-                x3: rect.x + op.x3,
-                y3: flipY(op.y3)
-              };
-            }
-            return { ...op, x: rect.x + op.x, y: flipY(op.y) };
-          });
-          surface.drawPath!(flippedOps, pathOpts);
-          return flipped;
-        }
-      : undefined
-  } as ChartPdfDrawingSurface;
+    rect.width,
+    rect.height
+  );
 
-  // Page background: a light frame matching the SVG background rect.
+  // Page background: a light frame. Unlike the SVG background this carries a border,
+  // which is what marks the chart's extent on a page that is not its own canvas.
   surface.drawRect({
     x: rect.x,
     y: rect.y,
@@ -326,1239 +354,24 @@ export function drawChartExPdf(
     stroke: { r: 0.85, g: 0.85, b: 0.85 }
   });
 
-  if (titleText) {
-    // Multi-paragraph titles arrive as a `\n`-joined string from
-    // `chartTitleText`. `drawText` is a single-line primitive on every
-    // surface we support, so previously a two-paragraph title rendered
-    // as one line containing a literal `\n`. Split explicitly and
-    // stack paragraphs vertically with a `fontSize * 1.2` line-height
-    // (same convention as the SVG path below).
-    const fontSize = 16;
-    const lineHeight = Math.round(fontSize * 1.2);
-    const lines = titleText.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      flipped.drawText(lines[i], {
-        x: rect.width / 2,
-        y: 20 + i * lineHeight,
-        fontSize,
-        anchor: "middle",
-        color: hexToPdfColor("#222222")
-      });
-    }
+  // One adapter owns the flip. This used to wrap the page in a hand-written flipping
+  // surface and *then* ask the shared adapter not to flip — two implementations of the
+  // same reflection, which is how a rotated label or a cubic control point could come
+  // out mirrored on one path and not the other.
+  const target = createChartPdfDrawSurface(surface, rect.x, rect.y, rect.height);
+  if (plan.title) {
+    renderNodesToChartPdf(target, [plan.title]);
   }
-
-  for (const series of seriesList) {
-    if (series.layoutId === "treemap") {
-      drawTreemapPdf(flipped, model, series, plot);
-    } else if (series.layoutId === "sunburst") {
-      drawSunburstPdf(flipped, model, series, plot);
-    } else if (series.layoutId === "funnel") {
-      drawFunnelPdf(flipped, model, series, plot);
-    } else if (series.layoutId === "waterfall") {
-      drawWaterfallPdf(flipped, model, series, plot);
-    } else if (series.layoutId === "boxWhisker") {
-      drawBoxWhiskerPdf(flipped, model, series, plot);
-    } else if (series.layoutId === "regionMap") {
-      drawRegionMapPdf(flipped, model, series, plot, options.regionMap);
-    } else if (series.layoutId === "clusteredColumn") {
-      // Both `histogram` and `pareto` live under clusteredColumn after
-      // builder normalisation; distinguishing them is a single runtime
-      // flag (`layoutPr.paretoLine`).
-      if (series.layoutPr?.paretoLine) {
-        drawParetoPdf(flipped, model, series, plot, { drawColumns: true });
-      } else {
-        drawHistogramPdf(flipped, model, series, plot);
-      }
-    } else if (series.layoutId === "paretoLine") {
-      // Standalone paretoLine (distinct from `clusteredColumn` with
-      // `paretoLine` flag) — Excel emits this for the cumulative-
-      // percent line overlay when the author builds a paired Pareto
-      // chart via the UI. The bars come from a sibling `clusteredColumn`
-      // series; this series draws ONLY the overlay curve. PDF dispatch
-      // was missing this case and threw `layoutId 'paretoLine' is not
-      // supported`; then when added, unconditionally redrew the columns
-      // on top of the companion series' bars.
-      drawParetoPdf(flipped, model, series, plot, { drawColumns: false });
-    } else {
-      throw new Error(
-        `drawChartExPdf: layoutId '${series.layoutId}' is not supported by the vector path. ` +
-          `Gate on canRenderChartExAsVectorPdf(model) before calling.`
-      );
-    }
+  for (const layer of plan.series) {
+    // A content stream has nowhere to record a region map's mode, so only the nodes
+    // carry over; the picture is the same one the SVG path draws.
+    renderNodesToChartPdf(target, layer.nodes);
   }
+  // Legend last so its swatches sit above the plot, matching the SVG draw order. The
+  // vector PDF path used to omit the legend entirely, so an authored `legendPos`
+  // appeared in SVG and PNG but never in a PDF.
+  renderNodesToChartPdf(target, plan.legend);
   return surface;
-}
-
-function drawTreemapPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  const root = buildHierarchy(refs.hierarchy, categories, values);
-  for (const cell of collectTreemapCells(root, plot)) {
-    surface.drawRect({
-      x: cell.rect.x,
-      y: cell.rect.y,
-      width: cell.rect.width,
-      height: cell.rect.height,
-      fill: hexToPdfColor(cell.color),
-      stroke: { r: 1, g: 1, b: 1 }
-    });
-    if (cell.label) {
-      surface.drawText(cell.label, {
-        x: cell.rect.x + 4,
-        y: cell.rect.y + 14,
-        fontSize: 10,
-        color: { r: 1, g: 1, b: 1 },
-        anchor: "start"
-      });
-    }
-  }
-}
-
-function drawSunburstPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  const root = buildHierarchy(refs.hierarchy, categories, values);
-  if (!surface.drawPath) {
-    // Without drawPath we can only approximate slice fills with a
-    // flood-filled wedge — not worth the complexity. Fall back to a
-    // neutral rect so the chart placeholder is still visible rather
-    // than silently empty, matching how classic charts degrade when
-    // `drawPath` is missing.
-    surface.drawRect({
-      x: plot.x,
-      y: plot.y,
-      width: plot.width,
-      height: plot.height,
-      stroke: { r: 0.7, g: 0.7, b: 0.7 }
-    });
-    return;
-  }
-  for (const slice of collectSunburstSlices(root, plot)) {
-    const ops = ringSliceToPdfPath(slice);
-    if (ops.length === 0) {
-      continue;
-    }
-    surface.drawPath(ops, {
-      fill: hexToPdfColor(slice.color),
-      stroke: { r: 1, g: 1, b: 1 }
-    });
-  }
-}
-
-/**
- * Shared PDF axis renderer for the ChartEx layouts that borrow
- * classic-chart axis furniture — histogram, pareto, waterfall,
- * boxWhisker. Mirrors the SVG {@link renderAxes} helper: four evenly
- * spaced horizontal gridlines, a darker baseline + left edge, and
- * numeric min/max labels on the y axis. Keeping the two functions
- * visually aligned means the PDF matches the SVG preview pixel-for-
- * pixel modulo rasterisation.
- */
-function drawAxesPdf(
-  surface: ChartPdfDrawingSurface,
-  plot: SvgRect,
-  range: { min: number; max: number }
-): void {
-  const gridColor = hexToPdfColor("#D9D9D9");
-  const frameColor = hexToPdfColor("#444444");
-  const textColor = hexToPdfColor("#555555");
-  // Four interior gridlines plus the top and bottom baselines give six
-  // data-aligned labels (min, 20%, 40%, 60%, 80%, max). Emitting them
-  // alongside the gridlines — same loop, same `i` — keeps the labels
-  // mathematically in sync with the lines so a user always sees a
-  // tick number directly to the left of each grid mark.
-  for (let i = 1; i < 5; i++) {
-    const t = i / 5;
-    const y = plot.y + plot.height * t;
-    surface.drawLine({
-      x1: plot.x,
-      y1: y,
-      x2: plot.x + plot.width,
-      y2: y,
-      color: gridColor
-    });
-    // `t` counts from the top; the numeric value is therefore the
-    // interpolation between `max` (at t = 0, top) and `min` (at
-    // t = 1, bottom). Mirrors the SVG emitter in `renderAxes`.
-    const value = range.max + (range.min - range.max) * t;
-    surface.drawText(formatNumber(value), {
-      x: plot.x - 8,
-      y: y + 3,
-      fontSize: 10,
-      color: textColor,
-      anchor: "end"
-    });
-  }
-  surface.drawLine({
-    x1: plot.x,
-    y1: plot.y + plot.height,
-    x2: plot.x + plot.width,
-    y2: plot.y + plot.height,
-    color: frameColor
-  });
-  surface.drawLine({
-    x1: plot.x,
-    y1: plot.y,
-    x2: plot.x,
-    y2: plot.y + plot.height,
-    color: frameColor
-  });
-  surface.drawText(formatNumber(range.max), {
-    x: plot.x - 8,
-    y: plot.y + 3,
-    fontSize: 10,
-    color: textColor,
-    anchor: "end"
-  });
-  surface.drawText(formatNumber(range.min), {
-    x: plot.x - 8,
-    y: plot.y + plot.height + 3,
-    fontSize: 10,
-    color: textColor,
-    anchor: "end"
-  });
-}
-
-/**
- * Shared PDF column renderer. Draws the same `rect + category label`
- * pair the SVG {@link renderColumnSvg} helper emits, plus the axes
- * via {@link drawAxesPdf}. Used directly by the histogram PDF path
- * and reused by waterfall / pareto (which compute their own column
- * geometry but share the axis framing).
- */
-function drawColumnsPdf(
-  surface: ChartPdfDrawingSurface,
-  values: number[],
-  categories: string[],
-  plot: SvgRect,
-  color: string,
-  axis?: ChartExAxis
-): void {
-  const range = valueRange(values, axis);
-  drawAxesPdf(surface, plot, range);
-  const count = Math.max(1, values.length);
-  const groupWidth = plot.width / count;
-  const zero = valueToY(0, range.min, range.max, plot);
-  const fill = hexToPdfColor(color);
-  const labelColor = hexToPdfColor("#555555");
-  values.forEach((value, i) => {
-    const y = valueToY(value, range.min, range.max, plot);
-    surface.drawRect({
-      x: plot.x + i * groupWidth + groupWidth * 0.18,
-      y: Math.min(y, zero),
-      width: groupWidth * 0.64,
-      height: Math.abs(zero - y),
-      fill
-    });
-    surface.drawText(categories[i] ?? String(i + 1), {
-      x: plot.x + i * groupWidth + groupWidth / 2,
-      y: plot.y + plot.height + 18,
-      fontSize: 10,
-      color: labelColor,
-      anchor: "middle"
-    });
-  });
-}
-
-function drawHistogramPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const bins = buildHistogramBins(refs.values, series.layoutPr?.binning);
-  drawColumnsPdf(
-    surface,
-    bins.map(bin => bin.count),
-    bins.map(bin => bin.label),
-    plot,
-    COLORS[0],
-    findValueAxis(model)
-  );
-}
-
-function drawParetoPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect,
-  options: { drawColumns?: boolean } = {}
-): void {
-  const { drawColumns = true } = options;
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  // Filter non-finite values before sorting. `Array.prototype.sort`
-  // is undefined on `NaN` comparator outputs (V8 TimSort keeps them
-  // in their discovery position, WebKit may shuffle them arbitrarily),
-  // so a blank / `#N/A` source cell produces bars at a random X
-  // position and desynces the cumulative curve from the column heights.
-  // Pareto convention also drops missing rows entirely.
-  const sorted = values
-    .map((value, i) => ({ value, category: categories[i] ?? String(i + 1) }))
-    .filter(item => Number.isFinite(item.value))
-    .sort((a, b) => b.value - a.value);
-  const sortedValues = sorted.map(item => item.value);
-  if (drawColumns) {
-    drawColumnsPdf(
-      surface,
-      sortedValues,
-      sorted.map(item => item.category),
-      plot,
-      COLORS[0],
-      findValueAxis(model)
-    );
-  }
-
-  // Cumulative polyline. Rendered as connected `drawLine` segments so
-  // the path stays visible on surfaces without `drawPath`, matching
-  // the SVG polyline behaviour. `drawCircle` is used for the dots
-  // when available; otherwise small rects serve as markers.
-  //
-  // Non-finite values (NaN from blank / `#N/A` source cells) would
-  // otherwise poison `Math.max(0, …)` and zero the visible `> 0` check
-  // — mirrors the SVG pareto guard.
-  const positiveSum = sortedValues.reduce(
-    (sum, v) => sum + (Number.isFinite(v) ? Math.max(0, v) : 0),
-    0
-  );
-  // When the dataset has no positive values (all-zero or all-negative
-  // Pareto input), the cumulative-percent curve is undefined — every
-  // point would collapse to the baseline and imply a flat 0 %
-  // cumulative trace. Suppress the overlay entirely so the author
-  // notices the input is out of range, rather than silently emitting
-  // a flat line that reads as valid data.
-  if (positiveSum > 0) {
-    const total = positiveSum;
-    let cumulative = 0;
-    const count = Math.max(1, sortedValues.length);
-    const step = plot.width / count;
-    const points = sortedValues.map((value, i) => {
-      cumulative += Number.isFinite(value) ? Math.max(0, value) : 0;
-      return {
-        x: plot.x + i * step + step / 2,
-        y: plot.y + plot.height - (cumulative / total) * plot.height
-      };
-    });
-    const lineColor = hexToPdfColor(COLORS[1]);
-    for (let i = 1; i < points.length; i++) {
-      surface.drawLine({
-        x1: points[i - 1].x,
-        y1: points[i - 1].y,
-        x2: points[i].x,
-        y2: points[i].y,
-        color: lineColor,
-        lineWidth: 2
-      });
-    }
-    for (const p of points) {
-      if (surface.drawCircle) {
-        surface.drawCircle({ cx: p.x, cy: p.y, r: 3, fill: lineColor });
-      } else {
-        surface.drawRect({
-          x: p.x - 3,
-          y: p.y - 3,
-          width: 6,
-          height: 6,
-          fill: lineColor
-        });
-      }
-    }
-    surface.drawText("Cumulative %", {
-      x: plot.x + plot.width - 4,
-      y: plot.y + 12,
-      fontSize: 10,
-      color: lineColor,
-      anchor: "end"
-    });
-  }
-}
-
-function drawWaterfallPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  const subtotalIdx = new Set(series.layoutPr?.subtotals?.map(s => s.idx) ?? []);
-  let running = 0;
-  const spans = values.map((value, i) => {
-    // Subtotal convention: span `0 → running sum` (not the scalar
-    // value stored at the row). See `renderWaterfallSvg` for the
-    // matching rationale.
-    if (subtotalIdx.has(i)) {
-      const end = running;
-      return { start: 0, end, value: end, total: true, gap: false };
-    }
-    // NaN guard mirrors the SVG path — `collectChartExNumbers` emits
-    // `NaN` for sparse slots; adding that into `running` poisons every
-    // subsequent bar. Emit a zero-height placeholder span and leave
-    // `running` untouched. Flag as `gap` so the colour picker below
-    // routes to a neutral grey rather than "increase" green
-    // (`value: 0 >= 0` would otherwise paint the gap row the same as a
-    // zero-increase row, making missing data indistinguishable from a
-    // real zero delta).
-    if (!Number.isFinite(value)) {
-      return { start: running, end: running, value: 0, total: false, gap: true };
-    }
-    const start = running;
-    const end = running + value;
-    running = end;
-    return { start, end, value, total: false, gap: false };
-  });
-  const range = valueRange(
-    spans.flatMap(s => [s.start, s.end]),
-    findValueAxis(model)
-  );
-  drawAxesPdf(surface, plot, range);
-  const count = Math.max(1, spans.length);
-  const groupWidth = plot.width / count;
-  const labelColor = hexToPdfColor("#555555");
-  const connectorColor = hexToPdfColor("#888888");
-  const centers: Array<{ x: number; y: number }> = [];
-  spans.forEach((span, i) => {
-    const y1 = valueToY(span.start, range.min, range.max, plot);
-    const y2 = valueToY(span.end, range.min, range.max, plot);
-    const x = plot.x + i * groupWidth + groupWidth * 0.18;
-    const colorHex = span.gap
-      ? "#BFBFBF"
-      : span.total
-        ? shapeFillColor(series.layoutPr?.totalSpPr, COLORS[2])
-        : span.value >= 0
-          ? shapeFillColor(series.layoutPr?.increaseSpPr, "#70AD47")
-          : shapeFillColor(series.layoutPr?.decreaseSpPr, "#C00000");
-    surface.drawRect({
-      x,
-      y: Math.min(y1, y2),
-      width: groupWidth * 0.64,
-      // Gap rows should have zero visible height — `Math.max(1, 0)`
-      // produced a 1-pixel green sliver that looked like a tiny
-      // positive delta. Skip the `Math.max` clamp when the span is
-      // intentionally flat.
-      height: span.gap ? 0 : Math.max(1, Math.abs(y1 - y2)),
-      fill: hexToPdfColor(colorHex)
-    });
-    surface.drawText(categories[i] ?? String(i + 1), {
-      x: plot.x + i * groupWidth + groupWidth / 2,
-      y: plot.y + plot.height + 18,
-      fontSize: 10,
-      color: labelColor,
-      anchor: "middle"
-    });
-    centers.push({ x: x + groupWidth * 0.64, y: y2 });
-  });
-  if (series.layoutPr?.connectorLines !== false) {
-    for (let i = 0; i < centers.length - 1; i++) {
-      surface.drawLine({
-        x1: centers[i].x,
-        y1: centers[i].y,
-        x2: centers[i + 1].x - groupWidth * 0.64,
-        y2: centers[i].y,
-        color: connectorColor,
-        dashPattern: [3, 3]
-      });
-    }
-  }
-}
-
-function drawFunnelPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  // Use the true maximum magnitude — flooring at 1 collapses charts
-  // whose data is entirely sub-1 (conversion rates, probabilities,
-  // proportions) into a tiny funnel because every stage width then
-  // scales as `value / 1` rather than `value / max`. Only fall back
-  // to `1` when there are no positive, finite values at all so
-  // downstream arithmetic never divides by zero.
-  const trueMax = maxAbsValue(values, 0);
-  const max = trueMax > 0 ? trueMax : 1;
-  const count = Math.max(1, values.length);
-  const h = plot.height / count;
-  const labelColor: PdfColor = { r: 1, g: 1, b: 1 };
-  const whiteStroke: PdfColor = { r: 1, g: 1, b: 1 };
-  // Pre-resolve per-point `dataPt/@idx` overrides into a map, mirroring
-  // `renderFunnelSvg`. Previously the PDF path used the default
-  // `COLORS` palette regardless of `dataPt` overrides, so a
-  // round-tripped funnel with custom stage colours rendered correctly
-  // in SVG but reverted to the default palette in PDF output — a
-  // silent divergence between the two backends.
-  const pointFills = new Map<number, string>();
-  if (series.dataPt) {
-    for (const dp of series.dataPt) {
-      if (dp.spPr) {
-        pointFills.set(dp.idx, shapeFillColor(dp.spPr, COLORS[dp.idx % COLORS.length]));
-      }
-    }
-  }
-  values.forEach((value, i) => {
-    // Non-finite values must not propagate into the polygon vertices —
-    // see `renderFunnelSvg` for the rationale.
-    const absValue = Number.isFinite(value) ? Math.abs(value) : 0;
-    const rawNext = values[i + 1];
-    const nextAbs = Number.isFinite(rawNext) ? Math.abs(rawNext) : absValue;
-    const topW = (absValue / max) * plot.width;
-    const bottomW = (nextAbs / max) * plot.width;
-    const y = plot.y + i * h;
-    const cx = plot.x + plot.width / 2;
-    const fill = hexToPdfColor(pointFills.get(i) ?? COLORS[i % COLORS.length]);
-    // Trapezoid = quadrilateral polygon: `drawPath` with move + 3×line
-    // + close. When the surface lacks drawPath we still keep a filled
-    // rectangle (retains the colour signal) and overlay four stroke-
-    // only lines that trace the trapezoid's real outline — so the
-    // funnel silhouette remains recognisable even without vector
-    // polygon filling.
-    if (surface.drawPath) {
-      surface.drawPath(
-        [
-          { op: "move", x: cx - topW / 2, y },
-          { op: "line", x: cx + topW / 2, y },
-          { op: "line", x: cx + bottomW / 2, y: y + h * 0.88 },
-          { op: "line", x: cx - bottomW / 2, y: y + h * 0.88 },
-          { op: "close" }
-        ],
-        { fill, stroke: whiteStroke }
-      );
-    } else {
-      surface.drawRect({
-        x: cx - Math.max(topW, bottomW) / 2,
-        y,
-        width: Math.max(topW, bottomW),
-        height: h * 0.88,
-        fill
-      });
-      // Four white strokes reproducing the trapezoid outline. Top and
-      // bottom are horizontal; the two sides angle inwards when
-      // bottomW < topW (narrowing funnel) or outward for a growing
-      // layer. The rect behind still carries the colour; these lines
-      // carve the trapezoid silhouette on top.
-      const yBottom = y + h * 0.88;
-      surface.drawLine({
-        x1: cx - topW / 2,
-        y1: y,
-        x2: cx + topW / 2,
-        y2: y,
-        color: whiteStroke
-      });
-      surface.drawLine({
-        x1: cx + topW / 2,
-        y1: y,
-        x2: cx + bottomW / 2,
-        y2: yBottom,
-        color: whiteStroke
-      });
-      surface.drawLine({
-        x1: cx + bottomW / 2,
-        y1: yBottom,
-        x2: cx - bottomW / 2,
-        y2: yBottom,
-        color: whiteStroke
-      });
-      surface.drawLine({
-        x1: cx - bottomW / 2,
-        y1: yBottom,
-        x2: cx - topW / 2,
-        y2: y,
-        color: whiteStroke
-      });
-    }
-    surface.drawText(categories[i] ?? String(i + 1), {
-      x: cx,
-      y: y + h * 0.55,
-      fontSize: 11,
-      color: labelColor,
-      anchor: "middle"
-    });
-  });
-}
-
-function drawBoxWhiskerPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  const groups =
-    categories.length > 0
-      ? groupValuesByCategory(values, categories)
-      : new Map([["Values", values]]);
-  const allValues = Array.from(groups.values()).flat();
-  const range = valueRange(allValues, findValueAxis(model));
-  drawAxesPdf(surface, plot, range);
-  const keys = Array.from(groups.keys());
-  const groupWidth = plot.width / Math.max(1, keys.length);
-  const whiskerColor = hexToPdfColor("#555555");
-  const medianColor = hexToPdfColor("#333333");
-  const outlierStroke = hexToPdfColor("#333333");
-  const meanColor = hexToPdfColor("#333333");
-  const labelColor = hexToPdfColor("#555555");
-  keys.forEach((key, i) => {
-    const stats = boxStats(groups.get(key) ?? [], series.layoutPr?.quartileMethod ?? "exclusive");
-    const cx = plot.x + i * groupWidth + groupWidth / 2;
-    const w = groupWidth * 0.38;
-    const q1 = valueToY(stats.q1, range.min, range.max, plot);
-    const q3 = valueToY(stats.q3, range.min, range.max, plot);
-    const med = valueToY(stats.median, range.min, range.max, plot);
-    const low = valueToY(stats.low, range.min, range.max, plot);
-    const high = valueToY(stats.high, range.min, range.max, plot);
-    const seriesColorHex = COLORS[i % COLORS.length];
-    const seriesColor = hexToPdfColor(seriesColorHex);
-    // Whisker (vertical line spanning low..high).
-    surface.drawLine({ x1: cx, y1: high, x2: cx, y2: low, color: whiskerColor });
-    // IQR box with 0.35 alpha fill, matching the SVG `withAlpha`.
-    surface.drawRect({
-      x: cx - w / 2,
-      y: Math.min(q1, q3),
-      width: w,
-      height: Math.abs(q3 - q1),
-      fill: { ...seriesColor, a: 0.35 },
-      stroke: seriesColor
-    });
-    // Median line.
-    surface.drawLine({
-      x1: cx - w / 2,
-      y1: med,
-      x2: cx + w / 2,
-      y2: med,
-      color: medianColor
-    });
-    // Mean marker (circle).
-    if (series.layoutPr?.showMeanMarker !== false) {
-      const meanY = valueToY(stats.mean, range.min, range.max, plot);
-      if (surface.drawCircle) {
-        surface.drawCircle({ cx, cy: meanY, r: 3, fill: meanColor });
-      } else {
-        surface.drawRect({
-          x: cx - 3,
-          y: meanY - 3,
-          width: 6,
-          height: 6,
-          fill: meanColor
-        });
-      }
-    }
-    // Mean line — dashed horizontal inside the IQR box.
-    if (series.layoutPr?.showMeanLine) {
-      const meanY = valueToY(stats.mean, range.min, range.max, plot);
-      surface.drawLine({
-        x1: cx - w / 2,
-        y1: meanY,
-        x2: cx + w / 2,
-        y2: meanY,
-        color: meanColor,
-        dashPattern: [3, 2]
-      });
-    }
-    // Inner points — small translucent dots, one per non-outlier
-    // sample. Matches the SVG path; iterate `stats.nonOutliers` (not
-    // the full raw group) so outlier values don't get double-plotted
-    // as both an inner-point dot AND a hollow outlier ring when both
-    // flags are enabled.
-    if (series.layoutPr?.showInnerPoints) {
-      const innerFill = { ...seriesColor, a: 0.55 };
-      for (const value of stats.nonOutliers) {
-        const y = valueToY(value, range.min, range.max, plot);
-        if (surface.drawCircle) {
-          surface.drawCircle({ cx: cx - w * 0.62, cy: y, r: 1.6, fill: innerFill });
-        } else {
-          surface.drawRect({
-            x: cx - w * 0.62 - 1.6,
-            y: y - 1.6,
-            width: 3.2,
-            height: 3.2,
-            fill: innerFill
-          });
-        }
-      }
-    }
-    // Outliers — hollow circles outside the IQR whiskers.
-    if (series.layoutPr?.showOutlierPoints !== false) {
-      for (const outlier of stats.outliers) {
-        const y = valueToY(outlier, range.min, range.max, plot);
-        if (surface.drawCircle) {
-          surface.drawCircle({ cx: cx + w * 0.62, cy: y, r: 2, stroke: outlierStroke });
-        } else {
-          // No drawCircle → approximate the hollow ring with a stroke-
-          // only rect. Matches SVG's `fill="none" stroke="#333"` circle
-          // more faithfully than an opaque rect would; keeps the bbox
-          // size identical so overlays with inner points don't shift.
-          surface.drawRect({
-            x: cx + w * 0.62 - 2,
-            y: y - 2,
-            width: 4,
-            height: 4,
-            stroke: outlierStroke
-          });
-        }
-      }
-    }
-    surface.drawText(key, {
-      x: cx,
-      y: plot.y + plot.height + 18,
-      fontSize: 10,
-      color: labelColor,
-      anchor: "middle"
-    });
-  });
-}
-
-/**
- * Vector PDF path for ChartEx `regionMap`. Mirrors `renderRegionMapSvg`
- * with the same three-mode dispatch — TopoJSON first, centroid
- * preview second, hex-tile fallback last — so the decision logic
- * stays in a single place instead of drifting between backends. All
- * the math (projections, extent normalisation, centroid lookup,
- * label matching) is imported verbatim from the SVG helpers; only
- * the "emit" step switches from string concatenation to `drawRect` /
- * `drawPath` / `drawCircle` / `drawLine` / `drawText` calls.
- *
- * Inside the function the three branches are:
- *
- *   1. Topology supplied and at least one feature matches → draw
- *      filled polygons per feature via `drawPath` (or a `drawLine`
- *      outline on surfaces without `drawPath`), plus matched-feature
- *      labels at each ring centroid.
- *   2. Known centroids cover every category → draw a muted frame
- *      rectangle + graticule + scaled circle per region + optional
- *      text labels; missing centroids spill into the hex-tile grid.
- *   3. No centroids hit → the whole plot becomes the hex-tile grid.
- */
-function drawRegionMapPdf(
-  surface: ChartPdfDrawingSurface,
-  model: ChartExModel,
-  series: ChartExSeries,
-  plot: SvgRect,
-  mapOptions?: RegionMapDataOptions
-): void {
-  const refs = resolveChartExRefs(model, series);
-  const values = refs.values;
-  const categories =
-    refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  const range = valueRange(values, findValueAxis(model));
-
-  // 1. TopoJSON branch.
-  if (mapOptions?.topology) {
-    const drawn = tryDrawRegionMapWithTopologyPdf(
-      surface,
-      values,
-      categories,
-      series,
-      plot,
-      range,
-      mapOptions
-    );
-    if (drawn) {
-      return;
-    }
-    // Fall through to the centroid preview.
-  }
-
-  // 2. Centroid preview.
-  const records = values.map((value, i) => ({
-    value,
-    label: categories[i] ?? String(i + 1),
-    coord: lookupRegionCoordinate(categories[i] ?? String(i + 1))
-  }));
-  const known = records.filter(
-    (record): record is { value: number; label: string; coord: RegionCoordinate } => !!record.coord
-  );
-  if (known.length === 0) {
-    // 3. No centroid hits: hex tiles over the full plot.
-    drawRegionMapTileFallbackPdf(surface, records, range, plot);
-    return;
-  }
-
-  // Frame + graticule.
-  surface.drawRect({
-    x: plot.x,
-    y: plot.y,
-    width: plot.width,
-    height: plot.height,
-    fill: hexToPdfColor("#F7FBFF"),
-    stroke: hexToPdfColor("#C7DFF2")
-  });
-  drawRegionMapGraticulePdf(surface, plot);
-
-  // Scaled circle per region.
-  const labelMode = series.layoutPr?.regionLabels ?? "bestFit";
-  const whiteStroke: PdfColor = { r: 1, g: 1, b: 1 };
-  const regionLabelColor = hexToPdfColor("#1F3B53");
-  for (const record of known) {
-    const projected = projectRegionCoordinate(
-      record.coord,
-      series.layoutPr?.projection ?? "miller",
-      plot
-    );
-    // Skip non-finite values and clamp `t` to `[0, 1]` — same guard
-    // as the SVG path; without it `radius` / `interpolateColor`
-    // receive `NaN` or out-of-range input and draw invisible or
-    // garbage-coloured dots. Matches the TOPO path's clamp.
-    if (!Number.isFinite(record.value)) {
-      continue;
-    }
-    const rawT = (record.value - range.min) / Math.max(1e-9, range.max - range.min);
-    const t = Math.max(0, Math.min(1, rawT));
-    const radius = 6 + Math.sqrt(t) * 14;
-    const fillColor: PdfColor = {
-      ...hexToPdfColor(interpolateColor("#D9EAF7", "#2F75B5", t)),
-      // Matches the SVG `opacity="0.92"`; `/ExtGState` will materialise
-      // it on capable surfaces, others render opaque which is
-      // acceptable for a preview-grade dot.
-      a: 0.92
-    };
-    if (surface.drawCircle) {
-      surface.drawCircle({
-        cx: projected.x,
-        cy: projected.y,
-        r: radius,
-        fill: fillColor,
-        stroke: whiteStroke
-      });
-    } else {
-      surface.drawRect({
-        x: projected.x - radius,
-        y: projected.y - radius,
-        width: radius * 2,
-        height: radius * 2,
-        fill: fillColor,
-        stroke: whiteStroke
-      });
-    }
-    if (labelMode === "showAll" || (labelMode === "bestFit" && radius >= 9)) {
-      surface.drawText(record.label, {
-        x: projected.x,
-        y: projected.y + 3,
-        fontSize: 9,
-        color: regionLabelColor,
-        anchor: "middle"
-      });
-    }
-  }
-
-  // Unknown regions drift into a hex-tile strip at the bottom.
-  const unknown = records.filter(record => !record.coord);
-  if (unknown.length > 0) {
-    const fallbackHeight = Math.min(52, plot.height * 0.25);
-    drawRegionMapTileFallbackPdf(surface, unknown, range, {
-      x: plot.x + 8,
-      y: plot.y + plot.height - fallbackHeight - 8,
-      width: plot.width - 16,
-      height: fallbackHeight
-    });
-  }
-}
-
-/**
- * PDF equivalent of `tryRenderRegionMapWithTopology`. Returns `true`
- * when at least one feature matched and was drawn; otherwise the
- * caller falls back to the centroid preview. Reuses every piece of
- * business logic from the SVG version (match rule ordering,
- * projection, extent computation, label reverse lookup) so the
- * decision boundaries stay identical across backends.
- */
-function tryDrawRegionMapWithTopologyPdf(
-  surface: ChartPdfDrawingSurface,
-  values: number[],
-  categories: string[],
-  series: ChartExSeries,
-  plot: SvgRect,
-  range: { min: number; max: number },
-  mapOptions: RegionMapDataOptions
-): boolean {
-  let features: ReturnType<typeof resolveTopologyObject>;
-  try {
-    features = resolveTopologyObject(mapOptions.topology as TopologyLike, mapOptions.objectName);
-  } catch {
-    return false;
-  }
-  if (features.length === 0) {
-    return false;
-  }
-
-  const matchRules: RegionMapMatchRule[] = (() => {
-    const raw = mapOptions.match ?? "id";
-    return Array.isArray(raw) ? (raw.length > 0 ? raw : ["id"]) : [raw];
-  })();
-  const candidateKeys = (f: (typeof features)[number]): string[] => {
-    const keys: string[] = [];
-    for (const rule of matchRules) {
-      const raw = rule.startsWith("property:")
-        ? (f.properties?.[rule.slice(9)] as string | number | undefined)
-        : (f.id as string | number | undefined);
-      if (raw !== undefined && raw !== null) {
-        keys.push(String(raw).trim().toLowerCase());
-      }
-    }
-    return keys;
-  };
-
-  const valueByLabel = new Map<string, number>();
-  categories.forEach((label, i) => {
-    const norm = normaliseLabel(label);
-    if (norm) {
-      valueByLabel.set(norm, values[i]);
-    }
-  });
-  if (valueByLabel.size === 0) {
-    return false;
-  }
-
-  const projection = mapOptions.projection ?? series.layoutPr?.projection ?? "miller";
-  const extent = computeProjectionExtent(features, projection);
-  if (!extent) {
-    return false;
-  }
-
-  // Pre-pass: resolve matches and count hits BEFORE drawing anything.
-  // PDF surface calls can't be rolled back, so if we committed the
-  // frame + outlines to the surface and then returned `false`, the
-  // caller would layer its centroid fallback on top of our partial
-  // topo-map — the SVG path had the same bug and buffers fragments
-  // instead. Here we just do the decision first and only touch the
-  // surface on the success path.
-  const resolvedMatch = new Map<
-    (typeof features)[number],
-    { key: string; value: number } | undefined
-  >();
-  let matchedCount = 0;
-  for (const feature of features) {
-    const keys = candidateKeys(feature);
-    let hit: { key: string; value: number } | undefined;
-    for (const key of keys) {
-      const value = valueByLabel.get(key);
-      if (value !== undefined) {
-        hit = { key, value };
-        matchedCount += 1;
-        break;
-      }
-    }
-    resolvedMatch.set(feature, hit);
-  }
-  if (matchedCount === 0) {
-    return false;
-  }
-
-  // Frame. PDF surface `drawRect` does not expose `borderRadius` via
-  // the chart surface interface, so the SVG's `rx="14"` rounded
-  // corners become sharp corners here — the only intentional visual
-  // divergence between the two backends for regionMap.
-  surface.drawRect({
-    x: plot.x,
-    y: plot.y,
-    width: plot.width,
-    height: plot.height,
-    fill: hexToPdfColor("#F7FBFF"),
-    stroke: hexToPdfColor("#C7DFF2")
-  });
-
-  const strokeHex = mapOptions.strokeColor ?? "#FFFFFF";
-  const strokeColor = hexToPdfColor(strokeHex);
-  for (const feature of features) {
-    const match = resolvedMatch.get(feature);
-    const fillHex = match
-      ? (() => {
-          const t = (match.value - range.min) / Math.max(1e-9, range.max - range.min);
-          return interpolateColor("#D9EAF7", "#2F75B5", Math.max(0, Math.min(1, t)));
-        })()
-      : "#E9EEF3";
-    const fill = hexToPdfColor(fillHex);
-    const ops = featureToPdfPathOps(feature.rings, projection, plot, extent);
-    if (ops.length === 0) {
-      continue;
-    }
-    if (surface.drawPath) {
-      surface.drawPath(ops, { fill, stroke: strokeColor });
-    } else {
-      // Minimal-surface fallback: outline the feature by walking the
-      // move/line ops as a series of drawLine calls. Fill is lost
-      // (no way to flood-fill a polygon without drawPath) but the
-      // silhouette remains.
-      drawPathOpsAsLines(surface, ops, strokeColor);
-    }
-  }
-
-  // Label reverse lookup (original category casing).
-  const labelByKey = new Map<string, string>();
-  categories.forEach(label => {
-    const norm = normaliseLabel(label);
-    if (norm) {
-      labelByKey.set(norm, label);
-    }
-  });
-
-  const labelMode = series.layoutPr?.regionLabels ?? "bestFit";
-  const topoLabelColor = hexToPdfColor("#1F3B53");
-  if (labelMode === "showAll" || labelMode === "bestFit") {
-    for (const feature of features) {
-      const match = resolvedMatch.get(feature);
-      if (!match || feature.rings.length === 0) {
-        continue;
-      }
-      const centroidLonLat = ringCentroid(feature.rings[0]);
-      if (!centroidLonLat) {
-        continue;
-      }
-      const projected = projectLonLatToPlot(
-        centroidLonLat[0],
-        centroidLonLat[1],
-        projection,
-        plot,
-        extent
-      );
-      const originalLabel =
-        labelByKey.get(match.key) ??
-        (typeof feature.id === "string" ? feature.id : String(feature.id ?? ""));
-      surface.drawText(originalLabel, {
-        x: projected.x,
-        y: projected.y + 3,
-        fontSize: 9,
-        color: topoLabelColor,
-        anchor: "middle"
-      });
-    }
-  }
-
-  return true;
-}
-
-/**
- * Convert a feature's resolved lon/lat rings into
- * `ChartPdfPathOp[]`. Each ring becomes `move` + `line×n` + `close`,
- * which is the exact one-to-one mapping of the SVG `M x y L x y … Z`
- * form `featureToSvgPath` emits — no curve approximation, because
- * TopoJSON arcs are already polylines once `resolveTopologyObject`
- * has dequantised them.
- */
-function featureToPdfPathOps(
-  rings: ResolvedRing[],
-  projection: NonNullable<RegionMapDataOptions["projection"]>,
-  plot: SvgRect,
-  extent: { minX: number; maxX: number; minY: number; maxY: number }
-): ChartPdfPathOp[] {
-  const ops: ChartPdfPathOp[] = [];
-  for (const ring of rings) {
-    if (ring.length < 2) {
-      continue;
-    }
-    const pts = ring.map(([lon, lat]) => projectLonLatToPlot(lon, lat, projection, plot, extent));
-    ops.push({ op: "move", x: pts[0].x, y: pts[0].y });
-    for (let i = 1; i < pts.length; i++) {
-      ops.push({ op: "line", x: pts[i].x, y: pts[i].y });
-    }
-    ops.push({ op: "close" });
-  }
-  return ops;
-}
-
-/**
- * Last-resort degradation for surfaces without `drawPath`: trace a
- * polygon's move/line/close ops as individual `drawLine` segments.
- * Produces a stroke-only outline (fill is unreachable without a
- * path-filling primitive). Only reachable on custom surfaces; both
- * `PdfPageBuilder` and `PdfEditorPage` implement `drawPath`.
- */
-function drawPathOpsAsLines(
-  surface: ChartPdfDrawingSurface,
-  ops: ChartPdfPathOp[],
-  color: PdfColor
-): void {
-  let subpathStart: { x: number; y: number } | undefined;
-  let prev: { x: number; y: number } | undefined;
-  for (const op of ops) {
-    if (op.op === "move") {
-      subpathStart = { x: op.x, y: op.y };
-      prev = subpathStart;
-    } else if (op.op === "line" && prev) {
-      surface.drawLine({ x1: prev.x, y1: prev.y, x2: op.x, y2: op.y, color });
-      prev = { x: op.x, y: op.y };
-    } else if (op.op === "close" && prev && subpathStart) {
-      surface.drawLine({
-        x1: prev.x,
-        y1: prev.y,
-        x2: subpathStart.x,
-        y2: subpathStart.y,
-        color
-      });
-      prev = subpathStart;
-    }
-  }
-}
-
-/** PDF equivalent of `renderRegionMapGraticule` — three vertical and two horizontal reference lines. */
-function drawRegionMapGraticulePdf(surface: ChartPdfDrawingSurface, plot: SvgRect): void {
-  const color = hexToPdfColor("#E5F0FA");
-  for (let i = 1; i < 4; i++) {
-    const x = plot.x + (plot.width * i) / 4;
-    surface.drawLine({ x1: x, y1: plot.y + 8, x2: x, y2: plot.y + plot.height - 8, color });
-  }
-  for (let i = 1; i < 3; i++) {
-    const y = plot.y + (plot.height * i) / 3;
-    surface.drawLine({ x1: plot.x + 8, y1: y, x2: plot.x + plot.width - 8, y2: y, color });
-  }
-}
-
-/**
- * Hex-tile fallback (PDF). Used when the category list contains no
- * regions the centroid table recognises, or as a bottom strip next
- * to the centroid preview for unmatched regions. Mirrors
- * `renderRegionMapTileFallback` exactly — a grid of hexagons whose
- * fill tracks the value scale, with optional labels when the cell
- * is large enough.
- */
-function drawRegionMapTileFallbackPdf(
-  surface: ChartPdfDrawingSurface,
-  records: Array<{ value: number; label: string }>,
-  range: { min: number; max: number },
-  plot: SvgRect
-): void {
-  const count = Math.max(1, records.length);
-  const cols = Math.ceil(Math.sqrt(count));
-  const rows = Math.ceil(count / cols);
-  const cellW = plot.width / cols;
-  const cellH = plot.height / rows;
-  const radius = Math.min(cellW, cellH) * 0.38;
-  const whiteStroke: PdfColor = { r: 1, g: 1, b: 1 };
-  const labelColor = hexToPdfColor("#1F3B53");
-  records.forEach((record, i) => {
-    if (!Number.isFinite(record.value)) {
-      return;
-    }
-    const cx = plot.x + (i % cols) * cellW + cellW / 2;
-    const cy = plot.y + Math.floor(i / cols) * cellH + cellH / 2;
-    const t = clamp01((record.value - range.min) / Math.max(1e-9, range.max - range.min));
-    const fill = hexToPdfColor(interpolateColor("#D9EAF7", "#2F75B5", t));
-    const hexOps = hexagonPathOps(cx, cy, radius);
-    if (surface.drawPath) {
-      surface.drawPath(hexOps, { fill, stroke: whiteStroke });
-    } else {
-      // Approximate the hexagon with a centred rect + outline — the
-      // colour remains, the exact hex shape becomes a square but the
-      // grid layout is preserved.
-      surface.drawRect({
-        x: cx - radius,
-        y: cy - radius,
-        width: radius * 2,
-        height: radius * 2,
-        fill,
-        stroke: whiteStroke
-      });
-    }
-    if (cellW > 34 && cellH > 22) {
-      surface.drawText(record.label, {
-        x: cx,
-        y: cy + 3,
-        fontSize: 9,
-        color: labelColor,
-        anchor: "middle"
-      });
-    }
-  });
-}
-
-function hexagonPathOps(cx: number, cy: number, radius: number): ChartPdfPathOp[] {
-  const ops: ChartPdfPathOp[] = [];
-  for (let i = 0; i < 6; i++) {
-    const angle = Math.PI / 6 + (Math.PI * 2 * i) / 6;
-    const x = cx + Math.cos(angle) * radius;
-    const y = cy + Math.sin(angle) * radius;
-    ops.push(i === 0 ? { op: "move", x, y } : { op: "line", x, y });
-  }
-  ops.push({ op: "close" });
-  return ops;
-}
-
-/**
- * Convert a sunburst ring slice into `ChartPdfPathOp[]`, approximating
- * each arc with a cubic Bézier curve. PDF's path grammar has no
- * native arc primitive, but a single ≤ 90° arc can be drawn to
- * within ~0.027 % max error using the standard "kappa" control
- * coefficient `(4/3) * tan((end-start)/4)`; longer arcs are split
- * into quadrants.
- *
- * The resulting path walks outer-arc forwards, then inner-arc
- * backwards, closing the ring slice — the same topology
- * `renderRingSlice` produces for SVG, just expressed as Beziers.
- */
-function ringSliceToPdfPath(slice: SunburstSlice): ChartPdfPathOp[] {
-  const ops: ChartPdfPathOp[] = [];
-  const outerStart = polar(slice.cx, slice.cy, slice.outer, slice.start);
-  ops.push({ op: "move", x: outerStart.x, y: outerStart.y });
-  appendArcAsBeziers(ops, slice.cx, slice.cy, slice.outer, slice.start, slice.end);
-  const innerEnd = polar(slice.cx, slice.cy, slice.inner, slice.end);
-  ops.push({ op: "line", x: innerEnd.x, y: innerEnd.y });
-  appendArcAsBeziers(ops, slice.cx, slice.cy, slice.inner, slice.end, slice.start);
-  ops.push({ op: "close" });
-  return ops;
-}
-
-function appendArcAsBeziers(
-  ops: ChartPdfPathOp[],
-  cx: number,
-  cy: number,
-  radius: number,
-  start: number,
-  end: number
-): void {
-  if (radius <= 0) {
-    return;
-  }
-  const totalSweep = end - start;
-  if (totalSweep === 0) {
-    return;
-  }
-  // Split the sweep so each sub-arc is ≤ 90° (π/2 radians). Keeping
-  // sub-arcs small is what bounds the cubic Bézier approximation
-  // error below ~0.03 %; larger sweeps visibly distort at the
-  // midpoint.
-  const steps = Math.max(1, Math.ceil(Math.abs(totalSweep) / (Math.PI / 2)));
-  const stepSweep = totalSweep / steps;
-  let theta = start;
-  for (let i = 0; i < steps; i++) {
-    const next = theta + stepSweep;
-    const kappa = (4 / 3) * Math.tan(stepSweep / 4);
-    const p0 = polar(cx, cy, radius, theta);
-    const p1 = {
-      x: p0.x - kappa * radius * Math.sin(theta),
-      y: p0.y + kappa * radius * Math.cos(theta)
-    };
-    const p3 = polar(cx, cy, radius, next);
-    const p2 = {
-      x: p3.x + kappa * radius * Math.sin(next),
-      y: p3.y - kappa * radius * Math.cos(next)
-    };
-    ops.push({ op: "curve", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, x3: p3.x, y3: p3.y });
-    theta = next;
-  }
 }
 
 interface HierarchyNode {
@@ -1567,88 +380,97 @@ interface HierarchyNode {
   children: HierarchyNode[];
 }
 
-function renderChartExSeriesSvg(
-  parts: string[],
+/** Draw display-list nodes onto a target built by {@link chartExPdfTarget}. */
+function renderNodesToChartPdf(target: DrawSurface, nodes: readonly DrawNode[]): void {
+  for (const node of nodes) {
+    renderNode(node, IDENTITY, target);
+  }
+}
+
+/**
+ * Serialise display-list nodes into markup.
+ *
+ * Every layout is converted, yet the SVG path still assembles fragments rather
+ * than serialising one `DrawList` for the whole chart — deliberately. Two things
+ * in the output have no representation in a display list: the `<svg>` element
+ * itself, and the `<g data-region-map-mode>` wrapper that reports which path drew
+ * a region map (see {@link RegionMapLayer}). Modelling either would mean adding a
+ * document node and an arbitrary-attribute channel to the IR for the benefit of a
+ * single backend. Emitting them here costs one string join and keeps the IR about
+ * geometry and paint, which is why this is the shape it settled on rather than a
+ * step on the way somewhere else.
+ */
+function nodesToSvg(nodes: readonly DrawNode[]): string {
+  const surface = new SvgSurface();
+  for (const node of nodes) {
+    renderNode(node, IDENTITY, surface);
+  }
+  return surface.markup();
+}
+
+/**
+ * The display list for one ChartEx series.
+ *
+ * This is the single dispatch point for every layout both backends can express:
+ * the SVG and PDF paths call it and then hand the nodes to their own surface, so a
+ * layout cannot render differently depending on which output was asked for. It
+ * used to be two parallel `switch` statements — one emitting markup, one calling
+ * surface methods — which is how the title size, the legend offset and the
+ * histogram plot rect came to disagree.
+ *
+ * Returns `undefined` for `regionMap`, the one layout still served by a
+ * per-backend emitter.
+ */
+function chartExSeriesNodes(
   model: ChartExModel,
   series: ChartExSeries,
   plot: SvgRect,
   seriesIndex: number,
-  renderOptions: ChartRenderOptions = {}
-): void {
-  const refs = resolveChartExRefs(model, series);
+  dataById: ReadonlyMap<number, ChartExDataEntry>,
+  axis: ChartExAxis | undefined
+): DrawNode[] | undefined {
+  const refs = resolveChartExRefs(series, dataById);
   const values = refs.values;
   const categories =
     refs.categories.length > 0 ? refs.categories : values.map((_, i) => String(i + 1));
-  // Locate the value axis once per series so `valScaling.min/max` can be
-  // honoured. Non-valued layouts (treemap / sunburst / funnel / regionMap)
-  // ignore the axis; columnar layouts pass it into `valueRange` below.
-  const valueAxis = findValueAxis(model);
   switch (series.layoutId) {
     case "funnel":
-      renderFunnelSvg(parts, values, categories, series, plot);
-      return;
+      return funnelLayoutNodes(values, categories, series, plot);
     case "waterfall":
-      renderWaterfallSvg(parts, values, categories, series, plot, valueAxis);
-      return;
+      return waterfallLayoutNodes(values, categories, series, plot, axis);
     case "clusteredColumn":
-      if (series.layoutPr?.paretoLine) {
-        renderParetoSvg(parts, values, categories, series, plot, valueAxis, {
-          drawColumns: true
-        });
-      } else {
-        renderHistogramSvg(parts, values, series, plot, valueAxis);
-      }
-      return;
+      // Both `histogram` and `pareto` live under clusteredColumn after builder
+      // normalisation; a single runtime flag distinguishes them.
+      return series.layoutPr?.paretoLine
+        ? paretoLayoutNodes(values, categories, plot, axis, { drawColumns: true })
+        : histogramLayoutNodes(values, series, plot, axis);
     case "paretoLine":
-      // `paretoLine` is a valid layoutId distinct from `clusteredColumn`
-      // + `layoutPr.paretoLine`. Excel stores the paired Pareto chart
-      // as two sibling series — a `clusteredColumn` for the bars and a
-      // `paretoLine` for the cumulative curve — so the standalone
-      // variant must emit ONLY the overlay line (the columns come from
-      // the companion series, if any). Previously this case fell
-      // through to `renderParetoSvg` which unconditionally redrew the
-      // columns in sorted order on top of the companion series' bars.
-      renderParetoSvg(parts, values, categories, series, plot, valueAxis, {
-        drawColumns: false
-      });
-      return;
+      // A valid layoutId distinct from `clusteredColumn` + `layoutPr.paretoLine`.
+      // Excel stores a paired Pareto as two sibling series — a `clusteredColumn`
+      // for the bars and a `paretoLine` for the curve — so this variant must emit
+      // only the overlay.
+      return paretoLayoutNodes(values, categories, plot, axis, { drawColumns: false });
     case "boxWhisker":
-      renderBoxWhiskerSvg(parts, values, categories, series, plot, valueAxis);
-      return;
+      return boxWhiskerLayoutNodes(values, categories, series, plot, axis);
     case "treemap":
-      renderTreemapSvg(parts, buildHierarchy(refs.hierarchy, categories, values), plot);
-      return;
+      return treemapNodes(
+        collectTreemapCells(buildHierarchy(refs.hierarchy, categories, values), plot)
+      );
     case "sunburst":
-      renderSunburstSvg(parts, buildHierarchy(refs.hierarchy, categories, values), plot);
-      return;
+      return sunburstNodes(
+        collectSunburstSlices(buildHierarchy(refs.hierarchy, categories, values), plot)
+      );
     case "regionMap":
-      renderRegionMapSvg(
-        parts,
-        values,
-        categories,
-        series,
-        plot,
-        renderOptions.regionMap,
-        valueAxis
-      );
-      return;
+      return undefined;
     default:
-      renderColumnSvg(
-        parts,
-        values,
-        categories,
-        plot,
-        COLORS[seriesIndex % COLORS.length],
-        valueAxis
-      );
+      return columnLayoutNodes(values, categories, plot, COLORS[seriesIndex % COLORS.length], axis);
   }
 }
 
 function resolveChartExRefs(
-  model: ChartExModel,
-  series: ChartExSeries
+  series: ChartExSeries,
+  dataById: ReadonlyMap<number, ChartExDataEntry>
 ): { values: number[]; categories: string[]; hierarchy: string[][] } {
-  const dataById = new Map(model.chartSpace.chartData.data.map(entry => [entry.id, entry]));
   const entries = (series.dataRefs ?? [])
     .map(ref => (ref.dataId === undefined ? undefined : dataById.get(ref.dataId)))
     .filter((entry): entry is ChartExDataEntry => !!entry);
@@ -1716,19 +538,17 @@ function collectChartExStrings(entry: ChartExDataEntry): string[] {
   if (!first) {
     return [];
   }
-  // Hard ceiling on densification — prevents malicious / malformed XML
-  // from allocating a gigabyte-scale array via a bogus `ptCount`.
-  // Matches the classic `collectNumberValues` guard (`SPARSE_ARRAY_CEILING`).
-  const SPARSE_ARRAY_CEILING = 2_097_152;
-  const declared = first.ptCount ?? first.points.length;
-  const count = Math.min(Math.max(first.points.length, declared), SPARSE_ARRAY_CEILING);
-  const values = Array.from({ length: count }, (_, i) => String(i + 1));
-  for (const point of first.points) {
-    if (point.index >= 0 && point.index < count) {
-      values[point.index] = point.value;
-    }
-  }
-  return values;
+  // One densifier, shared with the classic reader. The copy that used to live here
+  // sized the array from `max(points.length, ptCount)`, so a category at `idx="3"` in
+  // a file that omits `ptCount` sat outside its own array and was dropped.
+  const dense = densifySparsePoints<string | undefined, string>(
+    first.points,
+    first.ptCount,
+    undefined,
+    raw => (typeof raw === "string" ? raw : undefined)
+  );
+  // An unaddressed slot keeps its positional name, as it always has.
+  return dense.map((value, index) => value ?? String(index + 1));
 }
 
 function collectChartExNumbers(entry: ChartExDataEntry): number[] {
@@ -1737,9 +557,6 @@ function collectChartExNumbers(entry: ChartExDataEntry): number[] {
   if (!first) {
     return [];
   }
-  const SPARSE_ARRAY_CEILING = 2_097_152;
-  const declared = first.ptCount ?? first.points.length;
-  const count = Math.min(Math.max(first.points.length, declared), SPARSE_ARRAY_CEILING);
   // Mirror the classic `collectNumberValues` semantics: sparse slots
   // are gaps, not zeros. Excel omits `<cx:pt>` entries for blank /
   // `#N/A` source cells; the classic renderer encodes those as `NaN`
@@ -1748,56 +565,31 @@ function collectChartExNumbers(entry: ChartExDataEntry): number[] {
   // that poisoned the data range (waterfall spanning to 0, histogram
   // bars showing at "empty" categories) and diverged from the classic
   // rendering of identical data.
-  const values = Array.from({ length: count }, () => NaN);
-  for (const point of first.points) {
-    if (point.index >= 0 && point.index < count) {
-      values[point.index] = point.value;
-    }
-  }
-  return values;
+  return densifySparsePoints(first.points, first.ptCount, NaN, raw =>
+    typeof raw === "number" && Number.isFinite(raw) ? raw : NaN
+  );
 }
 
-function renderColumnSvg(
-  parts: string[],
+/** Nodes for a plain clustered-column layout. */
+function columnLayoutNodes(
   values: number[],
   categories: string[],
   plot: SvgRect,
   color: string,
   axis?: ChartExAxis
-): void {
-  const range = valueRange(values, axis);
-  renderAxes(parts, plot, range);
-  const count = Math.max(1, values.length);
-  const groupWidth = plot.width / count;
-  const zero = valueToY(0, range.min, range.max, plot);
-  values.forEach((value, i) => {
-    const y = valueToY(value, range.min, range.max, plot);
-    parts.push(
-      `<rect x="${fmt(plot.x + i * groupWidth + groupWidth * 0.18)}" y="${fmt(Math.min(y, zero))}" width="${fmt(groupWidth * 0.64)}" height="${fmt(Math.abs(zero - y))}" fill="${color}"/>`
-    );
-    parts.push(
-      svgText(
-        plot.x + i * groupWidth + groupWidth / 2,
-        plot.y + plot.height + 18,
-        categories[i] ?? String(i + 1),
-        10,
-        "#555",
-        "middle"
-      )
-    );
-  });
+): DrawNode[] {
+  return columnNodes(values, categories, plot, color, valueRange(values, axis));
 }
 
-function renderHistogramSvg(
-  parts: string[],
+/** Nodes for a histogram: bin the values, then draw them as columns. */
+function histogramLayoutNodes(
   values: number[],
   series: ChartExSeries,
   plot: SvgRect,
   axis?: ChartExAxis
-): void {
+): DrawNode[] {
   const bins = buildHistogramBins(values, series.layoutPr?.binning);
-  renderColumnSvg(
-    parts,
+  return columnLayoutNodes(
     bins.map(bin => bin.count),
     bins.map(bin => bin.label),
     plot,
@@ -1806,92 +598,53 @@ function renderHistogramSvg(
   );
 }
 
-function renderParetoSvg(
-  parts: string[],
+/**
+ * Nodes for a Pareto chart: descending columns plus the cumulative overlay.
+ *
+ * `drawColumns` is false for a standalone `paretoLine` series, whose bars come
+ * from a sibling `clusteredColumn` series — drawing them here would paint a second
+ * set of sorted bars on top of the companion's.
+ */
+function paretoLayoutNodes(
   values: number[],
   categories: string[],
-  _series: ChartExSeries,
   plot: SvgRect,
   axis?: ChartExAxis,
   options: { drawColumns?: boolean } = {}
-): void {
+): DrawNode[] {
   const { drawColumns = true } = options;
-  // Filter non-finite values before sorting — see `drawParetoPdf` for
-  // the full explanation. `NaN` comparator outputs make the sort order
-  // implementation-defined, which desyncs bars from the cumulative curve.
+  // Filter non-finite values before sorting: a `NaN` comparator result makes the
+  // order implementation-defined, which desyncs the bars from the cumulative
+  // curve.
   const sorted = values
-    .map((value, i) => ({ value, category: categories[i] ?? String(i + 1) }))
+    .map((value, index) => ({ value, category: categories[index] ?? String(index + 1) }))
     .filter(item => Number.isFinite(item.value))
     .sort((a, b) => b.value - a.value);
   const sortedValues = sorted.map(item => item.value);
+  const nodes: DrawNode[] = [];
   if (drawColumns) {
-    renderColumnSvg(
-      parts,
-      sortedValues,
-      sorted.map(item => item.category),
-      plot,
-      COLORS[0],
-      axis
+    nodes.push(
+      ...columnLayoutNodes(
+        sortedValues,
+        sorted.map(item => item.category),
+        plot,
+        COLORS[0],
+        axis
+      )
     );
   }
-  // Suppress the cumulative overlay when the dataset has no positive
-  // contribution. A `|| 1` fallback previously produced a flat line
-  // at the baseline for all-zero / all-negative data, visually
-  // indistinguishable from legitimate 0 % cumulative. See the PDF
-  // path (`drawParetoPdf`) for the matching rationale.
-  //
-  // `sortedValues` may carry `NaN` for blank / `#N/A` source cells
-  // (`collectChartExNumbers` preserves slot identity). `Math.max(0, NaN)`
-  // is `NaN`, and `NaN > 0` is `false`, so a single missing value
-  // previously suppressed the entire cumulative line. Coerce non-finite
-  // values to zero contribution so the line tracks the real positive
-  // data.
-  const positiveSum = sortedValues.reduce(
-    (sum, v) => sum + (Number.isFinite(v) ? Math.max(0, v) : 0),
-    0
-  );
-  if (positiveSum > 0) {
-    const total = positiveSum;
-    let cumulative = 0;
-    const count = Math.max(1, sortedValues.length);
-    const step = plot.width / count;
-    const points = sortedValues.map(value => {
-      cumulative += Number.isFinite(value) ? Math.max(0, value) : 0;
-      return {
-        y: plot.y + plot.height - (cumulative / total) * plot.height
-      };
-    });
-    // Re-derive X positions so the type stays simple (no array-index
-    // closure capture) — keeps the polyline emission below straight.
-    const plotted = points.map((p, i) => ({ x: plot.x + i * step + step / 2, y: p.y }));
-    parts.push(
-      `<polyline points="${plotted.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ")}" fill="none" stroke="${COLORS[1]}" stroke-width="2"/>`
-    );
-    for (const p of plotted) {
-      parts.push(`<circle cx="${fmt(p.x)}" cy="${fmt(p.y)}" r="3" fill="${COLORS[1]}"/>`);
-    }
-    // Emit the "Cumulative %" caption whenever the cumulative line is
-    // drawn, matching the PDF path. The previous
-    // `series.layoutPr?.paretoLine` guard only fired for the paired
-    // `clusteredColumn + paretoLine` variant; the standalone
-    // `layoutId: "paretoLine"` case (added at line 1527) reached this
-    // function without the flag set and silently dropped the caption
-    // — producing SVG output that disagreed with the PDF.
-    // `_series` is kept as a parameter in case future heuristics want
-    // to tweak placement, but the caption is no longer gated by the
-    // layoutPr flag.
-    parts.push(svgText(plot.x + plot.width - 4, plot.y + 12, "Cumulative %", 10, COLORS[1], "end"));
-  }
+  nodes.push(...paretoOverlayNodes(sortedValues, plot));
+  return nodes;
 }
 
-function renderWaterfallSvg(
-  parts: string[],
+/** Nodes for a waterfall: cumulative spans, subtotals, and the connectors. */
+function waterfallLayoutNodes(
   values: number[],
   categories: string[],
   series: ChartExSeries,
   plot: SvgRect,
   axis?: ChartExAxis
-): void {
+): DrawNode[] {
   const subtotalIdx = new Set(series.layoutPr?.subtotals?.map(s => s.idx) ?? []);
   let running = 0;
   const spans = values.map((value, i) => {
@@ -1931,205 +684,98 @@ function renderWaterfallSvg(
     spans.flatMap(s => [s.start, s.end]),
     axis
   );
-  renderAxes(parts, plot, range);
-  const count = Math.max(1, spans.length);
-  const groupWidth = plot.width / count;
-  const centers: Array<{ x: number; y: number }> = [];
-  spans.forEach((span, i) => {
-    const y1 = valueToY(span.start, range.min, range.max, plot);
-    const y2 = valueToY(span.end, range.min, range.max, plot);
-    const x = plot.x + i * groupWidth + groupWidth * 0.18;
-    const color = span.gap
+  const resolved: WaterfallSpan[] = spans.map(span => ({
+    start: span.start,
+    end: span.end,
+    gap: span.gap,
+    colour: span.gap
       ? "#BFBFBF"
       : span.total
         ? shapeFillColor(series.layoutPr?.totalSpPr, COLORS[2])
         : span.value >= 0
           ? shapeFillColor(series.layoutPr?.increaseSpPr, "#70AD47")
-          : shapeFillColor(series.layoutPr?.decreaseSpPr, "#C00000");
-    // Gap rows should render invisibly. `Math.max(1, …)` floored
-    // zero-height spans to a 1-pixel sliver that reads as a tiny
-    // positive delta; skip the floor when the span is flagged flat.
-    const height = span.gap ? 0 : Math.max(1, Math.abs(y1 - y2));
-    parts.push(
-      `<rect x="${fmt(x)}" y="${fmt(Math.min(y1, y2))}" width="${fmt(groupWidth * 0.64)}" height="${fmt(height)}" fill="${color}"/>`
-    );
-    parts.push(
-      svgText(
-        plot.x + i * groupWidth + groupWidth / 2,
-        plot.y + plot.height + 18,
-        categories[i] ?? String(i + 1),
-        10,
-        "#555",
-        "middle"
-      )
-    );
-    centers.push({ x: x + groupWidth * 0.64, y: y2 });
-  });
+          : shapeFillColor(series.layoutPr?.decreaseSpPr, "#C00000")
+  }));
+  const nodes = waterfallNodes(resolved, categories, plot, range);
   if (series.layoutPr?.connectorLines !== false) {
-    for (let i = 0; i < centers.length - 1; i++) {
-      parts.push(
-        `<line x1="${fmt(centers[i].x)}" y1="${fmt(centers[i].y)}" x2="${fmt(centers[i + 1].x - groupWidth * 0.64)}" y2="${fmt(centers[i].y)}" stroke="#888" stroke-dasharray="3 3"/>`
-      );
-    }
+    nodes.push(...waterfallConnectorNodes(resolved, plot, range));
   }
+  return nodes;
 }
 
-function renderFunnelSvg(
-  parts: string[],
+/** Nodes for a funnel, honouring per-point fill overrides. */
+function funnelLayoutNodes(
   values: number[],
   categories: string[],
   series: ChartExSeries,
   plot: SvgRect
-): void {
-  // See `drawFunnelPdf` for why we use the true max (not floored at
-  // 1): fractional-magnitude data would otherwise render as a tiny
-  // off-centre funnel.
-  const trueMax = maxAbsValue(values, 0);
-  const max = trueMax > 0 ? trueMax : 1;
-  const count = Math.max(1, values.length);
-  const h = plot.height / count;
-  // Pre-resolve per-point `dataPt/@idx` overrides into a map so the
-  // hot loop stays O(n). Previously funnel charts ignored
-  // `<cx:dataPt>` entirely and forced the preview palette, so an
-  // Excel-authored funnel with individually-coloured stages rendered
-  // with the wrong colours after a round-trip — even though the
-  // authored XML was preserved byte-for-byte on write.
+): DrawNode[] {
+  // Per-point `dataPt/@idx` overrides resolved up front so the hot loop stays
+  // O(n). An Excel-authored funnel with individually coloured stages used to
+  // render with the preview palette after a round-trip, even though the authored
+  // XML survived byte-for-byte.
   const pointFills = new Map<number, string>();
-  if (series.dataPt) {
-    for (const dp of series.dataPt) {
-      if (dp.spPr) {
-        pointFills.set(dp.idx, shapeFillColor(dp.spPr, COLORS[dp.idx % COLORS.length]));
-      }
+  for (const point of series.dataPt ?? []) {
+    if (point.spPr) {
+      pointFills.set(point.idx, shapeFillColor(point.spPr, COLORS[point.idx % COLORS.length]));
     }
   }
-  values.forEach((value, i) => {
-    // Non-finite values (blank / `#N/A` source cells emit NaN via
-    // `collectChartExNumbers`) must not propagate into the polygon
-    // vertices — `Math.abs(NaN) = NaN`, and `fmt(NaN)` returns `"0"`,
-    // collapsing the stage's edges to the SVG page origin at (0, 0).
-    // Coerce the width contribution to zero so a gap stage renders
-    // as a degenerate zero-width wedge rather than a triangle pointing
-    // at the page corner. Same for `values[i+1]`, where `??` would
-    // only have coalesced `null`/`undefined`, not NaN.
-    const absValue = Number.isFinite(value) ? Math.abs(value) : 0;
-    const rawNext = values[i + 1];
-    const nextAbs = Number.isFinite(rawNext) ? Math.abs(rawNext) : absValue;
-    const topW = (absValue / max) * plot.width;
-    const bottomW = (nextAbs / max) * plot.width;
-    const y = plot.y + i * h;
-    const cx = plot.x + plot.width / 2;
-    const fill = pointFills.get(i) ?? COLORS[i % COLORS.length];
-    parts.push(
-      `<polygon points="${fmt(cx - topW / 2)},${fmt(y)} ${fmt(cx + topW / 2)},${fmt(y)} ${fmt(cx + bottomW / 2)},${fmt(y + h * 0.88)} ${fmt(cx - bottomW / 2)},${fmt(y + h * 0.88)}" fill="${fill}" stroke="#fff"/>`
-    );
-    parts.push(svgText(cx, y + h * 0.55, categories[i] ?? String(i + 1), 11, "#fff", "middle"));
-  });
+  return funnelNodes(
+    values,
+    plot,
+    index => pointFills.get(index) ?? COLORS[index % COLORS.length],
+    (index, value) =>
+      chartExDataLabelText(series, {
+        category: categories[index] ?? String(index + 1),
+        value,
+        seriesName: seriesLabelText(series)
+      })
+  );
 }
 
-function renderBoxWhiskerSvg(
-  parts: string[],
+/** Nodes for a box-and-whisker chart, one box per category group. */
+function boxWhiskerLayoutNodes(
   values: number[],
   categories: string[],
   series: ChartExSeries,
   plot: SvgRect,
   axis?: ChartExAxis
-): void {
+): DrawNode[] {
   const groups =
     categories.length > 0
       ? groupValuesByCategory(values, categories)
       : new Map([["Values", values]]);
-  const allValues = Array.from(groups.values()).flat();
-  const range = valueRange(allValues, axis);
-  renderAxes(parts, plot, range);
-  const keys = Array.from(groups.keys());
-  const groupWidth = plot.width / Math.max(1, keys.length);
-  keys.forEach((key, i) => {
-    const stats = boxStats(groups.get(key) ?? [], series.layoutPr?.quartileMethod ?? "exclusive");
-    const cx = plot.x + i * groupWidth + groupWidth / 2;
-    const w = groupWidth * 0.38;
-    const q1 = valueToY(stats.q1, range.min, range.max, plot);
-    const q3 = valueToY(stats.q3, range.min, range.max, plot);
-    const med = valueToY(stats.median, range.min, range.max, plot);
-    const low = valueToY(stats.low, range.min, range.max, plot);
-    const high = valueToY(stats.high, range.min, range.max, plot);
-    parts.push(
-      `<line x1="${fmt(cx)}" y1="${fmt(high)}" x2="${fmt(cx)}" y2="${fmt(low)}" stroke="#555"/>`
-    );
-    parts.push(
-      `<rect x="${fmt(cx - w / 2)}" y="${fmt(Math.min(q1, q3))}" width="${fmt(w)}" height="${fmt(Math.abs(q3 - q1))}" fill="${withAlpha(COLORS[i % COLORS.length], 0.35)}" stroke="${COLORS[i % COLORS.length]}"/>`
-    );
-    parts.push(
-      `<line x1="${fmt(cx - w / 2)}" y1="${fmt(med)}" x2="${fmt(cx + w / 2)}" y2="${fmt(med)}" stroke="#333"/>`
-    );
-    if (series.layoutPr?.showMeanMarker !== false) {
-      parts.push(
-        `<circle cx="${fmt(cx)}" cy="${fmt(valueToY(stats.mean, range.min, range.max, plot))}" r="3" fill="#333"/>`
-      );
+  const range = valueRange(Array.from(groups.values()).flat(), axis);
+  const method = series.layoutPr?.quartileMethod ?? "exclusive";
+  return boxWhiskerNodes(
+    Array.from(groups.keys()).map(key => ({
+      key,
+      stats: boxStats(groups.get(key) ?? [], method)
+    })),
+    plot,
+    range,
+    {
+      showMeanMarker: series.layoutPr?.showMeanMarker !== false,
+      showMeanLine: !!series.layoutPr?.showMeanLine,
+      showInnerPoints: !!series.layoutPr?.showInnerPoints,
+      showOutlierPoints: series.layoutPr?.showOutlierPoints !== false
     }
-    if (series.layoutPr?.showMeanLine) {
-      const mean = valueToY(stats.mean, range.min, range.max, plot);
-      parts.push(
-        `<line x1="${fmt(cx - w / 2)}" y1="${fmt(mean)}" x2="${fmt(cx + w / 2)}" y2="${fmt(mean)}" stroke="#333" stroke-dasharray="3 2"/>`
-      );
-    }
-    if (series.layoutPr?.showInnerPoints) {
-      // Iterate `nonOutliers` (NOT the full raw group) so outlier
-      // samples don't get double-painted as both a filled inner-point
-      // dot AND a hollow outlier ring when both flags are enabled.
-      // Matches Excel's semantics: "inner points" are individual
-      // non-outlier observations.
-      for (const value of stats.nonOutliers) {
-        parts.push(
-          `<circle cx="${fmt(cx - w * 0.62)}" cy="${fmt(valueToY(value, range.min, range.max, plot))}" r="1.6" fill="${COLORS[i % COLORS.length]}" opacity="0.55"/>`
-        );
-      }
-    }
-    if (series.layoutPr?.showOutlierPoints !== false) {
-      for (const outlier of stats.outliers) {
-        parts.push(
-          `<circle cx="${fmt(cx + w * 0.62)}" cy="${fmt(valueToY(outlier, range.min, range.max, plot))}" r="2" fill="none" stroke="#333"/>`
-        );
-      }
-    }
-    parts.push(svgText(cx, plot.y + plot.height + 18, key, 10, "#555", "middle"));
-  });
-}
-
-function renderTreemapSvg(parts: string[], root: HierarchyNode, plot: SvgRect): void {
-  for (const cell of collectTreemapCells(root, plot)) {
-    parts.push(
-      `<rect x="${fmt(cell.rect.x)}" y="${fmt(cell.rect.y)}" width="${fmt(cell.rect.width)}" height="${fmt(cell.rect.height)}" fill="${cell.color}" stroke="#fff"/>`
-    );
-    if (cell.label) {
-      parts.push(svgText(cell.rect.x + 4, cell.rect.y + 14, cell.label, 10, "#fff", "start"));
-    }
-  }
-}
-
-function renderSunburstSvg(parts: string[], root: HierarchyNode, plot: SvgRect): void {
-  for (const slice of collectSunburstSlices(root, plot)) {
-    parts.push(
-      renderRingSlice(
-        slice.cx,
-        slice.cy,
-        slice.outer,
-        slice.inner,
-        slice.start,
-        slice.end,
-        slice.color
-      )
-    );
-  }
+  );
 }
 
 /**
- * Treemap geometry collector. Shared between the SVG emitter (which
- * prints `<rect>` elements) and the PDF emitter (which calls
- * `surface.drawRect` / `surface.drawText`). Returning plain data —
- * rect, colour, optional label — keeps both backends honest: any
- * future visual regression in the geometry shows up on the test that
- * exercises the primary (SVG) backend, not only on the secondary
- * (PDF) one.
+ * Treemap geometry collector.
+ *
+ * Returns plain data — rect, colour, optional label — which
+ * {@link treemapNodes} turns into a display list. Keeping the layout separate from
+ * the drawing is what let the paired SVG and PDF emitters be replaced by one node
+ * builder without touching the layout arithmetic.
+ *
+ * The layout is squarified ({@link squarify}) — tiles close to square, as Excel
+ * produces. It was slice-and-dice, which splits the plot along a single axis in one
+ * pass and at one level yields full-height strips: a four-node treemap on a wide
+ * plot read as a bar chart, and the narrow tiles fell under the label threshold and
+ * lost their names.
  *
  * The label threshold (> 40 × 18 pixels) mirrors the historical SVG
  * code; both backends honour it identically so small treemap cells
@@ -2143,7 +789,7 @@ export interface TreemapCell {
 
 export function collectTreemapCells(root: HierarchyNode, plot: SvgRect): TreemapCell[] {
   const nodes = root.children.length > 0 ? root.children : [{ ...root, name: "Values" }];
-  const entries = sliceDice(nodes, plot, true);
+  const entries = squarify(nodes, plot);
   // Drop degenerate cells (zero-value nodes produce zero-width or
   // zero-height rects). Without the filter, those rects are still
   // emitted with `stroke="#fff"` — browsers render the stroke on a
@@ -2266,36 +912,115 @@ function collectSunburstSlicesRecursive(
   return nextColorIndex;
 }
 
-function renderRegionMapSvg(
-  parts: string[],
+/**
+ * The chart title, as one node.
+ *
+ * Both backends used to build this themselves — SVG assembling `<tspan>`s with a
+ * relative `dy`, PDF looping `drawText` per paragraph — which is how they came to
+ * disagree on the font size and baseline in the first place.
+ */
+function chartExTitleNode(title: string, width: number): DrawNode {
+  return multilineTextNode(
+    width / 2,
+    CHART_EX_TITLE_BASELINE,
+    splitTextLines(title).map(run => run.text),
+    CHART_EX_TITLE_FONT_SIZE,
+    "#222222",
+    "middle",
+    CHART_EX_TITLE_FONT_SIZE * TEXT_LINE_HEIGHT_EM
+  );
+}
+
+/** The legend: a swatch and a label per entry, from the shared layout. */
+function chartExLegendNodes(
+  series: ChartExSeries[],
+  width: number,
+  height: number,
+  titleLines: number,
+  legendPos: "b" | "l" | "r" | "t" | "tr" | undefined
+): DrawNode[] {
+  const nodes: DrawNode[] = [];
+  for (const entry of layoutChartExLegend(series, width, height, titleLines, legendPos)) {
+    nodes.push(
+      rectNode(
+        {
+          x: entry.swatchX,
+          y: entry.swatchY,
+          width: entry.swatchSize,
+          height: entry.swatchSize
+        },
+        { fill: cssColour(entry.color) }
+      )
+    );
+    nodes.push(
+      textNode(
+        entry.labelX,
+        entry.labelBaselineY,
+        entry.label,
+        CHART_EX_LEGEND_FONT_SIZE,
+        CHART_EX_LEGEND_COLOR,
+        "start"
+      )
+    );
+  }
+  return nodes;
+}
+
+/** The map's rounded background panel. */
+function regionMapPanelNode(plot: SvgRect): DrawNode {
+  return rectNode(
+    plot,
+    { fill: cssColour("#F7FBFF"), stroke: cssColour("#C7DFF2"), strokeWidth: 1 },
+    14
+  );
+}
+
+/**
+ * One labelled group of region-map output.
+ *
+ * `mode` records which rendering path produced the nodes — the real TopoJSON
+ * outline, the built-in centroid preview, or the hex-tile fallback. That is not
+ * decoration: it is the only channel through which the library reports whether a
+ * caller's topology actually matched their categories, and the matcher options
+ * (`match: "id"`, `match: ["property:name_zh", …]`) are unverifiable without it.
+ *
+ * It stays out of the display list deliberately. The display list describes
+ * geometry and paint, and a mode is neither — it is a fact about a decision the
+ * renderer made. The SVG path turns it into a `data-region-map-mode` attribute on a
+ * wrapping `<g>` at serialisation time, which is where SVG-only metadata belongs,
+ * the same reasoning that keeps filters in `svgDefs` / `svgFilterId`. A content
+ * stream has nowhere to put it, so the PDF path just draws the nodes.
+ */
+interface RegionMapLayer {
+  readonly mode: string;
+  readonly nodes: DrawNode[];
+}
+
+/**
+ * The region map, as labelled layers.
+ *
+ * Replaces a pair of emitters — one assembling markup, one calling surface methods
+ * — which had already drifted: the SVG panel had rounded corners and the PDF panel
+ * did not.
+ */
+function regionMapLayers(
   values: number[],
   categories: string[],
   series: ChartExSeries,
   plot: SvgRect,
   mapOptions?: RegionMapDataOptions,
   axis?: ChartExAxis
-): void {
+): RegionMapLayer[] {
   const range = valueRange(values, axis);
 
-  // Path A: caller supplied a TopoJSON dataset. Try to draw real
-  // region polygons; fall through to the centroid preview if anything
-  // goes wrong (invalid topology, zero matches, unsupported geometry).
+  // Path A: the caller supplied a TopoJSON dataset. Fall through to the centroid
+  // preview if anything goes wrong — invalid topology, no matches, unsupported
+  // geometry — so a failed match still shows something rather than an empty chart.
   if (mapOptions?.topology) {
-    const drawn = tryRenderRegionMapWithTopology(
-      parts,
-      values,
-      categories,
-      series,
-      plot,
-      range,
-      mapOptions
-    );
-    if (drawn) {
-      return;
+    const nodes = tryRegionMapTopologyNodes(values, categories, series, plot, range, mapOptions);
+    if (nodes) {
+      return [{ mode: "topojson", nodes }];
     }
-    // Fall through to the centroid preview — this gives the caller
-    // something to look at even when their topology fails to match
-    // any labels, rather than producing an empty chart.
   }
 
   const records = values.map((value, i) => ({
@@ -2307,58 +1032,79 @@ function renderRegionMapSvg(
     (record): record is { value: number; label: string; coord: RegionCoordinate } => !!record.coord
   );
   if (known.length === 0) {
-    renderRegionMapTileFallback(parts, records, range, plot);
-    return;
+    return [{ mode: "tile-fallback", nodes: regionMapTileFallbackNodes(records, range, plot) }];
   }
 
-  parts.push(
-    `<rect x="${fmt(plot.x)}" y="${fmt(plot.y)}" width="${fmt(plot.width)}" height="${fmt(plot.height)}" rx="14" fill="#F7FBFF" stroke="#C7DFF2" data-region-map-mode="geographic-preview"/>`
-  );
-  renderRegionMapGraticule(parts, plot);
+  const nodes: DrawNode[] = [regionMapPanelNode(plot), ...regionMapGraticuleNodes(plot)];
   const labelMode = series.layoutPr?.regionLabels ?? "bestFit";
+  const projection = series.layoutPr?.projection ?? "miller";
+  // Frame to the data, the same way the TopoJSON branch does. Only the records with
+  // a finite value are drawn, so only those may influence the framing.
+  const extent = matchExtentToPlot(
+    fitRegionExtent(
+      known
+        .filter(record => Number.isFinite(record.value))
+        .map(record => projectLonLatRaw(record.coord.lon, record.coord.lat, projection))
+    ),
+    plot
+  );
   for (const record of known) {
-    const projected = projectRegionCoordinate(
-      record.coord,
-      series.layoutPr?.projection ?? "miller",
-      plot
+    const projected = projectLonLatToPlot(
+      record.coord.lon,
+      record.coord.lat,
+      projection,
+      plot,
+      extent
     );
-    // Skip non-finite values — `collectChartExNumbers` preserves `NaN`
-    // for blank / `#N/A` cells, and `(NaN - range.min) / …` propagates
-    // `NaN` into both `radius` (a `NaN` passed to `fmt` emits `"0"`,
-    // drawing an invisible 0-radius dot) and `interpolateColor`
-    // (produces a garbage colour off the clamp path). Also clamp `t`
-    // to `[0, 1]` so out-of-range values still receive a defined
-    // colour — mirrors the TOPO branch's clamp at `tryRender…WithTopology`.
+    // Skip non-finite values: `NaN` would propagate into both the radius (drawing
+    // an invisible zero-radius dot) and the colour interpolation. Clamp `t` so an
+    // out-of-range value still gets a defined colour, matching the topology branch.
     if (!Number.isFinite(record.value)) {
       continue;
     }
-    const rawT = (record.value - range.min) / Math.max(1e-9, range.max - range.min);
-    const t = Math.max(0, Math.min(1, rawT));
+    const t = clamp01((record.value - range.min) / Math.max(1e-9, range.max - range.min));
     const radius = 6 + Math.sqrt(t) * 14;
-    parts.push(
-      `<circle cx="${fmt(projected.x)}" cy="${fmt(projected.y)}" r="${fmt(radius)}" fill="${interpolateColor("#D9EAF7", "#2F75B5", t)}" stroke="#fff" stroke-width="1.5" opacity="0.92"/>`
-    );
+    // The old markup carried `opacity="0.92"` on the element. The display list has
+    // no element-level opacity, so it becomes an alpha on each paint. That is a
+    // faithful translation of the intent but not of the compositing: element
+    // opacity flattens the shape and then fades it, so the white ring's overlap
+    // with its own fill ends up marginally lighter than fading each paint
+    // separately does. The band is under a pixel wide and differs by at most
+    // 15/255, and the fill itself is unchanged — see the `draw` section of
+    // AGENTS.md for why closing that gap is not worth offscreen compositing in
+    // three backends.
+    nodes.push({
+      kind: "ellipse",
+      cx: projected.x,
+      cy: projected.y,
+      rx: radius,
+      ry: radius,
+      paint: {
+        fill: { ...cssColour(interpolateColor("#D9EAF7", "#2F75B5", t)), a: 0.92 },
+        stroke: { ...cssColour("#FFFFFF"), a: 0.92 },
+        strokeWidth: 1.5
+      }
+    });
     if (labelMode === "showAll" || (labelMode === "bestFit" && radius >= 9)) {
-      parts.push(svgText(projected.x, projected.y + 3, record.label, 9, "#1F3B53", "middle"));
+      nodes.push(textNode(projected.x, projected.y + 3, record.label, 9, "#1F3B53", "middle"));
     }
   }
 
+  const layers: RegionMapLayer[] = [{ mode: "geographic-preview", nodes }];
   const unknown = records.filter(record => !record.coord);
   if (unknown.length > 0) {
     const fallbackHeight = Math.min(52, plot.height * 0.25);
-    renderRegionMapTileFallback(
-      parts,
-      unknown,
-      range,
-      {
+    layers.push({
+      mode: "unmatched",
+      nodes: regionMapTileFallbackNodes(unknown, range, {
         x: plot.x + 8,
         y: plot.y + plot.height - fallbackHeight - 8,
         width: plot.width - 16,
         height: fallbackHeight
-      },
-      "unmatched"
-    );
+      })
+    });
   }
+  return layers;
 }
 
 /**
@@ -2375,23 +1121,22 @@ function renderRegionMapSvg(
  * outline so the world map provides context even for the regions
  * the author didn't supply data for.
  */
-function tryRenderRegionMapWithTopology(
-  parts: string[],
+function tryRegionMapTopologyNodes(
   values: number[],
   categories: string[],
   series: ChartExSeries,
   plot: SvgRect,
   range: { min: number; max: number },
   mapOptions: RegionMapDataOptions
-): boolean {
+): DrawNode[] | undefined {
   let features: ReturnType<typeof resolveTopologyObject>;
   try {
     features = resolveTopologyObject(mapOptions.topology as TopologyLike, mapOptions.objectName);
   } catch {
-    return false;
+    return undefined;
   }
   if (features.length === 0) {
-    return false;
+    return undefined;
   }
 
   // Normalise the `match` option into an ordered rule list. A single
@@ -2425,7 +1170,7 @@ function tryRenderRegionMapWithTopology(
     }
   });
   if (valueByLabel.size === 0) {
-    return false;
+    return undefined;
   }
 
   // Determine data extents in the projected unit square so we can
@@ -2434,21 +1179,19 @@ function tryRenderRegionMapWithTopology(
   // when the TopoJSON covers a bounding box larger than the matched
   // countries.
   const projection = mapOptions.projection ?? series.layoutPr?.projection ?? "miller";
-  const extent = computeProjectionExtent(features, projection);
-  if (!extent) {
-    return false;
+  const rawExtent = computeProjectionExtent(features, projection);
+  if (!rawExtent) {
+    return undefined;
   }
+  // Same correction the centroid preview needs: without it a world map is stretched
+  // to whatever shape the panel happens to be.
+  const extent = matchExtentToPlot(rawExtent, plot);
 
-  // Buffer the SVG fragments into a local array instead of pushing
-  // directly to `parts`. If we ultimately return `false` (no feature
-  // matched a category), the caller falls through to the centroid
-  // preview — we MUST NOT leave a half-drawn world outline underneath
-  // that preview, or the composite image shows both layers. Flush the
-  // buffer only once we've decided to claim the chart area.
-  const buffer: string[] = [];
-  buffer.push(
-    `<rect x="${fmt(plot.x)}" y="${fmt(plot.y)}" width="${fmt(plot.width)}" height="${fmt(plot.height)}" rx="14" fill="#F7FBFF" stroke="#C7DFF2" data-region-map-mode="topojson"/>`
-  );
+  // Buffer into a local array and return it only once a feature has matched. If
+  // nothing matches, the caller falls through to the centroid preview and must not
+  // find a half-drawn world outline underneath it, or the composite shows both
+  // layers.
+  const buffer: DrawNode[] = [regionMapPanelNode(plot)];
 
   // Resolve each feature against the rule list once and cache both the
   // winning key and its value, so the fill loop and the label loop
@@ -2484,11 +1227,17 @@ function tryRenderRegionMapWithTopology(
           return interpolateColor("#D9EAF7", "#2F75B5", Math.max(0, Math.min(1, t)));
         })()
       : "#E9EEF3";
-    const path = featureToSvgPath(feature.rings, projection, plot, extent);
-    if (path) {
-      buffer.push(
-        `<path d="${path}" fill="${fill}" stroke="${escapeXmlAttr(stroke)}" stroke-width="0.5" stroke-linejoin="round"/>`
-      );
+    const commands = featureToPathCommands(feature.rings, projection, plot, extent);
+    if (commands) {
+      buffer.push({
+        kind: "path",
+        commands,
+        paint: {
+          fill: cssColour(fill),
+          stroke: cssColour(stroke),
+          strokeWidth: 0.5
+        }
+      });
     }
   }
 
@@ -2497,7 +1246,7 @@ function tryRenderRegionMapWithTopology(
   // preview on a clean plot area instead of layering it over our
   // partial output.
   if (matchedCount === 0) {
-    return false;
+    return undefined;
   }
 
   // Build a reverse lookup (normalised category → original label) once
@@ -2533,17 +1282,12 @@ function tryRenderRegionMapWithTopology(
       const originalLabel =
         labelByKey.get(match.key) ??
         (typeof feature.id === "string" ? feature.id : String(feature.id ?? ""));
-      buffer.push(svgText(projected.x, projected.y + 3, originalLabel, 9, "#1F3B53", "middle"));
+      buffer.push(textNode(projected.x, projected.y + 3, originalLabel, 9, "#1F3B53", "middle"));
     }
   }
 
-  // Commit the buffered fragments now that we know at least one
-  // feature matched — the caller will see a complete topo-map
-  // rendering and skip the centroid preview.
-  for (const frag of buffer) {
-    parts.push(frag);
-  }
-  return true;
+  // At least one feature matched, so claim the chart area.
+  return buffer;
 }
 
 /**
@@ -2663,30 +1407,33 @@ function computeProjectionExtent(
 }
 
 /**
- * Convert a list of rings (outer + holes) into an SVG `path` `d`
- * attribute. Holes are represented by alternating fill-rule within the
- * same `<path>` — the default nonzero rule handles inner polygons
- * drawn clockwise in TopoJSON output from d3.
+ * A feature's rings as path commands.
+ *
+ * One builder for every backend. This used to be two — `featureToSvgPath`
+ * assembling a `d` string and `featureToPdfPathOps` assembling operators — from
+ * the same projected coordinates, which is two chances to project differently.
  */
-function featureToSvgPath(
+function featureToPathCommands(
   rings: ResolvedRing[],
   projection: NonNullable<RegionMapDataOptions["projection"]>,
   plot: SvgRect,
   extent: { minX: number; maxX: number; minY: number; maxY: number }
-): string | undefined {
-  const segments: string[] = [];
+): DrawPathCommand[] | undefined {
+  const commands: DrawPathCommand[] = [];
   for (const ring of rings) {
     if (ring.length < 2) {
       continue;
     }
-    const pts = ring.map(([lon, lat]) => projectLonLatToPlot(lon, lat, projection, plot, extent));
-    segments.push(`M${fmt(pts[0].x)} ${fmt(pts[0].y)}`);
-    for (let i = 1; i < pts.length; i++) {
-      segments.push(`L${fmt(pts[i].x)} ${fmt(pts[i].y)}`);
+    const points = ring.map(([lon, lat]) =>
+      projectLonLatToPlot(lon, lat, projection, plot, extent)
+    );
+    commands.push({ op: "move", x: points[0].x, y: points[0].y });
+    for (let index = 1; index < points.length; index++) {
+      commands.push({ op: "line", x: points[index].x, y: points[index].y });
     }
-    segments.push("Z");
+    commands.push({ op: "close" });
   }
-  return segments.length > 0 ? segments.join("") : undefined;
+  return commands.length > 0 ? commands : undefined;
 }
 
 /**
@@ -2978,19 +1725,19 @@ const NORMALISED_REGION_COORDINATES: Map<string, RegionCoordinate> = new Map(
   Object.entries(REGION_COORDINATES).map(([k, v]) => [normalizeRegionLabel(k), v])
 );
 
-function renderRegionMapGraticule(parts: string[], plot: SvgRect): void {
+/** The map graticule: three meridians and two parallels, inset from the frame. */
+function regionMapGraticuleNodes(plot: SvgRect): DrawNode[] {
+  const paint: DrawPaint = { stroke: cssColour("#E5F0FA"), strokeWidth: 1 };
+  const nodes: DrawNode[] = [];
   for (let i = 1; i < 4; i++) {
     const x = plot.x + (plot.width * i) / 4;
-    parts.push(
-      `<line x1="${fmt(x)}" y1="${fmt(plot.y + 8)}" x2="${fmt(x)}" y2="${fmt(plot.y + plot.height - 8)}" stroke="#E5F0FA"/>`
-    );
+    nodes.push(lineNode(x, plot.y + 8, x, plot.y + plot.height - 8, paint));
   }
   for (let i = 1; i < 3; i++) {
     const y = plot.y + (plot.height * i) / 3;
-    parts.push(
-      `<line x1="${fmt(plot.x + 8)}" y1="${fmt(y)}" x2="${fmt(plot.x + plot.width - 8)}" y2="${fmt(y)}" stroke="#E5F0FA"/>`
-    );
+    nodes.push(lineNode(plot.x + 8, y, plot.x + plot.width - 8, y, paint));
   }
+  return nodes;
 }
 
 // Mercator projection clamps latitude to `±MERCATOR_LAT_CLAMP_DEG`
@@ -3004,46 +1751,95 @@ function renderRegionMapGraticule(parts: string[], plot: SvgRect): void {
 // levels. Unify here.
 const MERCATOR_LAT_CLAMP_DEG = 85;
 
-function projectRegionCoordinate(
-  coord: RegionCoordinate,
-  projection: NonNullable<NonNullable<ChartExSeries["layoutPr"]>["projection"]>,
+/**
+ * Widen a projected extent until its shape matches the plot's, so the placement step
+ * cannot stretch the geography.
+ *
+ * {@link projectLonLatToPlot} maps each axis of the extent onto the corresponding
+ * side of the plot independently. That only leaves the projection undistorted if the
+ * extent and the plot have the same aspect ratio; otherwise a degree of longitude
+ * covers more pixels than a degree of latitude and the map is squashed. Expanding the
+ * shorter axis — never cropping the longer one — keeps every point in frame.
+ */
+function matchExtentToPlot(
+  extent: { minX: number; maxX: number; minY: number; maxY: number },
   plot: SvgRect
-): { x: number; y: number } {
-  const lon = Math.max(-180, Math.min(180, coord.lon));
-  // Only mercator/miller need the ±85° clamp (log-singularity at the
-  // poles). Albers / Robinson / equirectangular are finite at ±90°;
-  // clamping their input silently drops 5° of polar data.
-  const lat =
-    projection === "mercator" || projection === "miller"
-      ? Math.max(-MERCATOR_LAT_CLAMP_DEG, Math.min(MERCATOR_LAT_CLAMP_DEG, coord.lat))
-      : Math.max(-90, Math.min(90, coord.lat));
-  let nx: number;
-  let ny: number;
-  if (projection === "mercator") {
-    nx = (lon + 180) / 360;
-    const rad = (lat * Math.PI) / 180;
-    ny = 0.5 - Math.log(Math.tan(Math.PI / 4 + rad / 2)) / (2 * Math.PI);
-  } else if (projection === "miller") {
-    nx = (lon + 180) / 360;
-    const rad = (lat * Math.PI) / 180;
-    ny = 0.5 - (1.25 * Math.log(Math.tan(Math.PI / 4 + 0.4 * rad))) / (2 * Math.PI);
-  } else if (projection === "albers") {
-    ({ nx, ny } = projectAlbers(lon, lat));
-  } else if (projection === "robinson") {
-    ({ nx, ny } = projectRobinson(lon, lat));
-  } else {
-    // Fallback "plain" equirectangular projection: latitude in degrees
-    // spans the range `[-90, 90]`, so the normalised Y is `0.5 - lat/180`.
-    // The previous constant `190` was a typo — it compressed the
-    // vertical axis by ~5.3%, producing visible drift for high-latitude
-    // regions (89° mapped to `0.032` instead of `0.006`). Caught by the
-    // deep audit, not covered by any existing snapshot.
-    nx = (lon + 180) / 360;
-    ny = 0.5 - lat / 180;
+): { minX: number; maxX: number; minY: number; maxY: number } {
+  const availableWidth = Math.max(1, plot.width - 28);
+  const availableHeight = Math.max(1, plot.height - 28);
+  const spanX = extent.maxX - extent.minX;
+  const spanY = extent.maxY - extent.minY;
+  if (spanX <= 0 || spanY <= 0) {
+    return extent;
   }
+  const target = availableWidth / availableHeight;
+  const current = spanX / spanY;
+  if (Math.abs(current - target) < 1e-9) {
+    return extent;
+  }
+  if (current < target) {
+    const widened = spanY * target;
+    const pad = (widened - spanX) / 2;
+    return { ...extent, minX: extent.minX - pad, maxX: extent.maxX + pad };
+  }
+  const heightened = spanX / target;
+  const pad = (heightened - spanY) / 2;
+  return { ...extent, minY: extent.minY - pad, maxY: extent.maxY + pad };
+}
+
+/**
+ * Fit a set of projected points into an extent centred on them.
+ *
+ * The centroid preview used to map the *whole world* onto the panel, so a chart of
+ * four American countries drew them overlapping in one corner while the rest of the
+ * panel stayed empty and the labels were illegible. The TopoJSON branch already
+ * framed to its data through `computeProjectionExtent`, so the two also disagreed
+ * about framing.
+ *
+ * The extent is padded for the markers, which are drawn *around* their point and
+ * would otherwise be clipped at the edges, and floored at a minimum span so a single
+ * point or a tight cluster keeps some context instead of zooming to absurdity. Each
+ * axis is sized from its own data; {@link matchExtentToPlot} then widens whichever is
+ * proportionally short, which is what keeps the projection undistorted while still
+ * using the panel.
+ */
+function fitRegionExtent(points: readonly { x: number; y: number }[]): {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+} {
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    // Nothing to frame; fall back to the whole world in raw projection units.
+    return { minX: -0.5, maxX: 0.5, minY: -0.5, maxY: 0.5 };
+  }
+  // `projectLonLatRaw` spans roughly [-0.5, 0.5], so a twentieth of that is ~18° of
+  // longitude — enough context around a lone point for it to read as a map.
+  const minimumSpan = 0.05;
+  const axis = (low: number, high: number): { low: number; high: number } => {
+    const centre = (low + high) / 2;
+    // A fifth of the span as padding leaves room for the markers, which are drawn
+    // around their point rather than inside it.
+    const half = Math.max(minimumSpan, ((high - low) / 2) * 1.2);
+    return { low: centre - half, high: centre + half };
+  };
+  const horizontal = axis(minX, maxX);
+  const vertical = axis(minY, maxY);
   return {
-    x: plot.x + 14 + clamp01(nx) * Math.max(1, plot.width - 28),
-    y: plot.y + 14 + clamp01(ny) * Math.max(1, plot.height - 28)
+    minX: horizontal.low,
+    maxX: horizontal.high,
+    minY: vertical.low,
+    maxY: vertical.high
   };
 }
 
@@ -3067,33 +1863,6 @@ const ALBERS_N = (Math.sin(ALBERS_PHI1) + Math.sin(ALBERS_PHI2)) / 2;
 const ALBERS_C =
   Math.cos(ALBERS_PHI1) * Math.cos(ALBERS_PHI1) + 2 * ALBERS_N * Math.sin(ALBERS_PHI1);
 const ALBERS_RHO0 = Math.sqrt(ALBERS_C) / ALBERS_N;
-// Pre-compute the world extent in raw Albers units so the projected
-// coordinates can be normalised to 0..1.
-const ALBERS_RANGE = (() => {
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (let lon = -180; lon <= 180; lon += 10) {
-    for (let lat = -84; lat <= 84; lat += 4) {
-      const { rawX, rawY } = rawAlbers(lon, lat);
-      if (rawX < minX) {
-        minX = rawX;
-      }
-      if (rawX > maxX) {
-        maxX = rawX;
-      }
-      if (rawY < minY) {
-        minY = rawY;
-      }
-      if (rawY > maxY) {
-        maxY = rawY;
-      }
-    }
-  }
-  return { minX, maxX, minY, maxY };
-})();
-
 function rawAlbers(lon: number, lat: number): { rawX: number; rawY: number } {
   const phi = (lat * Math.PI) / 180;
   const lambda = (lon * Math.PI) / 180;
@@ -3102,26 +1871,6 @@ function rawAlbers(lon: number, lat: number): { rawX: number; rawY: number } {
   return {
     rawX: rho * Math.sin(theta),
     rawY: ALBERS_RHO0 - rho * Math.cos(theta)
-  };
-}
-
-function projectAlbers(lon: number, lat: number): { nx: number; ny: number } {
-  const { rawX, rawY } = rawAlbers(lon, lat);
-  const { minX, maxX, minY, maxY } = ALBERS_RANGE;
-  // `rawAlbers` follows the Snyder §14 convention where `rawY` grows
-  // northward (rawY at +90° ≈ +1.39, at −90° ≈ −0.74). Normalising
-  // directly to [0..1] would put the North Pole at ny=1 — but SVG / PDF
-  // y grows downward, so ny=1 renders at the BOTTOM of the plot. The
-  // other projections in this file (`mercator`, `miller`,
-  // equirectangular, `robinson`) all flip the sign explicitly (see
-  // `projectRobinson` at line 2888: `sign = lat >= 0 ? -1 : 1`).
-  // Without the flip, every Albers-projected map rendered upside down
-  // relative to its siblings — the USA sat across the southern
-  // hemisphere on every regionMap chart. Mirror the normalised output
-  // so north = top for this projection too.
-  return {
-    nx: (rawX - minX) / (maxX - minX),
-    ny: 1 - (rawY - minY) / (maxY - minY)
   };
 }
 
@@ -3169,19 +1918,24 @@ function projectRobinson(lon: number, lat: number): { nx: number; ny: number } {
   return { nx, ny };
 }
 
-function renderRegionMapTileFallback(
-  parts: string[],
+/**
+ * The hex-tile fallback: a value-coloured hexagon per record, laid out in a grid.
+ *
+ * Used both on its own (no category resolved to a coordinate) and as a sub-panel
+ * listing the records the geographic preview could not place.
+ */
+function regionMapTileFallbackNodes(
   records: Array<{ value: number; label: string }>,
   range: { min: number; max: number },
-  plot: SvgRect,
-  mode = "tile-fallback"
-): void {
+  plot: SvgRect
+): DrawNode[] {
   const count = Math.max(1, records.length);
   const cols = Math.ceil(Math.sqrt(count));
   const rows = Math.ceil(count / cols);
   const cellW = plot.width / cols;
   const cellH = plot.height / rows;
   const radius = Math.min(cellW, cellH) * 0.38;
+  const nodes: DrawNode[] = [];
   records.forEach((record, i) => {
     if (!Number.isFinite(record.value)) {
       return;
@@ -3189,21 +1943,18 @@ function renderRegionMapTileFallback(
     const cx = plot.x + (i % cols) * cellW + cellW / 2;
     const cy = plot.y + Math.floor(i / cols) * cellH + cellH / 2;
     const t = clamp01((record.value - range.min) / Math.max(1e-9, range.max - range.min));
-    const points = hexagonPoints(cx, cy, radius);
-    parts.push(
-      `<polygon points="${points}" fill="${interpolateColor("#D9EAF7", "#2F75B5", t)}" stroke="#fff" data-region-map-mode="${mode}"/>`
+    nodes.push(
+      polygonNode(hexagonPoints(cx, cy, radius), {
+        fill: cssColour(interpolateColor("#D9EAF7", "#2F75B5", t)),
+        stroke: cssColour("#FFFFFF"),
+        strokeWidth: 1
+      })
     );
     if (cellW > 34 && cellH > 22) {
-      parts.push(svgText(cx, cy + 3, record.label, 9, "#1F3B53", "middle"));
+      nodes.push(textNode(cx, cy + 3, record.label, 9, "#1F3B53", "middle"));
     }
   });
-}
-
-function hexagonPoints(cx: number, cy: number, radius: number): string {
-  return Array.from({ length: 6 }, (_, i) => {
-    const angle = Math.PI / 6 + (Math.PI * 2 * i) / 6;
-    return `${fmt(cx + Math.cos(angle) * radius)},${fmt(cy + Math.sin(angle) * radius)}`;
-  }).join(" ");
+  return nodes;
 }
 
 function buildHistogramBins(
@@ -3476,70 +2227,131 @@ function buildHierarchy(levels: string[][], categories: string[], values: number
   return root;
 }
 
-function sliceDice(
+/**
+ * Squarified treemap layout (Bruls, Huizing & van Wijk, 2000).
+ *
+ * Lays each level out in rows, choosing at every step whether adding the next node
+ * to the current row improves its worst aspect ratio or whether the row should be
+ * closed and a new one started along the other axis. The result is tiles that are
+ * close to square, which is what makes a treemap readable — area is easy to compare
+ * between squares and hard between slivers.
+ *
+ * This replaced a slice-and-dice layout, which split the plot along a single axis
+ * in one pass. That is proportional and stable, but at one level it produces
+ * full-height strips: a four-node treemap on a wide plot read as a bar chart, and
+ * the narrower tiles fell below the label threshold and lost their names.
+ */
+function squarify(
   nodes: HierarchyNode[],
-  rect: SvgRect,
-  horizontal: boolean
+  rect: SvgRect
 ): Array<{ node: HierarchyNode; rect: SvgRect }> {
-  const total = nodes.reduce((sum, n) => sum + Math.max(0, n.value), 0) || 1;
-  let offset = 0;
   const result: Array<{ node: HierarchyNode; rect: SvgRect }> = [];
-  for (const node of nodes) {
-    const share = Math.max(0, node.value) / total;
-    const r = horizontal
-      ? { x: rect.x + offset, y: rect.y, width: rect.width * share, height: rect.height }
-      : { x: rect.x, y: rect.y + offset, width: rect.width, height: rect.height * share };
-    result.push({ node, rect: r });
-    if (node.children.length > 0 && r.width > 18 && r.height > 18) {
-      // Push entries one at a time instead of `result.push(...recursive)`.
-      // `Function.prototype.apply`-style spread passes each element as a
-      // separate function argument, which V8 / JSC throw `RangeError:
-      // Maximum call stack size exceeded` on past ~100k entries. The
-      // file already documents this defensive pattern in
-      // `maxAbsValue` / `valueRange` / `boxStats`; this loop was the
-      // last hold-out.
-      const children = sliceDice(node.children, insetRect(r, 4), !horizontal);
-      for (const child of children) {
-        result.push(child);
-      }
+  layoutRows(
+    nodes.filter(node => Math.max(0, node.value) > 0),
+    rect,
+    result
+  );
+  // Recurse into children, inset so the parent's tile stays visible around them.
+  // Collected in a second pass so a child never sees a rect that a later row of its
+  // own level would have changed.
+  const parents = result.filter(
+    entry => entry.node.children.length > 0 && entry.rect.width > 18 && entry.rect.height > 18
+  );
+  for (const parent of parents) {
+    // Push one at a time rather than spreading: `result.push(...children)` passes
+    // each element as a separate argument, which throws `RangeError: Maximum call
+    // stack size exceeded` past ~100k entries. Every per-array fold in this file
+    // takes the same defensive shape.
+    for (const child of squarify(parent.node.children, insetRect(parent.rect, 4))) {
+      result.push(child);
     }
-    offset += horizontal ? r.width : r.height;
   }
   return result;
 }
 
-function renderRingSlice(
-  cx: number,
-  cy: number,
-  outer: number,
-  inner: number,
-  start: number,
-  end: number,
-  color: string
-): string {
-  const sweep = end - start;
-  // Full ring: SVG can't describe a 360° arc with a single `A` — start
-  // and end points coincide so the renderer would emit an empty path.
-  // Build a full ring from two 180° arcs on each radius instead. The
-  // epsilon guards against float drift (sunburst with one leaf at a
-  // given depth has `sweep === endAngle - startAngle === 2π`).
-  if (sweep >= Math.PI * 2 - 1e-9) {
-    return (
-      `<path d="M ${fmt(cx - outer)} ${fmt(cy)} ` +
-      `A ${fmt(outer)} ${fmt(outer)} 0 1 1 ${fmt(cx + outer)} ${fmt(cy)} ` +
-      `A ${fmt(outer)} ${fmt(outer)} 0 1 1 ${fmt(cx - outer)} ${fmt(cy)} ` +
-      `M ${fmt(cx - inner)} ${fmt(cy)} ` +
-      `A ${fmt(inner)} ${fmt(inner)} 0 1 0 ${fmt(cx + inner)} ${fmt(cy)} ` +
-      `A ${fmt(inner)} ${fmt(inner)} 0 1 0 ${fmt(cx - inner)} ${fmt(cy)} Z" ` +
-      `fill="${color}" fill-rule="evenodd" stroke="#fff"/>`
-    );
+/** Place one level's nodes as squarified rows inside `rect`. */
+function layoutRows(
+  nodes: readonly HierarchyNode[],
+  rect: SvgRect,
+  out: Array<{ node: HierarchyNode; rect: SvgRect }>
+): void {
+  if (nodes.length === 0 || rect.width <= 0 || rect.height <= 0) {
+    return;
   }
-  const large = sweep > Math.PI ? 1 : 0;
-  const p1 = polar(cx, cy, outer, start);
-  const p2 = polar(cx, cy, outer, end);
-  const p3 = polar(cx, cy, inner, end);
-  const p4 = polar(cx, cy, inner, start);
-  return `<path d="M ${fmt(p1.x)} ${fmt(p1.y)} A ${fmt(outer)} ${fmt(outer)} 0 ${large} 1 ${fmt(p2.x)} ${fmt(p2.y)} L ${fmt(p3.x)} ${fmt(p3.y)} A ${fmt(inner)} ${fmt(inner)} 0 ${large} 0 ${fmt(p4.x)} ${fmt(p4.y)} Z" fill="${color}" stroke="#fff"/>`;
+  // Largest first: the algorithm's aspect-ratio heuristic assumes it, and a
+  // descending order also puts the biggest tile in a predictable corner.
+  const ordered = [...nodes].sort((a, b) => Math.max(0, b.value) - Math.max(0, a.value));
+  const total = ordered.reduce((sum, node) => sum + Math.max(0, node.value), 0);
+  if (total <= 0) {
+    return;
+  }
+  // Work in area units so a node's value maps directly to pixels.
+  const areaScale = (rect.width * rect.height) / total;
+  let free = { ...rect };
+  let index = 0;
+  while (index < ordered.length) {
+    const shorter = Math.min(free.width, free.height);
+    const row: HierarchyNode[] = [ordered[index]];
+    let rowArea = Math.max(0, ordered[index].value) * areaScale;
+    index++;
+    // Extend the row while doing so improves its worst aspect ratio.
+    while (index < ordered.length) {
+      const nextArea = Math.max(0, ordered[index].value) * areaScale;
+      if (
+        worstAspect(row, rowArea, shorter, areaScale) <=
+        worstAspect([...row, ordered[index]], rowArea + nextArea, shorter, areaScale)
+      ) {
+        break;
+      }
+      row.push(ordered[index]);
+      rowArea += nextArea;
+      index++;
+    }
+    // The row occupies a band across the shorter side; lay its members out along it.
+    const thickness = shorter > 0 ? rowArea / shorter : 0;
+    const alongWidth = free.width < free.height;
+    let offset = 0;
+    for (const node of row) {
+      const area = Math.max(0, node.value) * areaScale;
+      const extent = thickness > 0 ? area / thickness : 0;
+      out.push({
+        node,
+        rect: alongWidth
+          ? { x: free.x + offset, y: free.y, width: extent, height: thickness }
+          : { x: free.x, y: free.y + offset, width: thickness, height: extent }
+      });
+      offset += extent;
+    }
+    free = alongWidth
+      ? { x: free.x, y: free.y + thickness, width: free.width, height: free.height - thickness }
+      : { x: free.x + thickness, y: free.y, width: free.width - thickness, height: free.height };
+    if (free.width <= 0 || free.height <= 0) {
+      break;
+    }
+  }
+}
+
+/** The worst (largest) aspect ratio among a candidate row's tiles. */
+function worstAspect(
+  row: readonly HierarchyNode[],
+  rowArea: number,
+  shorter: number,
+  areaScale: number
+): number {
+  if (rowArea <= 0 || shorter <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const thickness = rowArea / shorter;
+  let worst = 0;
+  for (const node of row) {
+    const area = Math.max(0, node.value) * areaScale;
+    if (area <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const extent = area / thickness;
+    worst = Math.max(worst, Math.max(thickness / extent, extent / thickness));
+  }
+  return worst;
 }
 
 function hierarchyDepth(node: HierarchyNode): number {
@@ -3558,119 +2370,211 @@ function hierarchyDepth(node: HierarchyNode): number {
   return 1 + maxChild;
 }
 
-function renderAxes(parts: string[], plot: SvgRect, range: { min: number; max: number }): void {
-  // Match `drawAxesPdf` (`chart-ex-renderer.ts:330`): emit four
-  // interior gridlines and a numeric label on each, so SVG and PDF
-  // readers both see a tick value at every grid mark. The top /
-  // bottom rails — `range.max` and `range.min` — are drawn as the
-  // baseline and left-frame strokes plus their own labels below.
-  for (let i = 1; i < 5; i++) {
-    const t = i / 5;
-    const y = plot.y + plot.height * t;
-    parts.push(
-      `<line x1="${fmt(plot.x)}" y1="${fmt(y)}" x2="${fmt(plot.x + plot.width)}" y2="${fmt(y)}" stroke="#D9D9D9"/>`
-    );
-    const value = range.max + (range.min - range.max) * t;
-    parts.push(svgText(plot.x - 8, y + 3, formatNumber(value), 10, "#555", "end"));
+/**
+ * Resolve what a data label should read, or `undefined` when it is hidden.
+ *
+ * `ChartExSeries.dataLabels` was accepted by the builder, serialised and parsed,
+ * but no renderer ever read it: every layout hard-coded its own choice. The most
+ * visible consequence was the funnel, whose model default is `value: true`
+ * (matching a freshly inserted Excel chart) while the renderer drew the category
+ * name — so SVG, PNG and PDF agreed with each other and disagreed with the model
+ * they were rendering.
+ *
+ * Parts are emitted in Excel's order — series name, category, value — joined with
+ * the authored `separator`.
+ */
+function chartExDataLabelText(
+  series: ChartExSeries,
+  datum: { category?: string; value?: number; seriesName?: string }
+): string | undefined {
+  const labels = series.dataLabels;
+  if (!labels) {
+    return undefined;
   }
-  parts.push(
-    `<line x1="${fmt(plot.x)}" y1="${fmt(plot.y + plot.height)}" x2="${fmt(plot.x + plot.width)}" y2="${fmt(plot.y + plot.height)}" stroke="#444"/>`
-  );
-  parts.push(
-    `<line x1="${fmt(plot.x)}" y1="${fmt(plot.y)}" x2="${fmt(plot.x)}" y2="${fmt(plot.y + plot.height)}" stroke="#444"/>`
-  );
-  parts.push(
-    svgText(
-      plot.x - 8,
-      valueToY(range.max, range.min, range.max, plot) + 3,
-      formatNumber(range.max),
-      10,
-      "#555",
-      "end"
-    )
-  );
-  parts.push(
-    svgText(
-      plot.x - 8,
-      valueToY(range.min, range.min, range.max, plot) + 3,
-      formatNumber(range.min),
-      10,
-      "#555",
-      "end"
-    )
-  );
+  const visibility = labels.visibility ?? {};
+  const parts: string[] = [];
+  if (visibility.seriesName && datum.seriesName) {
+    parts.push(datum.seriesName);
+  }
+  if (visibility.categoryName && datum.category !== undefined) {
+    parts.push(datum.category);
+  }
+  if (visibility.value && datum.value !== undefined && Number.isFinite(datum.value)) {
+    parts.push(formatNumber(datum.value));
+  }
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join(labels.separator ?? ", ");
 }
 
-function renderChartExLegend(
-  parts: string[],
+/** One resolved legend entry: a colour swatch and its label baseline. */
+interface ChartExLegendEntry {
+  readonly swatchX: number;
+  readonly swatchY: number;
+  readonly swatchSize: number;
+  readonly labelX: number;
+  readonly labelBaselineY: number;
+  readonly label: string;
+  readonly color: string;
+}
+
+/**
+ * Margins the legend layout assumes are free.
+ *
+ * Reserved by `getPlotRect`, which both backends now call, so a legend cannot be
+ * placed over the plot. Named constants because the two must not drift apart
+ * again.
+ */
+const CHART_EX_LEGEND_LEFT_INSET = 58;
+const CHART_EX_LEGEND_RIGHT_INSET = 128;
+const CHART_EX_LEGEND_BOTTOM_INSET = 46;
+
+/**
+ * Margins used when there is no legend: enough to keep axis labels off the edge,
+ * without the reservation a legend would need.
+ */
+const NO_LEGEND_INSET = 12;
+/**
+ * Room the value-axis labels need on the left, whatever the legend does.
+ *
+ * They are drawn at `plot.x - 8` and right-anchored, so a four-digit label at 10 units
+ * reaches about 30 px back from the plot edge. The legend's own reservation is larger and
+ * subsumes this when it sits on the left.
+ */
+const AXIS_LABEL_INSET = 44;
+/** Title size and baseline, shared by both backends. */
+const CHART_EX_TITLE_FONT_SIZE = 18;
+const CHART_EX_TITLE_BASELINE = 26;
+/**
+ * Vertical room each title paragraph past the first takes up.
+ *
+ * The 1.2 em step at the 18-unit title font is 21.6; this rounds up so the plot
+ * never touches a descender. Everything that has to clear the title block —
+ * {@link getPlotRect} and the top legend row in {@link layoutChartExLegend} —
+ * shifts by this same amount, because a title that grew by a line has to push
+ * both of them down together.
+ */
+const CHART_EX_TITLE_LINE_STEP = 22;
+const NO_LEGEND_BOTTOM_INSET = 24;
+
+/** Font size the legend labels are drawn at, in points/user units. */
+const CHART_EX_LEGEND_FONT_SIZE = 10;
+/** Legend label colour. */
+const CHART_EX_LEGEND_COLOR = "#555";
+
+/**
+ * Place the legend entries for a ChartEx preview.
+ *
+ * Layout is computed once and shared by the SVG and PDF backends. It used to
+ * live inline in the SVG emitter, which is why the PDF renderer had no legend at
+ * all: `legendPos` was honoured in SVG and PNG but silently dropped from every
+ * vector PDF. Returning geometry rather than markup is what lets both backends
+ * agree without a second copy of the arithmetic.
+ *
+ * Honours the authored `legendPos`; unknown positions fall back to the right
+ * side. Budget: ~18 px per row for vertical stacks, ~96 px per inline item for
+ * horizontal ones.
+ */
+type ChartExLegendPosition = "b" | "l" | "r" | "t" | "tr";
+
+function layoutChartExLegend(
   series: ChartExSeries[],
   width: number,
   height: number,
-  hasTitle: boolean,
+  titleLines: number,
   legendPos: "b" | "l" | "r" | "t" | "tr" | undefined
-): void {
-  // Honour the ChartEx `legendPos` attribute when picking where to
-  // stack the swatches. Previously every preview pinned the legend to
-  // the right edge regardless of authored position — a chart with
-  // `legendPos="b"` rendered with its legend on the right, visibly
-  // misrepresenting the authored layout.
-  //
-  // Layout budget: allow ~18 px per row for vertical stacks and
-  // ~96 px per inline item for horizontal stacks. Unknown positions
-  // fall back to the right side for backward compatibility.
+): ChartExLegendEntry[] {
   const pos = legendPos ?? "r";
+  const hasTitle = titleLines > 0;
+  const extraTitleLines = Math.max(0, titleLines - 1);
+  // Read the same reservation `getPlotRect` uses, so the legend sits in the band left
+  // for it rather than at a hard-coded offset that stops matching once the margins
+  // scale down on a small canvas.
+  const insets = chartExInsets(width, height, hasTitle, titleLines, true, pos);
   const rowHeight = 18;
   const swatchSize = 10;
   const hGap = 8; // gap between swatch and text
   const itemPadding = 14; // gap between horizontal entries
   const estItemWidth = (label: string): number =>
     swatchSize + hGap + Math.max(28, label.length * 6) + itemPadding;
-  const labels = series.map((s, i) => seriesLabelText(s) ?? `Series ${i + 1}`);
+  // A series caption can be multi-paragraph, but a legend row is
+  // single-line by construction — flatten it rather than let each backend
+  // mishandle the newline in its own way.
+  const labels = series.map((s, i) => singleLineLabel(seriesLabelText(s) ?? `Series ${i + 1}`));
+  const colorOf = (i: number): string => COLORS[i % COLORS.length];
 
   if (pos === "b" || pos === "t") {
-    // Horizontal row. Put `b` at the bottom of the canvas, `t`
-    // immediately below the chart title (or near the top when none).
+    // Horizontal row. `b` sits at the bottom of the canvas, `t` immediately
+    // below the chart title (or near the top when there is none).
     const totalW = labels.reduce((sum, l) => sum + estItemWidth(l), 0) - itemPadding;
     const startX = Math.max(6, (width - totalW) / 2);
-    const baseY = pos === "b" ? height - 22 : hasTitle ? 44 : 10;
+    // `t` has to clear the plot, whose top edge `getPlotRect` puts at 52 once
+    // there is a title. Sitting at 44 left the 10px swatch overlapping it by
+    // two pixels — invisible in the SVG preview until the PDF backend started
+    // using the same layout, but wrong in both.
+    //
+    // A title paragraph past the first pushes this row down by the same step the
+    // plot moves. Keying off `hasTitle` alone put the row at a fixed 40 while the
+    // second title line sat at baseline 47.6, so a two-line title was drawn
+    // through the legend, and a three-line one had the legend wedged between its
+    // paragraphs.
+    const baseY =
+      pos === "b" ? height - 22 : hasTitle ? 40 + extraTitleLines * CHART_EX_TITLE_LINE_STEP : 10;
+    const entries: ChartExLegendEntry[] = [];
     let offsetX = startX;
-    series.forEach((_s, i) => {
-      const label = labels[i];
-      const itemWidth = estItemWidth(label);
-      parts.push(
-        `<rect x="${fmt(offsetX)}" y="${fmt(baseY)}" width="${swatchSize}" height="${swatchSize}" fill="${COLORS[i % COLORS.length]}"/>`
-      );
-      parts.push(
-        svgText(offsetX + swatchSize + hGap, baseY + swatchSize - 1, label, 10, "#555", "start")
-      );
-      offsetX += itemWidth;
+    labels.forEach((label, i) => {
+      entries.push({
+        swatchX: offsetX,
+        swatchY: baseY,
+        swatchSize,
+        labelX: offsetX + swatchSize + hGap,
+        labelBaselineY: baseY + swatchSize - 1,
+        label,
+        color: colorOf(i)
+      });
+      offsetX += estItemWidth(label);
     });
-    return;
+    return entries;
   }
 
   if (pos === "l") {
-    // Left vertical stack. Place inside the left margin; getPlotRect
-    // leaves `plot.x` at 58 so a 10 px swatch + ~40 px label fits.
-    series.forEach((_s, i) => {
+    // Left vertical stack, inside the left margin; `getPlotRect` leaves
+    // `plot.x` at 58 so a 10 px swatch plus a ~40 px label fits.
+    // 8 px in from the edge, with the label a swatch-and-gap further along.
+    const swatchX = Math.min(8, insets.left * 0.14);
+    return labels.map((label, i) => {
       const y = (hasTitle ? 44 : 20) + i * rowHeight;
-      parts.push(
-        `<rect x="${fmt(8)}" y="${fmt(y)}" width="${swatchSize}" height="${swatchSize}" fill="${COLORS[i % COLORS.length]}"/>`
-      );
-      parts.push(svgText(22, y + 9, labels[i], 10, "#555", "start"));
+      return {
+        swatchX,
+        swatchY: y,
+        swatchSize,
+        labelX: swatchX + swatchSize + 4,
+        labelBaselineY: y + 9,
+        label,
+        color: colorOf(i)
+      };
     });
-    return;
   }
 
-  // Default: right / top-right vertical stack. Top-right lifts the
-  // stack up near the title baseline; plain right sits slightly below
-  // it. Both land inside the 128 px right margin from `getPlotRect`.
+  // Right / top-right vertical stack. `tr` lifts the stack up near the title
+  // baseline; plain `r` sits slightly below it. Both land inside the 128 px
+  // right margin from `getPlotRect`.
   const baseY = pos === "tr" ? (hasTitle ? 44 : 16) : hasTitle ? 44 : 20;
-  series.forEach((_s, i) => {
+  // 12 px inside the reserved band, which is where `width - 116` put it while the
+  // reservation was a fixed 128.
+  const swatchX = width - insets.right + Math.min(12, insets.right * 0.09);
+  return labels.map((label, i) => {
     const y = baseY + i * rowHeight;
-    parts.push(
-      `<rect x="${fmt(width - 116)}" y="${fmt(y)}" width="${swatchSize}" height="${swatchSize}" fill="${COLORS[i % COLORS.length]}"/>`
-    );
-    parts.push(svgText(width - 102, y + 9, labels[i], 10, "#555", "start"));
+    return {
+      swatchX,
+      swatchY: y,
+      swatchSize,
+      labelX: swatchX + swatchSize + hGap,
+      labelBaselineY: y + 9,
+      label,
+      color: colorOf(i)
+    };
   });
 }
 
@@ -3705,22 +2609,67 @@ function seriesLabelText(s: ChartExSeries): string | undefined {
   return undefined;
 }
 
-function getPlotRect(width: number, height: number, hasTitle: boolean, titleLines = 1): SvgRect {
-  const left = 58;
-  const right = 128;
-  // Scale the top margin by `titleLines` so multi-paragraph titles
-  // (emitted as stacked tspans) do not collide with the plot area.
-  // Baseline is 52 for a single-line title (matches the pre-tspan
-  // behaviour byte-for-byte); each additional line adds ~22px which
-  // matches the `<tspan dy="1.2em">` spacing at the 18px title font.
+/**
+ * The margins reserved around the plot.
+ *
+ * One source for both {@link getPlotRect} and {@link layoutChartExLegend}: the plot's
+ * edge and the legend's position are two readings of the same reservation, and when
+ * they were written as separate constants — 128 reserved on the right, the swatch
+ * placed at `width - 116` — scaling one without the other put the legend inside the
+ * plot.
+ *
+ * The reservations are absolute pixel counts sized for a comfortable chart, and on a
+ * small one they swallow it: 58 + 128 of a 240-wide canvas left 54 px of plot, and a
+ * 260-wide one was down to 74. They scale down together once they would claim more
+ * than their share.
+ */
+function chartExInsets(
+  width: number,
+  height: number,
+  hasTitle: boolean,
+  titleLines: number,
+  hasLegend: boolean,
+  legendPos: ChartExLegendPosition = "r"
+): { left: number; right: number; top: number; bottom: number } {
+  // Only the side the legend is on has to make room for it. Reserving all four meant a
+  // top or bottom legend still gave up 58 px on the left and 128 on the right — around
+  // 40 % of the width of a 460-wide chart, for a legend that is nowhere near either edge.
+  const wantsLeft = hasLegend && legendPos === "l";
+  const wantsRight = hasLegend && (legendPos === "r" || legendPos === "tr");
+  const wantsBottom = hasLegend && legendPos === "b";
+  // The axis labels are drawn at `plot.x - 8`, right-anchored, so the left margin has a
+  // floor whatever the legend does: without it the numbers run off the canvas.
+  const left = wantsLeft ? CHART_EX_LEGEND_LEFT_INSET : AXIS_LABEL_INSET;
+  const right = wantsRight ? CHART_EX_LEGEND_RIGHT_INSET : NO_LEGEND_INSET;
+  const claimed = left + right;
+  const budget = width * 0.55;
+  const factor = claimed > budget ? budget / claimed : 1;
   const extraLines = Math.max(0, titleLines - 1);
-  const top = hasTitle ? 52 + extraLines * 22 : 24;
-  const bottom = 46;
   return {
-    x: left,
-    y: top,
-    width: Math.max(10, width - left - right),
-    height: Math.max(10, height - top - bottom)
+    left: left * factor,
+    right: right * factor,
+    top: hasTitle ? 52 + extraLines * CHART_EX_TITLE_LINE_STEP : 24,
+    bottom: Math.min(
+      wantsBottom ? CHART_EX_LEGEND_BOTTOM_INSET : NO_LEGEND_BOTTOM_INSET,
+      height * 0.25
+    )
+  };
+}
+
+function getPlotRect(
+  width: number,
+  height: number,
+  hasTitle: boolean,
+  titleLines = 1,
+  hasLegend = true,
+  legendPos: ChartExLegendPosition = "r"
+): SvgRect {
+  const insets = chartExInsets(width, height, hasTitle, titleLines, hasLegend, legendPos);
+  return {
+    x: insets.left,
+    y: insets.top,
+    width: Math.max(10, width - insets.left - insets.right),
+    height: Math.max(10, height - insets.top - insets.bottom)
   };
 }
 
@@ -3848,20 +2797,6 @@ function findValueAxis(model: ChartExModel): ChartExAxis | undefined {
     return undefined;
   }
   return axes.find(a => a.type === "val");
-}
-
-function svgText(
-  x: number,
-  y: number,
-  text: string,
-  fontSize: number,
-  color: string,
-  anchor: "start" | "middle" | "end"
-): string {
-  // `color` and `anchor` flow into attribute values — escape defensively
-  // even though all current callers pass validated strings, so a future
-  // caller can't accidentally inject a `"` that breaks the SVG parse.
-  return `<text x="${fmt(x)}" y="${fmt(y)}" text-anchor="${escapeXmlAttr(anchor)}" font-family="Arial" font-size="${fontSize}" fill="${escapeXmlAttr(color)}">${escapeXml(text)}</text>`;
 }
 
 function chartTitleText(title: ChartTitle | undefined): string | undefined {

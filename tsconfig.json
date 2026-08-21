@@ -19,6 +19,8 @@
       "@pdf/*": ["./src/modules/pdf/*"],
       "@formula": ["./src/modules/formula/index.ts"],
       "@formula/*": ["./src/modules/formula/*"],
+      "@draw": ["./src/modules/draw/index.ts"],
+      "@draw/*": ["./src/modules/draw/*"],
       "@utils/*": ["./src/utils/*"],
       "@test/*": ["./src/test/*"]
     },

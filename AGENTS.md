@@ -63,6 +63,7 @@ src/
 │   ├── markdown/       # GFM table parsing/formatting
 │   ├── xml/            # SAX/DOM parser, query engine, writer
 │   ├── archive/        # ZIP/TAR compression; core/ shared primitives
+│   ├── draw/           # Shared drawing engine: display-list IR, one walker, SVG surface
 │   └── stream/         # Cross-platform streaming primitives; core/ shared primitives
 ├── utils/              # Shared: errors, datetime, fs, binary, crypto
 └── test/               # Test utilities and fixtures
@@ -153,13 +154,134 @@ keeps the `v0.9.0` tag format instead of `documonster-v0.9.0`).
 ## Module Dependency Layers
 
 ```
-Layer 5:  pdf      → excel (only excel-bridge.ts + word-chart-bridge.ts), word (only word-bridge.ts + word-chart-bridge.ts + word-layout-to-pdf.ts), archive, utils
-Layer 4:  excel, word → formula, archive, xml, csv, markdown, stream, utils
+Layer 5:  pdf      → excel (only excel-bridge.ts + word-chart-bridge.ts), word (only word-bridge.ts + word-chart-bridge.ts + word-layout-to-pdf.ts), draw, archive, utils
+Layer 4:  excel, word → formula, draw, archive, xml, csv, markdown, stream, utils
 Layer 3:  formula  → utils    (independent calc engine; no excel imports)
 Layer 2:  csv, archive → stream, utils
-Layer 1:  xml, markdown, stream → utils
+Layer 1:  xml, markdown, stream, draw → utils
 Layer 0:  utils    (no module dependencies)
 ```
+
+### The `draw` module
+
+`draw` is the shared drawing engine. It owns a structured display list
+(`DrawList`), the single walker that consumes it (`renderDrawList`), the abstract
+backend interface (`DrawSurface`), an SVG serialiser and a rasteriser. A producer
+that emits a `DrawList` therefore gets markup and pixels from `documonster/draw`
+alone, and a PDF page from `documonster/pdf` — the claim below is testable from
+outside the repository, not only inside it.
+
+**Why it exists.** The renderers used to pass an _SVG string_ between themselves:
+the chart engine serialised SVG, then the Node PNG fallback re-parsed it with a
+regex scanner and the PDF importer parsed it again with a second, differently
+capable parser. Each backend therefore had its own reading of every attribute,
+and the same picture came out differently depending on which one you asked —
+dashes disappeared, opacity was dropped, rotations mirrored, 8-digit colours were
+read with the wrong byte order. A display list removes the round trip.
+
+**The rule: one walker, many surfaces.** `renderDrawList` owns transform
+composition, stroke/dash scaling and text rotation, and hands surfaces
+**absolute, already-transformed** coordinates in a Y-down space. A surface never
+implements a transform stack, so a new backend is a few dozen lines instead of a
+parallel renderer. Adding a _producer_ (a chart type, a diagram engine) gets every
+existing backend for free; adding a _backend_ serves every producer.
+
+A surface lives with the engine when it needs nothing but the IR, and next to its
+target when it draws onto something the engine cannot know about:
+
+| Surface    | Location                     | Output                                                   |
+| ---------- | ---------------------------- | -------------------------------------------------------- |
+| SVG        | `draw/svg.ts`                | Markup in the subset the rest of the library understands |
+| Raster     | `draw/raster/surface.ts`     | RGBA pixels via `BasicRasterCanvas`                      |
+| PDF vector | `pdf/render/draw-surface.ts` | Page operators; owns the Y flip                          |
+
+The rasteriser used to live in `excel/chart/render/`, which was an accident of where
+charts were written rather than a statement about what it does: it paints a display
+list and knows nothing about a workbook. It sits in `draw/` now, alongside the glyph
+rasteriser and the stroke font it needs, and `documonster/draw` exports it.
+
+**It yields pixels, not a PNG.** Encoding one needs DEFLATE, which lives at Layer 2 in
+`archive/`, and dragging that down into Layer 1 to return a file format would make
+every consumer of the drawing engine pay for a compression library. The seam is
+therefore at the image: `rasterizeToRgba` is the backend, and
+`excel/chart/render/draw-raster-png.ts` is the ten-line adapter that pairs it with the
+library's own encoder. A caller with a different encoder pairs it with that instead.
+
+`createPdfDrawSurface` takes a `PdfDrawPage` — a structural interface naming the six
+marks it puts down — rather than a `PdfPageBuilder`. The concrete builder also carries
+annotations, form fields and a content stream, and naming it in a public signature
+would publish all of them.
+
+Because the Y flip lives in exactly one adapter, so does the fact that a
+reflection reverses a rotation's sense — a bug each per-backend renderer
+previously had to discover for itself.
+
+**Clipping** is axis-aligned rectangles only (`DrawNode.group.clip`), authored in
+the group's own space so it moves with `transform`. Every backend expresses that
+exactly — SVG `clipPath`, PDF `q … W n … Q`, a scissor test in `setPixel` — and an
+arbitrary clip path in a scanline rasteriser is a different order of problem. A
+surface may omit `pushClip`/`popClip`, in which case the walker draws unclipped
+rather than dropping the content.
+
+**Primitives** are rect, ellipse, **sector**, line, polyline, path (move/line/cubic)
+and text. A sector is first-class rather than lowered to a path because the three
+backends do it three genuinely different ways and lowering upstream would make two
+of them worse: SVG has arcs natively, PDF needs cubics, and the rasteriser tests
+radius-and-angle per pixel for an exact edge. The old pipeline smuggled the
+parameters past the SVG string in a `data-sector` attribute so the rasteriser
+could recover them; modelling them removes that channel.
+
+**Text measurement belongs here too.** A producer sizes its boxes around the text they
+contain, so it has to measure before it can build a display list at all. `draw/text.ts`
+expresses `@utils/text-measure` (Layer 0 — the glyph-advance tables, moved down from
+`@excel/utils` where nothing below Layer 4 could reach them) in terms of `DrawTextStyle`,
+and adds `wrapText`. Before that, measurement was reachable only through
+`@excel/chart/shared/chart-utils`, which is Layer 4: anything sitting beside `draw` could
+draw text but not measure it, and therefore could not lay anything out. That was the one
+thing stopping a non-chart producer from being written against this engine.
+
+Note the unit: `measureTextWidthPx` returns CSS pixels for a point size, while a display
+list draws text at `style.size` units. `measureText` applies `POINTS_PER_PIXEL`; skipping
+it over-reports every label by 4/3, which is how legends came out too wide and centred
+titles sat left of centre.
+
+**Deliberately absent**: element-level opacity, gradients and patterns. Opacity is
+expressed as an alpha on each paint instead. That is _not_ identical to the SVG
+`opacity` attribute, and it is worth being precise about the difference rather than
+claiming an equivalence: element opacity composites the finished shape once, so a
+stroke that overlaps its own fill is flattened first and then faded, whereas
+per-paint alpha fades the fill and then blends the stroke over the result. The two
+agree everywhere except the band where a translucent stroke covers its own fill.
+For the region map's circles — a 1.5-unit white ring at `0.92` over a near-white
+panel — that band is under a pixel wide and the channels differ by at most
+15/255; the fill is bit-identical. Closing that gap properly means offscreen
+compositing in every backend (a transparency group and a Form XObject in PDF, a
+second buffer in the rasteriser), which is a large amount of machinery for a
+sub-pixel seam, so the alpha is where it stays. Note that
+`describeSvgGeometry` folds element opacity into both paints, so it cannot see this
+difference — do not read a matching geometry hash as proof that compositing agrees.
+Nothing produces gradients or patterns —
+the chart engine already degrades gradient fills to a representative colour before
+it reaches any renderer — so adding them would grow the IR and every surface
+without changing a single output. Filters are the one exception, and they are
+named for the single backend that can express them (`DrawList.svgDefs` +
+`group.svgFilterId`): a DrawingML shadow has no counterpart in a content stream or
+a scanline rasteriser, so the field says SVG in its name rather than pretending to
+be portable. That mirrors what the per-backend renderers already did.
+
+**Metadata that only one backend can carry does not enter the IR.** The region map
+reports which path drew it — real TopoJSON, the built-in centroid preview, or the
+hex-tile fallback — and that is the only way a caller learns whether their topology
+actually matched their categories. It is a fact about a decision, not about geometry
+or paint, so the SVG renderer attaches it as a `data-region-map-mode` attribute on a
+wrapping `<g>` when it serialises, and the PDF path simply draws the nodes. Nothing
+was added to `DrawNode` for it. Prefer that shape for any future SVG-only
+annotation: decide it in the producer, attach it at the serialisation boundary.
+
+Cross-backend agreement is enforced by
+`src/modules/pdf/__tests__/draw-backend-parity.test.ts`: the same display list is
+rendered to markup, pixels and PDF operators, and the geometry is asserted to
+match modulo each backend's coordinate convention.
 
 - Modules may only import from **lower** layers — never sideways or upward.
 - **Sole exceptions**:
@@ -173,7 +295,7 @@ These rules are **machine-enforced** by `scripts/verify-layers.ts` (run via `pnp
 
 ## Path Aliases
 
-`@excel/*`, `@word/*`, `@formula/*`, `@pdf/*`, `@csv/*`, `@markdown/*`, `@xml/*`, `@archive/*`, `@stream/*` → `./src/modules/<name>/*`
+`@excel/*`, `@word/*`, `@formula/*`, `@pdf/*`, `@csv/*`, `@markdown/*`, `@xml/*`, `@archive/*`, `@stream/*`, `@draw/*` → `./src/modules/<name>/*`
 `@utils/*` → `./src/utils/*` | `@test/*` → `./src/test/*`
 
 Use aliases for **all** module imports — both cross-module (`@archive/...` from excel) and same-module (`@excel/cell` from within excel). This matches the IDE auto-import setting (`importModuleSpecifier: "non-relative"`) and keeps imports stable when files move. The only exception is `src/utils/` (Layer 0), whose internal files use relative paths (`./errors`, `./glob`).

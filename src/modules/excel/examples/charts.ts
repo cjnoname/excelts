@@ -181,6 +181,7 @@ import {
   Workbook,
   Worksheet
 } from "@excel/index";
+import { encodePng } from "@excel/utils/png";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import { chartToPdf } from "@pdf/excel-bridge";
 
@@ -5241,140 +5242,23 @@ async function main(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a single-colour PNG with no compression — enough to exercise
- * the picture-fill pipeline without depending on a PNG encoder.
+ * Generate a single-colour PNG to exercise the picture-fill pipeline.
  *
- * Produces an IHDR + IDAT + IEND stream with:
- *   - bit-depth 8, colour-type 6 (RGBA)
- *   - uncompressed DEFLATE blocks ("stored" blocks)
- * Real-world callers normally have a PNG handy on disk — this is only
- * here to keep the example runnable without a network round-trip or an
- * extra dev dependency.
+ * This used to hand-roll the whole container — IHDR/IDAT/IEND framing, a CRC-32
+ * table, an Adler-32 and *uncompressed* "stored" DEFLATE blocks — because there
+ * was no encoder to call. There is one now, so the example uses it: the output
+ * is properly compressed, and the example stops being a fourth copy of PNG
+ * framing that nobody would remember to keep in step.
  */
 function makeSolidColorPng(width: number, height: number, rgb: number): Uint8Array {
-  const r = (rgb >> 16) & 0xff;
-  const g = (rgb >> 8) & 0xff;
-  const b = rgb & 0xff;
-  // Build raw pixel stream: one filter byte per scanline (0 = None) +
-  // RGBA samples.
-  const rowBytes = 1 + width * 4;
-  const raw = new Uint8Array(rowBytes * height);
-  for (let y = 0; y < height; y++) {
-    raw[y * rowBytes] = 0;
-    for (let x = 0; x < width; x++) {
-      const o = y * rowBytes + 1 + x * 4;
-      raw[o + 0] = r;
-      raw[o + 1] = g;
-      raw[o + 2] = b;
-      raw[o + 3] = 0xff;
-    }
+  const rgba = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    rgba[i * 4] = (rgb >> 16) & 0xff;
+    rgba[i * 4 + 1] = (rgb >> 8) & 0xff;
+    rgba[i * 4 + 2] = rgb & 0xff;
+    rgba[i * 4 + 3] = 0xff;
   }
-  const compressed = zlibStored(raw);
-
-  const signature = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const chunks: Uint8Array[] = [signature];
-  chunks.push(pngChunk("IHDR", buildIhdr(width, height)));
-  chunks.push(pngChunk("IDAT", compressed));
-  chunks.push(pngChunk("IEND", new Uint8Array(0)));
-
-  const total = chunks.reduce((sum, c) => sum + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
-}
-
-function buildIhdr(width: number, height: number): Uint8Array {
-  const buf = new Uint8Array(13);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, width);
-  view.setUint32(4, height);
-  buf[8] = 8; // bit depth
-  buf[9] = 6; // colour type RGBA
-  buf[10] = 0;
-  buf[11] = 0;
-  buf[12] = 0;
-  return buf;
-}
-
-function pngChunk(type: string, data: Uint8Array): Uint8Array {
-  const typeBytes = new TextEncoder().encode(type);
-  const length = data.length;
-  const out = new Uint8Array(4 + 4 + length + 4);
-  const view = new DataView(out.buffer);
-  view.setUint32(0, length);
-  out.set(typeBytes, 4);
-  out.set(data, 8);
-  const crc = crc32(new Uint8Array(out.buffer, 4, 4 + length));
-  view.setUint32(8 + length, crc);
-  return out;
-}
-
-function crc32(bytes: Uint8Array): number {
-  let c: number;
-  const table: number[] = [];
-  for (let n = 0; n < 256; n++) {
-    c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[n] = c;
-  }
-  let crc = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) {
-    crc = table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-/**
- * Emit a zlib stream whose DEFLATE payload consists only of
- * "stored" (uncompressed) blocks. Keeps the PNG picture-fill demo
- * self-contained.
- */
-function zlibStored(data: Uint8Array): Uint8Array {
-  const MAX_BLOCK = 65535;
-  const parts: Uint8Array[] = [new Uint8Array([0x78, 0x01])]; // zlib header (no dict)
-  for (let i = 0; i < data.length; i += MAX_BLOCK) {
-    const chunk = data.subarray(i, Math.min(i + MAX_BLOCK, data.length));
-    const final = i + MAX_BLOCK >= data.length ? 1 : 0;
-    const header = new Uint8Array(5);
-    header[0] = final;
-    const len = chunk.length;
-    header[1] = len & 0xff;
-    header[2] = (len >> 8) & 0xff;
-    header[3] = ~len & 0xff;
-    header[4] = (~len >> 8) & 0xff;
-    parts.push(header, chunk);
-  }
-  // Adler-32 footer
-  parts.push(adler32Bytes(data));
-  const total = parts.reduce((s, p) => s + p.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.length;
-  }
-  return out;
-}
-
-function adler32Bytes(data: Uint8Array): Uint8Array {
-  let a = 1;
-  let b = 0;
-  const MOD = 65521;
-  for (let i = 0; i < data.length; i++) {
-    a = (a + data[i]) % MOD;
-    b = (b + a) % MOD;
-  }
-  const adler = ((b << 16) | a) >>> 0;
-  const out = new Uint8Array(4);
-  const view = new DataView(out.buffer);
-  view.setUint32(0, adler);
-  return out;
+  return encodePng(rgba, width, height);
 }
 
 main().catch(err => {

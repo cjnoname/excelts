@@ -3,7 +3,7 @@
  *
  * Renders text into a semi-transparent PNG suitable for use as an Excel watermark.
  * Uses a built-in bitmap font for ASCII characters — no Canvas or external fonts required.
- * PNG data is deflate-compressed using the archive module's built-in compressor.
+ * Pixels are handed to the shared PNG encoder in `@excel/utils/png`.
  *
  * @example
  * ```typescript
@@ -22,7 +22,7 @@
 // Public API
 // =============================================================================
 
-import { deflateRawCompressed } from "@archive/compression/deflate-fallback";
+import { encodePng } from "@excel/utils/png";
 
 /**
  * Options for text watermark image generation.
@@ -356,124 +356,4 @@ function rotateBitmap(
   }
 
   return { width: dstW, height: dstH, pixels: dst };
-}
-
-// =============================================================================
-// PNG Encoder (RGBA, deflate-compressed, with alpha)
-// =============================================================================
-
-/** Encode RGBA pixel data to a PNG file. */
-function encodePng(rgba: Uint8Array, width: number, height: number): Uint8Array {
-  // Build IDAT data: filter byte (0 = None) + raw RGBA for each row
-  const rawRowSize = 1 + width * 4; // filter byte + pixels
-  const rawData = new Uint8Array(rawRowSize * height);
-  for (let y = 0; y < height; y++) {
-    rawData[y * rawRowSize] = 0; // filter: None
-    rawData.set(rgba.subarray(y * width * 4, (y + 1) * width * 4), y * rawRowSize + 1);
-  }
-
-  // Wrap in zlib stream with deflate compression
-  const deflated = zlibCompress(rawData);
-
-  // PNG signature
-  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-
-  // IHDR chunk
-  const ihdr = new Uint8Array(13);
-  writeU32BE(ihdr, 0, width);
-  writeU32BE(ihdr, 4, height);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // color type: RGBA
-  ihdr[10] = 0; // compression
-  ihdr[11] = 0; // filter
-  ihdr[12] = 0; // interlace
-  const ihdrChunk = pngChunk(0x49484452, ihdr);
-
-  // IDAT chunk
-  const idatChunk = pngChunk(0x49444154, deflated);
-
-  // IEND chunk
-  const iendChunk = pngChunk(0x49454e44, new Uint8Array(0));
-
-  // Concatenate
-  const result = new Uint8Array(
-    sig.length + ihdrChunk.length + idatChunk.length + iendChunk.length
-  );
-  let offset = 0;
-  result.set(sig, offset);
-  offset += sig.length;
-  result.set(ihdrChunk, offset);
-  offset += ihdrChunk.length;
-  result.set(idatChunk, offset);
-  offset += idatChunk.length;
-  result.set(iendChunk, offset);
-
-  return result;
-}
-
-/** Build a PNG chunk: length(4) + type(4) + data + crc32(4). */
-function pngChunk(type: number, data: Uint8Array): Uint8Array {
-  const chunk = new Uint8Array(12 + data.length);
-  writeU32BE(chunk, 0, data.length);
-  writeU32BE(chunk, 4, type);
-  chunk.set(data, 8);
-  // CRC32 over type + data
-  const crc = crc32(chunk.subarray(4, 8 + data.length));
-  writeU32BE(chunk, 8 + data.length, crc);
-  return chunk;
-}
-
-/** Write a 32-bit big-endian unsigned int. */
-function writeU32BE(buf: Uint8Array, offset: number, value: number): void {
-  buf[offset] = (value >>> 24) & 0xff;
-  buf[offset + 1] = (value >>> 16) & 0xff;
-  buf[offset + 2] = (value >>> 8) & 0xff;
-  buf[offset + 3] = value & 0xff;
-}
-
-/** Wrap raw data in a zlib stream with deflate compression. */
-function zlibCompress(data: Uint8Array): Uint8Array {
-  // Zlib header: CMF=0x78, FLG=0x01 (deflate, no dict, check bits)
-  const deflated = deflateRawCompressed(data, 6);
-  const adler = adler32(data);
-
-  const result = new Uint8Array(2 + deflated.length + 4);
-  result[0] = 0x78;
-  result[1] = 0x01;
-  result.set(deflated, 2);
-  writeU32BE(result, 2 + deflated.length, adler);
-  return result;
-}
-
-/** Compute Adler-32 checksum. */
-function adler32(data: Uint8Array): number {
-  let a = 1;
-  let b = 0;
-  for (let i = 0; i < data.length; i++) {
-    a = (a + data[i]) % 65521;
-    b = (b + a) % 65521;
-  }
-  return (b << 16) | a;
-}
-
-/** CRC32 lookup table. */
-const CRC_TABLE = /* @__PURE__ */ (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[n] = c;
-  }
-  return table;
-})();
-
-/** Compute CRC32 checksum. */
-function crc32(data: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < data.length; i++) {
-    crc = CRC_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }

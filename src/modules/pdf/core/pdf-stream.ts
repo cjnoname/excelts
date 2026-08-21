@@ -267,6 +267,24 @@ export class PdfContentStream {
   }
 
   /**
+   * Fill using the even-odd rule (`f*`) rather than the default nonzero (`f`).
+   *
+   * The two differ wherever a path's subpaths overlap: nonzero counts edge directions,
+   * even-odd counts crossings. A compound path built by a producer that asked for
+   * even-odd is a different shape under nonzero, so the operator has to follow.
+   */
+  fillEvenOdd(): this {
+    this.parts.push("f*");
+    return this;
+  }
+
+  /** Fill and stroke using the even-odd rule (`B*`). */
+  fillEvenOddAndStroke(): this {
+    this.parts.push("B*");
+    return this;
+  }
+
+  /**
    * Fill and then stroke the current path.
    */
   fillAndStroke(): this {

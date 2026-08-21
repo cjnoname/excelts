@@ -7,13 +7,16 @@
  */
 
 import { extractAll } from "@archive/unzip/extract";
+import { flattenPath } from "@draw/index";
+import type { DrawPathCommand } from "@draw/index";
 import type {
   AddChartOptions,
   ChartTypeGroup,
   BarSeries,
   ValueAxis,
   AddChartExOptions,
-  ChartExModel
+  ChartExModel,
+  ChartModel
 } from "@excel/chart";
 import {
   chartOptionsFromRows,
@@ -25,6 +28,8 @@ import {
   renderChartExSvg,
   buildChartScene,
   renderChartSvg,
+  renderChartPng,
+  drawChartPdf,
   seriesFromColumns
 } from "@excel/chart";
 import { createChart } from "@excel/chart/chart-handle";
@@ -51,6 +56,7 @@ import {
   getCharts
 } from "@excel/core/worksheet";
 import { Cell, Chart, Workbook, Worksheet } from "@excel/index";
+import { extractSvgGeometry } from "@test/svg-geometry";
 import { describe, it, expect } from "vitest";
 
 const textDecoder = new TextDecoder();
@@ -280,7 +286,8 @@ describe("Second-round chart bug fixes", () => {
     // COLORS[0] = "#4472C4" (Excel's accent-1 blue). Any of A/B/C
     // slices should be coloured with accent-1 blue, not accent-2
     // orange that the old colorIndex=0 seed fell through to.
-    expect(svg).toContain("#4472C4");
+    // Colour case is not semantic; the shared SVG surface normalises to lowercase.
+    expect(svg.toLowerCase()).toContain("#4472c4");
   });
 
   it("region map lookup handles 'Democratic Republic of the Congo'", () => {
@@ -2451,5 +2458,878 @@ describe("Seventh-round chart/workbook bug fixes (round-trip & raw-patch correct
     expect(xml).toContain('<a:lumMod val="75000"/>');
     expect(xml).toContain('<a:shade val="50000"/>');
     expect(xml).toContain('<a:satMod val="110000"/>');
+  });
+});
+
+describe("Eighth-round chart bug fixes (multi-line text parity between backends)", () => {
+  /** Records every `drawText` the PDF backend issues, in order. */
+  function recordingSurface() {
+    const texts: { text: string; x: number; y: number; fontSize: number; rotation?: number }[] = [];
+    const page = {
+      drawRect() {
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText(
+        text: string,
+        options: { x: number; y: number; fontSize?: number; rotation?: number }
+      ) {
+        texts.push({
+          text,
+          x: options.x,
+          y: options.y,
+          fontSize: options.fontSize ?? 0,
+          rotation: options.rotation
+        });
+        return this;
+      }
+    };
+    return { page, texts };
+  }
+
+  function barChart(): { model: ChartModel } {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10],
+      ["B", 20],
+      ["C", 30]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }]
+      },
+      "D1:J10"
+    );
+    return { model: Chart.chartModel(getCharts(ws)[0])! };
+  }
+
+  /** A bar chart whose title has one paragraph per supplied string. */
+  function titledModel(paragraphs: string[]): ChartModel {
+    const { model } = barChart();
+    model.chart.title = {
+      text: { paragraphs: paragraphs.map(text => ({ runs: [{ text }] })) }
+    } as never;
+    return model;
+  }
+
+  function pngHash(png: Uint8Array): string {
+    let hash = 2166136261;
+    for (const byte of png) {
+      hash ^= byte;
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  it("stacks a multi-paragraph title in the PDF backend instead of collapsing it", () => {
+    // `ChartPdfDrawingSurface.drawText` is contractually a single line, and the
+    // surfaces behind it only honour `\n` when a wrap width is given — which
+    // charts never give. The title used to arrive as one call carrying a raw
+    // newline, so a two-paragraph title rendered as one line in PDF while the
+    // SVG backend stacked it correctly.
+    const { page, texts } = recordingSurface();
+    drawChartPdf(page, titledModel(["Quarterly", "Revenue"]), {
+      x: 0,
+      y: 0,
+      width: 300,
+      height: 200
+    });
+
+    expect(texts.every(entry => !/[\r\n]/.test(entry.text))).toBe(true);
+
+    const first = texts.findIndex(entry => entry.text === "Quarterly");
+    expect(first).toBeGreaterThanOrEqual(0);
+    const second = texts[first + 1];
+    expect(second.text).toBe("Revenue");
+    // Same anchor column, one 1.2 em step further down the page. The scene has
+    // already been flipped into PDF's Y-up space, so "down" means a lower y.
+    expect(second.x).toBeCloseTo(texts[first].x, 6);
+    expect(texts[first].y - second.y).toBeCloseTo(1.2 * texts[first].fontSize, 6);
+  });
+
+  it("steps a rotated multi-paragraph label along its own down axis", () => {
+    // Axis titles are emitted at -90°. Stacking along the page's Y axis would
+    // put the second line on top of the first; it has to follow the rotated
+    // text's own down direction, which for -90° is +x.
+    const model = titledModel(["Sales"]);
+    const valueAxis = model.chart.plotArea.axes.find(
+      axis => (axis as ValueAxis).axisType === "val"
+    ) as ValueAxis;
+    valueAxis.title = {
+      text: { paragraphs: [{ runs: [{ text: "Quarterly" }] }, { runs: [{ text: "Revenue" }] }] }
+    } as never;
+
+    const { page, texts } = recordingSurface();
+    drawChartPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+
+    const first = texts.findIndex(entry => entry.text === "Quarterly");
+    expect(first).toBeGreaterThanOrEqual(0);
+    const second = texts[first + 1];
+    expect(second.text).toBe("Revenue");
+    // The scene is handed to the surface in PDF space, where the Y flip has
+    // already reversed the sense of the rotation: the SVG's `rotate(-90)` (which
+    // reads bottom-to-top) is `+90` here. Forwarding the SVG angle unchanged
+    // mirrored every rotated axis title in a vector PDF.
+    expect(texts[first].rotation).toBe(90);
+    expect(second.rotation).toBe(90);
+    expect(second.x - texts[first].x).toBeCloseTo(1.2 * texts[first].fontSize, 6);
+    expect(second.y).toBeCloseTo(texts[first].y, 6);
+  });
+
+  it("leaves single-line text on the one-call fast path", () => {
+    const { page, texts } = recordingSurface();
+    drawChartPdf(page, titledModel(["Sales"]), { x: 0, y: 0, width: 300, height: 200 });
+    expect(texts.filter(entry => entry.text === "Sales")).toHaveLength(1);
+  });
+
+  it("draws a smooth line as a curve through its points", () => {
+    // `c:smooth` asks for a spline *through* the data, not a polyline with its corners
+    // rounded off. Rounding the joins left the line straight between every pair of
+    // points — the shape the reader is being told it is not.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 1],
+      ["B", 5],
+      ["C", 2],
+      ["D", 6]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "line",
+        smooth: true,
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$4", values: "Sheet1!$B$1:$B$4" }]
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const svg = renderChartSvg(model, { width: 300, height: 200 });
+    const path = /<path d="([^"]*)"/.exec(svg);
+    expect(path).not.toBeNull();
+    // Three segments for four points, each a cubic.
+    expect((path![1].match(/C/g) ?? []).length).toBe(3);
+  });
+
+  it("passes a smooth curve through every data point", () => {
+    // Catmull-Rom rather than an approximating spline: a chart's line has to touch its
+    // own values. The segment endpoints are the data points.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 1],
+      ["B", 5],
+      ["C", 2],
+      ["D", 6]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "line",
+        smooth: true,
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$4", values: "Sheet1!$B$1:$B$4" }]
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const svg = renderChartSvg(model, { width: 300, height: 200 });
+    // The markers sit on the data points; every one must lie on the curve's own anchors.
+    const markers = extractSvgGeometry(svg)
+      .filter(shape => shape.kind === "circle")
+      .map(shape => ({ x: shape.coords[0], y: shape.coords[1] }));
+    const path = /<path d="([^"]*)"/.exec(svg)![1];
+    const anchors = [
+      ...path.matchAll(/(?:M|C(?:\s+[-\d.]+\s+[-\d.]+){2})\s+([-\d.]+)\s+([-\d.]+)/g)
+    ].map(match => ({ x: Number(match[1]), y: Number(match[2]) }));
+    expect(markers.length).toBeGreaterThan(0);
+    for (const marker of markers) {
+      const hit = anchors.some(
+        anchor => Math.abs(anchor.x - marker.x) < 0.6 && Math.abs(anchor.y - marker.y) < 0.6
+      );
+      expect(hit, `no curve anchor at ${marker.x},${marker.y}`).toBe(true);
+    }
+  });
+
+  it("keeps a smooth curve inside the range of its own data", () => {
+    // Catmull-Rom overshoots at an asymmetric local extreme: where one neighbour is far
+    // and the other near, the curve bulges past the point it is meant to peak at. On a
+    // chart that is ink outside the plot, in the axis labels. Clamping each tangent
+    // against the smaller adjacent slope — the monotone condition — holds the curve to
+    // the data.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    const values = [100, 95, 0, 98, 100];
+    Worksheet.addRows(
+      ws,
+      values.map((value, index) => [`C${index}`, value])
+    );
+    addChart(
+      ws,
+      {
+        type: "line",
+        smooth: true,
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$5", values: "Sheet1!$B$1:$B$5" }]
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const svg = renderChartSvg(model, { width: 300, height: 200 });
+
+    // The plot's vertical extent, read from the axis lines.
+    const vertical = extractSvgGeometry(svg).filter(
+      shape =>
+        shape.kind === "polyline" &&
+        shape.coords.length === 4 &&
+        Math.abs(shape.coords[0] - shape.coords[2]) < 0.01
+    );
+    const top = Math.min(...vertical.flatMap(shape => [shape.coords[1], shape.coords[3]]));
+    const bottom = Math.max(...vertical.flatMap(shape => [shape.coords[1], shape.coords[3]]));
+
+    // The curve itself, flattened rather than judged by its control points.
+    const numbers = [.../<path d="([^"]*)"/.exec(svg)![1].matchAll(/-?[\d.]+/g)].map(match =>
+      Number(match[0])
+    );
+    const commands: DrawPathCommand[] = [{ op: "move", x: numbers[0], y: numbers[1] }];
+    for (let i = 2; i + 5 < numbers.length + 1; i += 6) {
+      commands.push({
+        op: "cubic",
+        x1: numbers[i],
+        y1: numbers[i + 1],
+        x2: numbers[i + 2],
+        y2: numbers[i + 3],
+        x: numbers[i + 4],
+        y: numbers[i + 5]
+      });
+    }
+    const ys = flattenPath(commands).flatMap(run => run.points.map(point => point.y));
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(top - 0.01);
+    expect(Math.max(...ys)).toBeLessThanOrEqual(bottom + 0.01);
+  });
+
+  it("leaves a non-smooth line straight", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 1],
+      ["B", 5],
+      ["C", 2],
+      ["D", 6]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "line",
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$4", values: "Sheet1!$B$1:$B$4" }]
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const svg = renderChartSvg(model, { width: 300, height: 200 });
+    expect(svg).not.toContain("<path");
+  });
+
+  it("keeps a smooth line's rounded joins and caps", () => {
+    // `c:smooth` asks for a spline; the SVG emitter has always approximated it by
+    // rounding the joins and caps, and that was the only place it ever showed —
+    // neither the PDF nor the raster path read the flag. Moving to a display list
+    // dropped the approximation silently, because the paint had nowhere to carry
+    // it, so a smooth line and a straight one rendered identically.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Worksheet.addRows(ws, [
+      ["A", 1],
+      ["B", 5],
+      ["C", 2]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "line",
+        series: [{ name: "S", categories: "S!$A$1:$A$3", values: "S!$B$1:$B$3" }],
+        smooth: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const svg = renderChartSvg(Chart.chartModel(getCharts(ws)[0])!, { width: 200, height: 150 });
+    expect(svg).toContain('stroke-linejoin="round"');
+    expect(svg).toContain('stroke-linecap="round"');
+  });
+
+  it("leaves a non-smooth line on the default joins", () => {
+    // The flag has to still mean something: emitting rounded joins unconditionally
+    // would make every line chart look smoothed.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Worksheet.addRows(ws, [
+      ["A", 1],
+      ["B", 5],
+      ["C", 2]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "line",
+        series: [{ name: "S", categories: "S!$A$1:$A$3", values: "S!$B$1:$B$3" }]
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const svg = renderChartSvg(Chart.chartModel(getCharts(ws)[0])!, { width: 200, height: 150 });
+    expect(svg).not.toContain("stroke-linejoin");
+    expect(svg).not.toContain("stroke-linecap");
+  });
+
+  it("keeps the SVG backend on the same 1.2 em step", () => {
+    const svg = renderChartSvg(titledModel(["Quarterly", "Revenue"]), {
+      width: 300,
+      height: 200
+    });
+    expect(svg).toContain(">Quarterly</tspan>");
+    expect(svg).toContain(">Revenue</tspan>");
+    // Baselines are absolute rather than relative `dy`, so no consumer has to
+    // resolve `em` against a font size to know where a line sits. The step itself
+    // is what matters, and it is still 1.2 em of the 18-unit title font.
+    const baselines = [...svg.matchAll(/<tspan x="[\d.]+" y="([\d.]+)"/g)].map(match =>
+      Number(match[1])
+    );
+    expect(baselines).toHaveLength(2);
+    expect(baselines[1] - baselines[0]).toBeCloseTo(1.2 * 18, 6);
+  });
+
+  it("stacks a multi-paragraph title in the Node raster fallback too", async () => {
+    // The raster fallback re-parses the emitted SVG. `decodeSvgText` strips the
+    // `<tspan>` tags but nothing put the line break back, so the paragraphs
+    // rasterised run together as "QuarterlyRevenue" — byte-identical to a chart
+    // actually titled that. Distinct output proves the tspans are walked.
+    const size = { width: 300, height: 200 };
+    const stacked = await renderChartPng(titledModel(["Quarterly", "Revenue"]), size);
+    const runTogether = await renderChartPng(titledModel(["QuarterlyRevenue"]), size);
+    expect(pngHash(stacked)).not.toBe(pngHash(runTogether));
+
+    // …and rendering stays deterministic.
+    const again = await renderChartPng(titledModel(["Quarterly", "Revenue"]), size);
+    expect(pngHash(again)).toBe(pngHash(stacked));
+  });
+
+  it("flattens a legend label that carries a newline", () => {
+    // A legend row has a fixed height and its column width comes from measuring
+    // the whole label, so a newline has nowhere to go. It must collapse to a
+    // space in every backend rather than stack (PDF), disappear (SVG whitespace
+    // collapsing) or run together (raster).
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10, 5],
+      ["B", 20, 12]
+    ]);
+    addChart(
+      ws,
+      {
+        // Two series, so the legend labels come from the series names rather
+        // than from the per-category fallback Excel uses for a lone series.
+        type: "bar",
+        series: [
+          { name: "North\nRegion", categories: "Sheet1!$A$1:$A$2", values: "Sheet1!$B$1:$B$2" },
+          { name: "South", categories: "Sheet1!$A$1:$A$2", values: "Sheet1!$C$1:$C$2" }
+        ],
+        showLegend: true,
+        legendPosition: "r"
+      },
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+
+    const scene = buildChartScene(model, { width: 300, height: 200 });
+    expect(scene.legend.items.map(item => item.label)).toContain("North Region");
+    expect(scene.legend.items.every(item => !/[\r\n]/.test(item.label))).toBe(true);
+
+    const { page, texts } = recordingSurface();
+    drawChartPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(texts.every(entry => !/[\r\n]/.test(entry.text))).toBe(true);
+  });
+
+  it("names the series, not the categories, on a single-series bar chart", () => {
+    // Excel lists series in a legend. It lists categories only where each point is
+    // coloured separately — the pie family, or an author who set `varyColors`. The
+    // branch used to fire for any chart with one series and several categories, so a
+    // single-series bar, line or area chart showed `Q1 Q2 Q3 Q4` and never its own
+    // name, and `varyColors` was not read anywhere in the renderer.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["Q1", 10],
+      ["Q2", 20],
+      ["Q3", 15]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        series: [{ name: "Revenue", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }],
+        showLegend: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const scene = buildChartScene(Chart.chartModel(getCharts(ws)[0])!, {
+      width: 300,
+      height: 200
+    });
+    expect(scene.legend.items.map(item => item.label)).toEqual(["Revenue"]);
+  });
+
+  it("names the categories on a pie, whose slices are coloured one by one", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["Q1", 10],
+      ["Q2", 20],
+      ["Q3", 15]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "pie",
+        series: [{ name: "Revenue", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }],
+        showLegend: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const scene = buildChartScene(Chart.chartModel(getCharts(ws)[0])!, {
+      width: 300,
+      height: 200
+    });
+    expect(scene.legend.items.map(item => item.label)).toEqual(["Q1", "Q2", "Q3"]);
+  });
+
+  it("honours varyColors on a chart that would otherwise name its series", () => {
+    // An author asking for per-point colours is asking for a per-point legend. The
+    // renderer never read the flag, so this was previously indistinguishable from a
+    // plain bar chart.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["Q1", 10],
+      ["Q2", 20],
+      ["Q3", 15]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        varyColors: true,
+        series: [{ name: "Revenue", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }],
+        showLegend: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const scene = buildChartScene(Chart.chartModel(getCharts(ws)[0])!, {
+      width: 300,
+      height: 200
+    });
+    expect(scene.legend.items.map(item => item.label)).toEqual(["Q1", "Q2", "Q3"]);
+  });
+
+  it("colours the points themselves when varyColors is set, not just the legend", () => {
+    // The legend lists categories only because each point carries its own colour, so the
+    // two have to agree: a legend of three colours against three identical bars would
+    // describe nothing. Asserting the legend alone cannot see that.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10],
+      ["B", 20],
+      ["C", 15]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        varyColors: true,
+        series: [{ name: "Rev", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }],
+        showLegend: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const shapes = extractSvgGeometry(renderChartSvg(model, { width: 320, height: 220 }));
+    const swatches = shapes
+      .filter(shape => shape.kind === "rect" && shape.coords[2] === 10 && shape.coords[3] === 10)
+      .map(shape => shape.fill);
+    const bars = shapes
+      .filter(
+        shape =>
+          shape.kind === "rect" &&
+          shape.coords[2] > 6 &&
+          shape.coords[3] > 6 &&
+          shape.fill !== undefined &&
+          shape.fill !== "#ffffff"
+      )
+      .map(shape => shape.fill);
+    expect(new Set(bars).size).toBe(3);
+    expect([...new Set(bars)]).toEqual(swatches);
+  });
+
+  it("keeps every point one colour without varyColors", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10],
+      ["B", 20],
+      ["C", 15]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        series: [{ name: "Rev", categories: "Sheet1!$A$1:$A$3", values: "Sheet1!$B$1:$B$3" }],
+        showLegend: true
+      } as AddChartOptions,
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    fillChartCaches(model, wb);
+    const bars = extractSvgGeometry(renderChartSvg(model, { width: 320, height: 220 }))
+      .filter(
+        shape =>
+          shape.kind === "rect" &&
+          shape.coords[2] > 6 &&
+          shape.coords[3] > 6 &&
+          shape.fill !== undefined &&
+          shape.fill !== "#ffffff"
+      )
+      .map(shape => shape.fill);
+    expect(new Set(bars).size).toBe(1);
+  });
+
+  it("flattens a per-category legend label that carries a newline", () => {
+    // A pie takes the other branch: its slices are coloured individually, so the
+    // legend names categories rather than the series, and the category text becomes
+    // the legend label and needs the same treatment. This used to be written with a
+    // bar chart, which reached the same branch only because the branch ignored the
+    // chart type — the behaviour that made a single-series bar chart list `Q1 Q2 Q3
+    // Q4` instead of its series name.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["North\nRegion", 10],
+      ["South", 20]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "pie",
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$2", values: "Sheet1!$B$1:$B$2" }],
+        showLegend: true,
+        legendPosition: "r"
+      },
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+
+    const scene = buildChartScene(model, { width: 300, height: 200 });
+    expect(scene.legend.items.every(item => !/[\r\n]/.test(item.label))).toBe(true);
+    expect(scene.legend.items.map(item => item.label)).toContain("North Region");
+  });
+});
+
+describe("Ninth-round chart bug fixes (raster opacity and alpha compositing)", () => {
+  /** Rasterise a standalone SVG and read one pixel back. */
+  async function pixel(svg: string, x: number, y: number) {
+    const { renderSvgToPng } = await import("@excel/chart/render/chart-renderer");
+    const { decodePng } = await import("@pdf/render/png-decoder");
+    const decoded = decodePng(await renderSvgToPng(svg, { width: 20, height: 20 }));
+    const offset = (y * decoded.width + x) * 3;
+    return {
+      r: decoded.pixels[offset],
+      g: decoded.pixels[offset + 1],
+      b: decoded.pixels[offset + 2],
+      a: decoded.alpha ? decoded.alpha[y * decoded.width + x] : 255
+    };
+  }
+
+  const svg = (attrs: string): string =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">` +
+    `<rect x="0" y="0" width="20" height="20" fill="#ff0000" ${attrs}/></svg>`;
+
+  it("honours the opacity attribute, which the raster path used to drop", () => {
+    // ChartEx emits `opacity="0.55"` on some series. The Node raster read only
+    // `fill` / `stroke`, so the same `Chart.toPNG` call came out fully opaque on
+    // Node while the browser canvas honoured it.
+    return pixel(svg('opacity="0.2"'), 10, 10).then(px => {
+      expect(px.a).toBeCloseTo(51, -0.5);
+      // …and the colour must stay pure red rather than darken towards black.
+      expect(px).toMatchObject({ r: 255, g: 0, b: 0 });
+    });
+  });
+
+  it("honours fill-opacity and multiplies it with opacity", async () => {
+    expect((await pixel(svg('fill-opacity="0.5"'), 10, 10)).a).toBeCloseTo(128, -0.5);
+    expect((await pixel(svg('fill-opacity="0.5" opacity="0.5"'), 10, 10)).a).toBeCloseTo(64, -0.5);
+  });
+
+  it("honours alpha carried by an 8-digit hex fill", async () => {
+    const px = await pixel(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">' +
+        '<rect x="0" y="0" width="20" height="20" fill="#ff000040"/></svg>',
+      10,
+      10
+    );
+    expect(px.a).toBeCloseTo(64, -0.5);
+    expect(px).toMatchObject({ r: 255, g: 0, b: 0 });
+  });
+
+  it("keeps an opaque paint fully opaque", async () => {
+    expect(await pixel(svg(""), 10, 10)).toMatchObject({ r: 255, g: 0, b: 0, a: 255 });
+  });
+
+  it("composites onto an opaque background exactly as before", async () => {
+    // The compositing fix must not move any pixel in the normal chart path,
+    // where a background rect is painted first: 20% red over white is
+    // rgb(255,204,204) under both the old and the corrected formula.
+    const px = await pixel(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">' +
+        '<rect x="0" y="0" width="20" height="20" fill="#ffffff"/>' +
+        '<rect x="0" y="0" width="20" height="20" fill="#ff0000" opacity="0.2"/></svg>',
+      10,
+      10
+    );
+    expect(px).toMatchObject({ r: 255, g: 204, b: 204, a: 255 });
+  });
+});
+
+describe("Tenth-round chart bug fixes (rotation sense across the Y flip)", () => {
+  it("reverses a rotated label's angle when the scene is flipped into PDF space", () => {
+    // A value-axis title is emitted as `rotate(-90)` so it reads bottom-to-top,
+    // which is what Excel, the SVG backend and the PNG backend all draw. The PDF
+    // surface receives a Y-up coordinate system, and a Y reflection reverses a
+    // rotation, so the angle has to flip with it.
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10],
+      ["B", 20]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$2", values: "Sheet1!$B$1:$B$2" }]
+      },
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    const valueAxis = model.chart.plotArea.axes.find(
+      axis => (axis as ValueAxis).axisType === "val"
+    ) as ValueAxis;
+    valueAxis.title = { text: { paragraphs: [{ runs: [{ text: "Units" }] }] } } as never;
+
+    // SVG keeps the authored, screen-space angle…
+    expect(renderChartSvg(model, { width: 300, height: 200 })).toContain("rotate(-90 ");
+
+    // …and the PDF surface receives its mirror image.
+    const rotations: number[] = [];
+    const page = {
+      drawRect() {
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText(text: string, options: { rotation?: number }) {
+        if (text === "Units") {
+          rotations.push(options.rotation ?? 0);
+        }
+        return this;
+      }
+    };
+    drawChartPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(rotations).toEqual([90]);
+  });
+
+  it("leaves unrotated text alone", () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Worksheet.addRows(ws, [
+      ["A", 10],
+      ["B", 20]
+    ]);
+    addChart(
+      ws,
+      {
+        type: "bar",
+        series: [{ name: "S", categories: "Sheet1!$A$1:$A$2", values: "Sheet1!$B$1:$B$2" }],
+        title: "Sales"
+      },
+      "D1:J10"
+    );
+    const model = Chart.chartModel(getCharts(ws)[0])!;
+    const seen: (number | undefined)[] = [];
+    const page = {
+      drawRect() {
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText(text: string, options: { rotation?: number }) {
+        if (text === "Sales") {
+          seen.push(options.rotation);
+        }
+        return this;
+      }
+    };
+    drawChartPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(seen).toEqual([undefined]);
+  });
+});
+
+describe("Eleventh-round chart bug fixes (raster stroke dash and text alpha)", () => {
+  /** Count opaque vs transparent pixels along the middle scanline. */
+  async function scanline(svg: string) {
+    const { renderSvgToPng } = await import("@excel/chart/render/chart-renderer");
+    const { decodePng } = await import("@pdf/render/png-decoder");
+    const decoded = decodePng(await renderSvgToPng(svg, { width: 40, height: 12 }));
+    const y = 6;
+    let on = 0;
+    let off = 0;
+    for (let x = 0; x < decoded.width; x++) {
+      const alpha = decoded.alpha ? decoded.alpha[y * decoded.width + x] : 255;
+      if (alpha > 40) {
+        on++;
+      } else {
+        off++;
+      }
+    }
+    return { on, off };
+  }
+
+  const wrap = (body: string): string =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="12">${body}</svg>`;
+
+  it("rasterises stroke-dasharray as an actual dashed stroke", async () => {
+    // The waterfall connector, the box-whisker mean line and classic dashed
+    // trendlines all emit `stroke-dasharray`; the Node raster path dropped it, so
+    // they came out solid while SVG and browser PNG drew them dashed.
+    //
+    // Compared relatively rather than against absolutes: in a browser this runs
+    // through Chromium's canvas, whose anti-aliasing leaves the odd sub-threshold
+    // edge pixel on a 1px line. What matters either way is that a dashed stroke
+    // covers materially less of the scanline than a solid one — before the fix the
+    // two were identical.
+    const solid = await scanline(
+      wrap('<line x1="0" y1="6" x2="39" y2="6" stroke="#000" stroke-width="1"/>')
+    );
+    const dashed = await scanline(
+      wrap(
+        '<line x1="0" y1="6" x2="39" y2="6" stroke="#000" stroke-width="1" stroke-dasharray="4 4"/>'
+      )
+    );
+    expect(dashed.on).toBeGreaterThan(0);
+    expect(dashed.off).toBeGreaterThan(solid.off + 2);
+    expect(dashed.on).toBeLessThan(solid.on - 2);
+  });
+
+  it("dashes a polyline as one continuous phase", async () => {
+    const solid = await scanline(
+      wrap('<polyline points="0,6 39,6" stroke="#000" stroke-width="1"/>')
+    );
+    const dashed = await scanline(
+      wrap('<polyline points="0,6 39,6" stroke="#000" stroke-width="1" stroke-dasharray="5 5"/>')
+    );
+    expect(dashed.off).toBeGreaterThan(solid.off + 2);
+  });
+
+  it("treats stroke-dasharray:none and an all-zero pattern as solid", async () => {
+    const solid = await scanline(
+      wrap('<line x1="0" y1="6" x2="39" y2="6" stroke="#000" stroke-width="1"/>')
+    );
+    for (const value of ["none", "0", "0 0"]) {
+      const result = await scanline(
+        wrap(
+          `<line x1="0" y1="6" x2="39" y2="6" stroke="#000" stroke-width="1" stroke-dasharray="${value}"/>`
+        )
+      );
+      expect(result.on, `dasharray=${value}`).toBe(solid.on);
+    }
+  });
+
+  it("modulates glyph anti-aliasing by the paint alpha", async () => {
+    // Coverage used to *replace* the alpha, so translucent text rendered fully
+    // opaque at every glyph centre while shapes honoured the same attribute.
+    const { renderSvgToPng } = await import("@excel/chart/render/chart-renderer");
+    const { decodePng } = await import("@pdf/render/png-decoder");
+    const size = { width: 60, height: 30 };
+    const text = (attrs: string): string =>
+      `<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30">` +
+      `<text x="2" y="22" font-size="24" fill="#ff0000" ${attrs}>I</text></svg>`;
+
+    const peak = (png: Uint8Array): number => {
+      const decoded = decodePng(png);
+      let max = 0;
+      const alpha = decoded.alpha;
+      if (!alpha) {
+        return 255;
+      }
+      for (const value of alpha) {
+        max = Math.max(max, value);
+      }
+      return max;
+    };
+
+    const opaque = peak(await renderSvgToPng(text(""), size));
+    const faded = peak(await renderSvgToPng(text('opacity="0.3"'), size));
+    expect(opaque).toBeGreaterThan(200);
+    expect(faded).toBeLessThan(opaque);
+    expect(faded).toBeGreaterThan(0);
+  });
+});
+
+describe("Twelfth-round chart bug fixes (rounded rect in the raster fallback)", () => {
+  it("rounds a rect's corners when rx is set", async () => {
+    // The ChartEx region-map frame is emitted with `rx="14"`; the raster path read
+    // only x/y/width/height, so it came out square while SVG and browser PNG
+    // rounded it.
+    const { renderSvgToPng } = await import("@excel/chart/render/chart-renderer");
+    const { decodePng } = await import("@pdf/render/png-decoder");
+    const size = { width: 40, height: 24 };
+    const svg = (attrs: string): string =>
+      `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="24">` +
+      `<rect x="0" y="0" width="40" height="24" ${attrs} fill="#0000ff"/></svg>`;
+
+    const alphaAt = async (attrs: string, x: number, y: number): Promise<number> => {
+      const decoded = decodePng(await renderSvgToPng(svg(attrs), size));
+      return decoded.alpha ? decoded.alpha[y * decoded.width + x] : 255;
+    };
+
+    // Square corners are painted; rounded ones are not. The centre stays filled
+    // either way, which rules out "the whole rect vanished".
+    expect(await alphaAt("", 1, 1)).toBeGreaterThan(200);
+    expect(await alphaAt('rx="10"', 1, 1)).toBeLessThan(40);
+    expect(await alphaAt('rx="10"', 20, 12)).toBeGreaterThan(200);
+  });
+
+  it("falls back to square corners for rx=0 and a malformed rx", async () => {
+    const { renderSvgToPng } = await import("@excel/chart/render/chart-renderer");
+    const { decodePng } = await import("@pdf/render/png-decoder");
+    for (const attrs of ['rx="0"', 'rx="abc"']) {
+      const decoded = decodePng(
+        await renderSvgToPng(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="24">` +
+            `<rect x="0" y="0" width="40" height="24" ${attrs} fill="#00f"/></svg>`,
+          { width: 40, height: 24 }
+        )
+      );
+      const alpha = decoded.alpha ? decoded.alpha[1 * decoded.width + 1] : 255;
+      expect(alpha, `attrs=${attrs}`).toBeGreaterThan(200);
+    }
   });
 });

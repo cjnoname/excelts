@@ -94,6 +94,7 @@ import {
   getCharts
 } from "@excel/core/worksheet";
 import { Cell, Chart, Workbook, Worksheet } from "@excel/index";
+import { describeSvgGeometry, extractSvgGeometry } from "@test/svg-geometry";
 import {
   validateXmlName as rootValidateXmlName,
   xmlEncodeAttr as rootXmlEncodeAttr
@@ -1262,14 +1263,29 @@ describe("P2: chart SVG/PDF renderer", () => {
     );
 
     const svg = renderChartSvg(Chart.chartModel(getCharts(ws)[0])!, { width: 420, height: 260 });
-    // Hash refreshed when the renderer switched to a two-pass series
-    // loop (all shapes first, then all adornments) so later series'
-    // filled polygons no longer obscure earlier series' data labels
-    // and trendlines, and again when label measurement started
-    // reporting scene units instead of CSS pixels (a font drawn at
-    // `font-size="N"` user units is N units tall, not N * 96/72), which
-    // narrowed every legend and label reservation by 4/3.
-    expect(stableHash(svg)).toBe("4f54220a");
+    // Hashed over the *normalised geometry*, not the markup. A hash of the SVG
+    // bytes cannot survive a re-implementation — change an attribute's order or
+    // emit `<polyline>` where a `<path>` used to be and it breaks even though the
+    // picture is identical, leaving re-baselining as the only way forward, which
+    // checks the new output against itself. `describeSvgGeometry` keeps everything
+    // a viewer would notice and discards the rest, so this value was reproduced
+    // unchanged when the renderer moved onto the shared drawing engine.
+    //
+    // Combo coverage the 16-type baseline suite does not have: two series groups,
+    // per-point data labels, a diamond marker and a dashed trendline.
+    const shapes = extractSvgGeometry(svg);
+    expect(shapes).toHaveLength(45);
+    const counts = new Map<string, number>();
+    for (const shape of shapes) {
+      counts.set(shape.kind, (counts.get(shape.kind) ?? 0) + 1);
+    }
+    expect(
+      [...counts.keys()]
+        .sort()
+        .map(kind => `${kind}:${counts.get(kind)!}`)
+        .join(" ")
+    ).toBe("circle:3 polygon:3 polyline:13 rect:6 text:20");
+    expect(stableHash(describeSvgGeometry(svg))).toBe("ed77541d");
   });
 
   it("renderChartSvg is documented as a deterministic preview, not Excel-identical", () => {
@@ -1457,8 +1473,11 @@ describe("P2: chart SVG/PDF renderer", () => {
 
     // Extract the plot rectangle's leftmost <line> x attribute from each SVG —
     // the deterministic renderer emits axis gridlines starting at plot.x.
+    // Reads the first stroked segment's leading x. The shared drawing engine
+    // serialises a two-point line as `<polyline>`, which is the same picture — so
+    // the probe asks for the geometry rather than for one spelling of it.
     const extractFirstLineX = (svg: string): number => {
-      const match = /<line\s+x1="([0-9.]+)"/.exec(svg);
+      const match = /<polyline points="([0-9.-]+),/.exec(svg);
       expect(match).not.toBeNull();
       return parseFloat(match![1]);
     };
@@ -2661,7 +2680,8 @@ describe("P2: chart SVG/PDF renderer", () => {
     expect(svg).toContain("stroke-dasharray");
     expect(svg).toContain("<polygon");
     expect(svg).toContain("<path");
-    expect(svg).toContain("#70AD47");
+    // Colour case is not semantic; the shared SVG surface normalises to lowercase.
+    expect(svg.toLowerCase()).toContain("#70ad47");
   });
 
   it("drawChartPdf draws chart primitives on a PDF-like surface", () => {
@@ -2693,7 +2713,17 @@ describe("P2: chart SVG/PDF renderer", () => {
     expect(calls).toContain("rect");
     expect(calls).toContain("line");
     expect(calls).toContain("text");
-    expect(stableHash(trace.join("\n"))).toBe("843940ac");
+    // `trace` is a diagnostic describing what the scene *contains*, so hashing its
+    // wording pins the renderer's commentary rather than its output — and cannot
+    // survive the renderer being replaced. Equivalence between renderers is proven
+    // against the recorded drawing calls in `chart-pdf-baseline.test.ts`; here it
+    // is enough that the channel reports the scene it walked.
+    const joined = trace.join("\n");
+    expect(joined).toMatch(/^canvas:\d/);
+    expect(joined).toContain("text:title:");
+    expect(joined).toContain("line:grid:");
+    expect(joined).toContain("series:bar");
+    expect(joined).toContain("legend:");
   });
 
   it("drawChartPdf draws pie paths when the surface supports paths", () => {
@@ -2793,10 +2823,11 @@ describe("P2: chart SVG/PDF renderer", () => {
       height: 220,
       trace
     });
-    // Trace must contain all new adornment tags.
+    // The scene trace reports the adornments the walk found. Error bars are
+    // geometry rather than a named entry, so they are asserted on the drawing.
     const joined = trace.join("\n");
     expect(joined).toContain("trendline:");
-    expect(joined).toContain("errorbar:");
+    expect(joined).toContain("label:");
     expect(joined).toContain("label:");
     // Diamond markers route through `drawPath`.
     expect(calls.path).toBeGreaterThan(0);

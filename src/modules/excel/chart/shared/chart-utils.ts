@@ -30,6 +30,7 @@
  *     directly without adapters.
  */
 
+import { measureText } from "@draw/text";
 import type { ChartColor, ChartFill, ChartLine } from "@excel/chart/model/types";
 import { CHART_THEME_PALETTE, DEFAULT_OFFICE_THEME } from "@utils/theme-colors";
 import { emuToPt } from "@utils/units";
@@ -99,6 +100,52 @@ export const COLORS = [
 export const AXIS_COLOR = "#444444";
 /** Light grey for gridlines. */
 export const GRID_COLOR = "#D9D9D9";
+
+/**
+ * Baseline advance between the paragraphs of one text node, as a multiple of
+ * the font size.
+ *
+ * Shared by every backend so a multi-paragraph title lands in the same place in
+ * all of them: the SVG paths emit it as `<tspan dy>`, the PDF paths step the
+ * baseline by it, and the raster fallback re-reads it out of the `dy`. It used
+ * to be an inline `1.2` in four places, which is exactly how the backends drift
+ * apart.
+ */
+export const TEXT_LINE_HEIGHT_EM = 1.2;
+
+/**
+ * Split a text node into its paragraphs.
+ *
+ * Accepts both LF and CRLF: a Windows-authored title that round-trips through a
+ * Buffer or a raw-XML reader arrives with `\r\n`, and leaving the `\r` attached
+ * leaks a literal carriage return into the output.
+ *
+ * Single-line text — the overwhelmingly common case — returns one entry, so no
+ * backend pays for the multi-line path.
+ */
+export function splitTextLines(text: string): { index: number; text: string }[] {
+  if (!/[\r\n]/.test(text)) {
+    return [{ index: 0, text }];
+  }
+  // Split on CRLF, a lone CR and a lone LF. Matching only `\r?\n` left an
+  // old-Mac-style lone `\r` attached to its line, so the carriage return
+  // leaked into the SVG/PDF output as an unrenderable character.
+  return text.split(/\r\n|[\r\n]/).map((line, index) => ({ index, text: line }));
+}
+
+/**
+ * Flatten a label that must occupy exactly one line.
+ *
+ * Legend entries and similar fixed-height rows measure the whole string for
+ * their column width, so a `\n` (an Alt+Enter category cell, or a series name
+ * carrying one) has nowhere to go. Every backend used to mishandle it
+ * differently — SVG collapsed it to a space per XML whitespace rules, the PDF
+ * surface received a raw newline it has no contract for, and the raster path ran
+ * the halves together. Collapse it at the source so all of them agree.
+ */
+export function singleLineLabel(label: string): string {
+  return /[\r\n]/.test(label) ? label.split(/\r\n|[\r\n]/).join(" ") : label;
+}
 
 /**
  * Preview-grade DrawingML theme palette in `CT_ColorMapping` order, sourced
@@ -906,3 +953,81 @@ export const PRESET_COLOR_HEX_TABLE: Readonly<Record<string, string>> = Object.f
   yellow: "FFFF00",
   yellowGreen: "9ACD32"
 });
+
+/**
+ * Measure the rendered pixel width of a label using the Excel module's
+ * built-in font metrics engine (`@excel/utils/text-metrics`). This replaces
+ * the previous `text.length * fontSize * 0.55` approximation with a real
+ * per-character advance-width lookup, which matters wherever the renderer
+ * must allocate space for a label (legend width, title centring, PDF
+ * anchoring). Chart labels default to Arial to match the SVG emit path
+ * (`font-family="Arial"` in the SVG surface), and `bold`/`italic` are
+ * forwarded when present — the Excel engine already knows how to degrade
+ * to a category-average factor for unrecognised faces.
+ */
+export function estimateTextWidth(
+  text: string,
+  fontSize: number,
+  options: { bold?: boolean; italic?: boolean; fontName?: string } = {}
+): number {
+  return measureText(text, {
+    size: fontSize,
+    family: options.fontName ?? "arial",
+    ...(options.bold === undefined ? {} : { bold: options.bold }),
+    ...(options.italic === undefined ? {} : { italic: options.italic })
+  });
+}
+
+/**
+ * Hard ceiling for sparse-array densification — prevents malicious or malformed XML
+ * from allocating gigabyte-scale arrays via a bogus `<c:ptCount>` / `<cx:ptCount>`.
+ * Excel's per-worksheet row limit is 1 048 576; doubling that gives a generous upper
+ * bound that still fits comfortably in memory for legitimate workbooks.
+ */
+export const SPARSE_ARRAY_CEILING = 2_097_152;
+
+/**
+ * Reconstruct a dense array from OOXML's sparse `idx`-addressed point form.
+ *
+ * Both the classic (`<c:pt idx>`) and ChartEx (`<cx:pt idx>`) readers need this, and
+ * writing it twice is how they came to disagree: the ChartEx copy sized the array from
+ * `max(points.length, ptCount)` alone, so a point at `idx="3"` in a file that omits
+ * `ptCount` fell outside its own array and was dropped — the series rendered empty
+ * rather than sparse. The length has to cover `maxIdx + 1` as well, which is what this
+ * one implementation does for both callers.
+ *
+ * @param points     Sparse records carrying an `index` and an optional `value`.
+ * @param pointCount Slot count declared by `ptCount`, when present.
+ * @param empty      Value for slots no point addresses.
+ * @param coerce     Maps a raw value to the output type; used to reject non-finite
+ *                   numbers and non-string categories to `empty`.
+ */
+export function densifySparsePoints<T, Raw>(
+  points: readonly { index: number; value?: Raw }[],
+  pointCount: number | undefined,
+  empty: T,
+  coerce: (raw: Raw | undefined) => T
+): T[] {
+  if (points.length === 0) {
+    return [];
+  }
+  let maxIdx = -1;
+  for (const p of points) {
+    if (typeof p.index === "number" && Number.isFinite(p.index) && p.index > maxIdx) {
+      maxIdx = p.index;
+    }
+  }
+  const declaredCount = typeof pointCount === "number" ? pointCount : 0;
+  const rawLength = Math.max(points.length, maxIdx + 1, declaredCount);
+  const length = Math.min(rawLength, SPARSE_ARRAY_CEILING);
+  const dense: T[] = new Array(length).fill(empty);
+  for (const p of points) {
+    const idx =
+      typeof p.index === "number" && Number.isFinite(p.index) && p.index >= 0 ? p.index : -1;
+    if (idx < 0 || idx >= length) {
+      continue;
+    }
+    dense[idx] = coerce(p.value);
+  }
+  return dense;
+}

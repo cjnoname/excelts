@@ -297,3 +297,112 @@ describe("renderDocumentToSvg", () => {
     });
   });
 });
+
+describe("renderDocumentToSvg chart rendering", () => {
+  /** A body with one inline chart carrying a title and explicit EMU extent. */
+  const chartDoc = (): DocxDocument =>
+    makeDoc([
+      makeParagraph("Before"),
+      {
+        type: "chart",
+        chart: { title: "Q1 Revenue", width: 3_000_000, height: 2_000_000 }
+      } as unknown as DocxDocument["body"][number]
+    ]);
+
+  it("falls back to a titled placeholder when no renderer is supplied", () => {
+    // `word/` may only reach the chart engine through its Excel bridge, so this
+    // module cannot draw a chart itself. Without an injected renderer the
+    // placeholder is the honest output.
+    const svg = renderDocumentToSvg(chartDoc())[0];
+    expect(svg).toContain("Q1 Revenue");
+    expect(svg).not.toContain('<g transform="translate');
+  });
+
+  it("scales a fragment that declares its own size down to the chart box", () => {
+    // `renderWordChartSvg` emits 96-DPI pixels while the layout rect is in
+    // points, so a fragment inlined verbatim overflowed its box by exactly 4/3.
+    // 3_000_000 EMU is 3.28in → 315px at 96dpi and 236pt at 72dpi.
+    const svg = renderDocumentToSvg(chartDoc(), {
+      renderChart: () => '<svg width="315" height="210"><rect width="315" height="210"/></svg>'
+    })[0];
+    const scale = /scale\(([\d.]+)\)/.exec(svg);
+    expect(scale).not.toBeNull();
+    // 72/96 = 0.75.
+    expect(Number(scale![1])).toBeCloseTo(0.75, 3);
+  });
+
+  it("does not add a scale when the fragment declares no size", () => {
+    const svg = renderDocumentToSvg(chartDoc(), {
+      renderChart: () => '<rect width="10" height="10"/>'
+    })[0];
+    expect(svg).toMatch(/<g transform="translate\([\d.]+ [\d.]+\)"><rect/);
+    expect(svg).not.toContain("scale(");
+  });
+
+  it("derives the fragment size from a viewBox when width/height are absent", () => {
+    const svg = renderDocumentToSvg(chartDoc(), {
+      renderChart: () => '<svg viewBox="0 0 472 315"><rect width="472" height="315"/></svg>'
+    })[0];
+    const scale = /scale\(([\d.]+)\)/.exec(svg);
+    expect(scale).not.toBeNull();
+    expect(Number(scale![1])).toBeLessThan(1);
+  });
+
+  it("inlines the fragment returned by renderChart", () => {
+    // Regression: `LayoutChart.svg` was declared and consumed but nothing on the
+    // normal layout path ever set it, so every chart was a placeholder and there
+    // was no way for a caller to supply one.
+    const svg = renderDocumentToSvg(chartDoc(), {
+      renderChart: chart => `<rect width="10" height="10" data-title="${chart.title}"/>`
+    })[0];
+    expect(svg).toContain('data-title="Q1 Revenue"');
+    // Positioned at the chart's page coordinates rather than dumped at 0,0.
+    expect(svg).toMatch(/<g transform="translate\([\d.]+ [\d.]+\)"><rect width="10"/);
+  });
+
+  it("keeps the placeholder when the renderer declines", () => {
+    const svg = renderDocumentToSvg(chartDoc(), { renderChart: () => undefined })[0];
+    expect(svg).toContain("Q1 Revenue");
+    expect(svg).not.toContain('<g transform="translate');
+  });
+});
+
+describe("renderDocumentToSvg shape colours", () => {
+  /** A body with one drawing shape carrying the given fill. */
+  const shapeDoc = (fillColor: string): DocxDocument =>
+    makeDoc([
+      {
+        type: "drawingShape",
+        shapeType: "rect",
+        width: 900_000,
+        height: 500_000,
+        fillColor
+      } as unknown as DocxDocument["body"][number]
+    ]);
+
+  it("never emits a literal #undefined for an unusable fill", () => {
+    // Regression: the layout only strips a leading `#` and never validates, so a
+    // colour that is not 3- or 6-digit hex reached the emitter and produced
+    // `fill="#undefined"` — invalid SVG.
+    const svg = renderDocumentToSvg(shapeDoc("red"))[0];
+    expect(svg).not.toContain("#undefined");
+    expect(svg).toMatch(/<rect[^>]*fill="none"/);
+  });
+
+  it("still honours a valid hex fill", () => {
+    const svg = renderDocumentToSvg(shapeDoc("#4472C4"))[0];
+    expect(svg).toMatch(/<rect[^>]*fill="#4472C4"/);
+  });
+
+  it("accepts a 3-digit hex fill", () => {
+    expect(renderDocumentToSvg(shapeDoc("f00"))[0]).toMatch(/<rect[^>]*fill="#f00"/);
+  });
+
+  it("rejects an 8-digit value rather than emitting it", () => {
+    // OOXML sometimes carries alpha inside the hex; this emitter has no alpha
+    // channel, so the colour is dropped rather than written malformed.
+    const svg = renderDocumentToSvg(shapeDoc("80FF0000"))[0];
+    expect(svg).not.toContain("#undefined");
+    expect(svg).not.toContain("80FF0000");
+  });
+});

@@ -44,7 +44,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+/**
+ * `--root <dir>` retargets the scan and `--config <file>` replaces the rule inputs
+ * below. Both exist for the tests.
+ *
+ * A gate that never fires is worse than no gate, and the only way to know this one fires
+ * is to hand it a tree that breaks each rule on purpose. Doing that against the real
+ * `ENTRIES` would mean a fixture with all 23 public entry points in it; supplying a
+ * config lets a test describe two.
+ */
+function argValue(flag: string): string | undefined {
+  const at = process.argv.indexOf(flag);
+  return at === -1 ? undefined : process.argv[at + 1];
+}
+
+const ROOT = path.resolve(argValue("--root") ?? path.resolve(import.meta.dirname, ".."));
 const SRC = path.join(ROOT, "src");
 
 /**
@@ -54,7 +68,7 @@ const SRC = path.join(ROOT, "src");
  * Node-only export cover a hole in the browser build. Entries that are shared
  * by both builds are listed as `both`.
  */
-const ENTRIES: Record<string, { file: string; platform: "node" | "browser" | "both" }> = {
+const REPO_ENTRIES: Record<string, { file: string; platform: "node" | "browser" | "both" }> = {
   "documonster/excel": { file: "src/modules/excel/index.ts", platform: "node" },
   "documonster/excel (browser)": {
     file: "src/modules/excel/index.browser.ts",
@@ -81,6 +95,7 @@ const ENTRIES: Record<string, { file: string; platform: "node" | "browser" | "bo
   "documonster/word/excel": { file: "src/modules/word/excel.ts", platform: "both" },
   "documonster/word/crypto": { file: "src/modules/word/crypto.ts", platform: "both" },
   "documonster/pdf": { file: "src/modules/pdf/index.ts", platform: "both" },
+  "documonster/draw": { file: "src/modules/draw/index.ts", platform: "both" },
   "documonster/formula": { file: "src/modules/formula/index.ts", platform: "both" },
   "documonster/csv": { file: "src/modules/csv/index.ts", platform: "both" },
   "documonster/markdown": { file: "src/modules/markdown/index.ts", platform: "both" },
@@ -98,14 +113,34 @@ const ENTRIES: Record<string, { file: string; platform: "node" | "browser" | "bo
 };
 
 /** The excel module's domain vocabulary — R1 applies to every declaration here. */
-const VOCABULARY_FILE = "src/modules/excel/types.ts";
+const REPO_VOCABULARY_FILE = "src/modules/excel/types.ts";
+
+/**
+ * `src/utils` types that a public signature is allowed to expose without the name
+ * being reachable.
+ *
+ * R2 used to skip *every* type declared under `src/utils`, on the assumption that
+ * utils is implementation detail that never surfaces. That assumption broke when
+ * `documonster/draw` made `Rgba01` — declared in `utils/svg-lex.ts` — the colour
+ * type of its public IR: the type leaked into `DrawPaint`, `DrawTextStyle` and the
+ * return of `cssColour`, a consumer could assign one but not declare one, and the
+ * check said nothing because of the blanket skip.
+ *
+ * An allowlist keeps the one pre-existing hole visible instead of hiding a whole
+ * directory. `BaseErrorOptions` is the options bag every module's error classes
+ * pass to `BaseError`; exposing it properly means adding it to ten public entries,
+ * which is a deliberate API decision rather than a cleanup.
+ *
+ * Format: `"TypeName @ src-relative/decl/file.ts"`.
+ */
+const REPO_UNEXPOSED_UTILS_TYPES = new Set(["BaseErrorOptions @ utils/errors.ts"]);
 
 /**
  * Types that only ever appear on `private` class members. Emitted into the
  * `.d.ts` but unreachable by consumers, so they stay internal on purpose.
  * Format: `"TypeName @ src-relative/decl/file.ts"`.
  */
-const PRIVATE_MEMBER_TYPES = new Set([
+const REPO_PRIVATE_MEMBER_TYPES = new Set([
   // pdf — `PdfEditor.#copiedPages`
   "CopiedPage @ modules/pdf/builder/pdf-editor.ts",
   // csv — private parser/formatter state on CsvParserStream / CsvFormatterStream
@@ -132,9 +167,9 @@ const PRIVATE_MEMBER_TYPES = new Set([
  * `Workbook` namespace is assembled per platform: Node adds file-path IO, which
  * the browser cannot provide.
  */
-const NODE_ONLY_NAMESPACE_MEMBERS = new Set(["Workbook.readFile", "Workbook.writeFile"]);
+const REPO_NODE_ONLY_NAMESPACE_MEMBERS = new Set(["Workbook.readFile", "Workbook.writeFile"]);
 
-const ALIASES: Record<string, string> = {
+const REPO_ALIASES: Record<string, string> = {
   "@excel": "src/modules/excel",
   "@word": "src/modules/word",
   "@formula": "src/modules/formula",
@@ -144,8 +179,89 @@ const ALIASES: Record<string, string> = {
   "@xml": "src/modules/xml",
   "@archive": "src/modules/archive",
   "@stream": "src/modules/stream",
+  "@draw": "src/modules/draw",
   "@utils": "src/utils"
 };
+
+/**
+ * Everything the rules read besides the source tree itself.
+ *
+ * Held in one object so a test can supply its own — two entry points and a two-name
+ * vocabulary instead of this repository's twenty-three and ninety-six — and so it is
+ * obvious what is policy and what is analysis. The defaults above are this
+ * repository's policy.
+ */
+interface Config {
+  readonly entries: Record<string, { file: string; platform: "node" | "browser" | "both" }>;
+  readonly vocabularyFile: string;
+  readonly unexposedUtilsTypes: ReadonlySet<string>;
+  readonly privateMemberTypes: ReadonlySet<string>;
+  readonly nodeOnlyNamespaceMembers: ReadonlySet<string>;
+  /**
+   * The entry pair R3 compares, as keys into {@link Config.entries}.
+   *
+   * Named in the config rather than written into the rule: the rule is "these two
+   * builds expose the same surface", and which two those are is policy. It read
+   * `ENTRIES["documonster/excel"]` directly and threw on any config without that exact
+   * key, which made the rule untestable and would have broken on a rename.
+   */
+  readonly platformPair?: readonly [string, string];
+  /**
+   * The entries R1 requires the vocabulary to be nameable from, as keys into
+   * {@link Config.entries}.
+   *
+   * Policy for the same reason as {@link Config.platformPair}: the rule is "the domain
+   * vocabulary is reachable from the entries that own it". This was a literal pair of
+   * `documonster/excel` labels inside the rule, so a config that named its entries
+   * anything else skipped R1 in silence — the worst way for a check to not apply.
+   */
+  readonly vocabularyEntries?: readonly string[];
+  readonly aliases: Record<string, string>;
+}
+
+/** Shape of the JSON a `--config` file carries; every field is optional. */
+interface ConfigOverride {
+  entries?: Config["entries"];
+  vocabularyFile?: string;
+  unexposedUtilsTypes?: string[];
+  privateMemberTypes?: string[];
+  nodeOnlyNamespaceMembers?: string[];
+  platformPair?: [string, string];
+  vocabularyEntries?: string[];
+  aliases?: Record<string, string>;
+}
+
+function loadConfig(): Config {
+  const file = argValue("--config");
+  const override: ConfigOverride = file
+    ? (JSON.parse(fs.readFileSync(path.resolve(file), "utf8")) as ConfigOverride)
+    : {};
+  return {
+    entries: override.entries ?? REPO_ENTRIES,
+    vocabularyFile: override.vocabularyFile ?? REPO_VOCABULARY_FILE,
+    unexposedUtilsTypes: new Set(override.unexposedUtilsTypes ?? [...REPO_UNEXPOSED_UTILS_TYPES]),
+    privateMemberTypes: new Set(override.privateMemberTypes ?? [...REPO_PRIVATE_MEMBER_TYPES]),
+    nodeOnlyNamespaceMembers: new Set(
+      override.nodeOnlyNamespaceMembers ?? [...REPO_NODE_ONLY_NAMESPACE_MEMBERS]
+    ),
+    aliases: override.aliases ?? REPO_ALIASES,
+    platformPair: override.platformPair ?? ["documonster/excel", "documonster/excel (browser)"],
+    vocabularyEntries: override.vocabularyEntries ?? [
+      "documonster/excel",
+      "documonster/excel (browser)"
+    ]
+  };
+}
+
+const CONFIG = loadConfig();
+const ENTRIES = CONFIG.entries;
+const VOCABULARY_FILE = CONFIG.vocabularyFile;
+const UNEXPOSED_UTILS_TYPES = CONFIG.unexposedUtilsTypes;
+const PRIVATE_MEMBER_TYPES = CONFIG.privateMemberTypes;
+const NODE_ONLY_NAMESPACE_MEMBERS = CONFIG.nodeOnlyNamespaceMembers;
+const ALIASES = CONFIG.aliases;
+const PLATFORM_PAIR = CONFIG.platformPair;
+const VOCABULARY_ENTRIES = CONFIG.vocabularyEntries ?? [];
 
 // =============================================================================
 // Source scanning
@@ -345,19 +461,23 @@ function followAlias(file: string, name: string, depth: number): Identity {
 function nameableFrom(entry: string): Map<string, string> {
   const found = new Map<string, string>();
   const seen = new Set<string>();
-  const walk = (file: string, prefix: string, depth: number) => {
+  // Bounded by the visited set, not by a hop count. A depth cap here could only
+  // under-report what is nameable, and an under-report is a false alarm: R2 would
+  // announce that a type in a public signature is unreachable when it is merely
+  // re-exported one hop further than the cap allowed.
+  const walk = (file: string, prefix: string) => {
     const key = `${prefix}|${file}`;
-    if (depth > 3 || seen.has(key)) return;
+    if (seen.has(key)) return;
     seen.add(key);
     const mod = parse(file);
     for (const name of mod.named.keys()) {
       const id = origin(file, name);
       if (id && !found.has(identityKey(id))) found.set(identityKey(id), prefix + name);
     }
-    for (const star of mod.stars) walk(star, prefix, depth + 1);
-    for (const [ns, target] of mod.namespaces) walk(target, `${prefix}${ns}.`, depth + 1);
+    for (const star of mod.stars) walk(star, prefix);
+    for (const [ns, target] of mod.namespaces) walk(target, `${prefix}${ns}.`);
   };
-  walk(entry, "", 0);
+  walk(entry, "");
   return found;
 }
 
@@ -452,12 +572,12 @@ function unnameableIn(
   const out: Array<{ name: string; decl: string }> = [];
   for (const [localName, ref] of candidates) {
     if (!ref.file.startsWith(SRC)) continue;
-    if (ref.file.includes(`${path.sep}src${path.sep}utils${path.sep}`)) continue;
     if (!new RegExp(`[^.\\w]${localName}\\b`).test(text)) continue;
     const id = origin(ref.file, ref.declared) ?? { file: ref.file, name: ref.declared };
     if (nameable.has(identityKey(id))) continue;
     const rel = path.relative(SRC, id.file);
     if (PRIVATE_MEMBER_TYPES.has(`${id.name} @ ${rel}`)) continue;
+    if (UNEXPOSED_UTILS_TYPES.has(`${id.name} @ ${rel}`)) continue;
     out.push({ name: id.name, decl: rel });
   }
   return out;
@@ -498,37 +618,45 @@ function signatureHoles(entry: string, nameable: Map<string, string>): Hole[] {
 /** Top-level exported names of an entry (types + values, namespaces included). */
 function topLevelNames(entry: string): Set<string> {
   const names = new Set<string>();
-  const walk = (file: string, depth: number) => {
-    if (depth > 3) return;
+  // The depth cap this replaced was the only thing stopping a cyclic `export *` from
+  // looping forever, and it also silently stopped at the fourth hop of a legitimate
+  // chain. A visited set does the first job properly and does not do the second.
+  const seen = new Set<string>();
+  const walk = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
     const mod = parse(file);
     for (const name of mod.named.keys()) names.add(name);
     for (const ns of mod.namespaces.keys()) names.add(ns);
-    for (const star of mod.stars) walk(star, depth + 1);
+    for (const star of mod.stars) walk(star);
   };
-  walk(entry, 0);
+  walk(entry);
   return names;
 }
 
 /** `namespace -> exported member names`, for every `export * as NS` on an entry. */
 function namespaceMembers(entry: string): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
-  const collect = (file: string, into: Set<string>, depth: number) => {
-    if (depth > 3) return;
+  const collect = (file: string, into: Set<string>, seen: Set<string>) => {
+    if (seen.has(file)) return;
+    seen.add(file);
     const mod = parse(file);
     for (const name of mod.named.keys()) into.add(name);
-    for (const star of mod.stars) collect(star, into, depth + 1);
+    for (const star of mod.stars) collect(star, into, seen);
   };
-  const walk = (file: string, depth: number) => {
-    if (depth > 3) return;
+  const walked = new Set<string>();
+  const walk = (file: string) => {
+    if (walked.has(file)) return;
+    walked.add(file);
     const mod = parse(file);
     for (const [ns, target] of mod.namespaces) {
       const members = out.get(ns) ?? new Set<string>();
-      collect(target, members, 0);
+      collect(target, members, new Set<string>());
       out.set(ns, members);
     }
-    for (const star of mod.stars) walk(star, depth + 1);
+    for (const star of mod.stars) walk(star);
   };
-  walk(entry, 0);
+  walk(entry);
   return out;
 }
 
@@ -571,7 +699,7 @@ function main(): void {
   const vocabulary = [
     ...read(vocabularyFile).matchAll(/^export\s+(?:type|interface|enum|const)\s+(\w+)/gm)
   ].map(m => m[1]);
-  for (const entryLabel of ["documonster/excel", "documonster/excel (browser)"]) {
+  for (const entryLabel of VOCABULARY_ENTRIES) {
     const nameable = perEntry.get(entryLabel);
     if (!nameable) continue;
     for (const name of vocabulary) {
@@ -599,39 +727,44 @@ function main(): void {
     }
   }
 
-  // R3 — the two excel entries must expose the same names, top level and inside
-  // every namespace they share.
-  const nodeEntry = path.join(ROOT, ENTRIES["documonster/excel"].file);
-  const browserEntry = path.join(ROOT, ENTRIES["documonster/excel (browser)"].file);
-  const nodeNames = topLevelNames(nodeEntry);
-  const browserNames = topLevelNames(browserEntry);
-  for (const name of nodeNames) {
-    if (!browserNames.has(name)) {
-      failures.push(`R3  documonster/excel exports \`${name}\`, but the browser entry does not`);
-    }
-  }
-  for (const name of browserNames) {
-    if (!nodeNames.has(name)) {
-      failures.push(`R3  the browser entry exports \`${name}\`, but documonster/excel does not`);
-    }
-  }
-  const nodeNs = namespaceMembers(nodeEntry);
-  const browserNs = namespaceMembers(browserEntry);
-  for (const [ns, members] of nodeNs) {
-    const other = browserNs.get(ns);
-    if (!other) continue;
-    for (const member of members) {
-      if (!other.has(member) && !NODE_ONLY_NAMESPACE_MEMBERS.has(`${ns}.${member}`)) {
-        failures.push(
-          `R3  \`${ns}.${member}\` exists on documonster/excel but not in the browser entry`
-        );
+  // R3 — the paired platform entries must expose the same names, top level and inside
+  // every namespace they share. Skipped when the config names no pair, or names one
+  // whose entries it does not define.
+  const pairKeys = PLATFORM_PAIR;
+  const pairDefined = pairKeys !== undefined && pairKeys.every(key => ENTRIES[key] !== undefined);
+  if (pairDefined) {
+    const nodeEntry = path.join(ROOT, ENTRIES[pairKeys[0]].file);
+    const browserEntry = path.join(ROOT, ENTRIES[pairKeys[1]].file);
+    const nodeNames = topLevelNames(nodeEntry);
+    const browserNames = topLevelNames(browserEntry);
+    for (const name of nodeNames) {
+      if (!browserNames.has(name)) {
+        failures.push(`R3  documonster/excel exports \`${name}\`, but the browser entry does not`);
       }
     }
-    for (const member of other) {
-      if (!members.has(member)) {
-        failures.push(
-          `R3  \`${ns}.${member}\` exists on the browser entry but not on documonster/excel`
-        );
+    for (const name of browserNames) {
+      if (!nodeNames.has(name)) {
+        failures.push(`R3  the browser entry exports \`${name}\`, but documonster/excel does not`);
+      }
+    }
+    const nodeNs = namespaceMembers(nodeEntry);
+    const browserNs = namespaceMembers(browserEntry);
+    for (const [ns, members] of nodeNs) {
+      const other = browserNs.get(ns);
+      if (!other) continue;
+      for (const member of members) {
+        if (!other.has(member) && !NODE_ONLY_NAMESPACE_MEMBERS.has(`${ns}.${member}`)) {
+          failures.push(
+            `R3  \`${ns}.${member}\` exists on documonster/excel but not in the browser entry`
+          );
+        }
+      }
+      for (const member of other) {
+        if (!members.has(member)) {
+          failures.push(
+            `R3  \`${ns}.${member}\` exists on the browser entry but not on documonster/excel`
+          );
+        }
       }
     }
   }

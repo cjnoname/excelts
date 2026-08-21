@@ -49,7 +49,10 @@
   "main": "index.js",
   "typesVersions": {
     "*": {
-      "zip": [
+      "excel": [
+        "dist/types/modules/excel/index.d.ts"
+      ],
+      "archive": [
         "dist/types/modules/archive/index.d.ts"
       ],
       "csv": [
@@ -57,15 +60,6 @@
       ],
       "markdown": [
         "dist/types/modules/markdown/index.d.ts"
-      ],
-      "excel/csv": [
-        "dist/types/modules/excel/bridge/csv.node.d.ts"
-      ],
-      "excel/markdown": [
-        "dist/types/modules/excel/bridge/markdown.node.d.ts"
-      ],
-      "excel/formula": [
-        "dist/types/modules/excel/bridge/formula.d.ts"
       ],
       "stream": [
         "dist/types/modules/stream/index.d.ts"
@@ -76,8 +70,20 @@
       "formula": [
         "dist/types/modules/formula/index.d.ts"
       ],
+      "draw": [
+        "dist/types/modules/draw/index.d.ts"
+      ],
       "chart": [
         "dist/types/modules/excel/chart/index.d.ts"
+      ],
+      "excel/csv": [
+        "dist/types/modules/excel/bridge/csv.node.d.ts"
+      ],
+      "excel/markdown": [
+        "dist/types/modules/excel/bridge/markdown.node.d.ts"
+      ],
+      "excel/formula": [
+        "dist/types/modules/excel/bridge/formula.d.ts"
       ],
       "xml": [
         "dist/types/modules/xml/index.d.ts"
@@ -196,6 +202,20 @@
       "require": {
         "types": "./dist/types/modules/formula/index.d.ts",
         "default": "./dist/cjs/modules/formula/index.js"
+      }
+    },
+    "./draw": {
+      "browser": {
+        "types": "./dist/browser/modules/draw/index.d.ts",
+        "default": "./dist/browser/modules/draw/index.js"
+      },
+      "import": {
+        "types": "./dist/types/modules/draw/index.d.ts",
+        "default": "./dist/esm/modules/draw/index.js"
+      },
+      "require": {
+        "types": "./dist/types/modules/draw/index.d.ts",
+        "default": "./dist/cjs/modules/draw/index.js"
       }
     },
     "./chart": {
@@ -346,7 +366,7 @@
   "scripts": {
     "example": "node scripts/run-examples.ts",
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
-    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\"",
+    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\"",
     "test": "vitest run && pnpm build:esm && pnpm test:packages && pnpm test:browser --",
     "test:all": "pnpm test",
     "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
@@ -376,7 +396,8 @@
     "build:browser:bundle": "rolldown -c rolldown.config.ts",
     "prepublishOnly": "pnpm build",
     "preversion": "pnpm check && pnpm build && pnpm test",
-    "prepare": "husky"
+    "prepare": "husky",
+    "verify:types-versions": "node scripts/verify-types-versions.ts"
   },
   "devDependencies": {
     "@rspack/core": "^2.1.9",

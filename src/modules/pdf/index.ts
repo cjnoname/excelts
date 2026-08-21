@@ -141,4 +141,15 @@ export type {
 // Errors
 // =============================================================================
 
+/**
+ * The PDF backend for `documonster/draw`.
+ *
+ * A display list built anywhere — a chart, a diagram, a caller's own producer — draws
+ * onto a page through this surface, which is what makes "one list, every backend" true
+ * outside this repository rather than only inside it. SVG and pixels come from
+ * `documonster/draw` itself; a PDF page needs a page builder, so its surface lives here.
+ */
+export { createPdfDrawSurface } from "@pdf/render/draw-surface";
+export type { DrawSurfaceRect, PdfClipTarget, PdfDrawPage } from "@pdf/render/draw-surface";
+
 export { PdfError, PdfRenderError, PdfFontError, PdfStructureError, isPdfError } from "@pdf/errors";

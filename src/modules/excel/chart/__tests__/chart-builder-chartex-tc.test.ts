@@ -59,6 +59,7 @@ import {
   removeChart
 } from "@excel/core/worksheet";
 import { Cell, Chart, Workbook, Worksheet } from "@excel/index";
+import { describeSvgGeometry, extractSvgGeometry } from "@test/svg-geometry";
 import { describe, it, expect } from "vitest";
 
 import { VALUES_A, VALUES_B, baseSeries, stableHash } from "./chart-builder.helpers";
@@ -2556,7 +2557,31 @@ describe("TC7: pareto chart type in ChartEx builder", () => {
     expect(svg).toContain("10-20");
     expect(svg).toContain("&gt;20");
     expect(svg).toContain(">2<");
-    expect(stableHash(svg)).toBe("a791d57d");
+    // Hashed over the normalised geometry rather than the markup: a hash of the
+    // SVG bytes breaks on any change in attribute order or element spelling even
+    // when the picture is identical, and the only way past that is to re-baseline
+    // it against the new output — checking new code against itself.
+    //
+    // This value moved once, deliberately: `getPlotRect` no longer reserves legend
+    // margins for a chart with no legend, and a histogram has none. The shape
+    // census is unchanged at 21 — nothing appeared or vanished, the plot simply
+    // uses the width it was previously leaving empty.
+    const shapes = extractSvgGeometry(svg);
+    expect(shapes).toHaveLength(21);
+    const counts = new Map<string, number>();
+    for (const shape of shapes) {
+      counts.set(shape.kind, (counts.get(shape.kind) ?? 0) + 1);
+    }
+    expect(
+      [...counts.keys()]
+        .sort()
+        .map(kind => `${kind}:${counts.get(kind)!}`)
+        .join(" ")
+    ).toBe("polyline:6 rect:5 text:10");
+    // Shifted by the legend margins now following `legendPos`: only the side the legend
+    // is on reserves room, and the left keeps the axis labels' floor instead of the
+    // legend's width. Shape count and census are unchanged.
+    expect(stableHash(describeSvgGeometry(svg))).toBe("f44e827c");
   });
 
   it("buildHistogramBins covers [start, end] with no extra empty bin and catches the axis minimum", () => {
@@ -2767,7 +2792,30 @@ describe("TC7: pareto chart type in ChartEx builder", () => {
     expect(svg).toContain("USA");
     expect(svg).toContain("Canada");
     expect(svg).toContain("<circle");
-    expect(stableHash(svg)).toBe("046760c7");
+    // Geometry, not bytes. A hash over the markup cannot survive a
+    // re-implementation, so the only way past a failure is to re-record it against
+    // the new output — which checks the renderer against itself.
+    //
+    // The shape count and census are the ones the original string emitter produced;
+    // the positions are not. The preview used to map the whole world onto the panel,
+    // so four American countries drew overlapping in one corner with unreadable
+    // labels while the rest of the panel stayed blank — and the TopoJSON branch,
+    // which frames to its data, disagreed with it. Both now frame the same way, so
+    // the same 17 shapes sit in different places.
+    const shapes = extractSvgGeometry(svg);
+    expect(shapes).toHaveLength(17);
+    const counts = new Map<string, number>();
+    for (const shape of shapes) {
+      counts.set(shape.kind, (counts.get(shape.kind) ?? 0) + 1);
+    }
+    expect(
+      [...counts.keys()]
+        .sort()
+        .map(kind => `${kind}:${counts.get(kind)!}`)
+        .join(" ")
+    ).toBe("circle:4 polyline:5 rect:3 text:5");
+    // Shifted by the legend margins now following `legendPos` — see the histogram note.
+    expect(stableHash(describeSvgGeometry(svg))).toBe("1b563892");
   });
 
   it("ChartEx regionMap Albers and Robinson projections use real formulas, not linear fallbacks", () => {
@@ -3139,7 +3187,30 @@ describe("TC7: pareto chart type in ChartEx builder", () => {
     const svg = renderChartExSvg(model, { width: 360, height: 240 });
 
     expect(svg).toContain("<path");
-    expect(stableHash(svg)).toBe("f3871773");
+    // Hashed over the normalised geometry rather than the markup, for the same
+    // reason as the histogram test above: a hash of the SVG bytes breaks on any
+    // change in element spelling even when the picture is identical.
+    //
+    // This value moved once, deliberately. A sector whose inner radius is zero is
+    // now written as one wedge (`M centre L p1 A p2 Z`) instead of a ring path with
+    // a degenerate zero-radius arc (`M p1 A p2 L centre A(r=0) centre Z`) — the
+    // classic pie renderer already used the wedge form, so ChartEx was the odd one
+    // out. Both describe the same closed region, and the shape count is unchanged
+    // at 15.
+    const shapes = extractSvgGeometry(svg);
+    expect(shapes).toHaveLength(15);
+    const counts = new Map<string, number>();
+    for (const shape of shapes) {
+      counts.set(shape.kind, (counts.get(shape.kind) ?? 0) + 1);
+    }
+    expect(
+      [...counts.keys()]
+        .sort()
+        .map(kind => `${kind}:${counts.get(kind)!}`)
+        .join(" ")
+    ).toBe("path:12 rect:2 text:1");
+    // Shifted by the legend margins now following `legendPos` — see the histogram note.
+    expect(stableHash(describeSvgGeometry(svg))).toBe("658cc99d");
   });
 
   it("ChartEx sunburst handles 3-level hierarchy (continent/country/city)", () => {
@@ -3307,7 +3378,8 @@ describe("TC7: pareto chart type in ChartEx builder", () => {
       expect(svg).toMatch(/<(rect|polygon|path|polyline|circle)/);
     }
     const waterfallSvg = renderChartExSvg(models[1], { width: 360, height: 220 });
-    expect(waterfallSvg).toContain("#00AA00");
+    // Colour case is not semantic; the shared SVG surface normalises to lowercase.
+    expect(waterfallSvg.toLowerCase()).toContain("#00aa00");
     expect(waterfallSvg).toContain("stroke-dasharray");
     const boxSvg = renderChartExSvg(models[5], { width: 360, height: 220 });
     expect(boxSvg).toContain('stroke-dasharray="3 2"');

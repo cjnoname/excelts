@@ -1,3 +1,6 @@
+import { BasicRasterCanvas } from "@draw/raster/canvas";
+import { renderDrawList } from "@draw/render";
+import { toSvg } from "@draw/svg";
 import type {
   AxisDataSource,
   ChartAxis,
@@ -22,9 +25,9 @@ import type {
   StringReference,
   Trendline
 } from "@excel/chart/model/types";
-import type { RasterFont } from "@excel/chart/render/glyph-rasterizer";
-import { loadSystemFont, rasterizeGlyph } from "@excel/chart/render/glyph-rasterizer";
-import { STROKE_FONT } from "@excel/chart/render/stroke-font";
+import { createChartPdfDrawSurface } from "@excel/chart/render/chart-pdf-draw-surface";
+import { rasterizeDrawList } from "@excel/chart/render/draw-raster-png";
+import { sceneToDrawList } from "@excel/chart/render/scene-to-draw";
 import type { PdfColor } from "@excel/chart/shared/chart-utils";
 import {
   AXIS_COLOR,
@@ -33,20 +36,18 @@ import {
   DEFAULT_WIDTH,
   GRID_COLOR,
   clamp01,
-  escapeXml,
-  escapeXmlAttr,
+  densifySparsePoints,
+  estimateTextWidth,
   fmt,
-  hexToPdfColor,
-  hexToPdfColorWithAlpha,
   interpolateColor,
   normalizeHex6,
   previewShapeFillColor,
   previewShapeLineColor,
   previewShapeLineWidthPx,
   resolveChartColor,
+  singleLineLabel,
   valueToX,
-  valueToY,
-  withAlpha
+  valueToY
 } from "@excel/chart/shared/chart-utils";
 import {
   parseSpPr,
@@ -55,7 +56,15 @@ import {
   getSpPrLine,
   getTxPrFontSize
 } from "@excel/chart/shared/shape-properties";
-import { measureTextWidthPx } from "@excel/utils/text-metrics";
+import { encodePng, withPngDpi } from "@excel/utils/png";
+import {
+  parseCssColor,
+  parseSvgAttributes,
+  parseSvgNumberList,
+  parseSvgPointPairs,
+  parseSvgRotate,
+  parseSvgTextRuns
+} from "@utils/svg-lex";
 
 export type { PdfColor };
 
@@ -118,38 +127,6 @@ const LEGEND_TOP_BELOW_TITLE = 48;
 const LEGEND_TOP_NO_TITLE = 20;
 /** Vertical legend top offset when title present (tr position). */
 const LEGEND_TR_WITH_TITLE = 44;
-
-// ---------------------------------------------------------------------------
-// Glyph rasterization cache — avoids re-rasterizing the same glyph outline
-// at the same font size across repeated chart text rendering calls. Keyed by
-// the GlyphOutline reference (stable per font + codePoint) and fontSize.
-// ---------------------------------------------------------------------------
-type RasterizedGlyph = {
-  width: number;
-  height: number;
-  offsetX: number;
-  offsetY: number;
-  pixels: Uint8Array;
-};
-const glyphCache = new WeakMap<object, Map<number, RasterizedGlyph>>();
-
-function cachedRasterizeGlyph(
-  outline: object & { contours: unknown[]; advanceWidth: number },
-  fontSize: number,
-  unitsPerEm: number
-): RasterizedGlyph {
-  let sizeMap = glyphCache.get(outline);
-  if (!sizeMap) {
-    sizeMap = new Map();
-    glyphCache.set(outline, sizeMap);
-  }
-  let cached = sizeMap.get(fontSize);
-  if (!cached) {
-    cached = rasterizeGlyph(outline as Parameters<typeof rasterizeGlyph>[0], fontSize, unitsPerEm);
-    sizeMap.set(fontSize, cached);
-  }
-  return cached;
-}
 
 /**
  * Options for the built-in deterministic chart preview renderer.
@@ -955,79 +932,12 @@ export function buildChartScene(model: ChartModel, options: ChartRenderOptions =
 }
 
 export function renderChartSvg(model: ChartModel, options: ChartRenderOptions = {}): string {
-  const scene = buildChartScene(model, options);
-  const parts: string[] = [];
-  const backgroundColor = options.backgroundColor ?? "#fff";
-  parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${scene.width}" height="${scene.height}" viewBox="0 0 ${scene.width} ${scene.height}">`
-  );
-  parts.push("<!-- deterministic preview; not an Excel-identical layout -->");
-  if (backgroundColor !== "transparent") {
-    parts.push(`<rect width="100%" height="100%" fill="${escapeXmlAttr(backgroundColor)}"/>`);
-  }
-  // Emit filter definitions before any drawing so shapes can reference
-  // them via `filter="url(#...)"`. Keeping `<defs>` at the top of the
-  // SVG matches the convention used by Inkscape/Illustrator and plays
-  // nicely with rasteriser pre-scan passes.
-  if (scene.effectFilters.length > 0) {
-    parts.push("<defs>");
-    for (const f of scene.effectFilters) {
-      parts.push(f.xml);
+  return toSvg(
+    sceneToDrawList(buildChartScene(model, options), options.backgroundColor ?? "#fff"),
+    {
+      comment: "deterministic preview; not an Excel-identical layout"
     }
-    parts.push("</defs>");
-  }
-  if (scene.title) {
-    parts.push(renderSvgText(scene.title));
-  }
-  for (const gridline of scene.gridlines) {
-    parts.push(renderSvgLine(gridline));
-  }
-  if (scene.axes.x) {
-    parts.push(renderSvgLine(scene.axes.x));
-  }
-  if (scene.axes.y) {
-    parts.push(renderSvgLine(scene.axes.y));
-  }
-  if (scene.axes.x2) {
-    parts.push(renderSvgLine(scene.axes.x2));
-  }
-  if (scene.axes.y2) {
-    parts.push(renderSvgLine(scene.axes.y2));
-  }
-  for (const label of scene.xLabels) {
-    parts.push(renderSvgText(label));
-  }
-  for (const label of scene.yLabels) {
-    parts.push(renderSvgText(label));
-  }
-  for (const label of scene.secondaryXLabels) {
-    parts.push(renderSvgText(label));
-  }
-  for (const label of scene.secondaryYLabels) {
-    parts.push(renderSvgText(label));
-  }
-  for (const title of scene.axisTitles) {
-    parts.push(renderSvgText(title));
-  }
-  // Two-pass series rendering so every series' adornments (data labels,
-  // trendlines, error bars, markers) paint on top of *every* series'
-  // filled shapes. A single-pass emission ran `renderSvgSeries` which
-  // drew a series' rects/polygons and then immediately its adornments,
-  // meaning the next series' filled area polygons / stacked bars
-  // covered the previous series' labels — especially bad on
-  // semi-transparent area/radar fills where labels were half-masked.
-  for (const s of scene.series) {
-    renderSvgSeries(parts, s);
-  }
-  for (const s of scene.series) {
-    renderSvgAdornments(parts, s);
-  }
-  if (scene.dataTable) {
-    renderSvgDataTable(parts, scene.dataTable);
-  }
-  renderSvgLegend(parts, scene.legend);
-  parts.push("</svg>");
-  return parts.join("");
+  );
 }
 
 export async function renderChartPng(
@@ -1036,9 +946,28 @@ export async function renderChartPng(
 ): Promise<Uint8Array> {
   const width = options.width ?? DEFAULT_WIDTH;
   const height = options.height ?? DEFAULT_HEIGHT;
-  const scale = normalizePngScale(options.scale);
-  const svg = renderChartSvg(model, { ...options, width, height });
-  return renderSvgToPng(svg, { width, height, scale, dpi: options.dpi });
+  // In a browser, hand the SVG to the platform: its own SVG engine beats the
+  // built-in rasteriser on filters, fonts and anti-aliasing. On Node there is no
+  // such engine, and the display list goes straight to pixels — no SVG string,
+  // and therefore no regex re-parse of the markup this very function just
+  // produced, which is where the raster backend used to lose dashes, opacity,
+  // rounded corners and multi-line text.
+  if (typeof document !== "undefined" && typeof Image !== "undefined") {
+    const svg = renderChartSvg(model, { ...options, width, height });
+    return renderSvgToPng(svg, {
+      width,
+      height,
+      scale: normalizePngScale(options.scale),
+      dpi: options.dpi
+    });
+  }
+  const scene = buildChartScene(model, { ...options, width, height });
+  return rasterizeDrawList(sceneToDrawList(scene, options.backgroundColor ?? "#fff"), {
+    width,
+    height,
+    ...(options.scale === undefined ? {} : { scale: normalizePngScale(options.scale) }),
+    ...(options.dpi === undefined ? {} : { dpi: options.dpi })
+  });
 }
 
 export async function renderSvgToPng(
@@ -1075,10 +1004,100 @@ export async function renderSvgToPng(
         }
       }, "image/png");
     });
-    return new Uint8Array(await pngBlob.arrayBuffer());
+    // `canvas.toBlob` cannot carry a physical resolution, so stamp the
+    // requested DPI into the container to match the Node path.
+    return withPngDpi(new Uint8Array(await pngBlob.arrayBuffer()), options.dpi);
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+/**
+ * Scale a `points` list into device pixels.
+ *
+ * Tokenising lives in `@utils/svg-lex` so this raster path and the PDF SVG
+ * importer cannot disagree about what a coordinate list means; only the scale is
+ * local.
+ */
+/**
+ * Parse `stroke-dasharray` into device-pixel on/off lengths.
+ *
+ * Returns `undefined` for `none`, an empty list or an all-zero pattern, so the
+ * caller keeps the cheaper solid path. An odd-length list repeats to make an even
+ * cycle, which is what SVG specifies.
+ */
+function parseStrokeDashArray(value: string | undefined, scale: number): number[] | undefined {
+  if (!value || value.trim() === "none") {
+    return undefined;
+  }
+  const parts = parseSvgNumberList(value).filter(part => part >= 0);
+  if (parts.length === 0 || parts.every(part => part === 0)) {
+    return undefined;
+  }
+  const cycle = parts.length % 2 === 0 ? parts : [...parts, ...parts];
+  return cycle.map(part => part * scale);
+}
+
+function scaledSvgPoints(input: string | undefined, scale: number): ChartScenePoint[] {
+  return parseSvgPointPairs(input).map(point => ({ x: point.x * scale, y: point.y * scale }));
+}
+
+/**
+ * Resolve a paint to 8-bit RGBA, folding in the SVG opacity attributes.
+ *
+ * `opacity` applies to the element as a whole and multiplies with the
+ * channel-specific `fill-opacity` / `stroke-opacity`, which in turn multiply
+ * with any alpha carried by the colour itself. All three used to be ignored
+ * here, so a ChartEx series that emits `opacity="0.55"` rasterised fully opaque
+ * on Node while the browser canvas honoured it — the same `Chart.toPNG` call
+ * produced visibly different images per platform.
+ */
+function rasterPaint(
+  color: string | undefined,
+  attrs: Record<string, string> | undefined,
+  channel: "fill-opacity" | "stroke-opacity"
+): [number, number, number, number] | undefined {
+  const parsed = parseCssColor(color);
+  if (!parsed) {
+    return undefined;
+  }
+  let alpha = parsed.a;
+  for (const name of [channel, "opacity"] as const) {
+    const raw = attrs?.[name];
+    if (raw === undefined) {
+      continue;
+    }
+    const value = Number.parseFloat(raw);
+    if (Number.isFinite(value)) {
+      alpha *= value < 0 ? 0 : value > 1 ? 1 : value;
+    }
+  }
+  return [
+    Math.round(parsed.r * 255),
+    Math.round(parsed.g * 255),
+    Math.round(parsed.b * 255),
+    Math.round(Math.max(0, Math.min(1, alpha)) * 255)
+  ];
+}
+
+/**
+ * Resolve a paint plus its opacity attributes into a single `#RRGGBBAA` token.
+ *
+ * The canvas primitives take a colour *string*, so folding the opacity into the
+ * token keeps their signatures untouched while still compositing correctly —
+ * `setPixel` already does source-over blending on the alpha channel.
+ */
+function paintToken(
+  color: string | undefined,
+  attrs: Record<string, string>,
+  channel: "fill-opacity" | "stroke-opacity"
+): string | undefined {
+  const rgba = rasterPaint(color, attrs, channel);
+  if (!rgba) {
+    return undefined;
+  }
+  const hex = (value: number): string => value.toString(16).padStart(2, "0");
+  return `#${hex(rgba[0])}${hex(rgba[1])}${hex(rgba[2])}${hex(rgba[3])}`;
 }
 
 function renderSvgToBasicPng(
@@ -1090,62 +1109,87 @@ function renderSvgToBasicPng(
 ): Uint8Array {
   const outputWidth = Math.max(1, Math.round(width * scale));
   const outputHeight = Math.max(1, Math.round(height * scale));
-  const canvas = new BasicRasterCanvas(outputWidth, outputHeight, scale);
+  const canvas = new BasicRasterCanvas(outputWidth, outputHeight);
   const tagRe = /<(rect|line|circle|polyline|polygon|path)\b[^>]*>|<text\b[^>]*>[\s\S]*?<\/text>/g;
   let match: RegExpExecArray | null;
   while ((match = tagRe.exec(svg)) !== null) {
     const tag = match[0];
     const name = tag.startsWith("<text") ? "text" : match[1];
-    const attrs = parseSvgAttrs(tag);
+    const attrs = parseSvgAttributes(tag);
+    // Resolve paint once per element so `opacity` / `fill-opacity` /
+    // `stroke-opacity` reach the canvas. They used to be dropped entirely here.
+    const fillPaint = paintToken(attrs.fill, attrs, "fill-opacity");
+    const strokePaint = paintToken(attrs.stroke, attrs, "stroke-opacity");
+    // `stroke-dasharray` is emitted by the waterfall connector, the box-whisker
+    // mean line and classic dashed trendlines; it was previously dropped, so
+    // those strokes rasterised solid.
+    const dash = parseStrokeDashArray(attrs["stroke-dasharray"], scale);
     if (name === "rect") {
       const x = numAttr(attrs, "x") * scale;
       const y = numAttr(attrs, "y") * scale;
       const rectWidth = numAttr(attrs, "width", 0, width) * scale;
       const rectHeight = numAttr(attrs, "height", 0, height) * scale;
       const strokeWidth = numAttr(attrs, "stroke-width", 1) * scale;
-      if (attrs.fill !== undefined) {
-        canvas.fillRect(x, y, rectWidth, rectHeight, attrs.fill);
+      const radius = numAttr(attrs, "rx", numAttr(attrs, "ry", 0)) * scale;
+      if (fillPaint !== undefined) {
+        if (radius > 0) {
+          canvas.fillRoundRect(x, y, rectWidth, rectHeight, radius, fillPaint);
+        } else {
+          canvas.fillRect(x, y, rectWidth, rectHeight, fillPaint);
+        }
       }
-      if (attrs.stroke !== undefined && strokeWidth > 0) {
-        canvas.strokeRect(x, y, rectWidth, rectHeight, attrs.stroke, strokeWidth);
+      if (strokePaint !== undefined && strokeWidth > 0) {
+        canvas.strokeRect(x, y, rectWidth, rectHeight, strokePaint, strokeWidth);
       }
     } else if (name === "line") {
-      canvas.drawLine(
-        numAttr(attrs, "x1") * scale,
-        numAttr(attrs, "y1") * scale,
-        numAttr(attrs, "x2") * scale,
-        numAttr(attrs, "y2") * scale,
-        attrs.stroke,
-        numAttr(attrs, "stroke-width", 1) * scale
-      );
+      const x1 = numAttr(attrs, "x1") * scale;
+      const y1 = numAttr(attrs, "y1") * scale;
+      const x2 = numAttr(attrs, "x2") * scale;
+      const y2 = numAttr(attrs, "y2") * scale;
+      const lineWidth = numAttr(attrs, "stroke-width", 1) * scale;
+      if (dash) {
+        canvas.drawPolyline(
+          [
+            { x: x1, y: y1 },
+            { x: x2, y: y2 }
+          ],
+          strokePaint,
+          lineWidth,
+          dash
+        );
+      } else {
+        canvas.drawLine(x1, y1, x2, y2, strokePaint, lineWidth);
+      }
     } else if (name === "circle") {
       canvas.fillCircle(
         numAttr(attrs, "cx") * scale,
         numAttr(attrs, "cy") * scale,
         numAttr(attrs, "r") * scale,
-        attrs.fill
+        fillPaint
       );
       canvas.strokeCircle(
         numAttr(attrs, "cx") * scale,
         numAttr(attrs, "cy") * scale,
         numAttr(attrs, "r") * scale,
-        attrs.stroke,
+        strokePaint,
         numAttr(attrs, "stroke-width", 1) * scale
       );
     } else if (name === "polyline") {
       canvas.drawPolyline(
-        parseSvgPoints(attrs.points, scale),
-        attrs.stroke,
-        numAttr(attrs, "stroke-width", 1) * scale
+        scaledSvgPoints(attrs.points, scale),
+        strokePaint,
+        numAttr(attrs, "stroke-width", 1) * scale,
+        dash
       );
     } else if (name === "polygon") {
-      const points = parseSvgPoints(attrs.points, scale);
-      canvas.fillPolygon(points, attrs.fill);
+      const points = scaledSvgPoints(attrs.points, scale);
+      canvas.fillPolygon(points, fillPaint);
       if (points.length > 0) {
         canvas.drawPolyline(
           [...points, points[0]],
-          attrs.stroke,
-          numAttr(attrs, "stroke-width", 1) * scale
+          strokePaint,
+          numAttr(attrs, "stroke-width", 1) * scale,
+          dash
         );
       }
     } else if (name === "path") {
@@ -1163,532 +1207,52 @@ function renderSvgToBasicPng(
             innerR * scale,
             startAngle,
             endAngle,
-            attrs.fill
+            fillPaint
           );
         }
       } else {
         const points = parsePathPoints(attrs.d, scale);
-        canvas.fillPolygon(points, attrs.fill);
+        canvas.fillPolygon(points, fillPaint);
         if (points.length > 0) {
           canvas.drawPolyline(
             [...points, points[0]],
-            attrs.stroke,
-            numAttr(attrs, "stroke-width", 1) * scale
+            strokePaint,
+            numAttr(attrs, "stroke-width", 1) * scale,
+            dash
           );
         }
       }
     } else if (name === "text") {
-      const rotation = parseSvgRotateTransform(attrs.transform);
-      canvas.drawText(
-        numAttr(attrs, "x") * scale,
-        numAttr(attrs, "y") * scale,
-        decodeSvgText(tag.match(/<text\b[^>]*>([\s\S]*?)<\/text>/)?.[1] ?? ""),
-        numAttr(attrs, "font-size", 10) * scale,
-        attrs.fill,
-        attrs["text-anchor"],
-        rotation
-          ? {
-              angle: rotation.angle,
-              originX: rotation.originX * scale,
-              originY: rotation.originY * scale
-            }
-          : undefined
-      );
-    }
-  }
-  return encodePng(outputWidth, outputHeight, canvas.data, dpi);
-}
-
-class BasicRasterCanvas {
-  readonly data: Uint8Array;
-
-  constructor(
-    readonly width: number,
-    readonly height: number,
-    private readonly scale = 1
-  ) {
-    this.data = new Uint8Array(width * height * 4);
-  }
-
-  fillRect(x: number, y: number, width: number, height: number, color: string | undefined): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba || width <= 0 || height <= 0) {
-      return;
-    }
-    const x0 = clampInt(Math.floor(x), 0, this.width);
-    const y0 = clampInt(Math.floor(y), 0, this.height);
-    const x1 = clampInt(Math.ceil(x + width), 0, this.width);
-    const y1 = clampInt(Math.ceil(y + height), 0, this.height);
-    for (let yy = y0; yy < y1; yy++) {
-      for (let xx = x0; xx < x1; xx++) {
-        this.setPixel(xx, yy, rgba);
+      const rotation = parseSvgRotate(attrs.transform);
+      const fontSize = numAttr(attrs, "font-size", 10);
+      const baseX = numAttr(attrs, "x");
+      const baseY = numAttr(attrs, "y");
+      const inner = tag.match(/<text\b[^>]*>([\s\S]*?)<\/text>/)?.[1] ?? "";
+      // A multi-paragraph title is emitted as `<tspan dy>` children. Stripping
+      // the markup and drawing the result as one string ran the paragraphs
+      // together ("QuarterlyRevenue"), because stripping markup removes the
+      // tags but nothing put the line break back. Walk the tspans instead so
+      // the raster matches what an SVG viewer shows.
+      for (const line of parseSvgTextRuns(inner, fontSize)) {
+        canvas.drawText(
+          (line.x ?? baseX) * scale,
+          (baseY + line.dy) * scale,
+          line.text,
+          fontSize * scale,
+          fillPaint,
+          attrs["text-anchor"],
+          rotation
+            ? {
+                angle: rotation.angle,
+                originX: rotation.cx * scale,
+                originY: rotation.cy * scale
+              }
+            : undefined
+        );
       }
     }
   }
-
-  strokeRect(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    color: string | undefined,
-    strokeWidth = 1
-  ): void {
-    this.drawLine(x, y, x + width, y, color, strokeWidth);
-    this.drawLine(x + width, y, x + width, y + height, color, strokeWidth);
-    this.drawLine(x + width, y + height, x, y + height, color, strokeWidth);
-    this.drawLine(x, y + height, x, y, color, strokeWidth);
-  }
-
-  drawPolyline(points: ChartScenePoint[], color: string | undefined, width = 1): void {
-    if (points.length < 2) {
-      return;
-    }
-    for (let i = 1; i < points.length; i++) {
-      this.drawLine(points[i - 1].x, points[i - 1].y, points[i].x, points[i].y, color, width);
-    }
-  }
-
-  drawLine(
-    x1: number,
-    y1: number,
-    x2: number,
-    y2: number,
-    color: string | undefined,
-    width = 1
-  ): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba) {
-      return;
-    }
-    let x0 = Math.round(x1);
-    let y0 = Math.round(y1);
-    const xEnd = Math.round(x2);
-    const yEnd = Math.round(y2);
-    const dx = Math.abs(xEnd - x0);
-    const sx = x0 < xEnd ? 1 : -1;
-    const dy = -Math.abs(yEnd - y0);
-    const sy = y0 < yEnd ? 1 : -1;
-    let err = dx + dy;
-    const radius = Math.max(0, Math.floor(width / 2));
-    while (true) {
-      for (let yy = y0 - radius; yy <= y0 + radius; yy++) {
-        for (let xx = x0 - radius; xx <= x0 + radius; xx++) {
-          this.setPixel(xx, yy, rgba);
-        }
-      }
-      if (x0 === xEnd && y0 === yEnd) {
-        break;
-      }
-      const e2 = 2 * err;
-      if (e2 >= dy) {
-        err += dy;
-        x0 += sx;
-      }
-      if (e2 <= dx) {
-        err += dx;
-        y0 += sy;
-      }
-    }
-  }
-
-  fillCircle(cx: number, cy: number, r: number, color: string | undefined): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba || r <= 0) {
-      return;
-    }
-    const x0 = Math.floor(cx - r);
-    const x1 = Math.ceil(cx + r);
-    const y0 = Math.floor(cy - r);
-    const y1 = Math.ceil(cy + r);
-    const rr = r * r;
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        if ((x - cx) ** 2 + (y - cy) ** 2 <= rr) {
-          this.setPixel(x, y, rgba);
-        }
-      }
-    }
-  }
-
-  strokeCircle(cx: number, cy: number, r: number, color: string | undefined, width = 1): void {
-    const points: ChartScenePoint[] = [];
-    const steps = Math.max(12, Math.ceil(r * 2));
-    for (let i = 0; i <= steps; i++) {
-      const a = (i / steps) * Math.PI * 2;
-      points.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
-    }
-    this.drawPolyline(points, color, width);
-  }
-
-  /**
-   * Fill a circular sector (pie slice) with pixel-level precision.
-   * Uses distance + angle tests per pixel instead of polygon scanline,
-   * producing smooth circular edges without polygon approximation artifacts.
-   */
-  fillSector(
-    cx: number,
-    cy: number,
-    outerR: number,
-    innerR: number,
-    startAngle: number,
-    endAngle: number,
-    color: string | undefined
-  ): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba || outerR <= 0) {
-      return;
-    }
-    const x0 = clampInt(Math.floor(cx - outerR), 0, this.width);
-    const x1 = clampInt(Math.ceil(cx + outerR), 0, this.width);
-    const y0 = clampInt(Math.floor(cy - outerR), 0, this.height);
-    const y1 = clampInt(Math.ceil(cy + outerR), 0, this.height);
-    const outerRR = outerR * outerR;
-    const innerRR = innerR * innerR;
-    // Normalise angles to [0, 2π)
-    let sa = startAngle % (Math.PI * 2);
-    if (sa < 0) {
-      sa += Math.PI * 2;
-    }
-    let ea = endAngle % (Math.PI * 2);
-    if (ea < 0) {
-      ea += Math.PI * 2;
-    }
-    const crossesZero = ea < sa;
-    for (let y = y0; y < y1; y++) {
-      const dy = y + 0.5 - cy;
-      for (let x = x0; x < x1; x++) {
-        const dx = x + 0.5 - cx;
-        const dist2 = dx * dx + dy * dy;
-        if (dist2 > outerRR || dist2 < innerRR) {
-          continue;
-        }
-        let angle = Math.atan2(dy, dx);
-        if (angle < 0) {
-          angle += Math.PI * 2;
-        }
-        const inAngle = crossesZero ? angle >= sa || angle <= ea : angle >= sa && angle <= ea;
-        if (inAngle) {
-          this.setPixel(x, y, rgba);
-        }
-      }
-    }
-  }
-
-  fillPolygon(points: ChartScenePoint[], color: string | undefined): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba || points.length < 3) {
-      return;
-    }
-    // Use `reduce` rather than `Math.min(...arr)` / `Math.max(...arr)` —
-    // polygons used for chart fills are small, but the PNG rasteriser
-    // also feeds this helper with large path-derived point sets and we
-    // want the safe default everywhere.
-    let minYRaw = points[0].y;
-    let maxYRaw = points[0].y;
-    for (const p of points) {
-      if (p.y < minYRaw) {
-        minYRaw = p.y;
-      }
-      if (p.y > maxYRaw) {
-        maxYRaw = p.y;
-      }
-    }
-    const minY = clampInt(Math.floor(minYRaw), 0, this.height - 1);
-    const maxY = clampInt(Math.ceil(maxYRaw), 0, this.height - 1);
-    for (let y = minY; y <= maxY; y++) {
-      const intersections: number[] = [];
-      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-        const a = points[i];
-        const b = points[j];
-        if (a.y > y !== b.y > y) {
-          intersections.push(((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x);
-        }
-      }
-      intersections.sort((a, b) => a - b);
-      for (let i = 0; i < intersections.length; i += 2) {
-        const x0 = clampInt(Math.floor(intersections[i]), 0, this.width - 1);
-        const x1 = clampInt(Math.ceil(intersections[i + 1] ?? intersections[i]), 0, this.width - 1);
-        for (let x = x0; x <= x1; x++) {
-          this.setPixel(x, y, rgba);
-        }
-      }
-    }
-  }
-
-  drawText(
-    x: number,
-    y: number,
-    text: string,
-    fontSize: number,
-    color: string | undefined,
-    anchor: string | undefined,
-    rotation?: { angle: number; originX: number; originY: number }
-  ): void {
-    if (!text) {
-      return;
-    }
-    // Use the same font-metrics engine as the SVG path so legend/title
-    // anchoring rasterises at the right offsets.
-    const measured = estimateTextWidth(text, fontSize);
-    const textWidth = measured > 0 ? measured : Math.max(1, fontSize * 0.5) * text.length;
-    const startX = anchor === "middle" ? x - textWidth / 2 : anchor === "end" ? x - textWidth : x;
-
-    // Try system font rasterization first (high quality filled glyphs)
-    const font = loadSystemFont();
-    if (font) {
-      this.drawTextWithFont(font, startX, y, text, fontSize, textWidth, color, rotation);
-      return;
-    }
-
-    // Fallback: stroke font
-    this.drawTextStroke(startX, y, text, fontSize, textWidth, color, rotation);
-  }
-
-  private drawTextWithFont(
-    font: RasterFont,
-    startX: number,
-    y: number,
-    text: string,
-    fontSize: number,
-    textWidth: number,
-    color: string | undefined,
-    rotation?: { angle: number; originX: number; originY: number }
-  ): void {
-    const rgba = parseSvgColor(color);
-    if (!rgba) {
-      return;
-    }
-
-    const scale = fontSize / font.unitsPerEm;
-
-    // Compute total advance from font metrics, then scale to match measured width.
-    // Iterate by code point (not UTF-16 code unit) so surrogate pairs for
-    // non-BMP characters resolve to a single glyph lookup.
-    let totalAdvance = 0;
-    for (const ch of text) {
-      const outline = font.getOutline(ch.codePointAt(0)!);
-      totalAdvance += outline ? outline.advanceWidth * scale : fontSize * 0.4;
-    }
-    const hScale = totalAdvance > 0 ? textWidth / totalAdvance : 1;
-
-    const theta = rotation && rotation.angle !== 0 ? (rotation.angle * Math.PI) / 180 : 0;
-    const cos = Math.cos(theta);
-    const sin = Math.sin(theta);
-    const ox = rotation ? rotation.originX : 0;
-    const oy = rotation ? rotation.originY : 0;
-
-    let curX = startX;
-    for (const ch of text) {
-      const code = ch.codePointAt(0)!;
-      const outline = font.getOutline(code);
-      if (!outline) {
-        curX += fontSize * 0.4 * hScale;
-        continue;
-      }
-
-      const glyph = cachedRasterizeGlyph(outline, fontSize, font.unitsPerEm);
-      if (glyph.pixels.length === 0) {
-        curX += outline.advanceWidth * scale * hScale;
-        continue;
-      }
-
-      // Position: baseline is at y; glyph offsetY is relative to baseline
-      const baseX = curX + glyph.offsetX;
-      const baseY = y + glyph.offsetY;
-
-      for (let row = 0; row < glyph.height; row++) {
-        for (let col = 0; col < glyph.width; col++) {
-          const coverage = glyph.pixels[row * glyph.width + col];
-          if (coverage > 0) {
-            let px = baseX + col;
-            let py = baseY + row;
-            if (theta !== 0) {
-              const dx = px - ox;
-              const dy = py - oy;
-              px = ox + dx * cos - dy * sin;
-              py = oy + dx * sin + dy * cos;
-            }
-            // Use coverage as alpha for anti-aliased rendering
-            const aa: [number, number, number, number] = [rgba[0], rgba[1], rgba[2], coverage];
-            this.setPixel(Math.round(px), Math.round(py), aa);
-          }
-        }
-      }
-      curX += outline.advanceWidth * scale * hScale;
-    }
-  }
-
-  private drawTextStroke(
-    startX: number,
-    y: number,
-    text: string,
-    fontSize: number,
-    textWidth: number,
-    color: string | undefined,
-    rotation?: { angle: number; originX: number; originY: number }
-  ): void {
-    const strokeWidth = Math.max(1, fontSize * 0.08);
-    let totalGlyphW = 0;
-    for (const ch of text) {
-      const code = ch.codePointAt(0)!;
-      const glyph = STROKE_FONT[code] ?? STROKE_FONT[63];
-      totalGlyphW += glyph ? glyph.w : 0.4;
-    }
-    const scale = totalGlyphW > 0 ? textWidth / (totalGlyphW * fontSize) : 1;
-
-    if (!rotation || rotation.angle === 0) {
-      let cx = startX;
-      for (const ch of text) {
-        const code = ch.codePointAt(0)!;
-        const glyph = STROKE_FONT[code] ?? STROKE_FONT[63];
-        if (glyph) {
-          for (const stroke of glyph.d) {
-            for (let j = 1; j < stroke.length; j++) {
-              const x1 = cx + stroke[j - 1][0] * fontSize * scale;
-              const y1 = y - fontSize * 0.75 + stroke[j - 1][1] * fontSize;
-              const x2 = cx + stroke[j][0] * fontSize * scale;
-              const y2 = y - fontSize * 0.75 + stroke[j][1] * fontSize;
-              this.drawLine(x1, y1, x2, y2, color, strokeWidth);
-            }
-          }
-          cx += glyph.w * fontSize * scale;
-        }
-      }
-      return;
-    }
-    const theta = (rotation.angle * Math.PI) / 180;
-    const cos = Math.cos(theta);
-    const sin = Math.sin(theta);
-    const ox = rotation.originX;
-    const oy = rotation.originY;
-    const rotate = (px: number, py: number): [number, number] => {
-      const dx = px - ox;
-      const dy = py - oy;
-      return [ox + dx * cos - dy * sin, oy + dx * sin + dy * cos];
-    };
-    let cx = startX;
-    for (const ch of text) {
-      const code = ch.codePointAt(0)!;
-      const glyph = STROKE_FONT[code] ?? STROKE_FONT[63];
-      if (glyph) {
-        for (const stroke of glyph.d) {
-          for (let j = 1; j < stroke.length; j++) {
-            const px1 = cx + stroke[j - 1][0] * fontSize * scale;
-            const py1 = y - fontSize * 0.75 + stroke[j - 1][1] * fontSize;
-            const px2 = cx + stroke[j][0] * fontSize * scale;
-            const py2 = y - fontSize * 0.75 + stroke[j][1] * fontSize;
-            const [rx1, ry1] = rotate(px1, py1);
-            const [rx2, ry2] = rotate(px2, py2);
-            this.drawLine(rx1, ry1, rx2, ry2, color, strokeWidth);
-          }
-        }
-        cx += glyph.w * fontSize * scale;
-      }
-    }
-  }
-
-  private setPixel(x: number, y: number, rgba: [number, number, number, number]): void {
-    if (x < 0 || y < 0 || x >= this.width || y >= this.height) {
-      return;
-    }
-    const i = (y * this.width + x) * 4;
-    const alpha = rgba[3] / 255;
-    const inverse = 1 - alpha;
-    this.data[i] = Math.round(rgba[0] * alpha + this.data[i] * inverse);
-    this.data[i + 1] = Math.round(rgba[1] * alpha + this.data[i + 1] * inverse);
-    this.data[i + 2] = Math.round(rgba[2] * alpha + this.data[i + 2] * inverse);
-    this.data[i + 3] = Math.round(rgba[3] + this.data[i + 3] * inverse);
-  }
-}
-
-function parseSvgAttrs(tag: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  // Manual parser avoids regex backtracking on uncontrolled input.
-  let i = 0;
-  const len = tag.length;
-  while (i < len) {
-    // Skip non-name characters
-    while (i < len && !isNameChar(tag.charCodeAt(i))) {
-      i++;
-    }
-    if (i >= len) {
-      break;
-    }
-    // Read attribute name
-    const nameStart = i;
-    while (i < len && isNameChar(tag.charCodeAt(i))) {
-      i++;
-    }
-    const name = tag.slice(nameStart, i);
-    // Expect `="`
-    if (i >= len || tag.charCodeAt(i) !== 61 /* = */) {
-      continue;
-    }
-    i++;
-    if (i >= len || tag.charCodeAt(i) !== 34 /* " */) {
-      continue;
-    }
-    i++;
-    // Read attribute value until closing quote
-    const valStart = i;
-    while (i < len && tag.charCodeAt(i) !== 34) {
-      i++;
-    }
-    attrs[name] = tag.slice(valStart, i);
-    if (i < len) {
-      i++; // skip closing quote
-    }
-  }
-  return attrs;
-}
-
-/** Check if a char code is valid in an SVG/XML attribute name (word chars, colon, hyphen). */
-function isNameChar(c: number): boolean {
-  return (
-    (c >= 65 && c <= 90) || // A-Z
-    (c >= 97 && c <= 122) || // a-z
-    (c >= 48 && c <= 57) || // 0-9
-    c === 95 || // _
-    c === 58 || // :
-    c === 45 // -
-  );
-}
-
-/**
- * Parse the `rotate(angle [x y])` form of an SVG transform attribute.
- *
- * The chart renderer emits rotation on text exclusively as
- * `transform="rotate(angle x y)"` (see renderSvgText), so a minimal parser
- * is sufficient. Returns `undefined` for any other transform shape — the
- * Node PNG fallback is deliberately narrow in scope, not a general SVG
- * engine. Missing origin coordinates default to 0/0 per SVG semantics.
- */
-function parseSvgRotateTransform(
-  transform: string | undefined
-): { angle: number; originX: number; originY: number } | undefined {
-  if (!transform) {
-    return undefined;
-  }
-  // Parse `rotate(angle)` or `rotate(angle, cx, cy)` using indexOf + split
-  // to avoid regex backtracking on overlapping \s* quantifiers.
-  const rotIdx = transform.indexOf("rotate(");
-  if (rotIdx < 0) {
-    return undefined;
-  }
-  const closeIdx = transform.indexOf(")", rotIdx);
-  if (closeIdx < 0) {
-    return undefined;
-  }
-  const inner = transform.slice(rotIdx + 7, closeIdx).trim();
-  const parts = inner.split(/[\s,]+/);
-  const angle = Number.parseFloat(parts[0]);
-  if (!Number.isFinite(angle) || angle === 0) {
-    return undefined;
-  }
-  const originX = parts.length >= 3 ? Number.parseFloat(parts[1]) : 0;
-  const originY = parts.length >= 3 ? Number.parseFloat(parts[2]) : 0;
-  return { angle, originX, originY };
+  return encodePng(canvas.data, outputWidth, outputHeight, { dpi });
 }
 
 function numAttr(
@@ -1709,22 +1273,6 @@ function numAttr(
   }
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function parseSvgPoints(input: string | undefined, scale = 1): ChartScenePoint[] {
-  if (!input) {
-    return [];
-  }
-  const values = input
-    .trim()
-    .split(/[\s,]+/)
-    .map(Number)
-    .filter(Number.isFinite);
-  const points: ChartScenePoint[] = [];
-  for (let i = 0; i + 1 < values.length; i += 2) {
-    points.push({ x: values[i] * scale, y: values[i + 1] * scale });
-  }
-  return points;
 }
 
 function parsePathPoints(input: string | undefined, scale = 1): ChartScenePoint[] {
@@ -1916,133 +1464,8 @@ function arcDelta(
   return delta;
 }
 
-function parseSvgColor(color: string | undefined): [number, number, number, number] | undefined {
-  if (!color || color === "none" || color === "transparent") {
-    return undefined;
-  }
-  const normalized = color.startsWith("#") ? color.slice(1) : color;
-  if (/^[0-9a-fA-F]{3}$/.test(normalized)) {
-    return [
-      Number.parseInt(normalized[0] + normalized[0], 16),
-      Number.parseInt(normalized[1] + normalized[1], 16),
-      Number.parseInt(normalized[2] + normalized[2], 16),
-      255
-    ];
-  }
-  if (/^[0-9a-fA-F]{6}$/.test(normalized)) {
-    return [
-      Number.parseInt(normalized.slice(0, 2), 16),
-      Number.parseInt(normalized.slice(2, 4), 16),
-      Number.parseInt(normalized.slice(4, 6), 16),
-      255
-    ];
-  }
-  // `#RRGGBBAA` — OOXML encodes alpha inside the srgb hex for some
-  // generators, and `resolveChartColor` lets the 8-digit form through
-  // with alpha stripped for SVG (browsers parse `#RRGGBBAA` natively).
-  // The PNG fallback raster used to reject 8-digit hex → every
-  // `<a:srgbClr val="RRGGBBAA"/>`-coloured shape silently vanished
-  // from the rasterised output.
-  if (/^[0-9a-fA-F]{8}$/.test(normalized)) {
-    return [
-      Number.parseInt(normalized.slice(0, 2), 16),
-      Number.parseInt(normalized.slice(2, 4), 16),
-      Number.parseInt(normalized.slice(4, 6), 16),
-      Number.parseInt(normalized.slice(6, 8), 16)
-    ];
-  }
-  // `#RGBA` — 4-digit shorthand mirrors `#RGB` with a nibble-alpha.
-  if (/^[0-9a-fA-F]{4}$/.test(normalized)) {
-    return [
-      Number.parseInt(normalized[0] + normalized[0], 16),
-      Number.parseInt(normalized[1] + normalized[1], 16),
-      Number.parseInt(normalized[2] + normalized[2], 16),
-      Number.parseInt(normalized[3] + normalized[3], 16)
-    ];
-  }
-  return undefined;
-}
-
-function decodeSvgText(value: string): string {
-  // Strip SVG markup in a single O(n) pass to avoid polynomial complexity
-  // from repeated regex replacements on nested incomplete tags.
-  let stripped = "";
-  let depth = 0;
-  for (let i = 0; i < value.length; i++) {
-    const ch = value.charCodeAt(i);
-    if (ch === 60 /* < */) {
-      depth++;
-    } else if (ch === 62 /* > */) {
-      if (depth > 0) {
-        depth--;
-      } else {
-        stripped += ">";
-      }
-    } else if (depth === 0) {
-      stripped += value[i];
-    }
-  }
-  return stripped.replace(
-    /&(?:([A-Za-z]+)|#x([0-9A-Fa-f]+)|#(\d+));/g,
-    (match, name: string | undefined, hex: string | undefined, dec: string | undefined) => {
-      if (name !== undefined) {
-        switch (name) {
-          case "amp":
-            return "&";
-          case "lt":
-            return "<";
-          case "gt":
-            return ">";
-          case "quot":
-            return '"';
-          case "apos":
-            return "'";
-          default:
-            return match;
-        }
-      }
-      if (hex !== undefined) {
-        const code = parseInt(hex, 16);
-        return Number.isFinite(code) ? String.fromCodePoint(code) : match;
-      }
-      if (dec !== undefined) {
-        const code = parseInt(dec, 10);
-        return Number.isFinite(code) ? String.fromCodePoint(code) : match;
-      }
-      return match;
-    }
-  );
-}
-
 function clampInt(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
-}
-
-function encodePng(width: number, height: number, rgba: Uint8Array, dpi?: number): Uint8Array {
-  const scanlines = new Uint8Array((width * 4 + 1) * height);
-  for (let y = 0; y < height; y++) {
-    const src = y * width * 4;
-    const dst = y * (width * 4 + 1);
-    scanlines[dst] = 0;
-    scanlines.set(rgba.subarray(src, src + width * 4), dst + 1);
-  }
-  const chunks: Uint8Array[] = [];
-  chunks.push(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  chunks.push(
-    pngChunk("IHDR", concatBytes([u32be(width), u32be(height), new Uint8Array([8, 6, 0, 0, 0])]))
-  );
-  if (dpi !== undefined) {
-    const pixelsPerMeter = Math.max(1, Math.round(dpi / 0.0254));
-    chunks.push(
-      pngChunk(
-        "pHYs",
-        concatBytes([u32be(pixelsPerMeter), u32be(pixelsPerMeter), new Uint8Array([1])])
-      )
-    );
-  }
-  chunks.push(pngChunk("IDAT", zlibStored(scanlines)));
-  chunks.push(pngChunk("IEND", new Uint8Array()));
-  return concatBytes(chunks);
 }
 
 function normalizePngScale(scale: number | undefined): number {
@@ -2055,78 +1478,19 @@ function normalizePngScale(scale: number | undefined): number {
   return Math.min(8, scale);
 }
 
-function pngChunk(type: string, data: Uint8Array): Uint8Array {
-  const typeBytes = new TextEncoder().encode(type);
-  const crcInput = concatBytes([typeBytes, data]);
-  return concatBytes([u32be(data.length), typeBytes, data, u32be(crc32Bytes(crcInput))]);
-}
-
-function zlibStored(data: Uint8Array): Uint8Array {
-  const blocks: Uint8Array[] = [new Uint8Array([0x78, 0x01])];
-  let offset = 0;
-  while (offset < data.length) {
-    const len = Math.min(0xffff, data.length - offset);
-    const final = offset + len >= data.length ? 1 : 0;
-    blocks.push(
-      new Uint8Array([final, len & 0xff, (len >>> 8) & 0xff, ~len & 0xff, (~len >>> 8) & 0xff])
-    );
-    blocks.push(data.subarray(offset, offset + len));
-    offset += len;
-  }
-  blocks.push(u32be(adler32(data)));
-  return concatBytes(blocks);
-}
-
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-function u32be(value: number): Uint8Array {
-  return new Uint8Array([
-    (value >>> 24) & 0xff,
-    (value >>> 16) & 0xff,
-    (value >>> 8) & 0xff,
-    value & 0xff
-  ]);
-}
-
-function adler32(data: Uint8Array): number {
-  let a = 1;
-  let b = 0;
-  for (const byte of data) {
-    a = (a + byte) % 65521;
-    b = (b + a) % 65521;
-  }
-  return ((b << 16) | a) >>> 0;
-}
-
-function crc32Bytes(data: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (const byte of data) {
-    crc ^= byte;
-    for (let i = 0; i < 8; i++) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
 export function drawChartPdf(
   page: ChartPdfDrawingSurface,
   model: ChartModel,
   options: PdfChartRenderOptions
 ): ChartPdfDrawingSurface {
-  const scene = translateScene(buildChartScene(model, options), options.x, options.y, true);
+  const scene = buildChartScene(model, options);
   const trace = options.trace;
   trace?.push(
     `canvas:${fmt(scene.width)}x${fmt(scene.height)}@${fmt(options.x)},${fmt(options.y)}`
   );
+
+  // The PDF preview frames the chart. The display list is built with a
+  // transparent background so the frame is not painted over.
   page.drawRect({
     x: options.x,
     y: options.y,
@@ -2135,421 +1499,82 @@ export function drawChartPdf(
     fill: { r: 1, g: 1, b: 1 },
     stroke: { r: 0.8, g: 0.8, b: 0.8 }
   });
-  if (scene.title) {
-    trace?.push(`text:title:${scene.title.text}:${fmt(scene.title.x)},${fmt(scene.title.y)}`);
-    drawPdfText(page, scene.title, { anchorOverride: "middle" });
+
+  // One conversion, one walk. This replaced a second full traversal of the scene
+  // — around 680 lines paired function-for-function with the SVG emitter — which
+  // is what let the two drift apart on dashes, rotation sense and text metrics.
+  const list = sceneToDrawList(scene, "transparent");
+  if (trace) {
+    traceScene(scene, trace);
   }
-  for (const gridline of scene.gridlines) {
-    trace?.push(
-      `line:grid:${fmt(gridline.x1)},${fmt(gridline.y1)}-${fmt(gridline.x2)},${fmt(gridline.y2)}`
-    );
-    page.drawLine({ ...gridline, color: hexToPdfColor(gridline.color) });
-  }
-  if (scene.axes.x) {
-    trace?.push(
-      `line:x:${fmt(scene.axes.x.x1)},${fmt(scene.axes.x.y1)}-${fmt(scene.axes.x.x2)},${fmt(scene.axes.x.y2)}`
-    );
-    page.drawLine({ ...scene.axes.x, color: hexToPdfColor(scene.axes.x.color) });
-  }
-  if (scene.axes.y) {
-    trace?.push(
-      `line:y:${fmt(scene.axes.y.x1)},${fmt(scene.axes.y.y1)}-${fmt(scene.axes.y.x2)},${fmt(scene.axes.y.y2)}`
-    );
-    page.drawLine({ ...scene.axes.y, color: hexToPdfColor(scene.axes.y.color) });
-  }
-  if (scene.axes.x2) {
-    trace?.push(
-      `line:x2:${fmt(scene.axes.x2.x1)},${fmt(scene.axes.x2.y1)}-${fmt(scene.axes.x2.x2)},${fmt(scene.axes.x2.y2)}`
-    );
-    page.drawLine({ ...scene.axes.x2, color: hexToPdfColor(scene.axes.x2.color) });
-  }
-  if (scene.axes.y2) {
-    trace?.push(
-      `line:y2:${fmt(scene.axes.y2.x1)},${fmt(scene.axes.y2.y1)}-${fmt(scene.axes.y2.x2)},${fmt(scene.axes.y2.y2)}`
-    );
-    page.drawLine({ ...scene.axes.y2, color: hexToPdfColor(scene.axes.y2.color) });
-  }
-  for (const label of [
-    ...scene.xLabels,
-    ...scene.yLabels,
-    ...scene.secondaryXLabels,
-    ...scene.secondaryYLabels,
-    ...scene.axisTitles
-  ]) {
-    trace?.push(`text:label:${label.text}:${fmt(label.x)},${fmt(label.y)}`);
-    drawPdfText(page, label);
-  }
-  // Two-pass rendering: every series' shapes first, then every
-  // series' adornments. Same fix as the SVG path — see the matching
-  // comment in `renderChartSvg`. Single-pass (shapes + adornments
-  // together per series) lets the next series' filled shapes paint
-  // over the previous series' data labels and trendlines.
-  for (const s of scene.series) {
-    trace?.push(`series:${s.type}`);
-    drawPdfSeries(page, s);
-  }
-  for (const s of scene.series) {
-    drawPdfAdornments(page, s, trace);
-  }
-  if (scene.dataTable) {
-    drawPdfDataTable(page, scene.dataTable, trace);
-  }
-  trace?.push(
-    `legend:${scene.legend.visible ? "visible" : "hidden"}:${scene.legend.items.map(item => item.label).join("|")}`
-  );
-  drawPdfLegend(page, scene.legend);
+  renderDrawList(list, createChartPdfDrawSurface(page, options.x, options.y, scene.height));
   return page;
 }
 
 /**
- * Draw a {@link ChartSceneText} through the PDF surface.
+ * Describe a scene for {@link PdfChartRenderOptions.trace}.
  *
- * Translates the scene's `anchor` / `rotate` / `color` fields into the
- * extended `ChartPdfDrawingSurface.drawText` parameters, and for surfaces
- * that ignore those new fields pre-shifts `x` using the same font
- * metrics the SVG path uses (`estimateTextWidth`). The result is that
- * legacy `drawText(text, { x, y, fontSize })` implementations continue
- * to render text at the correct horizontal position, while an upgraded
- * surface (such as `PdfPageBuilder`) can perform a proper measured
- * alignment with rotation.
- *
- * `anchorOverride` lets callers (e.g. the title) force a particular
- * anchor regardless of what the scene produced — useful where the
- * layout code already centres `x` around the midpoint but we still
- * want the text glyphs centred.
+ * A diagnostic channel, not a contract: it summarises what the scene *contains*
+ * so a caller can see the renderer reached the expected content. Equivalence
+ * between renderers is proven against the recorded drawing calls instead — see
+ * `chart-pdf-baseline.test.ts` — because a trace of the walker's own commentary
+ * cannot survive the walker being replaced.
  */
-function drawPdfText(
-  page: ChartPdfDrawingSurface,
-  text: ChartSceneText,
-  extra: { anchorOverride?: "start" | "middle" | "end" } = {}
-): void {
-  const anchor = extra.anchorOverride ?? text.anchor ?? "start";
-  // Pass the true anchor point `text.x` and the `anchor` hint to the
-  // surface unchanged. Modern library surfaces (`PdfPageBuilder`,
-  // canvas rasteriser) honour `anchor` by measuring the text and
-  // shifting internally. Legacy surfaces that predate the `anchor`
-  // parameter are documented to ignore it and render as if anchor
-  // were `"start"`; callers with such surfaces accept the
-  // approximate alignment.
-  //
-  // The previous code ALSO pre-shifted `x` by `-width * anchorBias`
-  // before passing `anchor` through. Surfaces that honour `anchor`
-  // then shifted a second time, producing `text.x - width` for a
-  // `"middle"`-anchored label (i.e., the text landed one glyph-width
-  // to the left of the correct anchor point). The comment on the
-  // old implementation claimed "supplying both is safe" but the
-  // arithmetic was double-compensation: the surface's own measurement
-  // yielded the same width, so the two shifts stacked instead of
-  // cancelling.
-  page.drawText(text.text, {
-    x: text.x,
-    y: text.y,
-    fontSize: text.fontSize,
-    color: text.color ? hexToPdfColor(text.color) : undefined,
-    rotation: text.rotate,
-    anchor,
-    fontFamily: text.fontFamily,
-    bold: text.bold,
-    italic: text.italic
-  });
-}
-
-/**
- * Draw series-level adornments: leader lines, error bars, trendlines,
- * markers, data labels, and the bar3D depth hint. The SVG path handles
- * all of these via {@link renderSvgAdornments}; this is the matching
- * PDF implementation. Optional `trace` entries mirror the SVG tag names
- * so golden assertions can verify presence without binding to exact
- * coordinates.
- */
-function drawPdfAdornments(
-  page: ChartPdfDrawingSurface,
-  series: ChartSceneSeries,
-  trace?: string[]
-): void {
-  const color = "color" in series ? hexToPdfColor(series.color) : { r: 0.3, g: 0.3, b: 0.3 };
-  // Leader lines (pie/doughnut external labels). Emit before the labels
-  // themselves so the glyphs sit on top visually.
-  for (const leader of series.leaderLines ?? []) {
-    trace?.push(`leader:${fmt(leader.x1)},${fmt(leader.y1)}-${fmt(leader.x2)},${fmt(leader.y2)}`);
-    page.drawLine({
-      x1: leader.x1,
-      y1: leader.y1,
-      x2: leader.x2,
-      y2: leader.y2,
-      color: hexToPdfColor(leader.color),
-      lineWidth: leader.width ?? 1
-    });
+function traceScene(scene: ChartScene, trace: string[]): void {
+  if (scene.title) {
+    trace.push(`text:title:${scene.title.text}:${fmt(scene.title.x)},${fmt(scene.title.y)}`);
   }
-  // Error bars
-  for (const eb of series.errorBars ?? []) {
-    trace?.push(
-      `errorbar:${fmt(eb.line.x1)},${fmt(eb.line.y1)}-${fmt(eb.line.x2)},${fmt(eb.line.y2)}`
+  for (const gridline of scene.gridlines) {
+    trace.push(
+      `line:grid:${fmt(gridline.x1)},${fmt(gridline.y1)}-${fmt(gridline.x2)},${fmt(gridline.y2)}`
     );
-    page.drawLine({
-      x1: eb.line.x1,
-      y1: eb.line.y1,
-      x2: eb.line.x2,
-      y2: eb.line.y2,
-      color: hexToPdfColor(eb.line.color),
-      lineWidth: eb.line.width ?? 1
-    });
-    for (const cap of [eb.cap1, eb.cap2]) {
-      if (cap) {
-        page.drawLine({
-          x1: cap.x1,
-          y1: cap.y1,
-          x2: cap.x2,
-          y2: cap.y2,
-          color: hexToPdfColor(cap.color),
-          lineWidth: cap.width ?? 1
-        });
-      }
-    }
   }
-  // Trendlines — polyline over the precomputed points, plus an optional
-  // label at the end. The SVG variant uses `stroke-dasharray="4 3"`
-  // whenever `dash` is set; mirror that as a simple on/off dash pattern.
-  // Segment the polyline at NaN gaps (moving-average trendlines can
-  // emit NaN points for leading positions before the window fills) so
-  // the PDF matches the SVG `segmentFinitePoints` treatment.
-  for (const trend of series.trendlines ?? []) {
-    trace?.push(`trendline:${trend.points.length}pts`);
-    const dashPattern = trend.dash ? [4, 3] : undefined;
-    for (const segment of segmentFinitePoints(trend.points)) {
-      for (let i = 1; i < segment.length; i++) {
-        const p0 = segment[i - 1];
-        const p1 = segment[i];
-        page.drawLine({
-          x1: p0.x,
-          y1: p0.y,
-          x2: p1.x,
-          y2: p1.y,
-          color: hexToPdfColor(trend.color),
-          lineWidth: trend.width ?? 1.5,
-          dashPattern
-        });
-      }
-    }
-    if (trend.label) {
-      drawPdfText(page, trend.label);
-    }
-  }
-  // Markers — geometric symbols at each point. Mirrors renderSvgMarker.
-  for (const marker of series.markers ?? []) {
-    drawPdfMarker(page, marker);
-  }
-  // Data labels (post-collision-resolution, post-leader-line layout).
-  for (const label of series.labels ?? []) {
-    trace?.push(`label:${label.text}:${fmt(label.x)},${fmt(label.y)}`);
-    drawPdfText(page, label);
-  }
-  // bar3D's decorative depth hint: two parallelograms projected along
-  // (+depth, -depth) for every bar. The PDF path does the same thing
-  // using `drawPath` when available; surfaces without `drawPath` fall
-  // back to drawing the two parallelograms as pairs of lines, which
-  // preserves the 3D illusion even without filled polygons.
-  //
-  // `buildSceneSeries` sets `depth > 0` only when `projection3D` is
-  // also present (see the `bar3DDepth` ternary at line 2880), so the
-  // previous `else if (depth && !projection3D)` branch that called
-  // `drawPdfBarDepth` was structurally unreachable. Dropped along
-  // with its SVG counterpart; the remaining 3D path covers every
-  // bar3D configuration the builder emits.
-  if (series.type === "bar" && series.depth && series.depth > 0 && series.projection3D) {
-    for (const bar of series.bars) {
-      drawPdfBar3DBox(page, bar, series.projection3D, color, series.horizontal);
-    }
-  }
-  // Radar's translucent fill is emitted by `drawPdfSeries` itself (the
-  // filled radar branch `chart-renderer.ts:4139-4146`) using
-  // `hexToPdfColorWithAlpha`, so no additional adornment pass is needed
-  // here. Surfaces without drawPath degrade to stroke-only, which the
-  // same branch also handles.
-}
-
-function drawPdfMarker(page: ChartPdfDrawingSurface, marker: ChartSceneMarker): void {
-  const r = marker.size / 2;
-  const fill = hexToPdfColor(marker.color);
-  const symbol = marker.symbol ?? "circle";
-  if (symbol === "square") {
-    page.drawRect({
-      x: marker.x - r,
-      y: marker.y - r,
-      width: marker.size,
-      height: marker.size,
-      fill
-    });
-    return;
-  }
-  if (symbol === "diamond") {
-    if (page.drawPath) {
-      page.drawPath(
-        [
-          { op: "move", x: marker.x, y: marker.y - r },
-          { op: "line", x: marker.x + r, y: marker.y },
-          { op: "line", x: marker.x, y: marker.y + r },
-          { op: "line", x: marker.x - r, y: marker.y },
-          { op: "close" }
-        ],
-        { fill }
+  for (const [name, axis] of [
+    ["x", scene.axes.x],
+    ["y", scene.axes.y],
+    ["x2", scene.axes.x2],
+    ["y2", scene.axes.y2]
+  ] as const) {
+    if (axis) {
+      trace.push(
+        `line:axis-${name}:${fmt(axis.x1)},${fmt(axis.y1)}-${fmt(axis.x2)},${fmt(axis.y2)}`
       );
-      return;
-    }
-    // Fall back to a stroked-outline diamond when the surface lacks
-    // `drawPath`. A circle fallback (the old behaviour) loses the
-    // shape identity — four lines preserve the diamond's silhouette
-    // at the cost of the fill.
-    page.drawLine({ x1: marker.x, y1: marker.y - r, x2: marker.x + r, y2: marker.y, color: fill });
-    page.drawLine({ x1: marker.x + r, y1: marker.y, x2: marker.x, y2: marker.y + r, color: fill });
-    page.drawLine({ x1: marker.x, y1: marker.y + r, x2: marker.x - r, y2: marker.y, color: fill });
-    page.drawLine({ x1: marker.x - r, y1: marker.y, x2: marker.x, y2: marker.y - r, color: fill });
-    return;
-  }
-  if (symbol === "triangle") {
-    if (page.drawPath) {
-      page.drawPath(
-        [
-          { op: "move", x: marker.x, y: marker.y - r },
-          { op: "line", x: marker.x + r, y: marker.y + r },
-          { op: "line", x: marker.x - r, y: marker.y + r },
-          { op: "close" }
-        ],
-        { fill }
-      );
-      return;
-    }
-    // Stroked-outline triangle fallback for surfaces without `drawPath`.
-    page.drawLine({
-      x1: marker.x,
-      y1: marker.y - r,
-      x2: marker.x + r,
-      y2: marker.y + r,
-      color: fill
-    });
-    page.drawLine({
-      x1: marker.x + r,
-      y1: marker.y + r,
-      x2: marker.x - r,
-      y2: marker.y + r,
-      color: fill
-    });
-    page.drawLine({
-      x1: marker.x - r,
-      y1: marker.y + r,
-      x2: marker.x,
-      y2: marker.y - r,
-      color: fill
-    });
-    return;
-  }
-  if (symbol === "x") {
-    page.drawLine({
-      x1: marker.x - r,
-      y1: marker.y - r,
-      x2: marker.x + r,
-      y2: marker.y + r,
-      color: fill,
-      lineWidth: 2
-    });
-    page.drawLine({
-      x1: marker.x + r,
-      y1: marker.y - r,
-      x2: marker.x - r,
-      y2: marker.y + r,
-      color: fill,
-      lineWidth: 2
-    });
-    return;
-  }
-  if (symbol === "plus") {
-    page.drawLine({
-      x1: marker.x - r,
-      y1: marker.y,
-      x2: marker.x + r,
-      y2: marker.y,
-      color: fill,
-      lineWidth: 2
-    });
-    page.drawLine({
-      x1: marker.x,
-      y1: marker.y - r,
-      x2: marker.x,
-      y2: marker.y + r,
-      color: fill,
-      lineWidth: 2
-    });
-    return;
-  }
-  // Default / circle / dash / dot / star / picture / auto — fall back to
-  // a filled circle so at least the point is visible.
-  if (page.drawCircle) {
-    page.drawCircle({ cx: marker.x, cy: marker.y, r, fill });
-  } else {
-    page.drawRect({
-      x: marker.x - r,
-      y: marker.y - r,
-      width: marker.size,
-      height: marker.size,
-      fill
-    });
-  }
-}
-
-/**
- * Render a bar3D column as a true extruded box via the PDF surface.
- * Mirrors {@link renderBar3DBox} for SVG — three visible faces with
- * light/dark shading. Surfaces without `drawPath` fall back to stroked
- * outlines so the 3D cue is preserved even without filled polygons.
- */
-function drawPdfBar3DBox(
-  page: ChartPdfDrawingSurface,
-  bar: ChartSceneRect,
-  proj: { dx: number; dy: number },
-  baseColor: PdfColor,
-  horizontal: boolean | undefined
-): void {
-  const dx = proj.dx;
-  const dy = proj.dy;
-  const right = bar.x + bar.width;
-  const top = bar.y;
-  const bottom = bar.y + bar.height;
-  const topFill: PdfColor = { r: baseColor.r, g: baseColor.g, b: baseColor.b, a: 0.92 };
-  const rightFill: PdfColor = { r: baseColor.r, g: baseColor.g, b: baseColor.b, a: 0.75 };
-  const topFace: ChartPdfPathOp[] = [
-    { op: "move", x: bar.x, y: top },
-    { op: "line", x: bar.x + dx, y: top - dy },
-    { op: "line", x: right + dx, y: top - dy },
-    { op: "line", x: right, y: top },
-    { op: "close" }
-  ];
-  const rightFace: ChartPdfPathOp[] = [
-    { op: "move", x: right, y: top },
-    { op: "line", x: right + dx, y: top - dy },
-    { op: "line", x: right + dx, y: bottom - dy },
-    { op: "line", x: right, y: bottom },
-    { op: "close" }
-  ];
-  void horizontal; // same geometry regardless — kept for future tuning
-  if (page.drawPath) {
-    page.drawPath(topFace, { fill: topFill });
-    page.drawPath(rightFace, { fill: rightFill });
-    page.drawRect({ x: bar.x, y: top, width: bar.width, height: bar.height, fill: baseColor });
-    return;
-  }
-  for (const ops of [topFace, rightFace]) {
-    for (let i = 1; i < ops.length; i++) {
-      const a = ops[i - 1];
-      const b = ops[i];
-      if (a.op === "close" || b.op === "close") {
-        continue;
-      }
-      if ("x" in a && "y" in a && "x" in b && "y" in b) {
-        page.drawLine({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, color: rightFill });
-      }
     }
   }
-  page.drawRect({ x: bar.x, y: top, width: bar.width, height: bar.height, fill: baseColor });
+  for (const group of [
+    scene.xLabels,
+    scene.yLabels,
+    scene.secondaryXLabels,
+    scene.secondaryYLabels,
+    scene.axisTitles
+  ]) {
+    for (const label of group) {
+      trace.push(`text:label:${label.text}:${fmt(label.x)},${fmt(label.y)}`);
+    }
+  }
+  for (const series of scene.series) {
+    trace.push(`series:${series.type}`);
+    for (const trendline of series.trendlines ?? []) {
+      trace.push(`trendline:${trendline.points.length}pts`);
+    }
+    for (const leader of series.leaderLines ?? []) {
+      trace.push(`leader:${fmt(leader.x1)},${fmt(leader.y1)}-${fmt(leader.x2)},${fmt(leader.y2)}`);
+    }
+    for (const label of series.labels ?? []) {
+      trace.push(`label:${label.text}:${fmt(label.x)},${fmt(label.y)}`);
+    }
+  }
+  if (scene.dataTable) {
+    for (const line of scene.dataTable.borders) {
+      trace.push(`line:dTable:${fmt(line.x1)},${fmt(line.y1)}-${fmt(line.x2)},${fmt(line.y2)}`);
+    }
+    for (const cell of scene.dataTable.cells) {
+      trace.push(`text:dTable:${cell.text}:${fmt(cell.x)},${fmt(cell.y)}`);
+    }
+  }
+  trace.push(
+    `legend:${scene.legend.visible ? scene.legend.items.length : 0}@${fmt(scene.legend.rect.x)},${fmt(scene.legend.rect.y)}`
+  );
 }
 
 function getPlotRect(
@@ -5631,6 +4656,27 @@ function scatterXValues(series: NormalizedSeries): number[] {
     : series.values.map((_, i) => i + 1);
 }
 
+/**
+ * Whether a chart type colours its individual points rather than its series.
+ *
+ * The pie family does so by default — a pie with one series is a ring of
+ * differently coloured slices — which is why its legend names categories. Every
+ * other type colours by series unless the author opts in with `varyColors`.
+ */
+function isPointColouredGroup(group: ChartTypeGroup): boolean {
+  if (
+    group.type === "pie" ||
+    group.type === "pie3D" ||
+    group.type === "doughnut" ||
+    group.type === "ofPie"
+  ) {
+    return true;
+  }
+  // `varyColors` is optional and not declared on every group — stock charts have no
+  // such concept — so read it without asserting it exists.
+  return (group as { varyColors?: boolean }).varyColors === true;
+}
+
 function buildSceneLegend(
   legend: ChartLegend | undefined,
   series: NormalizedSeries[],
@@ -5646,21 +4692,27 @@ function buildSceneLegend(
     legend?.legendEntries?.filter(entry => entry.delete).map(entry => entry.index) ?? []
   );
 
-  // When only 1 series but many categories, Excel shows per-category
-  // legend entries (each category gets its own colour swatch). This is
-  // the typical pivot-chart / varyColors pattern. Show ALL categories
-  // (not just unique) to match Excel's behaviour.
+  // A legend normally lists series. It lists categories instead when each *point*
+  // carries its own colour, because then a per-series swatch would describe nothing:
+  // that is the case for the pie family, where Excel colours slices individually by
+  // default, and for any chart whose author set `varyColors`.
+  //
+  // The condition used to be "one series and more than one category", with no regard
+  // for chart type, so a single-series bar, line or area chart listed `Q1 Q2 Q3 Q4`
+  // where Excel shows the series name — and `varyColors` was never read at all, so
+  // an author who asked for per-point colours on a bar chart got a series legend.
+  const pointColoured = series.every(entry => isPointColouredGroup(entry.group));
   let items: Array<{ label: string; color: string }>;
-  if (series.length === 1 && categories.length > 1) {
+  if (pointColoured && series.length === 1 && categories.length > 1) {
     items = categories.map((cat, i) => ({
-      label: cat,
+      label: singleLineLabel(cat),
       color: COLORS[i % COLORS.length]
     }));
   } else {
     items = series
       .filter((_, index) => !deletedEntries.has(index))
       .map(s => ({
-        label: s.label,
+        label: singleLineLabel(s.label),
         color: s.color
       }));
   }
@@ -6836,1164 +5888,6 @@ function applyLineStyle(line: ChartSceneLine, axis: ChartAxis | undefined): Char
   };
 }
 
-function renderSvgSeries(parts: string[], series: ChartSceneSeries): void {
-  // When the series carries an `a:effectLst`, wrap its primary shapes
-  // in a `<g filter="url(#...)">` so the DrawingML effect (shadow /
-  // glow / reflection / soft-edge / blur / inner-shadow) applies
-  // uniformly. Adornments (labels, markers, trendlines, error bars)
-  // intentionally render outside the group so they don't inherit the
-  // filter — matching Excel's convention where markers are drawn
-  // sharp over a blurred series.
-  const filterId = (series as ChartSceneAdornment).effectFilterId;
-  if (filterId) {
-    parts.push(`<g filter="url(#${filterId})">`);
-  }
-  if (series.type === "bar") {
-    for (const bar of series.bars) {
-      if (series.depth && series.projection3D) {
-        // Proper extruded box: top face + front face + right face with
-        // shading so the user can read the axonometric projection. The
-        // back face is hidden behind the front rect by definition, so
-        // we only paint three visible faces.
-        parts.push(renderBar3DBox(bar, series.projection3D, series.color, series.horizontal));
-      } else {
-        // Plain 2D bar. `buildSceneSeries` sets `depth` to 0 whenever
-        // `projection3D` is undefined (see the `bar3DDepth` ternary),
-        // so the `depth && !projection3D` case is structurally
-        // unreachable and the old `renderBarDepth` extrusion-only
-        // fallback has been removed.
-        parts.push(
-          `<rect x="${fmt(bar.x)}" y="${fmt(bar.y)}" width="${fmt(bar.width)}" height="${fmt(bar.height)}" fill="${series.color}"/>`
-        );
-      }
-    }
-  } else if (series.type === "area") {
-    // Split the upper / lower line at NaN gaps so a missing data point
-    // doesn't produce a stray `(x, 0)` spike across the area outline.
-    const segments = segmentFinitePoints(series.points);
-    const lowerSource =
-      series.lowerPoints ?? series.points.map(p => ({ x: p.x, y: series.baselineY }));
-    for (const segment of segments) {
-      if (segment.length < 2) {
-        continue;
-      }
-      // Build the matching lower slice with the same x-range so the
-      // stacked-area fill stays closed across any gaps above.
-      const startX = segment[0].x;
-      const endX = segment[segment.length - 1].x;
-      const lowerSegment = lowerSource.filter(p => p.x >= startX && p.x <= endX);
-      if (lowerSegment.length === 0) {
-        continue;
-      }
-      const polygonPoints = [...segment, ...lowerSegment.slice().reverse()];
-      parts.push(
-        `<polygon points="${polygonPoints.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ")}" fill="${withAlpha(series.color, 0.35)}"/>`
-      );
-      parts.push(
-        `<polyline points="${segment.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ")}" fill="none" stroke="${series.color}" stroke-width="2"/>`
-      );
-    }
-  } else if (series.type === "line" || series.type === "scatter") {
-    if (series.showLine !== false) {
-      // Honour the `dispBlanksAs="gap"` default: split the polyline at
-      // non-finite points so a blank cell in the source range renders
-      // as an actual break in the line, not a dip to `(x, 0)` (the
-      // previous output of `fmt(NaN) === "0"`). Scatter plots already
-      // expect gaps between unrelated points.
-      const segments = segmentFinitePoints(series.points);
-      const strokeAttrs = series.smooth ? ' stroke-linejoin="round" stroke-linecap="round"' : "";
-      for (const segment of segments) {
-        if (segment.length < 2) {
-          continue;
-        }
-        parts.push(
-          `<polyline points="${segment.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ")}" fill="none" stroke="${series.color}" stroke-width="2"${strokeAttrs}/>`
-        );
-      }
-    }
-    for (const point of series.points) {
-      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
-        continue;
-      }
-      parts.push(
-        `<circle cx="${fmt(point.x)}" cy="${fmt(point.y)}" r="3" fill="${series.color}"/>`
-      );
-    }
-  } else if (series.type === "bubble") {
-    for (const bubble of series.bubbles) {
-      parts.push(
-        `<circle cx="${fmt(bubble.x)}" cy="${fmt(bubble.y)}" r="${fmt(bubble.radius)}" fill="${withAlpha(series.color, 0.55)}" stroke="${series.color}"/>`
-      );
-    }
-  } else if (series.type === "pie" || series.type === "doughnut") {
-    for (const slice of series.slices) {
-      parts.push(renderSvgPieSlice(slice));
-    }
-  } else if (series.type === "ofPie") {
-    for (const slice of series.slices) {
-      parts.push(renderSvgPieSlice(slice));
-    }
-    for (const line of series.connectors ?? []) {
-      parts.push(renderSvgLine(line));
-    }
-    for (const slice of series.secondarySlices ?? []) {
-      parts.push(renderSvgPieSlice(slice));
-    }
-  } else if (series.type === "radar") {
-    // Split at non-finite vertices (NaN markers for blank / `#N/A`
-    // values) so the polygon/polyline doesn't plunge through the plot
-    // centre at each gap. Matches line/area gap handling; see
-    // `segmentFinitePoints`.
-    parts.push(
-      `<circle cx="${fmt(series.center.x)}" cy="${fmt(series.center.y)}" r="${fmt(series.radius)}" fill="none" stroke="${GRID_COLOR}"/>`
-    );
-    const segments = segmentFinitePoints(series.points);
-    // A fully-finite series is still drawn as a single closed polygon
-    // so the fill surface is correct. Any gap degrades to one or more
-    // polylines (open shapes) — matching Excel's behaviour where a
-    // missing category breaks the polygon ring.
-    const noGap = segments.length === 1 && segments[0].length === series.points.length;
-    if (noGap) {
-      const pts = segments[0].map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ");
-      parts.push(
-        `<polygon points="${pts}" fill="${series.filled ? withAlpha(series.color, 0.35) : "none"}" stroke="${series.color}" stroke-width="2"/>`
-      );
-    } else {
-      for (const seg of segments) {
-        if (seg.length < 2) {
-          continue;
-        }
-        const pts = seg.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ");
-        parts.push(
-          `<polyline points="${pts}" fill="${series.filled ? withAlpha(series.color, 0.35) : "none"}" stroke="${series.color}" stroke-width="2"/>`
-        );
-      }
-    }
-  } else if (series.type === "stock") {
-    for (const candle of series.candles) {
-      parts.push(
-        `<line x1="${fmt(candle.x)}" y1="${fmt(candle.highY)}" x2="${fmt(candle.x)}" y2="${fmt(candle.lowY)}" stroke="#555"/>`
-      );
-      // A candle body needs BOTH open and close to form a real
-      // rectangle. The old code fell back to `closeY ?? openY` for the
-      // height, which collapses to a forced-1px strip — a horizontal
-      // line drawn at the open price that looks like a legit minimum-
-      // height candle body but was actually a rendering artefact when
-      // close was absent. Suppress the body entirely when either endpoint
-      // is missing; the HLC wick already conveys the data.
-      if (candle.openY !== undefined && candle.closeY !== undefined) {
-        const y = Math.min(candle.openY, candle.closeY);
-        const h = Math.max(1, Math.abs(candle.closeY - candle.openY));
-        parts.push(
-          `<rect x="${fmt(candle.x - candle.width / 2)}" y="${fmt(y)}" width="${fmt(candle.width)}" height="${fmt(h)}" fill="${candle.up ? "#70AD47" : "#C00000"}" stroke="#555"/>`
-        );
-      }
-    }
-  } else if (series.type === "surface") {
-    for (const cell of series.cells) {
-      parts.push(
-        `<rect x="${fmt(cell.x)}" y="${fmt(cell.y)}" width="${fmt(cell.width)}" height="${fmt(cell.height)}" fill="${cell.color}" stroke="${series.wireframe ? "#555" : cell.color}" stroke-width="${series.wireframe ? 1 : 0}"/>`
-      );
-    }
-  }
-  if (filterId) {
-    parts.push(`</g>`);
-  }
-  // Adornments (markers, data labels, trendlines, error bars) are
-  // emitted in a second pass by `renderChartSvg` — see the two-pass
-  // comment at the top of the series loop. Emitting them inline here
-  // would paint them under later series' shapes.
-}
-
-function renderSvgAdornments(parts: string[], series: ChartSceneAdornment): void {
-  for (const errorBar of series.errorBars ?? []) {
-    parts.push(renderSvgLine(errorBar.line));
-    if (errorBar.cap1) {
-      parts.push(renderSvgLine(errorBar.cap1));
-    }
-    if (errorBar.cap2) {
-      parts.push(renderSvgLine(errorBar.cap2));
-    }
-  }
-  for (const trendline of series.trendlines ?? []) {
-    // Segment the polyline at NaN gaps so moving-average trendlines —
-    // which legitimately emit NaN for leading positions before the
-    // window fills — don't spike through `(x, 0)` via `fmt(NaN)`.
-    const dashAttr = trendline.dash ? ' stroke-dasharray="4 3"' : "";
-    for (const segment of segmentFinitePoints(trendline.points)) {
-      if (segment.length < 2) {
-        continue;
-      }
-      parts.push(
-        `<polyline points="${segment.map(p => `${fmt(p.x)},${fmt(p.y)}`).join(" ")}" fill="none" stroke="${trendline.color}" stroke-width="${trendline.width ?? 1.5}"${dashAttr}/>`
-      );
-    }
-    if (trendline.label) {
-      parts.push(renderSvgText(trendline.label));
-    }
-  }
-  for (const marker of series.markers ?? []) {
-    parts.push(renderSvgMarker(marker));
-  }
-  // Leader lines render *before* labels so the label glyphs visually sit on
-  // top of the line rather than being bisected by it.
-  for (const leader of series.leaderLines ?? []) {
-    parts.push(renderSvgLine(leader));
-  }
-  for (const label of series.labels ?? []) {
-    parts.push(renderSvgText(label));
-  }
-}
-
-function renderSvgMarker(marker: ChartSceneMarker): string {
-  const r = marker.size / 2;
-  if (marker.symbol === "square") {
-    return `<rect x="${fmt(marker.x - r)}" y="${fmt(marker.y - r)}" width="${fmt(marker.size)}" height="${fmt(marker.size)}" fill="${marker.color}"/>`;
-  }
-  if (marker.symbol === "diamond") {
-    return `<polygon points="${fmt(marker.x)},${fmt(marker.y - r)} ${fmt(marker.x + r)},${fmt(marker.y)} ${fmt(marker.x)},${fmt(marker.y + r)} ${fmt(marker.x - r)},${fmt(marker.y)}" fill="${marker.color}"/>`;
-  }
-  if (marker.symbol === "triangle") {
-    return `<polygon points="${fmt(marker.x)},${fmt(marker.y - r)} ${fmt(marker.x + r)},${fmt(marker.y + r)} ${fmt(marker.x - r)},${fmt(marker.y + r)}" fill="${marker.color}"/>`;
-  }
-  if (marker.symbol === "x" || marker.symbol === "plus") {
-    const diagonal = marker.symbol === "x";
-    const lines = diagonal
-      ? [
-          `<line x1="${fmt(marker.x - r)}" y1="${fmt(marker.y - r)}" x2="${fmt(marker.x + r)}" y2="${fmt(marker.y + r)}" stroke="${marker.color}" stroke-width="2"/>`,
-          `<line x1="${fmt(marker.x + r)}" y1="${fmt(marker.y - r)}" x2="${fmt(marker.x - r)}" y2="${fmt(marker.y + r)}" stroke="${marker.color}" stroke-width="2"/>`
-        ]
-      : [
-          `<line x1="${fmt(marker.x - r)}" y1="${fmt(marker.y)}" x2="${fmt(marker.x + r)}" y2="${fmt(marker.y)}" stroke="${marker.color}" stroke-width="2"/>`,
-          `<line x1="${fmt(marker.x)}" y1="${fmt(marker.y - r)}" x2="${fmt(marker.x)}" y2="${fmt(marker.y + r)}" stroke="${marker.color}" stroke-width="2"/>`
-        ];
-    return lines.join("");
-  }
-  return `<circle cx="${fmt(marker.x)}" cy="${fmt(marker.y)}" r="${fmt(r)}" fill="${marker.color}"/>`;
-}
-
-/**
- * Render a bar as an extruded 3D box using the supplied projection
- * deltas. Three visible faces:
- *
- *   1. **Top** — quadrilateral whose back edge sits at
- *      `(x+dx, y-dy)` / `(x+w+dx, y-dy)`. Painted lighter than the
- *      front so the viewer reads "light from above".
- *   2. **Right** — quadrilateral from front-right edge to back-right
- *      edge. Painted slightly darker than the front.
- *   3. **Front** — the original `bar` rectangle, unchanged.
- *
- * The shading uses the series' base color with fixed tints so plain
- * `#4472C4` (the default Office colour) ends up with a believable 3D
- * cue without loading a full lighting model.
- */
-function renderBar3DBox(
-  bar: ChartSceneRect,
-  proj: { dx: number; dy: number },
-  color: string,
-  horizontal: boolean | undefined
-): string {
-  const right = bar.x + bar.width;
-  const top = bar.y;
-  const bottom = bar.y + bar.height;
-  const dx = proj.dx;
-  const dy = proj.dy;
-  // Back corners.
-  const bx1 = bar.x + dx;
-  const by1 = top - dy;
-  const bx2 = right + dx;
-  const by2 = top - dy;
-  const bxBottom = right + dx;
-  const byBottom = bottom - dy;
-  const topFill = withAlpha(color, 0.92);
-  const rightFill = withAlpha(color, 0.75);
-  const parts: string[] = [];
-  // For horizontal bars we draw the same three faces but the "top" is
-  // actually the top edge of the horizontal bar (still a parallelogram
-  // along the depth vector).
-  if (horizontal) {
-    // Top edge + right (front-facing when horizontal) + front face.
-    parts.push(
-      `<polygon points="${fmt(bar.x)},${fmt(top)} ${fmt(bx1)},${fmt(by1)} ${fmt(bx2)},${fmt(by2)} ${fmt(right)},${fmt(top)}" fill="${topFill}"/>`,
-      `<polygon points="${fmt(right)},${fmt(top)} ${fmt(bx2)},${fmt(by2)} ${fmt(bxBottom)},${fmt(byBottom)} ${fmt(right)},${fmt(bottom)}" fill="${rightFill}"/>`,
-      `<rect x="${fmt(bar.x)}" y="${fmt(bar.y)}" width="${fmt(bar.width)}" height="${fmt(bar.height)}" fill="${color}"/>`
-    );
-  } else {
-    parts.push(
-      // Top face — front-top-left → back-top-left → back-top-right → front-top-right
-      `<polygon points="${fmt(bar.x)},${fmt(top)} ${fmt(bx1)},${fmt(by1)} ${fmt(bx2)},${fmt(by2)} ${fmt(right)},${fmt(top)}" fill="${topFill}"/>`,
-      // Right face — front-top-right → back-top-right → back-bottom-right → front-bottom-right
-      `<polygon points="${fmt(right)},${fmt(top)} ${fmt(bx2)},${fmt(by2)} ${fmt(bxBottom)},${fmt(byBottom)} ${fmt(right)},${fmt(bottom)}" fill="${rightFill}"/>`,
-      // Front face — the original rect.
-      `<rect x="${fmt(bar.x)}" y="${fmt(bar.y)}" width="${fmt(bar.width)}" height="${fmt(bar.height)}" fill="${color}"/>`
-    );
-  }
-  return parts.join("");
-}
-
-function renderSvgPieSlice(slice: ChartScenePieSlice): string {
-  // Full-sweep slice (single-value pie): SVG arcs can't describe a
-  // full 360° circle with a single `A` command — start and end points
-  // coincide, so the renderer returns an empty path. Emit a
-  // `<circle>` (or a doughnut `<path>` built from two semicircles) in
-  // that case. A tiny epsilon guards against floating drift when the
-  // sweep is computed as `100 / total * 2π` on integer totals.
-  //
-  // `sweepRaw` may be negative if a caller (e.g. `translatePieSlice`
-  // in `flipY` mode, or a hand-built slice) passes `endAngle <
-  // startAngle`. A raw negative value would land in `large = 0`
-  // without the absolute-value guard and the arc draws the *long* way
-  // round (covering `2π - |sweep|` of the circle). Normalise on the
-  // magnitude and track the direction in the SVG `sweep-flag`.
-  const sweepRaw = slice.endAngle - slice.startAngle;
-  const sweep = Math.abs(sweepRaw);
-  if (sweep >= Math.PI * 2 - 1e-9) {
-    if (slice.innerRadius > 0) {
-      // Doughnut full-ring: concatenate two 180° arcs on each radius.
-      const r = slice.radius;
-      const ir = slice.innerRadius;
-      return (
-        `<path d="M ${fmt(slice.cx - r)} ${fmt(slice.cy)} ` +
-        `A ${fmt(r)} ${fmt(r)} 0 1 1 ${fmt(slice.cx + r)} ${fmt(slice.cy)} ` +
-        `A ${fmt(r)} ${fmt(r)} 0 1 1 ${fmt(slice.cx - r)} ${fmt(slice.cy)} ` +
-        `M ${fmt(slice.cx - ir)} ${fmt(slice.cy)} ` +
-        `A ${fmt(ir)} ${fmt(ir)} 0 1 0 ${fmt(slice.cx + ir)} ${fmt(slice.cy)} ` +
-        `A ${fmt(ir)} ${fmt(ir)} 0 1 0 ${fmt(slice.cx - ir)} ${fmt(slice.cy)} Z" ` +
-        `fill="${slice.color}" fill-rule="evenodd"/>`
-      );
-    }
-    return `<circle cx="${fmt(slice.cx)}" cy="${fmt(slice.cy)}" r="${fmt(slice.radius)}" fill="${slice.color}"/>`;
-  }
-  const large = sweep > Math.PI ? 1 : 0;
-  const sweepFlag = sweepRaw >= 0 ? 1 : 0;
-  const innerSweepFlag = sweepRaw >= 0 ? 0 : 1;
-  const x1 = slice.cx + Math.cos(slice.startAngle) * slice.radius;
-  const y1 = slice.cy + Math.sin(slice.startAngle) * slice.radius;
-  const x2 = slice.cx + Math.cos(slice.endAngle) * slice.radius;
-  const y2 = slice.cy + Math.sin(slice.endAngle) * slice.radius;
-  if (slice.innerRadius > 0) {
-    const ix1 = slice.cx + Math.cos(slice.endAngle) * slice.innerRadius;
-    const iy1 = slice.cy + Math.sin(slice.endAngle) * slice.innerRadius;
-    const ix2 = slice.cx + Math.cos(slice.startAngle) * slice.innerRadius;
-    const iy2 = slice.cy + Math.sin(slice.startAngle) * slice.innerRadius;
-    return `<path d="M ${fmt(x1)} ${fmt(y1)} A ${fmt(slice.radius)} ${fmt(slice.radius)} 0 ${large} ${sweepFlag} ${fmt(x2)} ${fmt(y2)} L ${fmt(ix1)} ${fmt(iy1)} A ${fmt(slice.innerRadius)} ${fmt(slice.innerRadius)} 0 ${large} ${innerSweepFlag} ${fmt(ix2)} ${fmt(iy2)} Z" fill="${slice.color}" data-sector="${fmt(slice.cx)},${fmt(slice.cy)},${fmt(slice.radius)},${fmt(slice.innerRadius)},${fmt(slice.startAngle)},${fmt(slice.endAngle)}"/>`;
-  }
-  return `<path d="M ${fmt(slice.cx)} ${fmt(slice.cy)} L ${fmt(x1)} ${fmt(y1)} A ${fmt(slice.radius)} ${fmt(slice.radius)} 0 ${large} ${sweepFlag} ${fmt(x2)} ${fmt(y2)} Z" fill="${slice.color}" data-sector="${fmt(slice.cx)},${fmt(slice.cy)},${fmt(slice.radius)},0,${fmt(slice.startAngle)},${fmt(slice.endAngle)}"/>`;
-}
-
-function renderSvgDataTable(parts: string[], table: ChartSceneDataTable): void {
-  // Borders first so cell text paints on top. Order matters for the
-  // BasicRasterCanvas too — that canvas scans the SVG top-to-bottom.
-  for (const line of table.borders) {
-    parts.push(renderSvgLine(line));
-  }
-  for (const swatch of table.legendSwatches) {
-    parts.push(
-      `<rect x="${fmt(swatch.x)}" y="${fmt(swatch.y)}" width="${fmt(swatch.width)}" height="${fmt(swatch.height)}" fill="${swatch.color}"/>`
-    );
-  }
-  for (const cell of table.cells) {
-    parts.push(renderSvgText(cell));
-  }
-}
-
-function renderSvgLegend(parts: string[], legend: ChartSceneLegend): void {
-  if (!legend.visible || legend.items.length === 0) {
-    return;
-  }
-  const fontSize = legend.textStyle?.fontSize ?? 10;
-  const fontFamily = legend.textStyle?.fontFamily ?? "Arial";
-  const color = legend.textStyle?.color ?? "#555";
-  const weightAttr = legend.textStyle?.bold ? ' font-weight="bold"' : "";
-  const styleAttr = legend.textStyle?.italic ? ' font-style="italic"' : "";
-  const bold = legend.textStyle?.bold;
-  const italic = legend.textStyle?.italic;
-  const swatchSize = 10;
-  const swatchToLabelGap = 4;
-  const interItemGap = 16;
-  // Walk horizontally with `estimateTextWidth` so long labels don't
-  // overlap the next swatch. Previously the SVG path divided
-  // `rect.width / items.length` into equal slots regardless of label
-  // length, producing visibly-different output from the PDF path
-  // (`drawPdfLegend`) which already cursor-advances with measured
-  // widths. Chart round-trip tests that compared SVG ↔ PDF swatch
-  // positions drifted for any chart with asymmetric label lengths.
-  let cursorX = legend.rect.x;
-  legend.items.forEach((item, i) => {
-    const itemX = legend.orientation === "horizontal" ? cursorX : legend.rect.x;
-    const y = legend.orientation === "horizontal" ? legend.rect.y : legend.rect.y + i * 18;
-    parts.push(
-      `<rect x="${fmt(itemX)}" y="${fmt(y)}" width="${swatchSize}" height="${swatchSize}" fill="${item.color}"/>`
-    );
-    parts.push(
-      `<text x="${fmt(itemX + swatchSize + swatchToLabelGap)}" y="${fmt(y + 9)}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" fill="${color}"${weightAttr}${styleAttr}>${escapeXml(item.label)}</text>`
-    );
-    if (legend.orientation === "horizontal") {
-      const labelWidth = estimateTextWidth(item.label, fontSize, {
-        bold,
-        italic,
-        fontName: fontFamily
-      });
-      cursorX += swatchSize + swatchToLabelGap + labelWidth + interItemGap;
-    }
-  });
-}
-
-function renderSvgLine(line: ChartSceneLine): string {
-  return `<line x1="${fmt(line.x1)}" y1="${fmt(line.y1)}" x2="${fmt(line.x2)}" y2="${fmt(line.y2)}" stroke="${line.color}" stroke-width="${line.width ?? 1}"/>`;
-}
-
-/**
- * Split a list of points into contiguous runs of finite `(x, y)` pairs.
- * A non-finite coordinate (typically `NaN` propagated from a blank /
- * `#N/A` source cell by `collectNumberValues`) terminates the current
- * segment so the rendered polyline / polygon breaks at the gap instead
- * of collapsing to `(x, 0)` via `fmt(NaN) === "0"`.
- *
- * Matches Excel's default `dispBlanksAs="gap"` behaviour for line /
- * scatter / area charts — the other modes (`"zero"` / `"span"`) are
- * expected to be handled upstream by the scene builder (by mapping
- * NaN to `0` or by filtering out the point respectively).
- */
-function segmentFinitePoints(points: readonly ChartScenePoint[]): ChartScenePoint[][] {
-  const segments: ChartScenePoint[][] = [];
-  let current: ChartScenePoint[] = [];
-  for (const p of points) {
-    if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
-      current.push(p);
-    } else if (current.length > 0) {
-      segments.push(current);
-      current = [];
-    }
-  }
-  if (current.length > 0) {
-    segments.push(current);
-  }
-  return segments;
-}
-
-function renderSvgText(text: ChartSceneText): string {
-  const transform = text.rotate
-    ? ` transform="rotate(${fmt(text.rotate)} ${fmt(text.x)} ${fmt(text.y)})"`
-    : "";
-  const fontFamily = text.fontFamily ?? "Arial";
-  const weightAttr = text.bold ? ' font-weight="bold"' : "";
-  const styleAttr = text.italic ? ' font-style="italic"' : "";
-  const anchor = text.anchor ?? "start";
-  // SVG `<text>` collapses whitespace including newlines, so a
-  // multi-line chart title (from a rich-text model with >1 paragraph)
-  // renders as one line with spaces in place of `\n`. Split on `\n`
-  // and emit `<tspan>` children with an explicit `dy` baseline offset
-  // to stack paragraphs. Single-line strings stay on the fast path so
-  // the common case is byte-identical with the old output.
-  // Accept both LF and CRLF line endings — Windows-authored titles
-  // that round-trip via a Buffer or raw-XML reader may arrive with
-  // `\r\n` pairs. Previously `split("\n")` left the `\r` attached to
-  // the preceding tspan, leaking a literal carriage-return into the
-  // SVG and visibly displacing the next paragraph by one em.
-  if (/[\r\n]/.test(text.text)) {
-    const lines = text.text.split(/\r?\n/);
-    const lineHeightEm = 1.2;
-    const tspans = lines
-      .map(
-        (line, i) =>
-          `<tspan x="${fmt(text.x)}"${i === 0 ? "" : ` dy="${lineHeightEm}em"`}>${escapeXml(line)}</tspan>`
-      )
-      .join("");
-    return `<text x="${fmt(text.x)}" y="${fmt(text.y)}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${text.fontSize}" fill="${text.color}"${weightAttr}${styleAttr}${transform}>${tspans}</text>`;
-  }
-  return `<text x="${fmt(text.x)}" y="${fmt(text.y)}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${text.fontSize}" fill="${text.color}"${weightAttr}${styleAttr}${transform}>${escapeXml(text.text)}</text>`;
-}
-
-function drawPdfSeries(page: ChartPdfDrawingSurface, series: ChartSceneSeries): void {
-  if (series.type === "bar") {
-    const fill = hexToPdfColor(series.color);
-    for (const bar of series.bars) {
-      // Skip bars with NaN/non-finite geometry or zero area — these
-      // represent gap points (blank/error source cells) and must not
-      // emit invalid coordinates into the PDF stream.
-      if (
-        !Number.isFinite(bar.x) ||
-        !Number.isFinite(bar.y) ||
-        !Number.isFinite(bar.width) ||
-        !Number.isFinite(bar.height) ||
-        (bar.width === 0 && bar.height === 0)
-      ) {
-        continue;
-      }
-      // Skip the front-face rect here when the series has a `projection3D`
-      // hint — the dedicated bar3D pass at the end of this function
-      // (`drawPdfBar3DBox`) paints the front face itself along with the
-      // top and right shaded faces, so drawing it a second time here
-      // would over-composite opaque PDF fills and double-stroke outlines
-      // on surfaces that don't honour alpha compositing.
-      if (series.projection3D && series.depth && series.depth > 0) {
-        continue;
-      }
-      // When bars are extremely narrow (dense data — thousands of
-      // categories), draw a small filled dot instead of a hair-thin
-      // rect. This matches Excel's rendering where sub-pixel bars
-      // appear as dots rather than vertical lines.
-      // After translateScene flipY, bar.y is the PDF bottom edge and
-      // bar.y + bar.height is the top edge (value end of the bar).
-      if (bar.width < 2) {
-        const cx = bar.x + bar.width / 2;
-        const cy = bar.y + bar.height;
-        if (page.drawCircle) {
-          page.drawCircle({ cx, cy, r: 1.2, fill });
-        } else {
-          page.drawRect({ x: cx - 1, y: cy - 1, width: 2, height: 2, fill });
-        }
-      } else {
-        page.drawRect({ ...bar, fill });
-      }
-    }
-  } else if (series.type === "area") {
-    if (page.drawPath && series.points.length > 0) {
-      const lowerSource =
-        series.lowerPoints ?? series.points.map(p => ({ x: p.x, y: series.baselineY }));
-      // Draw one closed path per contiguous finite run of upper points
-      // so NaN gaps produce real breaks in the fill instead of zero-
-      // height spikes pulled from `fmt(NaN)` downstream. Match the
-      // matching lower slice by x-range.
-      for (const segment of segmentFinitePoints(series.points)) {
-        if (segment.length === 0) {
-          continue;
-        }
-        const startX = segment[0].x;
-        const endX = segment[segment.length - 1].x;
-        const lowerSegment = lowerSource.filter(
-          p => Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= startX && p.x <= endX
-        );
-        if (lowerSegment.length === 0) {
-          continue;
-        }
-        const ops: ChartPdfPathOp[] = [
-          { op: "move", x: lowerSegment[0].x, y: lowerSegment[0].y },
-          ...segment.map(p => ({ op: "line" as const, x: p.x, y: p.y })),
-          ...lowerSegment
-            .slice()
-            .reverse()
-            .map(p => ({ op: "line" as const, x: p.x, y: p.y })),
-          { op: "close" }
-        ];
-        // Match the SVG path's `withAlpha(color, 0.35)` fill so
-        // stacked areas behind the current one remain visible through
-        // the translucent polygon. Opaque fallback for surfaces that
-        // ignore `PdfColor.a` — same degradation policy as everywhere
-        // else.
-        page.drawPath(ops, { fill: hexToPdfColorWithAlpha(series.color, 0.35) });
-      }
-    }
-    // Split the line at NaN gaps so blanks show as breaks rather than
-    // `(x, 0)` spikes. Mirrors the SVG `segmentFinitePoints` path.
-    for (const segment of segmentFinitePoints(series.points)) {
-      for (let i = 1; i < segment.length; i++) {
-        page.drawLine({
-          x1: segment[i - 1].x,
-          y1: segment[i - 1].y,
-          x2: segment[i].x,
-          y2: segment[i].y,
-          color: hexToPdfColor(series.color)
-        });
-      }
-    }
-  } else if (series.type === "line" || series.type === "scatter") {
-    // Honour `showLine === false` — pure-marker scatter charts and line
-    // charts with the line removed via style shouldn't paint an
-    // implicit connector. The SVG path checks this flag; the PDF
-    // branch used to unconditionally draw the line even when the
-    // caller asked for markers only.
-    if (series.showLine !== false) {
-      for (const segment of segmentFinitePoints(series.points)) {
-        for (let i = 1; i < segment.length; i++) {
-          page.drawLine({
-            x1: segment[i - 1].x,
-            y1: segment[i - 1].y,
-            x2: segment[i].x,
-            y2: segment[i].y,
-            color: hexToPdfColor(series.color)
-          });
-        }
-      }
-    }
-    for (const point of series.points) {
-      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
-        continue;
-      }
-      page.drawRect({
-        x: point.x - 2,
-        y: point.y - 2,
-        width: 4,
-        height: 4,
-        fill: hexToPdfColor(series.color)
-      });
-    }
-  } else if (series.type === "bubble") {
-    for (const bubble of series.bubbles) {
-      // Bubble SVG uses `withAlpha(color, 0.55)`; emit real alpha in
-      // PDF so overlapping bubbles remain distinguishable.
-      const fill = hexToPdfColorWithAlpha(series.color, 0.55);
-      if (page.drawCircle) {
-        page.drawCircle({
-          cx: bubble.x,
-          cy: bubble.y,
-          r: bubble.radius,
-          fill
-        });
-      } else {
-        page.drawRect({
-          x: bubble.x - bubble.radius,
-          y: bubble.y - bubble.radius,
-          width: bubble.radius * 2,
-          height: bubble.radius * 2,
-          fill
-        });
-      }
-    }
-  } else if (series.type === "pie" || series.type === "doughnut") {
-    if (page.drawPath) {
-      for (const slice of series.slices) {
-        page.drawPath(pieSliceToPath(slice), { fill: hexToPdfColor(slice.color) });
-      }
-    } else {
-      // Surfaces without drawPath degrade to slice-outline strokes so the
-      // chart is still recognisable. The filled area is lost (we have
-      // no way to fill a polygon without drawPath), but the slice
-      // boundaries and doughnut ring read clearly.
-      for (const slice of series.slices) {
-        strokePieSliceOutline(page, slice, hexToPdfColor(slice.color));
-      }
-    }
-  } else if (series.type === "ofPie") {
-    if (page.drawPath) {
-      for (const slice of [...series.slices, ...(series.secondarySlices ?? [])]) {
-        page.drawPath(pieSliceToPath(slice), { fill: hexToPdfColor(slice.color) });
-      }
-    } else {
-      for (const slice of [...series.slices, ...(series.secondarySlices ?? [])]) {
-        strokePieSliceOutline(page, slice, hexToPdfColor(slice.color));
-      }
-    }
-    for (const line of series.connectors ?? []) {
-      page.drawLine({ ...line, color: hexToPdfColor(line.color) });
-    }
-  } else if (series.type === "radar") {
-    // Split at non-finite vertices so gaps don't drag the polygon
-    // through the plot centre. Mirrors the SVG path.
-    const segments = segmentFinitePoints(series.points);
-    const noGap = segments.length === 1 && segments[0].length === series.points.length;
-    // Filled radar: the SVG path draws a `withAlpha(color, 0.35)` polygon
-    // before the stroke loop. Mirror that here when `drawPath` is
-    // available AND the polygon is gap-free (a partial polygon with
-    // holes produces ambiguous fill — skip it, matching the SVG
-    // `polyline` degradation above). When `drawPath` is absent the
-    // stroke loop below alone preserves the polygon shape, which is
-    // the best degradation a drawLine-only surface can offer.
-    if (series.filled && page.drawPath && noGap && segments[0].length > 0) {
-      const seg = segments[0];
-      const ops: ChartPdfPathOp[] = [
-        { op: "move", x: seg[0].x, y: seg[0].y },
-        ...seg.slice(1).map(p => ({ op: "line" as const, x: p.x, y: p.y })),
-        { op: "close" }
-      ];
-      page.drawPath(ops, { fill: hexToPdfColorWithAlpha(series.color, 0.35) });
-    }
-    for (const seg of segments) {
-      if (seg.length < 2) {
-        continue;
-      }
-      // Emit strokes between consecutive finite vertices only. Close
-      // the loop only when the series has no gaps — a partial polygon
-      // stays open at the gap.
-      for (let i = 0; i < seg.length - 1; i++) {
-        page.drawLine({
-          x1: seg[i].x,
-          y1: seg[i].y,
-          x2: seg[i + 1].x,
-          y2: seg[i + 1].y,
-          color: hexToPdfColor(series.color),
-          lineWidth: 2
-        });
-      }
-      if (noGap && seg.length > 1) {
-        page.drawLine({
-          x1: seg[seg.length - 1].x,
-          y1: seg[seg.length - 1].y,
-          x2: seg[0].x,
-          y2: seg[0].y,
-          color: hexToPdfColor(series.color),
-          lineWidth: 2
-        });
-      }
-    }
-  } else if (series.type === "stock") {
-    for (const candle of series.candles) {
-      page.drawLine({
-        x1: candle.x,
-        y1: candle.highY,
-        x2: candle.x,
-        y2: candle.lowY,
-        color: hexToPdfColor("#555555")
-      });
-      // See SVG path — render the candle body only when BOTH open and
-      // close are known. Previously a missing close silently collapsed
-      // to a 1-px strip at the open price.
-      if (candle.openY !== undefined && candle.closeY !== undefined) {
-        page.drawRect({
-          x: candle.x - candle.width / 2,
-          y: Math.min(candle.openY, candle.closeY),
-          width: candle.width,
-          height: Math.max(1, Math.abs(candle.closeY - candle.openY)),
-          fill: hexToPdfColor(candle.up ? "#70AD47" : "#C00000")
-        });
-      }
-    }
-  } else if (series.type === "surface") {
-    for (const cell of series.cells) {
-      page.drawRect({ ...cell, fill: hexToPdfColor(cell.color) });
-    }
-  }
-}
-
-function drawPdfDataTable(
-  page: ChartPdfDrawingSurface,
-  table: ChartSceneDataTable,
-  trace: string[] | undefined
-): void {
-  for (const line of table.borders) {
-    trace?.push(`line:dTable:${fmt(line.x1)},${fmt(line.y1)}-${fmt(line.x2)},${fmt(line.y2)}`);
-    page.drawLine({ ...line, color: hexToPdfColor(line.color) });
-  }
-  for (const swatch of table.legendSwatches) {
-    page.drawRect({
-      x: swatch.x,
-      y: swatch.y,
-      width: swatch.width,
-      height: swatch.height,
-      fill: hexToPdfColor(swatch.color)
-    });
-  }
-  // Render data table cells. When extremely dense, the natural overlap
-  // of text glyphs produces the stippled black appearance Excel shows.
-  for (const cell of table.cells) {
-    trace?.push(`text:dTable:${cell.text}:${fmt(cell.x)},${fmt(cell.y)}`);
-    drawPdfText(page, cell);
-  }
-}
-
-function drawPdfLegend(page: ChartPdfDrawingSurface, legend: ChartSceneLegend): void {
-  if (!legend.visible || legend.items.length === 0) {
-    return;
-  }
-  const itemCount = legend.items.length;
-  // For dense legends (many items), use smaller font and multi-column
-  // grid layout to fit within the available rect.
-  const isDense = itemCount > 10;
-  const legendFontSize = isDense ? 7 : (legend.textStyle?.fontSize ?? 10);
-  const fontFamily = legend.textStyle?.fontFamily;
-  const bold = legend.textStyle?.bold;
-  const italic = legend.textStyle?.italic;
-  const textColor = legend.textStyle?.color ? hexToPdfColor(legend.textStyle.color) : undefined;
-  const swatchSize = isDense ? 7 : 10;
-  const swatchToLabelGap = 3;
-  const interItemGapX = isDense ? 8 : 16;
-  const rowHeight = isDense ? 10 : 18;
-
-  if (isDense) {
-    // Multi-column grid layout: calculate how many columns fit
-    const avgLabelWidth = 50; // rough estimate for truncated labels
-    const colWidth = swatchSize + swatchToLabelGap + avgLabelWidth + interItemGapX;
-    const availableWidth = legend.rect.width > 0 ? legend.rect.width : 600;
-    const cols = Math.max(1, Math.floor(availableWidth / colWidth));
-
-    for (let i = 0; i < itemCount; i++) {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const x = legend.rect.x + col * colWidth;
-      const y = legend.rect.y + row * rowHeight;
-      // Stop if we overflow the legend rect vertically
-      if (y + rowHeight > legend.rect.y + legend.rect.height) {
-        break;
-      }
-      page.drawRect({
-        x,
-        y,
-        width: swatchSize,
-        height: swatchSize,
-        fill: hexToPdfColor(legend.items[i].color)
-      });
-      page.drawText(legend.items[i].label, {
-        x: x + swatchSize + swatchToLabelGap,
-        y: y + 1,
-        fontSize: legendFontSize,
-        anchor: "start",
-        fontFamily,
-        bold,
-        italic,
-        color: textColor
-      });
-    }
-  } else {
-    // Original layout for small legends
-    let cursorX = legend.rect.x;
-    legend.items.forEach((item, i) => {
-      const swatchX = legend.orientation === "horizontal" ? cursorX : legend.rect.x;
-      const y = legend.orientation === "horizontal" ? legend.rect.y : legend.rect.y + i * rowHeight;
-      page.drawRect({
-        x: swatchX,
-        y,
-        width: swatchSize,
-        height: swatchSize,
-        fill: hexToPdfColor(item.color)
-      });
-      page.drawText(item.label, {
-        x: swatchX + swatchSize + swatchToLabelGap,
-        y: y + 1,
-        fontSize: legendFontSize,
-        anchor: "start",
-        fontFamily,
-        bold,
-        italic,
-        color: textColor
-      });
-      if (legend.orientation === "horizontal") {
-        const labelWidth = estimateTextWidth(item.label, legendFontSize, {
-          bold,
-          italic,
-          fontName: fontFamily
-        });
-        cursorX += swatchSize + swatchToLabelGap + labelWidth + interItemGapX;
-      }
-    });
-  }
-}
-
-function translateScene(
-  scene: ChartScene,
-  offsetX: number,
-  offsetY: number,
-  flipY: boolean
-): ChartScene {
-  const convertY = (y: number) => (flipY ? offsetY + scene.height - y : offsetY + y);
-  const mapPoint = (p: ChartScenePoint): ChartScenePoint => ({
-    x: offsetX + p.x,
-    y: convertY(p.y)
-  });
-  const mapRect = (r: ChartSceneRect): ChartSceneRect => {
-    const y = flipY ? offsetY + scene.height - r.y - r.height : offsetY + r.y;
-    return { x: offsetX + r.x, y, width: r.width, height: r.height };
-  };
-  const mapLine = (line: ChartSceneLine): ChartSceneLine => ({
-    ...line,
-    x1: offsetX + line.x1,
-    y1: convertY(line.y1),
-    x2: offsetX + line.x2,
-    y2: convertY(line.y2)
-  });
-  const mapText = (text: ChartSceneText): ChartSceneText => ({
-    ...text,
-    x: offsetX + text.x,
-    y: convertY(text.y)
-  });
-  return {
-    ...scene,
-    title: scene.title ? mapText(scene.title) : undefined,
-    plot: mapRect(scene.plot),
-    axes: {
-      x: scene.axes.x ? mapLine(scene.axes.x) : undefined,
-      y: scene.axes.y ? mapLine(scene.axes.y) : undefined,
-      x2: scene.axes.x2 ? mapLine(scene.axes.x2) : undefined,
-      y2: scene.axes.y2 ? mapLine(scene.axes.y2) : undefined
-    },
-    gridlines: scene.gridlines.map(mapLine),
-    xLabels: scene.xLabels.map(mapText),
-    yLabels: scene.yLabels.map(mapText),
-    secondaryXLabels: scene.secondaryXLabels.map(mapText),
-    secondaryYLabels: scene.secondaryYLabels.map(mapText),
-    axisTitles: scene.axisTitles.map(mapText),
-    legend: { ...scene.legend, rect: mapRect(scene.legend.rect) },
-    dataTable: scene.dataTable
-      ? {
-          rect: mapRect(scene.dataTable.rect),
-          // Column/row arrays are plain x/y scalars — columns is an array
-          // of x (no flip) and rows is an array of y (flip-aware via
-          // convertY). We remap them so downstream consumers can still
-          // use them in the translated frame.
-          columns: scene.dataTable.columns.map(x => offsetX + x),
-          rows: scene.dataTable.rows.map(y => convertY(y)),
-          cells: scene.dataTable.cells.map(mapText),
-          legendSwatches: scene.dataTable.legendSwatches.map(s => ({
-            ...mapRect(s),
-            color: s.color
-          })),
-          borders: scene.dataTable.borders.map(mapLine)
-        }
-      : undefined,
-    series: scene.series.map(s => translateSeries(s, mapPoint, mapRect, mapLine, mapText, flipY))
-  };
-}
-
-function translateSeries(
-  series: ChartSceneSeries,
-  mapPoint: (point: ChartScenePoint) => ChartScenePoint,
-  mapRect: (rect: ChartSceneRect) => ChartSceneRect,
-  mapLine: (line: ChartSceneLine) => ChartSceneLine,
-  mapText: (text: ChartSceneText) => ChartSceneText,
-  flipY: boolean
-): ChartSceneSeries {
-  if (series.type === "bar") {
-    // `projection3D` is a pair of screen-space deltas, not positions,
-    // so `mapRect` doesn't touch it. When `flipY=true` (PDF y-up) the
-    // `dy` sign must be negated so the back face of each bar still
-    // extrudes "upward" relative to the front face in the flipped
-    // frame. Without this, PDF bar3D extrudes downward — the opposite
-    // of the SVG rendering.
-    const projection3D = series.projection3D
-      ? { dx: series.projection3D.dx, dy: flipY ? -series.projection3D.dy : series.projection3D.dy }
-      : undefined;
-    return translateAdornments(
-      { ...series, bars: series.bars.map(mapRect), projection3D },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "line" || series.type === "scatter") {
-    return translateAdornments(
-      { ...series, points: series.points.map(mapPoint) },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "radar") {
-    return translateAdornments(
-      {
-        ...series,
-        points: series.points.map(mapPoint),
-        center: mapPoint(series.center)
-      },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "area") {
-    return translateAdornments(
-      {
-        ...series,
-        points: series.points.map(mapPoint),
-        lowerPoints: series.lowerPoints?.map(mapPoint),
-        baselineY: mapPoint({ x: 0, y: series.baselineY }).y
-      },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "bubble") {
-    return translateAdornments(
-      { ...series, bubbles: series.bubbles.map(b => ({ ...mapPoint(b), radius: b.radius })) },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "pie" || series.type === "doughnut") {
-    return translateAdornments(
-      { ...series, slices: series.slices.map(slice => translatePieSlice(slice, mapPoint, flipY)) },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "ofPie") {
-    return translateAdornments(
-      {
-        ...series,
-        slices: series.slices.map(slice => translatePieSlice(slice, mapPoint, flipY)),
-        secondarySlices: series.secondarySlices?.map(slice =>
-          translatePieSlice(slice, mapPoint, flipY)
-        ),
-        connectors: series.connectors?.map(line => ({
-          ...line,
-          ...lineFromPoints(
-            mapPoint({ x: line.x1, y: line.y1 }),
-            mapPoint({ x: line.x2, y: line.y2 })
-          )
-        }))
-      },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "stock") {
-    return translateAdornments(
-      {
-        ...series,
-        candles: series.candles.map(c => ({
-          ...c,
-          x: mapPoint({ x: c.x, y: 0 }).x,
-          highY: mapPoint({ x: 0, y: c.highY }).y,
-          lowY: mapPoint({ x: 0, y: c.lowY }).y,
-          openY: c.openY === undefined ? undefined : mapPoint({ x: 0, y: c.openY }).y,
-          closeY: c.closeY === undefined ? undefined : mapPoint({ x: 0, y: c.closeY }).y
-        }))
-      },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  if (series.type === "surface") {
-    return translateAdornments(
-      { ...series, cells: series.cells.map(cell => ({ ...cell, ...mapRect(cell) })) },
-      mapPoint,
-      mapLine,
-      mapText
-    );
-  }
-  return series;
-}
-
-function translateAdornments<T extends ChartSceneSeries>(
-  series: T,
-  mapPoint: (point: ChartScenePoint) => ChartScenePoint,
-  mapLine: (line: ChartSceneLine) => ChartSceneLine,
-  mapText: (text: ChartSceneText) => ChartSceneText
-): T {
-  return {
-    ...series,
-    labels: series.labels?.map(mapText),
-    markers: series.markers?.map(m => ({ ...m, ...mapPoint(m) })),
-    trendlines: series.trendlines?.map(t => ({
-      ...t,
-      points: t.points.map(mapPoint),
-      label: t.label ? mapText(t.label) : undefined
-    })),
-    errorBars: series.errorBars?.map(e => ({
-      line: mapLine(e.line),
-      cap1: e.cap1 ? mapLine(e.cap1) : undefined,
-      cap2: e.cap2 ? mapLine(e.cap2) : undefined
-    })),
-    leaderLines: series.leaderLines?.map(mapLine)
-  };
-}
-
-function translatePieSlice(
-  slice: ChartScenePieSlice,
-  mapPoint: (point: ChartScenePoint) => ChartScenePoint,
-  flipY: boolean
-): ChartScenePieSlice {
-  const center = mapPoint({ x: slice.cx, y: slice.cy });
-  // Flipping `Y` geometrically mirrors the slice, so the sweep
-  // direction must invert. When `flipY` is false the caller is only
-  // translating the scene — angles must stay untouched, otherwise the
-  // pie re-orders its wedges after any `offset`-only transform.
-  if (flipY) {
-    return {
-      ...slice,
-      cx: center.x,
-      cy: center.y,
-      startAngle: -slice.endAngle,
-      endAngle: -slice.startAngle
-    };
-  }
-  return {
-    ...slice,
-    cx: center.x,
-    cy: center.y
-  };
-}
-
-function lineFromPoints(
-  p1: ChartScenePoint,
-  p2: ChartScenePoint
-): Pick<ChartSceneLine, "x1" | "y1" | "x2" | "y2"> {
-  return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
-}
-
-/**
- * Stroke the outline of a pie / doughnut slice with `drawLine` calls.
- *
- * Used by {@link drawPdfSeries} as a fallback when the target surface
- * does not implement `drawPath` — without it, pie charts would be
- * completely invisible on minimal surfaces. The outline uses the same
- * polyline approximation of the arc (`arcPolyline`) that
- * {@link pieSliceToPath} builds for the filled version, so the shape
- * matches pixel-for-pixel modulo fill/no-fill.
- */
-function strokePieSliceOutline(
-  page: ChartPdfDrawingSurface,
-  slice: ChartScenePieSlice,
-  color: PdfColor
-): void {
-  const ops = pieSliceToPath(slice);
-  let last: { x: number; y: number } | undefined;
-  let first: { x: number; y: number } | undefined;
-  for (const op of ops) {
-    if (op.op === "move") {
-      last = { x: op.x, y: op.y };
-      first = last;
-    } else if (op.op === "line" && last) {
-      page.drawLine({ x1: last.x, y1: last.y, x2: op.x, y2: op.y, color });
-      last = { x: op.x, y: op.y };
-    } else if (op.op === "close" && last && first) {
-      page.drawLine({ x1: last.x, y1: last.y, x2: first.x, y2: first.y, color });
-      last = undefined;
-      first = undefined;
-    }
-  }
-}
-
-function pieSliceToPath(slice: ChartScenePieSlice): ChartPdfPathOp[] {
-  const ops: ChartPdfPathOp[] = [];
-  const startOuter = polarPoint(slice.cx, slice.cy, slice.radius, slice.startAngle);
-  const endOuter = polarPoint(slice.cx, slice.cy, slice.radius, slice.endAngle);
-  if (slice.innerRadius > 0) {
-    const endInner = polarPoint(slice.cx, slice.cy, slice.innerRadius, slice.endAngle);
-    ops.push({ op: "move", ...startOuter });
-    ops.push(...arcPolyline(slice.cx, slice.cy, slice.radius, slice.startAngle, slice.endAngle));
-    ops.push({ op: "line", ...endInner });
-    ops.push(
-      ...arcPolyline(slice.cx, slice.cy, slice.innerRadius, slice.endAngle, slice.startAngle)
-    );
-    ops.push({ op: "close" });
-    return ops;
-  }
-  ops.push({ op: "move", x: slice.cx, y: slice.cy });
-  ops.push({ op: "line", ...startOuter });
-  ops.push(...arcPolyline(slice.cx, slice.cy, slice.radius, slice.startAngle, slice.endAngle));
-  ops.push({ op: "line", ...endOuter });
-  ops.push({ op: "close" });
-  return ops;
-}
-
-function arcPolyline(
-  cx: number,
-  cy: number,
-  radius: number,
-  startAngle: number,
-  endAngle: number
-): ChartPdfPathOp[] {
-  const sweep = endAngle - startAngle;
-  // Use high segment density for smooth arcs: ~1 segment per 2° of sweep,
-  // minimum 8 segments. A 36° slice (10% pie) gets 18 segments; a full
-  // circle gets 180. This eliminates visible polygon facets in PDF output.
-  const segments = Math.max(8, Math.ceil((Math.abs(sweep) * radius) / 3));
-  const ops: ChartPdfPathOp[] = [];
-  for (let i = 1; i <= segments; i++) {
-    ops.push({ op: "line", ...polarPoint(cx, cy, radius, startAngle + (sweep * i) / segments) });
-  }
-  return ops;
-}
-
-function polarPoint(cx: number, cy: number, radius: number, angle: number): ChartScenePoint {
-  return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
-}
-
 function collectSeries(group: ChartTypeGroup | undefined): SeriesBase[] {
   return ((group as { series?: SeriesBase[] } | undefined)?.series ?? []) as SeriesBase[];
 }
@@ -8040,59 +5934,6 @@ function collectNumberValues(ref: NumberReference | undefined): number[] {
   return densifySparsePoints(points, ref?.cache?.pointCount, NaN, raw =>
     typeof raw === "number" && Number.isFinite(raw) ? raw : NaN
   );
-}
-
-/**
- * Hard ceiling for sparse-array densification — prevents malicious or
- * malformed XML from allocating gigabyte-scale arrays via a bogus
- * `<c:ptCount val="...">`. Excel's per-worksheet row limit is
- * 1 048 576; doubling that gives a generous upper bound that still
- * fits comfortably in memory for legitimate workbooks.
- */
-const SPARSE_ARRAY_CEILING = 2_097_152;
-
-/**
- * Reconstruct a dense array from OOXML's sparse `<c:pt idx="N">` form.
- * Shared between the numeric (`collectNumberValues`) and string
- * (`collectCategories`) code paths — previously both duplicated the
- * `maxIdx` / `declaredCount` / ceiling logic, and each drift kept
- * quietly mis-routing indices.
- *
- * @param points      Sparse point records with `index` and optional `value`.
- * @param pointCount  The total slot count declared in `<c:ptCount>`.
- * @param empty       Value for slots with no matching point.
- * @param coerce      Maps a raw `value` to the output type; used to
- *                    reject non-finite numbers / non-string category
- *                    values to `empty`.
- */
-function densifySparsePoints<T, Raw>(
-  points: readonly { index: number; value?: Raw }[],
-  pointCount: number | undefined,
-  empty: T,
-  coerce: (raw: Raw | undefined) => T
-): T[] {
-  if (points.length === 0) {
-    return [];
-  }
-  let maxIdx = -1;
-  for (const p of points) {
-    if (typeof p.index === "number" && Number.isFinite(p.index) && p.index > maxIdx) {
-      maxIdx = p.index;
-    }
-  }
-  const declaredCount = typeof pointCount === "number" ? pointCount : 0;
-  const rawLength = Math.max(points.length, maxIdx + 1, declaredCount);
-  const length = Math.min(rawLength, SPARSE_ARRAY_CEILING);
-  const dense: T[] = new Array(length).fill(empty);
-  for (const p of points) {
-    const idx =
-      typeof p.index === "number" && Number.isFinite(p.index) && p.index >= 0 ? p.index : -1;
-    if (idx < 0 || idx >= length) {
-      continue;
-    }
-    dense[idx] = coerce(p.value);
-  }
-  return dense;
 }
 
 function collectAxisValues(axisData: AxisDataSource | undefined): number[] {
@@ -8284,43 +6125,6 @@ function truncateLabel(label: string): string {
  * CSS pixels to points. `@excel/utils/text-metrics` reports pixel widths for a
  * point-sized font; chart scene units are the units text is drawn in.
  */
-const POINTS_PER_PIXEL = 72 / 96;
-
-/**
- * Measure the rendered pixel width of a label using the Excel module's
- * built-in font metrics engine (`@excel/utils/text-metrics`). This replaces
- * the previous `text.length * fontSize * 0.55` approximation with a real
- * per-character advance-width lookup, which matters wherever the renderer
- * must allocate space for a label (legend width, title centring, PDF
- * anchoring). Chart labels default to Arial to match the SVG emit path
- * (`font-family="Arial"` in renderSvgText), and `bold`/`italic` are
- * forwarded when present — the Excel engine already knows how to degrade
- * to a category-average factor for unrecognised faces.
- */
-function estimateTextWidth(
-  text: string,
-  fontSize: number,
-  options: { bold?: boolean; italic?: boolean; fontName?: string } = {}
-): number {
-  if (!text) {
-    return 0;
-  }
-  // `measureTextWidthPx` takes a point size and returns a CSS-pixel width, so
-  // it embeds a 96/72 scale. Chart scenes are a single coordinate space in which
-  // text is *drawn* at `fontSize` units — SVG emits `font-size="${fontSize}"`
-  // (user units) and the PDF surface passes `fontSize` straight through as
-  // points. Returning the pixel width therefore over-allocated every label by
-  // 4/3, which pushed legends wider, shifted centred titles left, and
-  // ellipsised axis labels that in fact fit.
-  return (
-    measureTextWidthPx(text, {
-      name: options.fontName ?? "arial",
-      size: fontSize,
-      bold: options.bold,
-      italic: options.italic
-    }) * POINTS_PER_PIXEL
-  );
-}
 
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {

@@ -2,7 +2,7 @@
  * Tests for the chart glyph rasterizer's horizontal metrics handling.
  */
 
-import { parseRasterFont, rasterizeGlyph } from "@excel/chart/render/glyph-rasterizer";
+import { parseRasterFont, rasterizeGlyph } from "@draw/raster/glyph-rasterizer";
 import { describe, it, expect } from "vitest";
 
 // =============================================================================

@@ -9,8 +9,12 @@
  * Reference: ECMA-376 §18.18.92 + Office Open XML extension `x14` namespace.
  */
 
+import { toSvg } from "@draw/svg";
+import type { DrawList, DrawNode } from "@draw/types";
+import { parseCssColor } from "@utils/svg-lex";
+import type { Rgba01 } from "@utils/svg-lex";
 import { CHART_THEME_PALETTE } from "@utils/theme-colors";
-import { xmlEncode, xmlEncodeAttr } from "@xml/encode";
+import { xmlEncode } from "@xml/encode";
 
 /**
  * Top-level sparkline group — matches `x14:sparklineGroup`.
@@ -736,20 +740,52 @@ export function computeSparklineGeometry(
       out.push({ kind: "rect", x, y, width: barW, height: Math.max(h, 1), color });
     }
   } else {
-    const pointsFinite: Array<{ x: number; y: number; v: number }> = [];
+    // `displayEmptyCellsAs` was serialised into the XML but never read back when
+    // drawing, so all three settings produced the same picture: the blanks were dropped
+    // and the line ran straight across them. That is `span` — the one Excel does *not*
+    // use by default.
+    const emptyAs = group.displayEmptyCellsAs ?? "gap";
+    const plotted: Array<{ x: number; y: number; v: number } | undefined> = [];
     for (let i = 0; i < data.length; i++) {
       const v = data[i];
+      const x = xAt(i, data.length);
       if (Number.isFinite(v)) {
-        pointsFinite.push({ x: xAt(i, data.length), y: yAt(v), v });
+        plotted.push({ x, y: yAt(v), v });
+      } else if (emptyAs === "zero") {
+        // A blank reads as a value of zero, so it gets a point like any other.
+        plotted.push({ x, y: yAt(0), v: 0 });
+      } else {
+        // `gap` breaks the line here; `span` bridges it. Either way there is no point.
+        plotted.push(undefined);
       }
     }
-    if (pointsFinite.length >= 2) {
-      out.push({
-        kind: "polyline",
-        points: pointsFinite.map(p => ({ x: p.x, y: p.y })),
-        color: lineColor,
-        width: group.lineWeight ? group.lineWeight * 0.75 : 1
-      });
+    const pointsFinite = plotted.filter((p): p is { x: number; y: number; v: number } => !!p);
+    // `gap` splits into runs so the break is visible; `span` and `zero` are one run.
+    const runs: Array<Array<{ x: number; y: number; v: number }>> =
+      emptyAs === "gap"
+        ? plotted.reduce<Array<Array<{ x: number; y: number; v: number }>>>((acc, point) => {
+            if (!point) {
+              if (acc.length > 0 && acc[acc.length - 1].length > 0) {
+                acc.push([]);
+              }
+              return acc;
+            }
+            if (acc.length === 0) {
+              acc.push([]);
+            }
+            acc[acc.length - 1].push(point);
+            return acc;
+          }, [])
+        : [pointsFinite];
+    for (const run of runs) {
+      if (run.length >= 2) {
+        out.push({
+          kind: "polyline",
+          points: run.map(p => ({ x: p.x, y: p.y })),
+          color: lineColor,
+          width: group.lineWeight ? group.lineWeight * 0.75 : 1
+        });
+      }
     }
     if (group.markers) {
       for (const p of pointsFinite) {
@@ -848,32 +884,23 @@ export interface SparklineRenderOptions {
  * standalone SVG per sparkline when passed a group with a single
  * member, or a grid-stacked SVG when given multiple members.
  */
-export function renderSparklineSvg(
+export function sparklineToDrawList(
   group: SparklineGroup,
   values: number[][],
   options: SparklineRenderOptions = {}
-): string {
+): DrawList {
   const width = Math.max(1, options.width ?? 120);
   const height = Math.max(1, options.height ?? 30);
   const padding = Math.max(0, options.padding ?? 2);
   const rowCount = Math.max(group.sparklines.length, values.length, 1);
   const rowHeight = height / rowCount;
 
-  const parts: string[] = [];
-  parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
-  );
-  if (options.background) {
-    parts.push(
-      `<rect x="0" y="0" width="${width}" height="${height}" fill="${escapeAttr(options.background)}"/>`
-    );
-  }
-
   // Per-group axis range: group means all sparklines share min/max;
   // individual means each uses its own; custom uses manualMin/Max.
   const groupMin = minOrNaN(values);
   const groupMax = maxOrNaN(values);
 
+  const children: DrawNode[] = [];
   for (let row = 0; row < rowCount; row++) {
     const data = values[row] ?? [];
     if (data.length === 0) {
@@ -888,34 +915,69 @@ export function renderSparklineSvg(
       groupMax
     });
     // Geometry is box-local (y-down); offset each row by its top.
-    for (const p of primitives) {
-      switch (p.kind) {
+    for (const primitive of primitives) {
+      switch (primitive.kind) {
         case "rect":
-          parts.push(
-            `<rect x="${p.x}" y="${rowTop + p.y}" width="${p.width}" height="${p.height}" fill="${p.color}"/>`
-          );
+          children.push({
+            kind: "rect",
+            x: primitive.x,
+            y: rowTop + primitive.y,
+            width: primitive.width,
+            height: primitive.height,
+            paint: { fill: colourOf(primitive.color) }
+          });
           break;
-        case "polyline": {
-          const d = p.points
-            .map((pt, i) => `${i === 0 ? "M" : "L"}${pt.x} ${rowTop + pt.y}`)
-            .join(" ");
-          parts.push(`<path d="${d}" fill="none" stroke="${p.color}" stroke-width="${p.width}"/>`);
+        case "polyline":
+          children.push({
+            kind: "polyline",
+            points: primitive.points.map(point => ({ x: point.x, y: rowTop + point.y })),
+            paint: { stroke: colourOf(primitive.color), strokeWidth: primitive.width }
+          });
           break;
-        }
         case "circle":
-          parts.push(`<circle cx="${p.cx}" cy="${rowTop + p.cy}" r="${p.r}" fill="${p.color}"/>`);
+          children.push({
+            kind: "ellipse",
+            cx: primitive.cx,
+            cy: rowTop + primitive.cy,
+            rx: primitive.r,
+            ry: primitive.r,
+            paint: { fill: colourOf(primitive.color) }
+          });
           break;
         case "axis":
-          parts.push(
-            `<line x1="${p.x1}" y1="${rowTop + p.y1}" x2="${p.x2}" y2="${rowTop + p.y2}" stroke="${p.color}" stroke-width="0.5"/>`
-          );
+          children.push({
+            kind: "line",
+            x1: primitive.x1,
+            y1: rowTop + primitive.y1,
+            x2: primitive.x2,
+            y2: rowTop + primitive.y2,
+            paint: { stroke: colourOf(primitive.color), strokeWidth: 0.5 }
+          });
           break;
       }
     }
   }
+  return { width, height, children };
+}
 
-  parts.push(`</svg>`);
-  return parts.join("");
+/**
+ * Parse a sparkline colour token, falling back to black.
+ *
+ * The geometry layer emits `#rrggbb`; a malformed value must still paint
+ * something rather than vanish, which is what an `undefined` fill would do.
+ */
+function colourOf(token: string): Rgba01 {
+  return parseCssColor(token) ?? { r: 0, g: 0, b: 0, a: 1 };
+}
+
+export function renderSparklineSvg(
+  group: SparklineGroup,
+  values: number[][],
+  options: SparklineRenderOptions = {}
+): string {
+  return toSvg(sparklineToDrawList(group, values, options), {
+    ...(options.background === undefined ? {} : { background: options.background })
+  });
 }
 
 function axisRangeFor(
@@ -1024,12 +1086,4 @@ function resolveSparklineColor(color: SparklineColor | undefined): string | unde
     return hex ? `#${hex}` : "#000000";
   }
   return undefined;
-}
-
-function escapeAttr(s: string): string {
-  // Attribute values additionally require `\t \n \r` → numeric refs
-  // so XML attribute-value normalisation doesn't collapse them to
-  // literal spaces (losing e.g. a manual cell-reference break in a
-  // sparkline group's `manualMin` / `manualMax` display label).
-  return xmlEncodeAttr(s);
 }

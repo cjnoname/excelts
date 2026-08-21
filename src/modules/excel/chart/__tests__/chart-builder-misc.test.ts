@@ -14,7 +14,9 @@ import {
   setSpPrFill,
   parseChartEx,
   buildChartExModel,
-  renderChartEx
+  renderChartEx,
+  renderChartExSvg,
+  drawChartExPdf
 } from "@excel/chart";
 import { chartsheetChart } from "@excel/core/chartsheet";
 import { getChartEntry } from "@excel/core/workbook";
@@ -1213,6 +1215,143 @@ describe("chartToPdf bridge", () => {
     expect(outlierRects).toBeGreaterThan(0);
   });
 
+  it("drawChartExPdf rounds the regionMap panel's corners when the surface takes a path", async () => {
+    // `ChartPdfDrawingSurface.drawRect` has no corner radius, so the SVG's rounded
+    // map panel used to come out square in a PDF — the old renderer documented that
+    // as the one unavoidable divergence for this layout. It is avoidable whenever
+    // the surface can take a path.
+    const { drawChartExPdf } = await import("@excel/chart");
+    const paths: Array<{ ops: Array<{ op: string }> }> = [];
+    const rects: Array<{ width: number; height: number }> = [];
+    const surface = {
+      drawRect(opts: { width: number; height: number }) {
+        rects.push(opts);
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText() {
+        return this;
+      },
+      drawPath(ops: Array<{ op: string }>) {
+        paths.push({ ops });
+        return this;
+      }
+    };
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    addChartEx(
+      ws,
+      {
+        type: "regionMap",
+        series: [
+          {
+            values: "ignored",
+            literalValues: [10, 20],
+            literalCategories: ["USA", "Canada"]
+          }
+        ]
+      },
+      "D1:J10"
+    );
+    drawChartExPdf(surface, Chart.chartExModel(getCharts(ws)[0])!, {
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300
+    });
+
+    // The panel is now a path with four cubic corners rather than a plain rect.
+    const cornered = paths.filter(p => p.ops.filter(op => op.op === "curve").length === 4);
+    expect(cornered.length).toBeGreaterThan(0);
+  });
+
+  it("drawChartExPdf regionMap keeps a feature's two rings apart without drawPath", async () => {
+    // A country with an island is one path with two subpaths. On a surface with no
+    // `drawPath` the fallback traces the outline with `drawLine`, and it used to
+    // flatten every command into one point list — drawing a connector from the end
+    // of the mainland ring to the start of the island, and leaving both rings with
+    // a missing closing edge.
+    const { drawChartExPdf } = await import("@excel/chart");
+    const lines: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+    const surface = {
+      drawRect() {
+        return this;
+      },
+      drawLine(opts: { x1: number; y1: number; x2: number; y2: number }) {
+        lines.push(opts);
+        return this;
+      },
+      drawText() {
+        return this;
+      }
+    };
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    addChartEx(
+      ws,
+      {
+        type: "regionMap",
+        series: [
+          {
+            values: "ignored",
+            literalValues: [42],
+            literalCategories: ["Twinland"]
+          }
+        ]
+      },
+      "D1:J10"
+    );
+    // Two disjoint unit squares, far apart, as one feature.
+    const topology = {
+      type: "Topology",
+      arcs: [
+        [
+          [0, 0],
+          [10, 0],
+          [10, 10],
+          [0, 10],
+          [0, 0]
+        ],
+        [
+          [40, 40],
+          [50, 40],
+          [50, 50],
+          [40, 50],
+          [40, 40]
+        ]
+      ],
+      objects: {
+        countries: {
+          type: "GeometryCollection",
+          geometries: [{ type: "MultiPolygon", id: "Twinland", arcs: [[[0]], [[1]]] }]
+        }
+      }
+    } as const;
+    drawChartExPdf(
+      surface,
+      Chart.chartExModel(getCharts(ws)[0])!,
+      {
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 300
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      { regionMap: { topology, objectName: "countries", match: "id" } }
+    );
+
+    // Every traced segment must lie within one ring, never bridge the two. The
+    // rings are 30 units apart in source space, so any connector is far longer
+    // than the longest legitimate edge.
+    expect(lines.length).toBeGreaterThan(0);
+    const lengths = lines.map(l => Math.hypot(l.x2 - l.x1, l.y2 - l.y1));
+    const longest = Math.max(...lengths);
+    const median = [...lengths].sort((a, b) => a - b)[Math.floor(lengths.length / 2)];
+    expect(longest).toBeLessThan(median * 3);
+  });
+
   it("drawChartExPdf funnel traces the trapezoid outline with drawLine when drawPath is missing", async () => {
     // Minimal surface without drawPath. The funnel layer must still
     // (a) fill a colour rect so the data magnitude is visible and
@@ -1367,5 +1506,267 @@ describe("drawChartExPdf regionMap with TopoJSON topology", () => {
     // When TopoJSON polygons are provided, the renderer draws path primitives
     // for each matched region (3 countries = at least 3 paths).
     expect(paths.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("ChartEx legend parity between the SVG and vector-PDF backends", () => {
+  /** A funnel chartEx with a legend at the requested position. */
+  function funnelWithLegend(legendPosition: "b" | "l" | "r" | "t" | "tr") {
+    return buildChartExModel({
+      type: "funnel",
+      categories: "Sheet1!$A$1:$A$3",
+      series: [{ name: "Stage", values: "Sheet1!$B$1:$B$3", literalValues: [10, 6, 3] }],
+      showLegend: true,
+      legendPosition
+    });
+  }
+
+  /** Record the swatches and label strings a PDF surface receives. */
+  function recordingSurface() {
+    const swatches: { x: number; y: number }[] = [];
+    const texts: string[] = [];
+    const page = {
+      drawRect(options: { x: number; y: number; width: number; height: number }) {
+        if (options.width === 10 && options.height === 10) {
+          swatches.push({ x: options.x, y: options.y });
+        }
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText(text: string) {
+        texts.push(text);
+        return this;
+      }
+    };
+    return { page, swatches, texts };
+  }
+
+  it("draws the legend in the vector PDF, not only in the SVG", () => {
+    // Regression: `drawChartExPdf` had no legend code at all, so an authored
+    // `legendPos` showed up in SVG and PNG but never in a PDF.
+    const model = funnelWithLegend("b");
+    const svg = renderChartExSvg(model, { width: 300, height: 200 });
+    expect(svg).toContain('width="10" height="10"');
+    expect(svg).toContain("Stage");
+
+    const { page, swatches, texts } = recordingSurface();
+    drawChartExPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(swatches).toHaveLength(1);
+    expect(texts).toContain("Stage");
+  });
+
+  it("omits the legend from both backends when the model has none", () => {
+    const model = buildChartExModel({
+      type: "funnel",
+      categories: "Sheet1!$A$1:$A$3",
+      series: [{ name: "Stage", values: "Sheet1!$B$1:$B$3", literalValues: [10, 6, 3] }],
+      showLegend: false
+    });
+    expect(renderChartExSvg(model, { width: 300, height: 200 })).not.toContain(
+      'width="10" height="10"'
+    );
+
+    const { page, swatches } = recordingSurface();
+    drawChartExPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(swatches).toHaveLength(0);
+  });
+
+  it("places the swatch at the same coordinates in both backends", () => {
+    // Both backends read one shared layout, so the geometry cannot drift. The
+    // PDF surface receives page coordinates, which are Y-up: a swatch whose SVG
+    // top edge is `y` has its PDF bottom edge at `height - y - swatchSize`.
+    const HEIGHT = 200;
+    const SWATCH = 10;
+    for (const position of ["b", "l", "r", "t", "tr"] as const) {
+      const model = funnelWithLegend(position);
+      const svg = renderChartExSvg(model, { width: 300, height: HEIGHT });
+      const svgSwatch = /<rect x="([\d.-]+)" y="([\d.-]+)" width="10" height="10"/.exec(svg);
+      expect(svgSwatch, `no SVG swatch for legendPos=${position}`).not.toBeNull();
+
+      const { page, swatches } = recordingSurface();
+      drawChartExPdf(page, model, { x: 0, y: 0, width: 300, height: HEIGHT });
+      expect(swatches, `no PDF swatch for legendPos=${position}`).toHaveLength(1);
+      expect(swatches[0].x).toBeCloseTo(Number(svgSwatch![1]), 2);
+      expect(swatches[0].y).toBeCloseTo(HEIGHT - Number(svgSwatch![2]) - SWATCH, 2);
+    }
+  });
+
+  it("keeps the legend clear of the plotted data in the vector PDF", () => {
+    // Asserting against the *expected* margins would pass even if the PDF path
+    // computed a different plot, which is exactly the bug: it used 12px insets
+    // while the legend layout assumes 58/128/46. So measure what is actually
+    // drawn — the bounding box of every non-swatch mark — and require the
+    // swatch to sit outside it.
+    const WIDTH = 300;
+    const HEIGHT = 200;
+    for (const position of ["b", "l", "r", "t", "tr"] as const) {
+      for (const title of [undefined, "T"]) {
+        const model = buildChartExModel({
+          type: "funnel",
+          categories: "Sheet1!$A$1:$A$3",
+          series: [{ name: "Stage", values: "Sheet1!$B$1:$B$3", literalValues: [10, 6, 3] }],
+          showLegend: true,
+          legendPosition: position,
+          ...(title === undefined ? {} : { title })
+        });
+
+        const swatches: { x: number; y: number }[] = [];
+        const data = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+        const note = (x: number, y: number): void => {
+          data.minX = Math.min(data.minX, x);
+          data.minY = Math.min(data.minY, y);
+          data.maxX = Math.max(data.maxX, x);
+          data.maxY = Math.max(data.maxY, y);
+        };
+        const page = {
+          drawRect(options: { x: number; y: number; width: number; height: number }) {
+            if (options.width === 10 && options.height === 10) {
+              swatches.push({ x: options.x, y: options.y });
+            } else if (options.width < WIDTH && options.height < HEIGHT) {
+              // Skip the full-bleed chart background; everything else is data.
+              note(options.x, options.y);
+              note(options.x + options.width, options.y + options.height);
+            }
+            return this;
+          },
+          drawLine(options: { x1: number; y1: number; x2: number; y2: number }) {
+            note(options.x1, options.y1);
+            note(options.x2, options.y2);
+            return this;
+          },
+          drawText() {
+            return this;
+          },
+          drawPath(ops: { op: string; x?: number; y?: number }[]) {
+            for (const op of ops) {
+              if (op.x !== undefined && op.y !== undefined) {
+                note(op.x, op.y);
+              }
+            }
+            return this;
+          }
+        };
+        drawChartExPdf(page, model, { x: 0, y: 0, width: WIDTH, height: HEIGHT });
+
+        expect(swatches).toHaveLength(1);
+        expect(Number.isFinite(data.minX), "no data geometry was recorded").toBe(true);
+
+        const swatch = swatches[0];
+        const overlaps =
+          swatch.x + 10 > data.minX &&
+          swatch.x < data.maxX &&
+          swatch.y + 10 > data.minY &&
+          swatch.y < data.maxY;
+        expect(
+          overlaps,
+          `legendPos=${position} title=${String(title)}: swatch (${swatch.x},${swatch.y}) ` +
+            `overlaps data box [${data.minX},${data.minY}]-[${data.maxX},${data.maxY}]`
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("flattens a multi-paragraph series caption onto the legend row", () => {
+    const model = buildChartExModel({
+      type: "funnel",
+      categories: "Sheet1!$A$1:$A$3",
+      series: [{ name: "North\nRegion", values: "Sheet1!$B$1:$B$3", literalValues: [3, 2, 1] }],
+      showLegend: true,
+      legendPosition: "r"
+    });
+    const { page, texts } = recordingSurface();
+    drawChartExPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    expect(texts.every(text => !/[\r\n]/.test(text))).toBe(true);
+    expect(texts).toContain("North Region");
+  });
+});
+
+describe("ChartEx data labels are driven by the model, not hard-coded", () => {
+  const funnel = (dataLabels?: unknown) =>
+    buildChartExModel({
+      type: "funnel",
+      categories: "Sheet1!$A$1:$A$3",
+      series: [
+        {
+          name: "Stage",
+          values: "Sheet1!$B$1:$B$3",
+          literalValues: [10, 6, 3],
+          ...(dataLabels === undefined ? {} : { dataLabels })
+        }
+      ]
+    } as Parameters<typeof buildChartExModel>[0]);
+
+  /** Every string the PDF backend draws. */
+  function pdfTexts(model: ReturnType<typeof buildChartExModel>): string[] {
+    const out: string[] = [];
+    const page = {
+      drawRect() {
+        return this;
+      },
+      drawLine() {
+        return this;
+      },
+      drawText(text: string) {
+        out.push(text);
+        return this;
+      }
+    };
+    drawChartExPdf(page, model, { x: 0, y: 0, width: 300, height: 200 });
+    return out;
+  }
+
+  it("shows the value by default, matching the model Excel writes", () => {
+    // `chart-ex-builder` defaults a funnel to `visibility.value = true`, but the
+    // renderers drew the category name — so all three backends agreed with each
+    // other and disagreed with the model they were rendering.
+    const model = funnel();
+    expect(
+      model.chartSpace.chart.plotArea.plotAreaRegion!.series[0].dataLabels?.visibility?.value
+    ).toBe(true);
+    expect(pdfTexts(model)).toEqual(expect.arrayContaining(["10", "6", "3"]));
+    expect(renderChartExSvg(model, { width: 300, height: 200 })).toContain(">10<");
+  });
+
+  it("honours an authored categoryName-only visibility", () => {
+    const texts = pdfTexts(funnel({ showCategory: true, showValue: false }));
+    expect(texts).not.toContain("10");
+    expect(texts).toEqual(expect.arrayContaining(["1", "2", "3"]));
+  });
+
+  it("joins several parts with the authored separator", () => {
+    expect(pdfTexts(funnel({ showCategory: true, showValue: true, separator: " — " }))).toEqual(
+      expect.arrayContaining(["1 — 10", "2 — 6", "3 — 3"])
+    );
+  });
+
+  it("draws no data label when every flag is off", () => {
+    const texts = pdfTexts(funnel({ showCategory: false, showValue: false }));
+    for (const value of ["10", "6", "3", "1", "2"]) {
+      expect(texts, `unexpected label ${value}`).not.toContain(value);
+    }
+    const svg = renderChartExSvg(funnel({ showCategory: false, showValue: false }), {
+      width: 300,
+      height: 200
+    });
+    expect(svg).not.toContain(">10<");
+  });
+
+  it("keeps the SVG and PDF backends showing the same label text", () => {
+    for (const labels of [
+      undefined,
+      { showCategory: true, showValue: false },
+      { showCategory: true, showValue: true, separator: "/" }
+    ]) {
+      const model = funnel(labels);
+      const svg = renderChartExSvg(model, { width: 300, height: 200 });
+      for (const text of pdfTexts(model)) {
+        if (text === "Stage") {
+          continue; // legend entry, not a data label
+        }
+        expect(svg, `PDF drew ${JSON.stringify(text)} but the SVG did not`).toContain(text);
+      }
+    }
   });
 });

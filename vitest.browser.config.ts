@@ -33,6 +33,10 @@ export default defineConfig({
       // APIs and disk fixtures, so we re-run them in a real browser to prove
       // the shipped logic behaves identically there. Node-stream / fixture
       // dependent files are excluded below.
+      // `draw` is the shared drawing engine: display-list maths and string
+      // building, with no platform API at all, so the browser must agree with
+      // Node exactly.
+      "src/modules/draw/**/__tests__/**/*.test.ts",
       "src/modules/xml/__tests__/**/*.test.ts",
       "src/modules/markdown/__tests__/**/*.test.ts",
       "src/modules/formula/**/__tests__/**/*.test.ts",

@@ -24,11 +24,24 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+/**
+ * `--root <dir>` points the scan at a different tree. Used by the tests: a check that
+ * never fires is worse than no check, and the only way to know this one fires is to
+ * hand it a tree that breaks the rules on purpose.
+ */
+function rootFromArgv(): string {
+  const flag = process.argv.indexOf("--root");
+  return flag === -1
+    ? path.resolve(import.meta.dirname, "..")
+    : path.resolve(process.argv[flag + 1]);
+}
+
+const ROOT = rootFromArgv();
 const PACKAGES_DIR = path.join(ROOT, "packages");
 
 /** Internal path aliases declared in the root tsconfig. */
 const INTERNAL_ALIASES = [
+  "@draw",
   "@excel",
   "@word",
   "@formula",
@@ -44,14 +57,73 @@ const INTERNAL_ALIASES = [
 
 const ALIAS_RE = new RegExp(`^(?:${INTERNAL_ALIASES.join("|")})(?:/|$)`);
 
-/** Matches `import ... from "x"`, `export ... from "x"`, `import("x")`, `require("x")`. */
-const IMPORT_RE =
-  /(?:import|export)\s[^;]*?from\s*["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)|require\s*\(\s*["']([^"']+)["']\s*\)/g;
+/**
+ * Every form a module specifier can take.
+ *
+ * The bare `import "x"` is easy to forget and was: it has no bindings and no `from`
+ * clause, so a pattern anchored on `from` never saw it — yet importing a module for its
+ * side effects reaches into it exactly as much as a named import does, and would have
+ * pulled the core's internals into a satellite unnoticed.
+ */
+const IMPORT_PATTERNS = [
+  /(?:import|export)\s[^;]*?from\s*["']([^"']+)["']/g,
+  /\bimport\s*\(\s*["']([^"']+)["']\s*[,)]/g,
+  /(?:^|[\s;])import\s*["']([^"']+)["']/g,
+  /\brequire\s*\(\s*["']([^"']+)["']\s*[,)]/g
+];
 
 interface Violation {
   readonly file: string;
   readonly specifier: string;
   readonly reason: string;
+}
+
+/**
+ * Source with comments blanked out, so a specifier mentioned in prose is not read as an
+ * import.
+ *
+ * The doc comments in this repository discuss `@excel/…` constantly — including to say
+ * that a given file must *not* import it — and a commented-out import is ordinary while
+ * refactoring. Both were being reported as violations.
+ *
+ * Replaced with spaces rather than removed, so every byte offset still lines up and the
+ * reported line numbers stay true.
+ */
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      out += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (two === "/*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      // Keep newlines so line numbers survive.
+      out += source.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      // Copy the literal whole, so a `//` inside a specifier is not mistaken for a comment.
+      let j = i + 1;
+      while (j < source.length && source[j] !== ch) {
+        j += source[j] === "\\" ? 2 : 1;
+      }
+      out += source.slice(i, Math.min(j + 1, source.length));
+      i = j + 1;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 function collectTsFiles(dir: string, out: string[]): void {
@@ -68,12 +140,14 @@ function collectTsFiles(dir: string, out: string[]): void {
   }
 }
 
-function specifiersOf(source: string): string[] {
+function specifiersOf(rawSource: string): string[] {
+  const source = stripComments(rawSource);
   const specifiers: string[] = [];
-  for (const match of source.matchAll(IMPORT_RE)) {
-    const specifier = match[1] ?? match[2] ?? match[3];
-    if (specifier !== undefined) {
-      specifiers.push(specifier);
+  for (const pattern of IMPORT_PATTERNS) {
+    for (const match of source.matchAll(pattern)) {
+      if (match[1] !== undefined) {
+        specifiers.push(match[1]);
+      }
     }
   }
   return specifiers;

@@ -9,6 +9,7 @@
  */
 
 import { measureTextWidth, mapToStandardFont } from "@utils/font-metrics";
+import { parseSvgAttributes, parseSvgNumberList } from "@utils/svg-lex";
 import { isHyperlink, isRun } from "@word/core/text-utils";
 import { layoutDocument } from "@word/layout/layout";
 import type { LayoutResult } from "@word/layout/layout";
@@ -72,6 +73,28 @@ export interface RenderOptions {
   readonly backgroundColor?: string;
   /** Scale factor for the output. Default: 1.0. */
   readonly scale?: number;
+  /**
+   * Render a chart to an SVG fragment.
+   *
+   * Charts cannot be drawn from inside this module: the layout carries the
+   * source `Chart` / `ChartEx` payload but rendering one means reaching the
+   * Excel chart engine, and `word/` may only do that through
+   * `word/bridge/excel-bridge`. Without an injected renderer every chart fell
+   * back to a titled placeholder box — `LayoutChart.svg` was declared but
+   * nothing on the normal layout path ever populated it, so
+   * `renderDocumentToSvg` could not produce a chart at all.
+   *
+   * Pass `renderWordChartSvg` from `documonster/word/excel` to get real charts.
+   * The fragment is inlined inside a `<g transform="translate(x y)">`, so it
+   * should be authored at the origin with the chart's own width/height. Return
+   * `undefined` to keep the placeholder.
+   *
+   * Only consulted by the positioned-layout renderers — {@link
+   * renderDocumentToSvg} and {@link renderPageFromLayout}. {@link
+   * renderPageToSvg} still runs on the older pagination *estimate*, which has no
+   * chart content at all, so this option has no effect there.
+   */
+  readonly renderChart?: (chart: LayoutChart) => string | undefined;
 }
 
 // =============================================================================
@@ -1223,16 +1246,16 @@ export function renderPageFromLayout(
         renderLayoutFloatToSvg(item, geometry, elements);
         break;
       case "textBox":
-        renderLayoutTextBoxToSvg(item, geometry, elements);
+        renderLayoutTextBoxToSvg(item, geometry, elements, options);
         break;
       case "shape":
-        renderLayoutShapeToSvg(item, geometry, elements);
+        renderLayoutShapeToSvg(item, geometry, elements, options);
         break;
       case "chart":
-        renderLayoutChartToSvg(item, geometry, elements);
+        renderLayoutChartToSvg(item, geometry, elements, options);
         break;
       case "sdt":
-        renderLayoutSdtToSvg(item, geometry, elements);
+        renderLayoutSdtToSvg(item, geometry, elements, options);
         break;
       case "math":
         renderLayoutMathToSvg(item, geometry, elements);
@@ -1547,7 +1570,8 @@ function renderLayoutFloatToSvg(
 function renderLayoutTextBoxToSvg(
   tb: LayoutTextBox,
   geometry: PageGeometry,
-  elements: string[]
+  elements: string[],
+  options?: RenderOptions
 ): void {
   const abs = absRect(tb.rect, geometry);
   const safeStroke = tb.border ? sanitizeHexColor(tb.border.color) : undefined;
@@ -1569,17 +1593,26 @@ function renderLayoutTextBoxToSvg(
     marginLeft: geometry.marginLeft + tb.rect.x,
     marginTop: geometry.marginTop + tb.rect.y
   };
-  renderPageContentList(tb.content, innerGeometry, elements);
+  renderPageContentList(tb.content, innerGeometry, elements, options);
 }
 
 function renderLayoutShapeToSvg(
   shape: LayoutShape,
   geometry: PageGeometry,
-  elements: string[]
+  elements: string[],
+  options?: RenderOptions
 ): void {
   const abs = absRect(shape.rect, geometry);
-  const fill = shape.fillColor ? `#${sanitizeHexColor(shape.fillColor)}` : "none";
-  const stroke = shape.strokeColor ? `#${sanitizeHexColor(shape.strokeColor)}` : "#888888";
+  // `sanitizeHexColor` returns undefined for anything that is not a 3- or
+  // 6-digit hex, and interpolating that straight into the attribute emitted the
+  // literal string `fill="#undefined"` — invalid SVG that no renderer accepts.
+  // The layout only strips a leading `#` (see `normaliseHex`) and never
+  // validates, so any out-of-contract colour reaching this point produced broken
+  // output. Fall back to the no-paint / default-stroke values instead.
+  const safeFill = sanitizeHexColor(shape.fillColor);
+  const safeStroke = sanitizeHexColor(shape.strokeColor);
+  const fill = safeFill ? `#${safeFill}` : "none";
+  const stroke = safeStroke ? `#${safeStroke}` : "#888888";
   const sw = (shape.strokeWidth ?? 0.75).toFixed(2);
 
   // Map a few common preset shapes; everything else falls back to a rect.
@@ -1607,22 +1640,59 @@ function renderLayoutShapeToSvg(
       marginLeft: geometry.marginLeft + shape.rect.x,
       marginTop: geometry.marginTop + shape.rect.y
     };
-    renderPageContentList(shape.textContent, innerGeometry, elements);
+    renderPageContentList(shape.textContent, innerGeometry, elements, options);
   }
+}
+
+/**
+ * Uniform factor that fits an SVG fragment's own declared size into `width` x
+ * `height`.
+ *
+ * Returns 1 when the fragment declares no usable size (nothing to correct), so
+ * the common case emits a plain translate.
+ */
+function svgFragmentScale(fragment: string, width: number, height: number): number {
+  const root = /<svg\b([^>]*)>/i.exec(fragment);
+  if (!root || width <= 0 || height <= 0) {
+    return 1;
+  }
+  const attrs = parseSvgAttributes(root[1]);
+  const viewBox = parseSvgNumberList(attrs.viewBox);
+  const declaredWidth = Number.parseFloat(attrs.width ?? "") || viewBox[2];
+  const declaredHeight = Number.parseFloat(attrs.height ?? "") || viewBox[3];
+  if (
+    !Number.isFinite(declaredWidth) ||
+    !Number.isFinite(declaredHeight) ||
+    declaredWidth <= 0 ||
+    declaredHeight <= 0
+  ) {
+    return 1;
+  }
+  return Math.min(width / declaredWidth, height / declaredHeight);
 }
 
 function renderLayoutChartToSvg(
   chart: LayoutChart,
   geometry: PageGeometry,
-  elements: string[]
+  elements: string[],
+  options?: RenderOptions
 ): void {
   const abs = absRect(chart.rect, geometry);
-  if (chart.svg) {
-    // Inline a pre-rendered SVG fragment inside a <g> with an absolute
-    // translate so it ends up at the right page coordinates.
-    elements.push(
-      `<g transform="translate(${abs.x.toFixed(2)} ${abs.y.toFixed(2)})">${chart.svg}</g>`
-    );
+  // A pre-rendered fragment on the layout wins; otherwise ask the caller's
+  // renderer. Only when neither is available do we fall back to a placeholder.
+  const svg = chart.svg ?? options?.renderChart?.(chart);
+  if (svg) {
+    // Inline the fragment inside a <g> that translates it to the chart's page
+    // position and scales it to the chart's box. The scale matters because a
+    // fragment normally declares its own size in a different unit — the Excel
+    // bridge renders at 96 DPI while the layout rect is in points, so without
+    // this the chart overflowed its box by exactly 4/3.
+    const scale = svgFragmentScale(svg, abs.width, abs.height);
+    const transform =
+      scale === 1
+        ? `translate(${abs.x.toFixed(2)} ${abs.y.toFixed(2)})`
+        : `translate(${abs.x.toFixed(2)} ${abs.y.toFixed(2)}) scale(${scale.toFixed(6)})`;
+    elements.push(`<g transform="${transform}">${svg}</g>`);
     return;
   }
   pushPlaceholder(abs, { stroke: "#666666" }, elements);
@@ -1635,7 +1705,12 @@ function renderLayoutChartToSvg(
   }
 }
 
-function renderLayoutSdtToSvg(sdt: LayoutSdt, geometry: PageGeometry, elements: string[]): void {
+function renderLayoutSdtToSvg(
+  sdt: LayoutSdt,
+  geometry: PageGeometry,
+  elements: string[],
+  options?: RenderOptions
+): void {
   // SDT is transparent visually; recurse into its children using the
   // page-relative geometry but offset by the SDT's own rect.
   const innerGeometry: PageGeometry = {
@@ -1643,7 +1718,7 @@ function renderLayoutSdtToSvg(sdt: LayoutSdt, geometry: PageGeometry, elements: 
     marginLeft: geometry.marginLeft + sdt.rect.x,
     marginTop: geometry.marginTop + sdt.rect.y
   };
-  renderPageContentList(sdt.content, innerGeometry, elements);
+  renderPageContentList(sdt.content, innerGeometry, elements, options);
 }
 
 function renderLayoutMathToSvg(math: LayoutMath, geometry: PageGeometry, elements: string[]): void {
@@ -1715,7 +1790,8 @@ function renderLayoutPlaceholderToSvg(
 function renderPageContentList(
   items: readonly PageContent[],
   geometry: PageGeometry,
-  elements: string[]
+  elements: string[],
+  options?: RenderOptions
 ): void {
   for (const item of items) {
     switch (item.type) {
@@ -1732,16 +1808,16 @@ function renderPageContentList(
         renderLayoutFloatToSvg(item, geometry, elements);
         break;
       case "textBox":
-        renderLayoutTextBoxToSvg(item, geometry, elements);
+        renderLayoutTextBoxToSvg(item, geometry, elements, options);
         break;
       case "shape":
-        renderLayoutShapeToSvg(item, geometry, elements);
+        renderLayoutShapeToSvg(item, geometry, elements, options);
         break;
       case "chart":
-        renderLayoutChartToSvg(item, geometry, elements);
+        renderLayoutChartToSvg(item, geometry, elements, options);
         break;
       case "sdt":
-        renderLayoutSdtToSvg(item, geometry, elements);
+        renderLayoutSdtToSvg(item, geometry, elements, options);
         break;
       case "math":
         renderLayoutMathToSvg(item, geometry, elements);

@@ -17,11 +17,24 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve(import.meta.dirname, "..");
+/**
+ * `--root <dir>` points the scan at a different tree. Used by the tests: a check that
+ * never fires is worse than no check, and the only way to know this one fires is to
+ * hand it a tree that breaks the rules on purpose.
+ */
+function rootFromArgv(): string {
+  const flag = process.argv.indexOf("--root");
+  return flag === -1
+    ? path.resolve(import.meta.dirname, "..")
+    : path.resolve(process.argv[flag + 1]);
+}
+
+const ROOT = rootFromArgv();
 const MODULES_DIR = path.join(ROOT, "src", "modules");
 const UTILS_DIR = path.join(ROOT, "src", "utils");
 
 const MODULES = [
+  "draw",
   "excel",
   "word",
   "formula",
@@ -41,17 +54,21 @@ type ModuleName = (typeof MODULES)[number] | "utils";
  */
 const ALLOWED: Record<ModuleName, ReadonlySet<ModuleName>> = {
   utils: new Set([]),
+  // draw is the shared drawing engine: a display-list IR plus its walker and SVG
+  // serialiser. It sits beside xml/markdown/stream so excel, word and pdf can all
+  // consume it, and it depends on nothing but utils.
+  draw: new Set(["utils"]),
   xml: new Set(["utils"]),
   markdown: new Set(["utils"]),
   stream: new Set(["utils"]),
   csv: new Set(["stream", "utils"]),
   archive: new Set(["stream", "utils"]),
   formula: new Set(["utils"]),
-  excel: new Set(["formula", "archive", "xml", "csv", "markdown", "stream", "utils"]),
-  word: new Set(["formula", "archive", "xml", "csv", "markdown", "stream", "utils"]),
+  excel: new Set(["draw", "formula", "archive", "xml", "csv", "markdown", "stream", "utils"]),
+  word: new Set(["draw", "formula", "archive", "xml", "csv", "markdown", "stream", "utils"]),
   // pdf may reach excel/word ONLY via the bridge files (see EXCEPTIONS); the
   // base allow-set covers the unconditional dependencies.
-  pdf: new Set(["archive", "utils"])
+  pdf: new Set(["draw", "archive", "utils"])
 };
 
 /**
@@ -66,7 +83,55 @@ const EXCEPTIONS: Record<string, ReadonlySet<ModuleName>> = {
   "src/modules/word/bridge/excel-bridge.ts": new Set(["excel"])
 };
 
-const ALIAS_RE = /@(excel|word|formula|pdf|csv|markdown|xml|archive|stream|utils)\b/;
+const ALIAS_RE = /@(draw|excel|word|formula|pdf|csv|markdown|xml|archive|stream|utils)\b/;
+
+/**
+ * Source with comments blanked out, so a specifier mentioned in prose is not read as an
+ * import.
+ *
+ * The doc comments in this repository discuss `@excel/…` constantly — including to say
+ * that a given file must *not* import it — and a commented-out import is ordinary while
+ * refactoring. Both were being reported as violations.
+ *
+ * Replaced with spaces rather than removed, so every byte offset still lines up and the
+ * reported line numbers stay true.
+ */
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    if (two === "//") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      out += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (two === "/*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      // Keep newlines so line numbers survive.
+      out += source.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      // Copy the literal whole, so a `//` inside a specifier is not mistaken for a comment.
+      let j = i + 1;
+      while (j < source.length && source[j] !== ch) {
+        j += source[j] === "\\" ? 2 : 1;
+      }
+      out += source.slice(i, Math.min(j + 1, source.length));
+      i = j + 1;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 
 /** Recursively collect production `.ts` files (skip tests & examples). */
 function collect(dir: string, out: string[]): void {
@@ -84,40 +149,72 @@ function collect(dir: string, out: string[]): void {
 }
 
 /**
- * Extract the module aliases (`@excel`, `@word`, …) referenced by `import` /
- * `export ... from` / dynamic `import()` statements in a source file. Returns
- * a map of target module → first line number where it appears.
+ * Every module specifier a file imports, with the line it appears on.
+ *
+ * Matched across the WHOLE source rather than line by line, so a multi-line statement
+ * like `import {\n  a,\n  b\n} from "@excel/…"` is caught on its closing `from`. The
+ * `[^"\'`]` runs may span newlines, which is what lets the pattern cross them.
+ * Specifiers are string literals — never template literals — so backticks are excluded
+ * deliberately, to avoid matching an `@alias` mentioned in a doc comment such as "must
+ * NOT import from `@excel/…`".
+ *
+ * A bare `import "x"` has no `from` clause and was therefore invisible: importing a
+ * module purely for its side effects is still importing it, and it crosses a layer
+ * boundary exactly as much as a named import does.
  */
-function importedModules(source: string): Map<ModuleName, number> {
-  const found = new Map<ModuleName, number>();
-  // Match the specifier of any static or dynamic import/export-from across the
-  // WHOLE source (not line-by-line) so multi-line statements like
-  //   import {\n  a,\n  b\n} from "@excel/...";
-  // are matched on their closing `from "..."`. The `[^"']` runs may span
-  // newlines, which is what lets the regex cross lines. Module specifiers are
-  // string literals (`"`/`'`) — never template literals — so backticks are
-  // deliberately excluded to avoid matching `@alias` mentions inside doc
-  // comments such as "must NOT import from `@excel/...`".
-  const stmtRe =
-    /(?:^|[\s;])(?:import|export)[^"'`]*?\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-  let m: RegExpExecArray | null;
-  while ((m = stmtRe.exec(source)) !== null) {
-    const spec = m[1] ?? m[2];
-    if (!spec) {
-      continue;
-    }
-    const alias = spec.match(ALIAS_RE);
-    if (alias) {
-      const mod = alias[1] as ModuleName;
-      if (!found.has(mod)) {
-        // Line number of the matched specifier (count newlines up to the match).
-        const idx = m.index + m[0].length;
-        const line = source.slice(0, idx).split("\n").length;
-        found.set(mod, line);
+function importSpecifiers(rawSource: string): Array<{ spec: string; line: number }> {
+  const source = stripComments(rawSource);
+  const out: Array<{ spec: string; line: number }> = [];
+  const patterns = [
+    // `import … from "x"` / `export … from "x"`
+    /(?:^|[\s;])(?:import|export)[^"'`]*?\bfrom\s*["']([^"']+)["']/g,
+    // `import("x")` — dynamic, optionally with import attributes as a second argument.
+    /\bimport\s*\(\s*["']([^"']+)["']\s*[,)]/g,
+    // `import "x"` — side effect only, no bindings and no `from`
+    /(?:^|[\s;])import\s*["']([^"']+)["']/g,
+    // `require("x")` — CommonJS, reachable through `createRequire`
+    /\brequire\s*\(\s*["']([^"']+)["']\s*[,)]/g
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(source)) !== null) {
+      const spec = match[1];
+      if (spec) {
+        out.push({ spec, line: source.slice(0, match.index + match[0].length).split("\n").length });
       }
     }
   }
-  return found;
+  return out;
+}
+
+/**
+ * Which module a specifier resolves to, or `undefined` if it stays inside the module
+ * that wrote it.
+ *
+ * Aliases are the documented way to write a cross-module import, but they are not the
+ * only way one compiles: `../../excel/index` reaches just as far. Checking aliases alone
+ * left a relative path as an open door through the layer rules — the one architectural
+ * constraint this script exists to hold — so a specifier that climbs out of its own
+ * module is resolved against the filesystem and attributed to whatever it lands in.
+ */
+function targetModule(fromFile: string, spec: string): ModuleName | undefined {
+  const alias = spec.startsWith("@") ? spec.match(ALIAS_RE) : null;
+  if (alias) {
+    return alias[1] as ModuleName;
+  }
+  if (!spec.startsWith(".")) {
+    return undefined;
+  }
+  const resolved = path.resolve(path.dirname(fromFile), spec);
+  const fromModulesDir = path.relative(MODULES_DIR, resolved).split(path.sep);
+  if (!fromModulesDir[0].startsWith("..") && MODULES.includes(fromModulesDir[0] as ModuleName)) {
+    return fromModulesDir[0] as ModuleName;
+  }
+  const fromUtilsDir = path.relative(UTILS_DIR, resolved).split(path.sep);
+  if (!fromUtilsDir[0].startsWith("..")) {
+    return "utils";
+  }
+  return undefined;
 }
 
 interface Violation {
@@ -133,10 +230,16 @@ function checkFile(absPath: string, owner: ModuleName, violations: Violation[]):
   const allowed = ALLOWED[owner];
   const extra = EXCEPTIONS[rel];
 
-  for (const [target, line] of importedModules(source)) {
-    if (target === owner) {
-      continue; // same-module imports are always fine
+  const seen = new Set<ModuleName>();
+  for (const { spec, line } of importSpecifiers(source)) {
+    const target = targetModule(absPath, spec);
+    if (target === undefined || target === owner) {
+      continue; // unresolvable, external, or same-module — all fine
     }
+    if (seen.has(target)) {
+      continue; // one report per offending module is enough
+    }
+    seen.add(target);
     if (allowed.has(target)) {
       continue;
     }
@@ -170,12 +273,17 @@ function main(): void {
     }
   }
 
-  // utils (Layer 0): may import nothing from modules. Its internal files use
-  // relative paths, so alias references here can only be cross-module.
-  const utilsFiles: string[] = [];
-  collect(UTILS_DIR, utilsFiles);
-  for (const f of utilsFiles) {
-    checkFile(f, "utils", violations);
+  // utils (Layer 0): may import nothing from modules. Its internal files use relative
+  // paths, so a cross-module reference here is always a violation.
+  //
+  // Guarded like the module directories above: the scan should report on the tree it was
+  // given, not crash because part of it is absent.
+  if (fs.existsSync(UTILS_DIR)) {
+    const utilsFiles: string[] = [];
+    collect(UTILS_DIR, utilsFiles);
+    for (const f of utilsFiles) {
+      checkFile(f, "utils", violations);
+    }
   }
 
   if (violations.length === 0) {
