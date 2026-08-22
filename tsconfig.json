@@ -21,6 +21,7 @@
       "@formula/*": ["./src/modules/formula/*"],
       "@draw": ["./src/modules/draw/index.ts"],
       "@draw/*": ["./src/modules/draw/*"],
+      "@mermaid/*": ["./src/modules/mermaid/*"],
       "@utils/*": ["./src/utils/*"],
       "@test/*": ["./src/test/*"]
     },

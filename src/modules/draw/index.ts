@@ -35,8 +35,8 @@
  * `rasterizeDrawList`, which is that pairing and nothing else.
  */
 
-export { cssColour, translucent } from "@draw/colour";
-export { POINTS_PER_PIXEL, measureText, wrapText } from "@draw/text";
+export { cssColour, relativeLuminance, translucent } from "@draw/colour";
+export { POINTS_PER_PIXEL, measureText, widestText, wrapText } from "@draw/text";
 export type { DrawSurface } from "@draw/surface";
 export { renderDrawList, renderNode } from "@draw/render";
 export { SvgSurface, toSvg } from "@draw/svg";

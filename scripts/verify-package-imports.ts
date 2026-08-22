@@ -42,6 +42,7 @@ const PACKAGES_DIR = path.join(ROOT, "packages");
 /** Internal path aliases declared in the root tsconfig. */
 const INTERNAL_ALIASES = [
   "@draw",
+  "@mermaid",
   "@excel",
   "@word",
   "@formula",

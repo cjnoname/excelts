@@ -36,3 +36,20 @@ export function cssColour(token: string | undefined): Rgba01 {
 export function translucent(token: string | undefined, alpha: number): Rgba01 {
   return { ...cssColour(token), a: alpha };
 }
+
+/**
+ * Perceived brightness of a colour, on 0…1, by the BT.709 coefficients.
+ *
+ * Used to choose an ink that stays readable on a generated fill: a palette assigns colours
+ * without knowing what will be written on them, so the text colour has to be derived from the
+ * background rather than fixed. Green weighs most and blue least because the eye responds
+ * that way, which is why a mid blue needs light text and a mid yellow needs dark.
+ *
+ * This is the *linear* weighted sum of the stored channels, not the gamma-corrected quantity
+ * from the WCAG contrast definition. That is deliberate — it is being compared against a
+ * hand-tuned threshold, so consistency matters more than colorimetric exactness, and the
+ * cheaper form is what the thresholds were chosen against.
+ */
+export function relativeLuminance(colour: Rgba01): number {
+  return 0.2126 * colour.r + 0.7152 * colour.g + 0.0722 * colour.b;
+}

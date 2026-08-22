@@ -64,6 +64,7 @@ src/
 │   ├── xml/            # SAX/DOM parser, query engine, writer
 │   ├── archive/        # ZIP/TAR compression; core/ shared primitives
 │   ├── draw/           # Shared drawing engine: display-list IR, one walker, SVG surface
+│   ├── mermaid/        # Mermaid text → DrawList (21 diagram types)
 │   └── stream/         # Cross-platform streaming primitives; core/ shared primitives
 ├── utils/              # Shared: errors, datetime, fs, binary, crypto
 └── test/               # Test utilities and fixtures
@@ -157,7 +158,7 @@ keeps the `v0.9.0` tag format instead of `documonster-v0.9.0`).
 Layer 5:  pdf      → excel (only excel-bridge.ts + word-chart-bridge.ts), word (only word-bridge.ts + word-chart-bridge.ts + word-layout-to-pdf.ts), draw, archive, utils
 Layer 4:  excel, word → formula, draw, archive, xml, csv, markdown, stream, utils
 Layer 3:  formula  → utils    (independent calc engine; no excel imports)
-Layer 2:  csv, archive → stream, utils
+Layer 2:  csv, archive → stream, utils; mermaid → draw, utils
 Layer 1:  xml, markdown, stream, draw → utils
 Layer 0:  utils    (no module dependencies)
 ```
@@ -277,6 +278,78 @@ or paint, so the SVG renderer attaches it as a `data-region-map-mode` attribute 
 wrapping `<g>` when it serialises, and the PDF path simply draws the nodes. Nothing
 was added to `DrawNode` for it. Prefer that shape for any future SVG-only
 annotation: decide it in the producer, attach it at the serialisation boundary.
+
+### The `mermaid` module
+
+`mermaid` is the first producer written _against_ the drawing engine rather than
+alongside it, and it exists as much to test the claim as to draw diagrams: it
+implements no backend, and gets SVG, pixels and a PDF page anyway.
+
+Twenty-one diagram types, but far fewer layouts, because most of them are the same picture
+in a different language. A state diagram, a class diagram, an ER diagram, a requirement
+diagram and a C4 diagram are all a directed graph of boxes, so each is converted to the
+flowchart form and laid out by the same ranking, ordering, straightening and routing; only
+the boxes and the marks at the ends of the edges differ, which is the part that genuinely
+differs. A box that sizes itself — a class compartment stack, a C4 element with its
+technology line — hands the result to the layout through `measureNode`.
+
+The rest are _not_ graphs and are not forced through that layout. A Gantt bar's position
+comes from the calendar, a journey's dot from a score, a mind map's node from the height of
+its own subtree, a commit from its lane and its ordinal. Each of those is a layout and a
+renderer in one pass, which is honest about how little there is to lay out. What they share
+is the theme, the primitives and — for the Gantt chart — the date arithmetic in
+`parse/dates`, which is kept separate precisely so it can be tested as arithmetic rather
+than through a picture: a bar in the wrong place is not an ugly chart, it is a wrong one.
+
+Three passes, and keeping them apart is what makes the module tractable. The
+parser turns text into a syntax tree that says nothing about geometry. The layout
+turns that tree into coordinates — a layered ("Sugiyama") arrangement: rank,
+order to reduce crossings, position, route. The renderer turns coordinates into a
+`DrawList`. A caller can stop after any of them; `parseMermaid` and
+`layoutFlowchart` are both public because inspecting the tree or re-using the
+positions are real things to want.
+
+**Nothing was added to the IR for it.** Every outline is a rect, an ellipse, a
+closed polyline or a path. The case worth naming is the arrowhead: a marker is an
+SVG concept with no counterpart in a content stream or a scanline rasteriser, so
+the producer lowers it to a small filled triangle aimed along the last segment —
+which is the same picture in all three backends and needed no new primitive. The
+text baseline is the other one: the engine positions text by its baseline because
+that is what every backend can honour, so vertical centring is arithmetic the
+producer does (`BASELINE_SHIFT`), not a portable attribute it can ask for.
+
+Two layout details are worth knowing before changing them, because both were
+bugs first:
+
+- **A rank is re-centred after its overlaps are resolved.** Pushing left to right
+  until every pair clears the gap is one-directional and drags the whole rank
+  right; the trunk of a diagram then visibly bends away from a fork, because the
+  fork's children have been shoved sideways and their parent follows them.
+  Translating the finished rank back by its mean displacement cannot re-introduce
+  an overlap, since it moves every node equally.
+- **A long edge is threaded, not routed round.** An edge spanning several ranks gets a
+  chain of narrow dummy nodes, one per rank it crosses, so it takes part in the ordering
+  like any other edge and is drawn straight through the lane that was left for it. Without
+  them it has no say in how the ranks between its ends are arranged and has to be routed
+  afterwards around whatever ended up in the way — which is why a diagram with several
+  skip edges used to grow a bundle of lanes down its margin. Dummies are scaffolding: they
+  steer the layout and are dropped before it is returned, and they are deliberately kept
+  out of the straightening pass, or a chain threading past a trunk drags it sideways.
+- **The ordering measures its own output.** Median sweeps, then a transpose pass that
+  swaps adjacent pairs while that removes crossings, then keep whichever iteration
+  actually counted fewest. A heuristic that does not measure what it produced has no
+  reason to improve it, and the last sweep is regularly worse than one already passed
+  through.
+- **Every edge gets its own place on the borders it joins.** Bending at the midpoint of
+  the flow axis makes an incoming edge arrive at the _centre_ of its target's leading
+  edge whatever it came from, so a node with three parents collected three arrowheads on
+  one pixel — and in a class diagram the marks that tell inheritance from composition
+  landed on top of each other. Ports are ordered by where the other end sits, so the
+  lines arrive in the order they left and do not cross on the way in.
+- **An edge that runs backwards or skips a rank is routed around the outside.**
+  Drawn straight it crosses whatever sits between its ends, and the piece that
+  shows is the segment between two _other_ nodes — a cycle's back edge grew an
+  arrowhead on a pair that had not asked for one.
 
 Cross-backend agreement is enforced by
 `src/modules/pdf/__tests__/draw-backend-parity.test.ts`: the same display list is

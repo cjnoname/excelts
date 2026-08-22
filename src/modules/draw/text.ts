@@ -85,3 +85,20 @@ export function wrapText(text: string, style: DrawTextStyle, maxWidth: number): 
   }
   return lines;
 }
+
+/**
+ * The width of the widest of several strings.
+ *
+ * A producer sizes a column, a gutter or a legend around the longest label it has to fit, so
+ * this is the shape every layout reaches for. It lives beside {@link measureText} because
+ * spreading a mapped array into `Math.max` has one failure mode worth hiding: `Math.max()`
+ * with no arguments is `-Infinity`, which silently poisons the arithmetic downstream rather
+ * than throwing. An empty list measures zero.
+ */
+export function widestText(texts: readonly string[], style: DrawTextStyle): number {
+  let widest = 0;
+  for (const text of texts) {
+    widest = Math.max(widest, measureText(text, style));
+  }
+  return widest;
+}

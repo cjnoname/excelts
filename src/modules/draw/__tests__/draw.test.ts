@@ -1,3 +1,4 @@
+import { relativeLuminance } from "@draw/colour";
 import {
   IDENTITY,
   apply,
@@ -764,5 +765,24 @@ describe("the SVG-only filter channel", () => {
     surface.pushFilter('a"b');
     surface.popFilter();
     expect(surface.markup()).toContain("&quot;");
+  });
+});
+
+describe("perceived brightness", () => {
+  it("weighs green above red above blue", () => {
+    // The BT.709 ordering is the whole point: an ink chosen from an unweighted average picks
+    // dark text on a mid blue, where it is barely readable.
+    const red = relativeLuminance({ r: 1, g: 0, b: 0, a: 1 });
+    const green = relativeLuminance({ r: 0, g: 1, b: 0, a: 1 });
+    const blue = relativeLuminance({ r: 0, g: 0, b: 1, a: 1 });
+    expect(green).toBeGreaterThan(red);
+    expect(red).toBeGreaterThan(blue);
+    expect(green).toBeCloseTo(0.7152, 6);
+    expect(blue).toBeCloseTo(0.0722, 6);
+  });
+
+  it("puts black and white at the ends of the range", () => {
+    expect(relativeLuminance({ r: 0, g: 0, b: 0, a: 1 })).toBe(0);
+    expect(relativeLuminance({ r: 1, g: 1, b: 1, a: 1 })).toBeCloseTo(1, 6);
   });
 });

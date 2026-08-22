@@ -96,6 +96,7 @@ const REPO_ENTRIES: Record<string, { file: string; platform: "node" | "browser" 
   "documonster/word/crypto": { file: "src/modules/word/crypto.ts", platform: "both" },
   "documonster/pdf": { file: "src/modules/pdf/index.ts", platform: "both" },
   "documonster/draw": { file: "src/modules/draw/index.ts", platform: "both" },
+  "documonster/mermaid": { file: "src/modules/mermaid/index.ts", platform: "both" },
   "documonster/formula": { file: "src/modules/formula/index.ts", platform: "both" },
   "documonster/csv": { file: "src/modules/csv/index.ts", platform: "both" },
   "documonster/markdown": { file: "src/modules/markdown/index.ts", platform: "both" },
@@ -180,6 +181,7 @@ const REPO_ALIASES: Record<string, string> = {
   "@archive": "src/modules/archive",
   "@stream": "src/modules/stream",
   "@draw": "src/modules/draw",
+  "@mermaid": "src/modules/mermaid",
   "@utils": "src/utils"
 };
 

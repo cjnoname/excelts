@@ -35,6 +35,7 @@ const UTILS_DIR = path.join(ROOT, "src", "utils");
 
 const MODULES = [
   "draw",
+  "mermaid",
   "excel",
   "word",
   "formula",
@@ -58,6 +59,9 @@ const ALLOWED: Record<ModuleName, ReadonlySet<ModuleName>> = {
   // serialiser. It sits beside xml/markdown/stream so excel, word and pdf can all
   // consume it, and it depends on nothing but utils.
   draw: new Set(["utils"]),
+  // mermaid is a pure producer: it turns diagram text into a display list and owns no
+  // backend of its own, so it needs the engine and nothing else.
+  mermaid: new Set(["draw", "utils"]),
   xml: new Set(["utils"]),
   markdown: new Set(["utils"]),
   stream: new Set(["utils"]),
@@ -83,7 +87,7 @@ const EXCEPTIONS: Record<string, ReadonlySet<ModuleName>> = {
   "src/modules/word/bridge/excel-bridge.ts": new Set(["excel"])
 };
 
-const ALIAS_RE = /@(draw|excel|word|formula|pdf|csv|markdown|xml|archive|stream|utils)\b/;
+const ALIAS_RE = /@(draw|mermaid|excel|word|formula|pdf|csv|markdown|xml|archive|stream|utils)\b/;
 
 /**
  * Source with comments blanked out, so a specifier mentioned in prose is not read as an

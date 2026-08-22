@@ -7,7 +7,7 @@
  * outside the chart module.
  */
 
-import { POINTS_PER_PIXEL, measureText, wrapText } from "@draw/index";
+import { POINTS_PER_PIXEL, measureText, widestText, wrapText } from "@draw/index";
 import type { DrawTextStyle } from "@draw/index";
 import { measureTextWidthPx } from "@utils/text-measure";
 import { describe, expect, it } from "vitest";
@@ -120,5 +120,30 @@ describe("wrapping text to a width", () => {
 
   it("returns a single empty line for empty text", () => {
     expect(wrapText("", style(), 100)).toEqual([""]);
+  });
+});
+
+describe("the widest of several strings", () => {
+  const style: DrawTextStyle = { size: 12, family: "sans-serif" };
+
+  it("measures zero for nothing, rather than -Infinity", () => {
+    // `Math.max(...[])` is `-Infinity`, which does not throw: it flows into whatever width was
+    // being computed and turns a layout into NaN somewhere else entirely. Sizing a gutter for
+    // no labels asks for no room.
+    expect(widestText([], style)).toBe(0);
+  });
+
+  it("agrees with measuring the longest entry directly", () => {
+    const texts = ["i", "medium", "the longest label here"];
+    expect(widestText(texts, style)).toBe(measureText("the longest label here", style));
+  });
+
+  it("compares width and not character count", () => {
+    // Proportional metrics: at equal length the wide glyphs win, and a helper that compared
+    // `length` could not tell the two apart at all.
+    expect(widestText(["MMMM", "iiii"], style)).toBe(measureText("MMMM", style));
+    // The converse, so this cannot pass by always preferring the first entry: enough narrow
+    // glyphs do outrun fewer wide ones.
+    expect(widestText(["MMMM", "iiiiii"], style)).toBe(measureText("iiiiii", style));
   });
 });
