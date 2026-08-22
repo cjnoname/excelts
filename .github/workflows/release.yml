@@ -5,14 +5,19 @@ on:
     branches:
       - main
 
+# Publishing uses npm trusted publishing (OIDC). pnpm exchanges the id token
+# `id-token: write` grants for a short-lived one and enables provenance by
+# itself, so no `NODE_AUTH_TOKEN` and no `--provenance` below. npm matches the
+# trusted publisher by workflow filename, per package: both `documonster` and
+# `@documonster/mcp` must point at `release.yml`.
 permissions:
   contents: write
   id-token: write
   pull-requests: write
 
 jobs:
-  # Step 1: release-please creates/updates a release PR.
-  # When the PR is merged, it creates a GitHub release + tag and sets release_created=true.
+  # Merging the release PR is what creates the GitHub release + tag and sets
+  # release_created=true — the signal both publish jobs and the canary gate on.
   release-please:
     runs-on: ubuntu-latest
     outputs:
@@ -22,9 +27,8 @@ jobs:
       - uses: googleapis/release-please-action@v5
         id: release
 
-  # Step 2a: Canary — publish on every push except when release-please just created a release.
-  # When release_created=true the merged PR commit is the trigger; we publish the real version
-  # via the publish job instead, so canary is skipped.
+  # Skipped on a release commit: that push is the merged release PR, whose real
+  # version the publish job below ships instead.
   canary:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created != 'true' }}
@@ -42,7 +46,6 @@ jobs:
         with:
           node-version: 26
           cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
@@ -76,8 +79,6 @@ jobs:
           else
             pnpm publish --tag canary --no-git-checks
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Build @documonster/mcp canary
         run: pnpm build:packages
@@ -95,8 +96,6 @@ jobs:
             # everyone but the owner.
             pnpm publish --tag canary --access public --no-git-checks
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Deliberately unauthenticated: an anonymous read is the only thing that
       # proves the packages are actually installable by a user. An authenticated
@@ -136,8 +135,6 @@ jobs:
               core.warning(`Canary published, but commenting on the commit failed: ${error.message}`);
             }
 
-  # Step 2b: Publish — triggered only when release-please creates a release (PR merged).
-  # Automatically uses --tag beta for prerelease versions, or latest for stable.
   publish:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -155,7 +152,6 @@ jobs:
         with:
           node-version: 26
           cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
@@ -179,8 +175,6 @@ jobs:
             echo "Publishing ${VERSION} as latest"
             pnpm publish --no-git-checks
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify publish
         run: |
@@ -194,9 +188,6 @@ jobs:
           fi
           echo "Verified: documonster@${EXPECTED_VERSION} is live on npm"
 
-  # Step 3: Publish @documonster/mcp — the repository releases as a single unit,
-  # so this runs on the same release as the core.
-  #
   # Ordering matters. `@documonster/mcp` depends on `documonster: workspace:*`,
   # which `pnpm publish` rewrites to the core version present in this checkout.
   # The core must therefore reach npm first, or the published MCP package would
@@ -218,7 +209,6 @@ jobs:
         with:
           node-version: 26
           cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
@@ -246,8 +236,6 @@ jobs:
             echo "Publishing @documonster/mcp@${VERSION} as latest"
             pnpm publish --access public --no-git-checks
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Unauthenticated on purpose — see the canary job's verify step.
       - name: Verify publish
