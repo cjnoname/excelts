@@ -48,5 +48,3 @@ type _Browser_createParse_matches_ParseStream = Assert<
 type _Browser_createParse_matches_new_Parse = Assert<
   IsEqual<ReturnType<typeof BrowserParseModule.createParse>, InstanceType<typeof BrowserParse>>
 >;
-
-export {};

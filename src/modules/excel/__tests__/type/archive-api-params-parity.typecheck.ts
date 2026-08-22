@@ -126,5 +126,3 @@ type _CreateParseClassParams = Assert<
 type _CreateParseReturns = Assert<
   ReturnsEqual<typeof NodeParse.createParse, typeof BrowserParse.createParse>
 >;
-
-export {};

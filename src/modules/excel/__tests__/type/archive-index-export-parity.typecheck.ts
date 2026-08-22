@@ -197,5 +197,3 @@ type _Type_UnzipOptions = Assert<IsEqual<NodeUnzipOptions, BrowserUnzipOptions>>
 type _Type_ArchiveSource = Assert<IsEqual<NodeArchiveSource, BrowserArchiveSource>>;
 
 type _Type_ArchiveSink = Assert<IsEqual<NodeArchiveSink, BrowserArchiveSink>>;
-
-export {};

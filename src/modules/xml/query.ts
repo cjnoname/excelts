@@ -7,7 +7,7 @@
  * Supported syntax:
  * - `a/b/c`         — match child `a`, then child `b`, then child `c`
  * - `a/b[@id='1']`  — match child `b` with attribute `id` equal to `"1"`
- * - `a/*​/c`          — wildcard: any element name at that level
+ * - `a/*`            — wildcard: any element name at that level; valid in any step
  * - `a//c`           — recursive descent: `c` at any depth under `a`
  * - `a/b[0]`         — index: first matching `b` under each parent `a`
  *

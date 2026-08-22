@@ -95,5 +95,3 @@ type _Class_ChunkedBuilder = Assert<
 type _Class_TransactionalChunkedBuilder = Assert<
   IsEqual<NodeRuntime["TransactionalChunkedBuilder"], BrowserRuntime["TransactionalChunkedBuilder"]>
 >;
-
-export {};

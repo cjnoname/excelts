@@ -411,5 +411,3 @@ type _StreamToStringParams = Assert<
 type _StreamToUint8ArrayParams = Assert<
   ParamsEqual<typeof NodeStreams.streamToUint8Array, typeof BrowserStreams.streamToUint8Array>
 >;
-
-export {};
