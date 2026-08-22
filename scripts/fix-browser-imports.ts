@@ -11,6 +11,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { relPosix, toPosixPath } from "./lib/paths.ts";
+
 const projectRoot = process.cwd();
 
 function readArg(name: string): string | null {
@@ -34,10 +36,6 @@ if (!distDir) {
   console.error("Usage: node scripts/fix-browser-imports.mjs --dir <distDir>");
   process.exitCode = 1;
   process.exit();
-}
-
-function toPosixPath(p: string): string {
-  return p.split(path.sep).join("/");
 }
 
 function isFile(p: string): boolean {
@@ -73,7 +71,7 @@ interface PreferBrowserSpecifierOptions {
 
 /** Relative specifier for `candidateAbs`, POSIX-style and always `./`-prefixed. */
 function relativeSpecifier(filePath: string, candidateAbs: string): string {
-  let rel = toPosixPath(path.relative(path.dirname(filePath), candidateAbs));
+  let rel = relPosix(path.dirname(filePath), candidateAbs);
   if (!rel.startsWith(".")) {
     rel = `./${rel}`;
   }

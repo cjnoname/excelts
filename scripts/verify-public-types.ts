@@ -44,6 +44,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { relPosix } from "./lib/paths.ts";
+
 /**
  * `--root <dir>` retargets the scan and `--config <file>` replaces the rule inputs
  * below. Both exist for the tests.
@@ -577,7 +579,10 @@ function unnameableIn(
     if (!new RegExp(`[^.\\w]${localName}\\b`).test(text)) continue;
     const id = origin(ref.file, ref.declared) ?? { file: ref.file, name: ref.declared };
     if (nameable.has(identityKey(id))) continue;
-    const rel = path.relative(SRC, id.file);
+    // `relPosix`, not `path.relative`: the allowlist keys below are written with `/`,
+    // and a native separator here matched none of them on Windows — every deliberate
+    // exception was reported as a violation on that leg alone.
+    const rel = relPosix(SRC, id.file);
     if (PRIVATE_MEMBER_TYPES.has(`${id.name} @ ${rel}`)) continue;
     if (UNEXPOSED_UTILS_TYPES.has(`${id.name} @ ${rel}`)) continue;
     out.push({ name: id.name, decl: rel });

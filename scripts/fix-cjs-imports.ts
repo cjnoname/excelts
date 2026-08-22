@@ -6,13 +6,11 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
+import { relPosix } from "./lib/paths.ts";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const cjsDir = path.join(__dirname, "../dist/cjs");
-
-function toPosixPath(p: string): string {
-  return p.split(path.sep).join("/");
-}
 
 function isSafeAliasCapture(value: unknown): boolean {
   if (typeof value !== "string") {
@@ -119,8 +117,7 @@ function resolveAliasToRelativeImport({
         }
       }
 
-      let rel = path.relative(path.dirname(filePath), absDistFile);
-      rel = toPosixPath(rel);
+      let rel = relPosix(path.dirname(filePath), absDistFile);
       if (!rel.startsWith(".")) {
         rel = `./${rel}`;
       }

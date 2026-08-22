@@ -24,6 +24,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { relPosix } from "./lib/paths.ts";
+
 /**
  * `--root <dir>` points the scan at a different tree. Used by the tests: a check that
  * never fires is worse than no check, and the only way to know this one fires is to
@@ -179,7 +181,7 @@ function main(): void {
     fileCount += files.length;
 
     for (const file of files) {
-      const relative = path.relative(ROOT, file).split(path.sep).join("/");
+      const relative = relPosix(ROOT, file);
       const source = fs.readFileSync(file, "utf8");
 
       for (const specifier of specifiersOf(source)) {

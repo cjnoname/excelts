@@ -7,6 +7,8 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
+import { relPosix, toPosixPath } from "./lib/paths.ts";
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -33,10 +35,6 @@ let filesModified = 0;
 // ============================================================================
 // Shared Utilities
 // ============================================================================
-
-function toPosixPath(p: string): string {
-  return p.split(path.sep).join("/");
-}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -233,7 +231,7 @@ function resolveAliasToRelativeImport({
         }
       }
 
-      let rel = toPosixPath(path.relative(path.dirname(filePath), absDistFile));
+      let rel = relPosix(path.dirname(filePath), absDistFile);
       if (!rel.startsWith(".")) rel = `./${rel}`;
       return rel;
     }
@@ -423,7 +421,7 @@ function verifyEsmSpecifiers(dir: string): boolean {
     `❌ Found ${issues.length} extensionless relative specifier(s) in ${toPosixPath(dir)}:`
   );
   for (const issue of issues) {
-    const relFile = toPosixPath(path.relative(process.cwd(), issue.filePath));
+    const relFile = relPosix(process.cwd(), issue.filePath);
     console.error(`${relFile}:${issue.line}  ${issue.kind}  ${issue.specifier}`);
   }
   return false;
