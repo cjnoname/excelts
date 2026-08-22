@@ -24,11 +24,11 @@
  */
 
 import { writeFile } from "node:fs/promises";
-import path from "node:path";
 
 import { createZip } from "@archive/zip/zip-bytes";
 import { getWorksheets } from "@excel/core/workbook";
 import { Cell, Workbook } from "@excel/index";
+import { testFilePath } from "@test/utils";
 import { describe, expect, it } from "vitest";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -88,7 +88,7 @@ describe("robust <sheet>↔worksheet binding", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("named")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-alt-prefix.xlsx");
+    const filePath = testFilePath("cursed-workbook-alt-prefix");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -123,7 +123,7 @@ describe("robust <sheet>↔worksheet binding", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("abs-target")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-absolute-target.xlsx");
+    const filePath = testFilePath("cursed-workbook-absolute-target");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -160,7 +160,7 @@ describe("robust <sheet>↔worksheet binding", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("multi")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-multi-prefix.xlsx");
+    const filePath = testFilePath("cursed-workbook-multi-prefix");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -197,7 +197,7 @@ describe("robust <sheet>↔worksheet binding", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("dot-slash")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-dotslash-target.xlsx");
+    const filePath = testFilePath("cursed-workbook-dotslash-target");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -232,7 +232,7 @@ describe("strict <sheets> as authoritative list", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("hello")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-empty-sheets.xlsx");
+    const filePath = testFilePath("cursed-workbook-empty-sheets");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -265,7 +265,7 @@ describe("strict <sheets> as authoritative list", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("orphan")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-bad-rid.xlsx");
+    const filePath = testFilePath("cursed-workbook-bad-rid");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -300,7 +300,7 @@ describe("strict <sheets> as authoritative list", () => {
       { name: "xl/worksheets/sheet2.xml", data: enc(sheetXml("foreign")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-mixed.xlsx");
+    const filePath = testFilePath("cursed-workbook-mixed");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -341,7 +341,7 @@ describe("strict <sheets> as authoritative list", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("bogus-id")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-bogus-sheetid.xlsx");
+    const filePath = testFilePath("cursed-workbook-bogus-sheetid");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();
@@ -378,7 +378,7 @@ describe("strict <sheets> as authoritative list", () => {
       { name: "xl/worksheets/sheet1.xml", data: enc(sheetXml("phantom-target")) }
     ]);
 
-    const filePath = path.join("tmp", "cursed-workbook-phantom-target.xlsx");
+    const filePath = testFilePath("cursed-workbook-phantom-target");
     await writeFile(filePath, zipBytes);
 
     const wb = Workbook.create();

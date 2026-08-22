@@ -19,6 +19,14 @@
  * both callers are in `excel/`, which keeps the layering trivial (excel →
  * archive is already allowed). If a second module ever needs it, move it down
  * rather than copying it a third time — that is the mistake this file undoes.
+ *
+ * Bundle consequence: this is the only edge from `excel/` into `archive/` that
+ * a chart consumer walks, so `Chart.toPNG` pays for DEFLATE + CRC32 (≈4 KB on
+ * Node, which reaches `node:zlib`; ≈24 KB in a browser, which needs the JS
+ * deflate because `CompressionStream` is async). `scripts/treeshake-verify.ts`
+ * allows exactly `archive/compression/` for the `Chart` namespace and nothing
+ * else in `archive/`. A consumer that only builds charts never gets here: the
+ * renderers sit behind `chart-render-ops.ts`.
  */
 
 import { zlibSync } from "@archive/compression/compress";

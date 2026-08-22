@@ -26,19 +26,6 @@ const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf-8")
 const PKG_NAME: string = PKG.name;
 const TMP_DIR = path.join(ROOT, "tmp");
 
-// Common mustNotInclude patterns
-const ALL_MODULES = [
-  "modules/excel/",
-  "modules/formula/",
-  "modules/pdf/",
-  "modules/csv/",
-  "modules/archive/",
-  "modules/stream/",
-  "modules/xml/",
-  "modules/markdown/"
-];
-const NOT_EXCEL_PDF_CSV = ["modules/excel/", "modules/formula/", "modules/pdf/", "modules/csv/"];
-
 /**
  * The formula-engine module trees that must never be dragged in by a
  * `documonster/excel` consumer — the evaluator, the built-in function library,
@@ -58,10 +45,16 @@ const FORMULA_ENGINE_MODULES = [
   "modules/excel/core/formula-writeback.js"
 ];
 
-/** Exclude all modules except the listed ones */
-function allModulesExcept(...keep: string[]): string[] {
-  return ALL_MODULES.filter(m => !keep.some(k => m.includes(k)));
-}
+/**
+ * The `archive/` subtrees that sit *on top of* the compression primitives. A
+ * consumer that legitimately needs raw DEFLATE/CRC32 — the PNG encoder does —
+ * must still not drag in a container format.
+ */
+const ARCHIVE_CONTAINERS = [
+  "modules/archive/zip/",
+  "modules/archive/unzip/",
+  "modules/archive/tar/"
+];
 
 // =============================================================================
 // Scenarios
@@ -89,6 +82,14 @@ interface Scenario {
    * that other `Formula` members reach.
    */
   useExpr?: string;
+  /**
+   * Module-path fragments exempt from `mustNotInclude`. Needed when only a
+   * *part* of an otherwise-forbidden module tree is legitimate: a prefix list
+   * cannot say "archive's compression primitives, but nothing built on them".
+   * Prefer this over widening `mustNotInclude`, which would stop checking the
+   * whole tree.
+   */
+  allowModules?: string[];
 }
 
 /** Shorthand for creating a scenario */
@@ -126,7 +127,9 @@ const ALL_MODULE_TREES = [
   "modules/markdown/",
   "modules/xml/",
   "modules/archive/",
-  "modules/stream/"
+  "modules/stream/",
+  "modules/draw/",
+  "modules/mermaid/"
 ];
 
 /** Build a mustNotInclude list = every module tree except `self` and `allowed`. */
@@ -161,6 +164,42 @@ function ns(
   };
 }
 
+/**
+ * `Chart` is the one excel namespace that legitimately reaches `archive/`:
+ * `Chart.toPNG` encodes a PNG, a PNG's IDAT *is* a zlib stream, and its chunks
+ * are CRC32-checked — so the shared encoder (`@excel/utils/png`) pulls
+ * `archive/compression/{compress,crc32}`. This used to come out archive-free
+ * only because the chart renderer carried a private encoder that emitted
+ * *stored* (uncompressed) deflate blocks alongside a second CRC32
+ * implementation; consolidating on the library's real encoder is what added the
+ * edge, and it is the right trade.
+ *
+ * Only the primitives are allowed. Everything built on top of them — ZIP, TAR,
+ * the archive surface — is still asserted absent, as is every other module
+ * tree. A consumer that never renders keeps paying nothing: the
+ * `Chart.add` / `Workbook.create` scenarios below prove the create path drops
+ * the renderers, and with them the encoder.
+ *
+ * It is also the one namespace that eagerly reaches `draw/`: the renderers draw
+ * onto the shared display list, so `Chart` pays for the walker, the SVG
+ * serialiser and the rasteriser (≈100–160 KB). Every other draw consumer —
+ * `Sparkline`, `Worksheet`, word's `Layout`, `Pdf` — keeps it behind a lazy
+ * boundary and is asserted draw-free, which is the property this scenario pins
+ * down by being the single exception.
+ */
+function chartNs(platform?: "browser" | "node"): Scenario {
+  const tag = platform === "browser" ? "browser " : "";
+  return {
+    name: `${tag}/excel: Chart (allows xml+draw, archive/compression for PNG)`,
+    importFrom: `${PKG_NAME}/excel`,
+    imports: ["Chart"],
+    mustNotInclude: [...exclude("excel", ["modules/xml/", "modules/draw/"]), ...ARCHIVE_CONTAINERS],
+    allowModules: ["modules/archive/compression/"],
+    platform,
+    lazySplit: true
+  };
+}
+
 const scenarios: Scenario[] = [
   // ===========================================================================
   // /excel subpath — ALL 20 namespaces. Per the layer rules, excel may reach
@@ -170,7 +209,7 @@ const scenarios: Scenario[] = [
   ns("excel", "Address", []),
   ns("excel", "Anchor", []),
   ns("excel", "Cell", []),
-  ns("excel", "Chart", ["modules/xml/"]), // xml/encode for chart XML
+  chartNs(), // xml/encode + the draw engine; DEFLATE+CRC32 for Chart.toPNG
   ns("excel", "Chartsheet", []),
   ns("excel", "Column", []),
   ns("excel", "DataValidation", []),
@@ -382,7 +421,7 @@ const scenarios: Scenario[] = [
   ns("excel", "Address", [], "browser"),
   ns("excel", "Anchor", [], "browser"),
   ns("excel", "Cell", [], "browser"),
-  ns("excel", "Chart", ["modules/xml/"], "browser"),
+  chartNs("browser"),
   ns("excel", "Chartsheet", [], "browser"),
   ns("excel", "Column", [], "browser"),
   ns("excel", "DataValidation", [], "browser"),
@@ -440,15 +479,72 @@ const scenarios: Scenario[] = [
   ns("pdf", "Pdf", ["modules/archive/", "modules/xml/"], "browser"),
 
   // ===========================================================================
-  // Infrastructure modules — intentionally flat exports (not namespaced).
+  // Layer 1/2 modules with intentionally flat exports (not namespaced).
+  //
+  // These used to be checked against a shorter hand-written module list that
+  // predated `word`, `draw` and `mermaid` — so the lowest layers, the ones with
+  // the least excuse to reach anywhere, were the least checked. They go through
+  // `exclude()` like everything else now.
   // ===========================================================================
   s(
     "/archive: crc32 (minimal)",
     `${PKG_NAME}/archive`,
     ["crc32"],
-    [...NOT_EXCEL_PDF_CSV, "modules/archive/zip/", "modules/archive/unzip/", "modules/archive/tar/"]
+    // archive may reach stream; a CRC32-only consumer must not even do that,
+    // nor pull any container format built on top of the primitives.
+    [...exclude("archive", []), ...ARCHIVE_CONTAINERS]
   ),
-  s("/stream: pipeline", `${PKG_NAME}/stream`, ["pipeline"], allModulesExcept("stream"))
+  s("/stream: pipeline", `${PKG_NAME}/stream`, ["pipeline"], exclude("stream", [])),
+
+  // ===========================================================================
+  // The drawing engine and its first external producer.
+  //
+  // `draw` is Layer 1: it may reach `utils` and NOTHING else. That is the whole
+  // basis of the "one walker, many surfaces" claim — a backend added beside it
+  // must not need excel, word or pdf — so it is worth asserting rather than
+  // assuming. The imports named here are the three consumers a producer
+  // actually uses (walk, serialise, rasterise), i.e. the widest eager reach the
+  // module has.
+  //
+  // `mermaid` is Layer 2 and may reach `draw` only. It implements no backend,
+  // so anything else appearing here means the module grew a dependency the
+  // layer diagram forbids.
+  //
+  // The other half of the value is the reverse direction: `modules/mermaid/`
+  // now sits in `ALL_MODULE_TREES`, so all 100 other scenarios assert that 21
+  // diagram types never land in an excel, word or pdf bundle. Nothing imports
+  // mermaid today, and this is what keeps it that way.
+  // ===========================================================================
+  {
+    name: "/draw: renderDrawList + toSvg + rasterizeToRgba (isolated)",
+    importFrom: `${PKG_NAME}/draw`,
+    imports: ["renderDrawList", "toSvg", "rasterizeToRgba"],
+    mustNotInclude: exclude("draw", []),
+    lazySplit: true
+  },
+  {
+    name: "browser /draw: renderDrawList + toSvg + rasterizeToRgba (isolated)",
+    importFrom: `${PKG_NAME}/draw`,
+    imports: ["renderDrawList", "toSvg", "rasterizeToRgba"],
+    mustNotInclude: exclude("draw", []),
+    platform: "browser",
+    lazySplit: true
+  },
+  {
+    name: "/mermaid: mermaidToSvg + mermaidToDrawList (allows draw)",
+    importFrom: `${PKG_NAME}/mermaid`,
+    imports: ["mermaidToSvg", "mermaidToDrawList"],
+    mustNotInclude: exclude("mermaid", ["modules/draw/"]),
+    lazySplit: true
+  },
+  {
+    name: "browser /mermaid: mermaidToSvg + mermaidToDrawList (allows draw)",
+    importFrom: `${PKG_NAME}/mermaid`,
+    imports: ["mermaidToSvg", "mermaidToDrawList"],
+    mustNotInclude: exclude("mermaid", ["modules/draw/"]),
+    platform: "browser",
+    lazySplit: true
+  }
 ];
 
 // =============================================================================
@@ -559,11 +655,15 @@ function readEmittedBundle(dir: string, onlyFile?: string): string {
 
 function checkViolations(
   contributing: ModuleEntry[],
-  mustNotInclude: string[]
+  mustNotInclude: string[],
+  allowModules: string[] = []
 ): ScenarioResult["violations"] {
+  const checked = allowModules.length
+    ? contributing.filter(m => !allowModules.some(a => m.path.includes(a)))
+    : contributing;
   const violations: ScenarioResult["violations"] = [];
   for (const pattern of mustNotInclude) {
-    const matched = contributing.filter(m => m.path.includes(pattern));
+    const matched = checked.filter(m => m.path.includes(pattern));
     if (matched.length > 0) {
       violations.push({ pattern, matchedModules: matched });
     }
@@ -578,7 +678,7 @@ function makeResult(
   contributing: ModuleEntry[],
   parsedCount: number
 ): ScenarioResult {
-  const violations = checkViolations(contributing, scenario.mustNotInclude);
+  const violations = checkViolations(contributing, scenario.mustNotInclude, scenario.allowModules);
   if (bundleSize > 0 && contributing.length === 0) {
     violations.push({
       pattern: "NO_MODULE_MARKERS",
