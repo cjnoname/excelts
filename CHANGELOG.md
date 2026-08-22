@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/documonster/documonster/compare/v0.9.0...v0.10.0) (2026-08-22)
+
+
+### Features
+
+* **draw:** Render every backend from one display list ([ac93c68](https://github.com/documonster/documonster/commit/ac93c6892a516f23d72480fcb92d3e1a1d805de5))
+* **mermaid:** Draw twenty-one diagram types onto the shared engine ([14908ab](https://github.com/documonster/documonster/commit/14908abbdf5c48bbae07fe4bd216d3ee2428247e))
+* **treeshake:** Enhance scenario configuration with allowModules for selective module inclusion ([a546866](https://github.com/documonster/documonster/commit/a5468660ee0efd189a8d7723bb71ecd70cfd8ad5))
+
+
+### Bug Fixes
+
+* **pdf:** Measure vertical text placement from ink, not the line box ([f505700](https://github.com/documonster/documonster/commit/f50570049383696fd3cbccfb84556d4e921b55b3)), closes [#210](https://github.com/documonster/documonster/issues/210)
+* **verify-public-types:** Normalize path separators for Windows compatibility in relative paths ([42f35f2](https://github.com/documonster/documonster/commit/42f35f2f8090f6be9bbd0709ef470dc9e089875c))
+* **word:** Resolve styles when paginating, and let the positioner own the page ([d883f5e](https://github.com/documonster/documonster/commit/d883f5e19a7cce4d72ed56a11fa295ea6275a30d))
+
+
+### Code Refactoring
+
+* Improve type version checks and enhance test coverage for SVG geometry ([93ee968](https://github.com/documonster/documonster/commit/93ee9684020bb262c4db8a2d416904d73d6d344a))
+
 ## [0.9.0](https://github.com/documonster/documonster/compare/v0.8.0...v0.9.0) (2026-08-17)
 
 
