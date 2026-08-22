@@ -20,6 +20,8 @@ import { Cell, Column, Workbook, Worksheet } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { extractTextFromPage } from "@pdf/reader/content-interpreter";
 import { PdfDocument } from "@pdf/reader/pdf-document";
+import { CELL_PADDING_V } from "@pdf/render/constants";
+import { getFontAscent, getFontDescent } from "@utils/font-metrics";
 import { EMU_PER_INCH } from "@utils/units";
 import { describe, expect, it } from "vitest";
 
@@ -916,6 +918,26 @@ describe("pageSetup.showRowColHeaders", () => {
     expect(heading!.fontSize).toBeGreaterThan(cell!.fontSize);
   });
 
+  it("should centre a heading label's ink in its band", async () => {
+    const { wb } = plainSheet();
+    const pdfBytes = await excelToPdf(wb, { showRowColHeaders: true });
+    // The column band is the first rectangle the heading painter fills.
+    const band = decompressPdfContent(pdfBytes).match(/([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re\s+f/);
+    expect(band).not.toBeNull();
+    const bandBottom = Number(band![2]);
+    const bandHeight = Number(band![4]);
+
+    const doc = new PdfDocument(pdfBytes);
+    const label = extractTextFromPage(doc.getPages()[0], doc).find(f => f.text === "A");
+    expect(label).toBeDefined();
+
+    const ascent = getFontAscent(label!.fontName, label!.fontSize);
+    const descent = getFontDescent(label!.fontName, label!.fontSize);
+    // Centred on the ink. Centring on the em square and guessing the descender
+    // at 0.2 em instead leaves the label sitting low in the band.
+    expect(label!.y + (ascent + descent) / 2).toBeCloseTo(bandBottom + bandHeight / 2, 1);
+  });
+
   it("should label the correct columns on later horizontal pages", async () => {
     const { wb } = markerSheet(20, 3);
     const pages = textPerPage(
@@ -1113,6 +1135,33 @@ describe("pageSetup.cellComments", () => {
     // Note-yellow box plus Excel's red corner marker on the commented cell.
     expect(content).toMatch(/1 1 0\.88 rg/);
     expect(content).toMatch(/0\.8 0 0 rg/);
+  });
+
+  it("should inset a displayed comment's first line by its ascent", async () => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    for (let r = 1; r <= 12; r++) {
+      for (let c = 1; c <= 6; c++) {
+        Cell.setValue(ws, r, c, `r${r}c${c}`);
+      }
+    }
+    cellSetNote(getCell(ws, "B6"), "Look here");
+
+    const pdfBytes = await excelToPdf(wb, { cellComments: "asDisplayed" });
+    const content = decompressPdfContent(pdfBytes);
+    // The note box is the only note-yellow fill on the page.
+    const box = content.match(/1 1 0\.88 rg\s+([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re\s+f/);
+    expect(box).not.toBeNull();
+    const boxTop = Number(box![2]) + Number(box![4]);
+
+    const doc = new PdfDocument(pdfBytes);
+    const line = extractTextFromPage(doc.getPages()[0], doc).find(f => f.text.includes("Look"));
+    expect(line).toBeDefined();
+
+    // The first line's ascent sits one padding below the box top. Stepping down
+    // by the font size instead drops the note by font size minus ascent.
+    const ascent = getFontAscent(line!.fontName, line!.fontSize);
+    expect(boxTop - (line!.y + ascent)).toBeCloseTo(CELL_PADDING_V, 1);
   });
 
   it("should reserve asDisplayed comment text during configured-font layout", async () => {

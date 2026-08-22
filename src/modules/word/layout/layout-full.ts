@@ -15,7 +15,12 @@
  * is a build error, never a silent drop.
  */
 
-import { measureTextWidth, styledFontVariant } from "@utils/font-metrics";
+import {
+  getFontAscent,
+  getFontDescent,
+  measureTextWidth,
+  styledFontVariant
+} from "@utils/font-metrics";
 import { ommlToMathML } from "@word/advanced/math-convert";
 import { extractMathText, isHyperlink, isRun } from "@word/core/text-utils";
 import { layoutDocument } from "@word/layout/layout";
@@ -26,6 +31,8 @@ import {
   DEFAULT_PAGE_MARGIN_TWIPS,
   DEFAULT_PAGE_WIDTH_TWIPS,
   LINE_HEIGHT_FACTOR,
+  SCRIPT_BASELINE_SHIFT_FACTOR,
+  SCRIPT_FONT_SIZE_RATIO,
   resolveCellMarginsTwips
 } from "@word/layout/layout-constants";
 import type {
@@ -52,6 +59,7 @@ import type {
   PageContent,
   PageGeometry
 } from "@word/layout/layout-model";
+import { resolveWordLineMetrics } from "@word/layout/line-metrics";
 import {
   resolveRunStyle,
   resolveShadingFill,
@@ -87,7 +95,8 @@ import type {
   TableCellProperties,
   TableOfContents,
   TableProperties,
-  TextBox
+  TextBox,
+  VerticalCellAlign
 } from "@word/types";
 import { EMU_PER_POINT, twipsToPt } from "@word/units";
 
@@ -2090,6 +2099,27 @@ function computeListMarkers(doc: DocxDocument): Map<Paragraph, ListMarker> {
 }
 
 /** Normalize a Word bullet glyph to a WinAnsi-renderable equivalent. */
+/**
+ * Bullet glyphs this engine can substitute for a level definition's own symbol.
+ *
+ * A host that has to know which faces a document needs *before* laying it out
+ * (the PDF bridge, choosing a fallback font) cannot see these in the source
+ * model: Word authors bullets as Symbol/Wingdings private-use code points and
+ * the layout rewrites them. Exported so that prediction stays derived from the
+ * one function that performs the rewrite rather than a second copy of its table.
+ */
+export function predictBulletGlyphs(doc: DocxDocument): string[] {
+  const out: string[] = [];
+  for (const abstract of doc.abstractNumberings ?? []) {
+    for (const level of abstract.levels ?? []) {
+      if (level.format === "bullet") {
+        out.push(normalizeBulletGlyph(level.text));
+      }
+    }
+  }
+  return out;
+}
+
 function normalizeBulletGlyph(text: string | undefined): string {
   if (!text || text.length === 0) {
     return "\u2022"; // round bullet
@@ -2355,10 +2385,15 @@ function layoutParagraph(
     const lineAvailableWidth = perLineSlots ? slot.width : fullAvailableWidth;
     let xPos = lineIdx === 0 ? firstLineIndentPt : 0;
 
-    // Calculate line width for alignment, and find the tallest item
-    // so the line's height accommodates inline images.
+    // Calculate line width for alignment, and measure what the line holds so
+    // its box can be sized around it: the ink extents of every face on the
+    // line, plus the tallest inline image. An inline image sits *on* the
+    // baseline, so it pushes the baseline down rather than only making the box
+    // taller.
     let lineWidth = 0;
-    let lineMaxHeight = lineHeightPt;
+    let lineAscent = 0;
+    let lineDescent = 0;
+    let maxImageHeight = 0;
     for (const seg of lineSegments) {
       if ("type" in seg && seg.type === "break") {
         // A hard break draws nothing; it only ended the previous line.
@@ -2368,8 +2403,8 @@ function layoutParagraph(
         const w = emuToPt(seg.content.width);
         const h = emuToPt(seg.content.height);
         lineWidth += w;
-        if (h > lineMaxHeight) {
-          lineMaxHeight = h;
+        if (h > maxImageHeight) {
+          maxImageHeight = h;
         }
       } else {
         const fontSize = getRunFontSizePt(seg.properties) * headingScale;
@@ -2382,6 +2417,22 @@ function layoutParagraph(
           seg.properties?.bold,
           seg.properties?.italic
         );
+        const metrics = measureLayoutFontMetrics(
+          seg.text,
+          fontName,
+          fontSize,
+          options,
+          seg.properties?.bold,
+          seg.properties?.italic
+        );
+        const scriptShift =
+          seg.properties?.vertAlign === "superscript"
+            ? fontSize * SCRIPT_BASELINE_SHIFT_FACTOR
+            : seg.properties?.vertAlign === "subscript"
+              ? -fontSize * SCRIPT_BASELINE_SHIFT_FACTOR
+              : 0;
+        lineAscent = Math.max(lineAscent, metrics.ascent + scriptShift);
+        lineDescent = Math.min(lineDescent, metrics.descent + scriptShift);
       }
     }
 
@@ -2454,13 +2505,19 @@ function layoutParagraph(
             ? "left"
             : (alignment as "left" | "center" | "right" | "justify");
 
+    const lineMetrics = resolveWordLineMetrics({
+      nominalHeight: lineHeightPt,
+      ascent: lineAscent,
+      descent: lineDescent,
+      imageAscent: maxImageHeight,
+      exact: spacing?.lineRule === "exact"
+    });
+    const { baseline: lineBaseline, height: lineBoxHeight } = lineMetrics;
+
     lineBoxes.push({
       y: yOffset,
-      height: lineMaxHeight,
-      // Baseline for text sits at 80% of line height; for an
-      // image-dominant line this puts the image's bottom near the
-      // baseline, matching Word's default inline-image alignment.
-      baseline: lineMaxHeight * 0.8,
+      height: lineBoxHeight,
+      baseline: lineBaseline,
       runs,
       alignment: mappedAlignment
     });
@@ -2474,7 +2531,7 @@ function layoutParagraph(
       pageBreakAfterLines.push(lineIdx);
     }
 
-    yOffset += lineMaxHeight;
+    yOffset += lineBoxHeight;
   }
 
   // An empty paragraph still occupies a line — except a thematic break, whose
@@ -2632,6 +2689,14 @@ function layoutTable(
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     let maxRowHeight = DEFAULT_FONT_SIZE_PT * 1.5; // minimum row height
+    // This row's cells with the `w:vAlign` each asked for. A cell is laid out
+    // from its top margin because its final height is not known until every
+    // cell in the row has been measured; the alignment is applied once the row
+    // height settles, below.
+    const rowCells: Array<{
+      cell: LayoutTableCell;
+      verticalAlign: VerticalCellAlign | undefined;
+    }> = [];
     // `w:trHeight`: `exact` fixes the row height outright, `atLeast` raises the
     // floor. Ignoring it let a table with declared row heights render squashed —
     // and, now that this pass owns pagination, shifted everything after it.
@@ -2746,6 +2811,10 @@ function layoutTable(
           endCol >= colWidths.length
         )
       });
+      rowCells.push({
+        cell: cells[cells.length - 1],
+        verticalAlign: cell.properties?.verticalAlign
+      });
 
       gridCol += span;
     }
@@ -2756,11 +2825,18 @@ function layoutTable(
       maxRowHeight = declaredHeightPt;
     }
 
-    // Normalize cell heights to row max
-    for (const c of cells) {
-      if (c.row === ri) {
-        (c as { rect: { height: number } }).rect.height = maxRowHeight;
+    // Normalize cell heights to row max, then honour `w:vAlign`: a cell was
+    // measured from its top margin, so anything but `top` has to move its
+    // content down into the slack the row's tallest cell created.
+    for (const { cell: c, verticalAlign } of rowCells) {
+      // Only a cell whose content is genuinely taller than the settled row needs
+      // bounding, which happens when an `exact` rule shortened the row. Marking
+      // every exact cell would make renderers emit a clip that changes nothing.
+      if (c.rect.height > maxRowHeight) {
+        (c as { clipToBounds?: boolean }).clipToBounds = true;
       }
+      shiftCellContentForVerticalAlign(c, verticalAlign, maxRowHeight);
+      (c as { rect: { height: number } }).rect.height = maxRowHeight;
     }
 
     cursorY += maxRowHeight;
@@ -2772,6 +2848,40 @@ function layoutTable(
     cells,
     sourceIndex
   };
+}
+
+/**
+ * Move a cell's content down to satisfy `w:vAlign` once the row's height is
+ * known.
+ *
+ * A cell is laid out top-down from its own top margin, because its final height
+ * depends on the tallest cell in the row and that is not known until the whole
+ * row has been measured. `center` and `bottom` therefore mean "translate the
+ * finished content into the slack that appeared". Only the top-level blocks move:
+ * a paragraph's lines are positioned relative to the paragraph, and a nested
+ * table's cells relative to that table, so both follow their own origin.
+ *
+ * The cell's height at this point is still its natural content height — the
+ * caller normalises it to the row height straight after.
+ */
+function shiftCellContentForVerticalAlign(
+  cell: LayoutTableCell,
+  verticalAlign: VerticalCellAlign | undefined,
+  rowHeight: number
+): void {
+  if (!verticalAlign || verticalAlign === "top") {
+    return;
+  }
+  // A `w:trHeight` of `exact` can leave the row shorter than its content, in
+  // which case there is nothing to distribute and Word clips instead.
+  const slack = rowHeight - cell.rect.height;
+  if (slack <= 0) {
+    return;
+  }
+  const shift = verticalAlign === "center" ? slack / 2 : slack;
+  for (const block of cell.content) {
+    (block as { rect: { y: number } }).rect.y += shift;
+  }
 }
 
 /**
@@ -3673,7 +3783,7 @@ function getHeadingFontScale(level: number): number {
 function getRunFontSizePt(props: Run["properties"]): number {
   const base = props?.size ? props.size / 2 : DEFAULT_FONT_SIZE_PT;
   if (props?.vertAlign === "superscript" || props?.vertAlign === "subscript") {
-    return base * 0.65;
+    return base * SCRIPT_FONT_SIZE_RATIO;
   }
   return base;
 }
@@ -3737,6 +3847,21 @@ function measureLayoutText(
     return options.measureText(text, fontName, fontSize, bold, italic);
   }
   return measureTextWidth(text, styledFontVariant(fontName, bold, italic), fontSize);
+}
+
+function measureLayoutFontMetrics(
+  text: string,
+  fontName: string,
+  fontSize: number,
+  options: FullLayoutOptions | undefined,
+  bold?: boolean,
+  italic?: boolean
+): { ascent: number; descent: number } {
+  if (options?.measureTextMetrics) {
+    return options.measureTextMetrics(text, fontName, fontSize, bold, italic);
+  }
+  const face = styledFontVariant(fontName, bold, italic);
+  return { ascent: getFontAscent(face, fontSize), descent: getFontDescent(face, fontSize) };
 }
 
 function resolveColorHex(

@@ -44,6 +44,17 @@ export const DEFAULT_FONT_SIZE_HALF_PT = DEFAULT_FONT_SIZE_PT * 2;
  */
 export const LINE_HEIGHT_FACTOR = 1.2;
 
+/**
+ * Rendered size of a superscript/subscript, as a fraction of its source size.
+ *
+ * Kept beside {@link SCRIPT_BASELINE_SHIFT_FACTOR}: the two describe one effect,
+ * and measurement, line extents and drawing all have to apply both.
+ */
+export const SCRIPT_FONT_SIZE_RATIO = 0.65;
+
+/** Baseline rise/drop for a superscript/subscript, relative to its rendered size. */
+export const SCRIPT_BASELINE_SHIFT_FACTOR = 0.33;
+
 // =============================================================================
 // Table cell margins
 // =============================================================================

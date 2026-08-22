@@ -1,4 +1,5 @@
 import {
+  computeTextBlockHeight,
   computeTextStartY,
   computeTextX,
   wrapTextLines,
@@ -63,9 +64,51 @@ describe("page-renderer helpers", () => {
       const topY = computeTextStartY("top", rect, 12, 8, padTop, padBottom);
       expect(topY).toBe(10 + 40 - 5 - 8); // 37
 
-      // bottom-aligned: y + padBottom + (totalTextHeight - ascent)
+      // bottom-aligned: y + padBottom + (textBlockHeight - ascent)
       const bottomY = computeTextStartY("bottom", rect, 12, 8, padTop, padBottom);
       expect(bottomY).toBe(10 + 10 + (12 - 8)); // 24
+    });
+
+    it("should inset top and bottom equally for an ink-height block", () => {
+      const ascent = 8;
+      const descent = -2;
+      const pad = 3;
+      const blockHeight = computeTextBlockHeight(1, 12, ascent, descent);
+
+      const topY = computeTextStartY("top", rect, blockHeight, ascent, pad, pad);
+      const bottomY = computeTextStartY("bottom", rect, blockHeight, ascent, pad, pad);
+
+      // Gap above the ascent equals the gap below the descent — the whole point:
+      // a line box's leading must not land on one side only.
+      expect(rect.y + rect.height - (topY + ascent)).toBeCloseTo(pad, 10);
+      expect(bottomY + descent - rect.y).toBeCloseTo(pad, 10);
+    });
+
+    it("should centre the ink of a middle-aligned block", () => {
+      const ascent = 8;
+      const descent = -2;
+      const blockHeight = computeTextBlockHeight(2, 12, ascent, descent);
+
+      const y = computeTextStartY("middle", rect, blockHeight, ascent);
+      const inkTop = y + ascent;
+      const inkBottom = y - 12 + descent; // second line's descent
+
+      expect((inkTop + inkBottom) / 2).toBeCloseTo(rect.y + rect.height / 2, 10);
+    });
+  });
+
+  describe("computeTextBlockHeight", () => {
+    it("should span the first ascent to the last descent", () => {
+      // 3 lines: two full advances plus one line's ink height.
+      expect(computeTextBlockHeight(3, 12, 8, -2)).toBe(34);
+    });
+
+    it("should exclude line leading for a single line", () => {
+      expect(computeTextBlockHeight(1, 12, 8, -2)).toBe(10);
+    });
+
+    it("should treat an empty stack as one line", () => {
+      expect(computeTextBlockHeight(0, 12, 8, -2)).toBe(10);
     });
   });
 

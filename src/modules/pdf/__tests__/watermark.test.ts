@@ -1,5 +1,6 @@
 import { pdf } from "@pdf/pdf";
 import type { PdfExportOptions, PdfTextWatermark, PdfImageWatermark } from "@pdf/types";
+import { getFontAscent, getFontDescent, measureTextWidth } from "@utils/font-metrics";
 /**
  * Tests for PDF watermark feature.
  *
@@ -12,7 +13,7 @@ import type { PdfExportOptions, PdfTextWatermark, PdfImageWatermark } from "@pdf
  */
 import { describe, it, expect } from "vitest";
 
-import { pdfToString, expectValidPdf } from "./test-helpers";
+import { decompressPdfContent, pdfToString, expectValidPdf } from "./test-helpers";
 
 // A tiny valid 1x1 red PNG for image watermark tests
 const TINY_PNG = new Uint8Array([
@@ -396,6 +397,43 @@ describe("PDF Watermark Filtering", () => {
 // =============================================================================
 
 describe("PDF Watermark Placement", () => {
+  it.each([0, 45, -45])(
+    "should centre a %i° watermark's ink on the requested point",
+    async rotation => {
+      const fontSize = 48;
+      const text = "CENTRE";
+      const bytes = await pdf(sampleData, {
+        watermark: { type: "text", text, fontSize, rotation, position: "center" }
+      });
+      expectValidPdf(bytes);
+
+      const content = decompressPdfContent(bytes);
+      // Bind the matrix to this watermark's text instead of taking the first Tm
+      // from whichever content stream the writer happened to serialise first.
+      const tm = content.match(
+        /(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) Tm\s*\(CENTRE\) Tj/
+      );
+      const mediaBox = pdfToString(bytes).match(/\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)/);
+      expect(tm).not.toBeNull();
+      expect(mediaBox).not.toBeNull();
+
+      const pageWidth = Number(mediaBox![1]);
+      const pageHeight = Number(mediaBox![2]);
+      const [a, b, c, d, x, baseline] = tm!.slice(1).map(Number);
+      const ascent = getFontAscent("Helvetica", fontSize);
+      const descent = getFontDescent("Helvetica", fontSize);
+      const width = measureTextWidth(text, "Helvetica", fontSize);
+
+      // Transform the local ink centre through the emitted text matrix. This
+      // checks both axes for rotated marks; an ascent-only approximation lifts a
+      // 48pt watermark several points off centre.
+      const localCenterX = width / 2;
+      const localCenterY = (ascent + descent) / 2;
+      expect(x + a * localCenterX + c * localCenterY).toBeCloseTo(pageWidth / 2, 1);
+      expect(baseline + b * localCenterX + d * localCenterY).toBeCloseTo(pageHeight / 2, 1);
+    }
+  );
+
   it("should default to under (watermark stream before content)", async () => {
     const bytes = await pdf(sampleData, {
       watermark: { type: "text", text: "UNDER" }

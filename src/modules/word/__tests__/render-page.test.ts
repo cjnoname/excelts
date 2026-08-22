@@ -125,7 +125,7 @@ describe("renderPageToSvg", () => {
     expect(svg).toContain("Red text");
   });
 
-  it("renders a table with <rect> and <line> elements", () => {
+  it("renders every table cell border and its text", () => {
     const table: Table = {
       type: "table",
       rows: [
@@ -140,13 +140,112 @@ describe("renderPageToSvg", () => {
     const doc = makeDoc([table]);
     const svg = renderPageToSvg(doc, 1);
 
-    // Table outer border is drawn as a <rect>
-    expect(svg).toContain("<rect");
-    // Row/column separators drawn as <line>
-    expect(svg).toContain("<line");
+    // The positioned renderer paints one border rectangle per cell rather than
+    // the estimate renderer's separate row/column line grid.
+    const cellBorders = [...svg.matchAll(/<rect[^>]*fill="none"[^>]*stroke="#cccccc"/g)];
+    expect(cellBorders).toHaveLength(4);
     // Cell text should be present
     expect(svg).toContain("Cell A1");
     expect(svg).toContain("Cell B1");
+  });
+
+  it("clips an exact-height table row but never an exact line", () => {
+    const doc = makeDoc([
+      {
+        type: "paragraph",
+        properties: { spacing: { line: 120, lineRule: "exact" } },
+        children: [{ content: [{ type: "text", text: "Tall" }], properties: { size: 48 } }]
+      },
+      {
+        type: "table",
+        rows: [
+          {
+            properties: { height: { value: 200, rule: "exact" } },
+            cells: [
+              {
+                content: [makeParagraph("one"), makeParagraph("two")]
+              }
+            ]
+          }
+        ]
+      }
+    ]);
+
+    const svg = renderPageToSvg(doc, 1);
+    // The 10pt exact row bounds its overflowing content...
+    expect(svg).toContain('viewBox="72.00 78.00 468.00 10.00" overflow="hidden"');
+    // ...but the 6pt exact line draws its glyphs whole, overlapping neighbours
+    // rather than being sliced, so it introduces no clip of its own.
+    expect(svg).not.toContain('height="6.00" viewBox="72.00 72.00');
+    expect(svg).toContain("Tall");
+    expect(svg).toContain("two");
+  });
+
+  it("keeps clipping free of document-wide ids so pages can share one HTML", () => {
+    const row = (text: string) => ({
+      type: "table" as const,
+      rows: [
+        {
+          properties: { height: { value: 200, rule: "exact" as const } },
+          cells: [{ content: [makeParagraph(text), makeParagraph(`${text} overflow`)] }]
+        }
+      ]
+    });
+    const doc = makeDoc(Array.from({ length: 90 }, (_, i) => row(`r${i}`)));
+
+    const pages = renderDocumentToSvg(doc);
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      expect(page).toContain('overflow="hidden"');
+      // A `clipPath` would need an id, and ids are document-wide: two pages
+      // embedded in the same HTML file would then clip against each other.
+      expect(page).not.toContain("clipPath");
+      expect(page).not.toMatch(/\sid="/);
+    }
+  });
+
+  it("applies RenderOptions.fonts on every SVG entry point", () => {
+    const doc = makeDoc([makeParagraph("Mapped")]);
+    const fonts = new Map([["Calibri", "My Preview Face"]]);
+
+    expect(renderPageToSvg(doc, 1, { fonts })).toContain('font-family="My Preview Face"');
+    expect(renderDocumentToSvg(doc, { fonts })[0]).toContain('font-family="My Preview Face"');
+  });
+
+  it("pairs an unmapped font with its generic family", () => {
+    const withFont = (text: string, font: string): Paragraph => ({
+      type: "paragraph",
+      children: [{ properties: { font }, content: [{ type: "text", text }] }]
+    });
+
+    // A viewer lacking the exact face should still resolve to the right kind of
+    // font rather than its default proportional one.
+    expect(renderPageToSvg(makeDoc([withFont("s", "Times New Roman")]), 1)).toContain(
+      `font-family="&quot;Times New Roman&quot;, serif"`
+    );
+    expect(renderPageToSvg(makeDoc([withFont("m", "Consolas")]), 1)).toContain(
+      `font-family="&quot;Consolas&quot;, monospace"`
+    );
+    expect(renderPageToSvg(makeDoc([withFont("p", "Calibri")]), 1)).toContain(
+      `font-family="&quot;Calibri&quot;, sans-serif"`
+    );
+  });
+
+  it("keeps a hostile font name from breaking the CSS declaration", () => {
+    const named = (font: string): Paragraph => ({
+      type: "paragraph",
+      children: [{ properties: { font }, content: [{ type: "text", text: "x" }] }]
+    });
+
+    // A raw quote would end the CSS string early and a backslash would start an
+    // escape sequence — either way the viewer resolves a different family than
+    // the attribute appears to name.
+    expect(renderPageToSvg(makeDoc([named('Ev"il\\Face')]), 1)).toContain(
+      `font-family="&quot;EvilFace&quot;, sans-serif"`
+    );
+
+    // An empty name must not produce `"", sans-serif`, which is not a valid list.
+    expect(renderPageToSvg(makeDoc([named("  ")]), 1)).toContain(`font-family="sans-serif"`);
   });
 
   it("throws RangeError for page number out of range", () => {

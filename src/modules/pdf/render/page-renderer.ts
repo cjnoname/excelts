@@ -560,14 +560,25 @@ function drawCellText(
   const lines = wrapText ? wrapTextLines(text, measure, effectiveWidth) : text.split(/\r?\n/);
 
   const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
-  const ascent = Math.max(
-    ...lines.map(line => fontManager.measureTextMetrics(line, resourceName, fontSize).ascent)
+  const lineMetrics = lines.map(line =>
+    fontManager.measureTextMetrics(line, resourceName, fontSize)
   );
-  const totalTextHeight = lines.length * lineHeight;
+  // Union every line's actual ink interval. Looking only at the first ascent
+  // and last descent misses a taller fallback face on a middle line; lending
+  // that middle face's metrics to both outer lines adds phantom padding.
+  let inkTop = Number.NEGATIVE_INFINITY;
+  let inkBottom = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < lineMetrics.length; i++) {
+    const baselineOffset = -i * lineHeight;
+    inkTop = Math.max(inkTop, baselineOffset + lineMetrics[i].ascent);
+    inkBottom = Math.min(inkBottom, baselineOffset + lineMetrics[i].descent);
+  }
+  const ascent = inkTop;
+  const blockHeight = inkTop - inkBottom;
   const textStartY = computeTextStartY(
     verticalAlign,
     rect,
-    totalTextHeight,
+    blockHeight,
     ascent,
     pad.top,
     pad.bottom
@@ -616,16 +627,6 @@ function drawRichText(
   const runs = cell.richText!;
   const pad = computeCellPadding(cell, scaleFactor);
 
-  // Use the largest font size across all runs for line height calculation
-  let maxFontSize = cell.fontSize;
-  for (const run of runs) {
-    if (run.fontSize > maxFontSize) {
-      maxFontSize = run.fontSize;
-    }
-  }
-  const primaryFontSize = maxFontSize;
-  const lineHeight = primaryFontSize * LINE_HEIGHT_FACTOR;
-
   // Helper: resolve resource name for a run
   const runResource = (run: LayoutRichTextRun) =>
     fontManager.resolveFont(run.fontFamily, run.bold, run.italic);
@@ -662,6 +663,7 @@ function drawRichText(
     // Compute per-line heights from the faces that actually draw the line.
     const lineHeights: number[] = [];
     const lineAscents: number[] = [];
+    const lineDescents: number[] = [];
     for (const range of lineRanges) {
       let lineMaxFont = cell.fontSize;
       for (let ci = range.start; ci < range.end; ci++) {
@@ -672,6 +674,18 @@ function drawRichText(
       }
       let lineAscent = 0;
       let lineDescent = 0;
+      if (range.start === range.end) {
+        // An explicit blank line still has the face and size of the run that
+        // owns the newline (or, for a trailing blank line, the run immediately
+        // before it). Without these metrics a leading blank line has zero
+        // ascent and a trailing one zero descent, which moves middle/bottom
+        // aligned rich text by a full font ascent.
+        const ri = runForChar[range.start] ?? runForChar[range.start - 1] ?? 0;
+        lineMaxFont = Math.max(lineMaxFont, runs[ri].fontSize);
+        const metrics = fontManager.measureTextMetrics("", runResources[ri], runs[ri].fontSize);
+        lineAscent = metrics.ascent;
+        lineDescent = metrics.descent;
+      }
       for (let ci = range.start; ci < range.end;) {
         const ri = runForChar[ci] ?? 0;
         let end = ci + 1;
@@ -688,15 +702,28 @@ function drawRichText(
         ci = end;
       }
       lineAscents.push(lineAscent);
+      lineDescents.push(lineDescent);
       lineHeights.push(Math.max(lineMaxFont * LINE_HEIGHT_FACTOR, lineAscent - lineDescent));
     }
 
-    const ascent = lineAscents[0] ?? primaryFontSize;
-    const totalTextHeight = lineHeights.reduce((sum, h) => sum + h, 0);
+    // Union every line's actual ink interval at its variable baseline offset.
+    // Looking only at the first ascent and last descent misses a taller middle
+    // run, which then shifts centred text or gets clipped despite sufficient row
+    // height.
+    let inkTop = Number.NEGATIVE_INFINITY;
+    let inkBottom = Number.POSITIVE_INFINITY;
+    let baselineOffset = 0;
+    for (let i = 0; i < lineHeights.length; i++) {
+      inkTop = Math.max(inkTop, baselineOffset + lineAscents[i]);
+      inkBottom = Math.min(inkBottom, baselineOffset + lineDescents[i]);
+      baselineOffset -= lineHeights[i];
+    }
+    const ascent = inkTop;
+    const blockHeight = inkTop - inkBottom;
     const textStartY = computeTextStartY(
       verticalAlign,
       rect,
-      totalTextHeight,
+      blockHeight,
       ascent,
       pad.top,
       pad.bottom
@@ -782,11 +809,10 @@ function drawRichText(
 
   const ascent = Math.max(...runMetrics.map(metrics => metrics.ascent));
   const descent = Math.min(...runMetrics.map(metrics => metrics.descent));
-  const actualLineHeight = Math.max(lineHeight, ascent - descent);
   const textStartY = computeTextStartY(
     verticalAlign,
     rect,
-    actualLineHeight,
+    ascent - descent,
     ascent,
     pad.top,
     pad.bottom
@@ -874,32 +900,75 @@ function drawRotatedText(
     lines = cell.text.split(/\r?\n/);
   }
 
-  const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
-  const totalTextHeight = lines.length * lineHeight;
+  /**
+   * The text block's per-line ink, at a given size, plus a bounding box for any
+   * rotation of it.
+   *
+   * `boundsAt` transforms each line's own ink rectangle and unions the corners,
+   * which is what both fitting and placement need. The cruder
+   * `maxLineWidth × blockHeight` overestimates whenever the widest line and the
+   * tallest face are different lines, shrinking text that would have fitted.
+   */
+  const measureBlock = (size: number) => {
+    const lineHeight = size * LINE_HEIGHT_FACTOR;
+    const metrics = lines.map(line => fontManager.measureTextMetrics(line, resourceName, size));
+    const widths = lines.map(line => fontManager.measureText(line, resourceName, size));
+    let ccwLeft = Number.POSITIVE_INFINITY;
+    let ccwRight = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < metrics.length; i++) {
+      // Rotated +90° the columns advance right and the ascent points left. The
+      // -90° case is the exact mirror of this range (see `cwLeft` / `cwRight`),
+      // so only one of the two is measured.
+      ccwLeft = Math.min(ccwLeft, i * lineHeight - metrics[i].ascent);
+      ccwRight = Math.max(ccwRight, i * lineHeight - metrics[i].descent);
+    }
+    /**
+     * Bounding box of the block rotated by (cos, sin), in a space whose origin
+     * is the first line's baseline start. Also reports that box's centre, so a
+     * caller can align the visible ink rather than a nominal rectangle.
+     */
+    const boundsAt = (cosA: number, sinA: number) => {
+      let minX = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let minY = Number.POSITIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < metrics.length; i++) {
+        const halfWidth = widths[i] / 2;
+        const baselineY = -(i - (metrics.length - 1) / 2) * lineHeight;
+        for (const x of [-halfWidth, halfWidth]) {
+          for (const y of [baselineY + metrics[i].descent, baselineY + metrics[i].ascent]) {
+            const rx = x * cosA - y * sinA;
+            const ry = x * sinA + y * cosA;
+            minX = Math.min(minX, rx);
+            maxX = Math.max(maxX, rx);
+            minY = Math.min(minY, ry);
+            maxY = Math.max(maxY, ry);
+          }
+        }
+      }
+      return {
+        width: maxX - minX,
+        height: maxY - minY,
+        centerX: (minX + maxX) / 2,
+        centerY: (minY + maxY) / 2
+      };
+    };
+    return { lineHeight, boundsAt, ccwLeft, ccwRight };
+  };
+
+  let block = measureBlock(fontSize);
 
   // For non-wrapping text: scale font down if the rotated bounding box exceeds cell
   if (!wrapText) {
-    let maxLineWidth = 0;
-    for (const line of lines) {
-      const w = measure(line);
-      if (w > maxLineWidth) {
-        maxLineWidth = w;
-      }
-    }
-    const rotatedWidth = maxLineWidth * absCos + totalTextHeight * absSin;
-    const rotatedHeight = maxLineWidth * absSin + totalTextHeight * absCos;
+    const { width: rotatedWidth, height: rotatedHeight } = block.boundsAt(cos, sin);
     if (maxWidth > 0 && maxHeight > 0 && (rotatedWidth > maxWidth || rotatedHeight > maxHeight)) {
       const fitScale = Math.min(maxWidth / rotatedWidth, maxHeight / rotatedHeight);
       if (fitScale < 1) {
         fontSize = fontSize * fitScale;
+        block = measureBlock(fontSize);
       }
     }
   }
-
-  const scaledLineHeight = fontSize * LINE_HEIGHT_FACTOR;
-  const ascent = Math.max(
-    ...lines.map(line => fontManager.measureTextMetrics(line, resourceName, fontSize).ascent)
-  );
 
   const is90 = Math.abs(degrees - 90) < 0.01;
   const isMinus90 = Math.abs(degrees + 90) < 0.01;
@@ -908,30 +977,10 @@ function drawRotatedText(
 
   if (is90) {
     // Text reads bottom-to-top. Each line becomes a column drawn left-to-right.
-    drawRotated90(
-      stream,
-      cell,
-      lines,
-      fontManager,
-      resourceName,
-      fontSize,
-      scaledLineHeight,
-      ascent,
-      pad
-    );
+    drawRotated90(stream, cell, lines, fontManager, resourceName, fontSize, block, pad);
   } else if (isMinus90) {
     // Text reads top-to-bottom. Each line becomes a column drawn right-to-left.
-    drawRotatedMinus90(
-      stream,
-      cell,
-      lines,
-      fontManager,
-      resourceName,
-      fontSize,
-      scaledLineHeight,
-      ascent,
-      pad
-    );
+    drawRotatedMinus90(stream, cell, lines, fontManager, resourceName, fontSize, block, pad);
   } else {
     // General rotation — center multi-line text block in cell
     drawRotatedGeneral(
@@ -941,13 +990,38 @@ function drawRotatedText(
       fontManager,
       resourceName,
       fontSize,
-      scaledLineHeight,
-      ascent,
+      block,
       cos,
       sin,
       indentPts
     );
   }
+}
+
+/**
+ * A rotated text block, measured at the size it will be drawn.
+ *
+ * Every extent here is the block's real ink, unioned across its lines: a line
+ * box's leading is not part of it, so rotation cannot charge that leading to
+ * whichever side it happens to point at. `ccw*` / `cw*` are the column ranges
+ * the axis-swapped 90° cases place against; `boundsAt` is the rotated bounding
+ * box every other angle needs.
+ */
+interface RotatedTextBlock {
+  readonly lineHeight: number;
+  /** Bounding box, and its centre, of the block rotated by (cos, sin). */
+  readonly boundsAt: (
+    cos: number,
+    sin: number
+  ) => { width: number; height: number; centerX: number; centerY: number };
+  /**
+   * Horizontal span of the columns when rotated +90°, relative to the first
+   * column's origin. The -90° span is its exact mirror — negating and swapping
+   * the two bounds — because that rotation reverses both the column advance and
+   * the direction the ascent points.
+   */
+  readonly ccwLeft: number;
+  readonly ccwRight: number;
 }
 
 /** 90° CCW: text reads bottom-to-top, lines stack left-to-right. */
@@ -958,22 +1032,21 @@ function drawRotated90(
   fontManager: FontManager,
   resourceName: string,
   fontSize: number,
-  lineHeight: number,
-  ascent: number,
+  block: RotatedTextBlock,
   pad: CellPadding
 ): void {
   const { rect, horizontalAlign, verticalAlign } = cell;
-  const totalColumnsWidth = lines.length * lineHeight;
-
-  // horizontalAlign controls X placement of line columns (same visual axis)
+  const { lineHeight, ccwLeft, ccwRight } = block;
+  // Rotated 90° CCW the ascent points at page-left, so the block's ink spans
+  // `blockWidth` horizontally, starting `ascent` left of the first column.
   let startX: number;
   if (horizontalAlign === "center") {
-    startX = rect.x + rect.width / 2 - totalColumnsWidth / 2 + ascent;
+    startX = rect.x + rect.width / 2 - (ccwLeft + ccwRight) / 2;
   } else if (horizontalAlign === "right") {
-    startX = rect.x + rect.width - pad.right - totalColumnsWidth + ascent;
+    startX = rect.x + rect.width - pad.right - ccwRight;
   } else {
     // left (default)
-    startX = rect.x + pad.left + ascent;
+    startX = rect.x + pad.left - ccwLeft;
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -1012,22 +1085,25 @@ function drawRotatedMinus90(
   fontManager: FontManager,
   resourceName: string,
   fontSize: number,
-  lineHeight: number,
-  ascent: number,
+  block: RotatedTextBlock,
   pad: CellPadding
 ): void {
   const { rect, horizontalAlign, verticalAlign } = cell;
-  const totalColumnsWidth = lines.length * lineHeight;
-
-  // horizontalAlign controls X placement: lines stack right-to-left
+  const { lineHeight, ccwLeft, ccwRight } = block;
+  // Mirror of the +90° span: see `RotatedTextBlock.ccwLeft`.
+  const cwLeft = -ccwRight;
+  const cwRight = -ccwLeft;
+  // Rotated -90° the ascent points at page-right, so the first column — the
+  // rightmost one — carries the block's right edge `ascent` past its origin,
+  // and the columns then step left.
   let startX: number;
   if (horizontalAlign === "center") {
-    startX = rect.x + rect.width / 2 + totalColumnsWidth / 2 - lineHeight + ascent;
+    startX = rect.x + rect.width / 2 - (cwLeft + cwRight) / 2;
   } else if (horizontalAlign === "right") {
-    startX = rect.x + rect.width - pad.right - lineHeight + ascent;
+    startX = rect.x + rect.width - pad.right - cwRight;
   } else {
     // left (default)
-    startX = rect.x + pad.left + totalColumnsWidth - lineHeight + ascent;
+    startX = rect.x + pad.left - cwLeft;
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -1066,29 +1142,26 @@ function drawRotatedGeneral(
   fontManager: FontManager,
   resourceName: string,
   fontSize: number,
-  lineHeight: number,
-  ascent: number,
+  block: RotatedTextBlock,
   cos: number,
   sin: number,
   indentPts: number
 ): void {
   const { rect, horizontalAlign, verticalAlign } = cell;
+  const { lineHeight } = block;
   // Use border-aware padding (no scaleFactor — font size is already scaled by caller)
   const pad = computeCellPadding(cell);
 
-  // Compute the rotated bounding box of the text block
-  let maxLineWidth = 0;
-  for (const line of lines) {
-    const w = fontManager.measureText(line, resourceName, fontSize);
-    if (w > maxLineWidth) {
-      maxLineWidth = w;
-    }
-  }
-  const totalTextHeight = lines.length * lineHeight;
-  const absSin = Math.abs(sin);
-  const absCos = Math.abs(cos);
-  const rotatedWidth = maxLineWidth * absCos + totalTextHeight * absSin;
-  const rotatedHeight = maxLineWidth * absSin + totalTextHeight * absCos;
+  // The visible ink, rotated. Aligning against this rather than a nominal
+  // `maxLineWidth × blockHeight` rectangle keeps a tall face on one line from
+  // padding the other lines, and subtracting its centre below is what makes the
+  // ink — not that rectangle — land on the alignment point.
+  const {
+    width: rotatedWidth,
+    height: rotatedHeight,
+    centerX: localCenterX,
+    centerY: localCenterY
+  } = block.boundsAt(cos, sin);
 
   // Compute slant offset to match parallelogram border shape
   const slantShift = computeSlantOffset(cell.textRotation, rect.height) / 2;
@@ -1128,9 +1201,10 @@ function drawRotatedGeneral(
     const lineWidth = fontManager.measureText(line, resourceName, fontSize);
     const lineOffset = (i - (lines.length - 1) / 2) * lineHeight;
     const offsetX = -lineWidth / 2;
-    const offsetY = -ascent / 2 - lineOffset;
-    const tx = cx + offsetX * cos - offsetY * sin;
-    const ty = cy + offsetX * sin + offsetY * cos;
+    const offsetY = -lineOffset;
+
+    const tx = cx + offsetX * cos - offsetY * sin - localCenterX;
+    const ty = cy + offsetX * sin + offsetY * cos - localCenterY;
 
     emitTextWithMatrix(stream, fontManager, {
       text: line,
@@ -1581,6 +1655,22 @@ function emitTextWithType3(
 }
 
 /**
+ * Pitch of Excel's stacked (`textRotation = 255`) text, as fractions of the font
+ * size. Excel does not publish either value, and these read correctly from 8 pt
+ * to 36 pt. They are deliberately *not* `LINE_HEIGHT_FACTOR`: that spaces
+ * wrapped lines of horizontal text, where consecutive lines rarely collide,
+ * whereas a column of upright glyphs stacks full-height forms directly above one
+ * another and needs the looser step. Only the pitch is approximate — where the
+ * column starts is derived from real ink metrics.
+ */
+const VERTICAL_STACK_METRICS = {
+  /** Baseline-to-baseline step down a column. */
+  CHAR_ADVANCE: 1.3,
+  /** Centre-to-centre step across columns. */
+  COLUMN_PITCH: 1.4
+} as const;
+
+/**
  * Draw vertical stacked text (each character top-to-bottom).
  * Newlines (\n) start a new column to the right.
  */
@@ -1595,12 +1685,12 @@ function drawVerticalStackedText(
   const pad = computeCellPadding(cell, scaleFactor);
   const resourceName = fontManager.resolveFont(cell.fontFamily, cell.bold, cell.italic);
 
-  const charHeight = fontSize * 1.3;
-  const ascent = fontManager.measureTextMetrics(text, resourceName, fontSize).ascent;
+  const charHeight = fontSize * VERTICAL_STACK_METRICS.CHAR_ADVANCE;
+  const { ascent, descent } = fontManager.measureTextMetrics(text, resourceName, fontSize);
 
   // Split on newlines — each segment becomes a new column
   const columns = text.split(/\r?\n/);
-  const columnWidth = fontSize * 1.4;
+  const columnWidth = fontSize * VERTICAL_STACK_METRICS.COLUMN_PITCH;
   const totalColumnsWidth = columns.length * columnWidth;
 
   // Horizontal alignment controls column X positioning
@@ -1619,18 +1709,16 @@ function drawVerticalStackedText(
   for (let colIdx = 0; colIdx < columns.length; colIdx++) {
     const colText = columns[colIdx];
     const colX = startX + colIdx * columnWidth;
-    const totalTextHeight = colText.length * charHeight;
 
     // Vertical alignment controls starting Y position (PDF y-axis: higher = top of cell)
-    let currentY: number;
-    if (verticalAlign === "middle") {
-      currentY = rect.y + rect.height / 2 + totalTextHeight / 2 - ascent;
-    } else if (verticalAlign === "bottom") {
-      currentY = rect.y + pad.bottom + totalTextHeight - ascent;
-    } else {
-      // top (default)
-      currentY = rect.y + rect.height - pad.top - ascent;
-    }
+    let currentY = computeTextStartY(
+      verticalAlign,
+      rect,
+      computeTextBlockHeight(colText.length, charHeight, ascent, descent),
+      ascent,
+      pad.top,
+      pad.bottom
+    );
 
     for (const ch of colText) {
       if (currentY < rect.y + pad.bottom) {
@@ -1666,10 +1754,23 @@ export function alphaGsName(alpha: number, resourcePrefix = ""): string {
 // Text Layout Helpers
 // =============================================================================
 
+/**
+ * Baseline of the **first** line, given where the text block must sit.
+ *
+ * `textBlockHeight` is the distance from the first line's ascent to the last
+ * line's descent — the block the three alignments are measured against. For a
+ * stack of `n` lines set `(n - 1) * lineHeight + (ascent - descent)`; note that
+ * `n * lineHeight` is *not* the same thing, because a line box carries leading
+ * that no glyph occupies. Passing the taller value pushes the block up by that
+ * leading (~0.28 × font size for Helvetica, ~0.41 × for Courier), so
+ * bottom-aligned text floats above its inset and centred text sits above the
+ * cell's middle — the top inset stays exact because it is derived from `ascent`
+ * alone. Feed it ink extents and all three alignments agree.
+ */
 export function computeTextStartY(
   verticalAlign: "top" | "middle" | "bottom",
   rect: PdfRect,
-  totalTextHeight: number,
+  textBlockHeight: number,
   ascent: number,
   padVTop = CELL_PADDING_V,
   padVBottom = padVTop
@@ -1680,24 +1781,45 @@ export function computeTextStartY(
       y = rect.y + rect.height - padVTop - ascent;
       break;
     case "middle":
-      y = rect.y + rect.height / 2 + totalTextHeight / 2 - ascent;
+      y = rect.y + rect.height / 2 + textBlockHeight / 2 - ascent;
       break;
     case "bottom":
     default:
-      y = rect.y + padVBottom + (totalTextHeight - ascent);
+      y = rect.y + padVBottom + (textBlockHeight - ascent);
       break;
   }
-  // Clamp: ensure text ascent doesn't exceed the cell top
-  const maxY = rect.y + rect.height - padVTop - ascent;
-  if (y > maxY) {
-    y = maxY;
+  // When the block does not fit, the alignment cannot be honoured and something
+  // has to be sacrificed. Pull it down to the top-aligned baseline: the reader
+  // then loses the tail of the text rather than its first line, which is what
+  // Excel's own clipping leaves legible in a too-short row. Note this makes a
+  // bottom- or middle-aligned block in such a row render as top-aligned.
+  const topAlignedY = rect.y + rect.height - padVTop - ascent;
+  if (y > topAlignedY) {
+    y = topAlignedY;
   }
-  // Clamp: ensure text descent doesn't go below cell bottom
+  // Last resort for a cell shorter than a single ascent: keep the baseline
+  // inside the cell so the glyphs cannot be drawn under the row below. This
+  // does not reserve room for descenders — at this size nothing fits, and the
+  // cell clip is what actually contains the overflow.
   const minY = rect.y + padVBottom;
   if (y < minY) {
     y = minY;
   }
   return y;
+}
+
+/**
+ * Height of a stack of `lineCount` lines from the first ascent to the last
+ * descent, i.e. the `textBlockHeight` `computeTextStartY` expects. `descent` is
+ * negative, as the font metrics report it.
+ */
+export function computeTextBlockHeight(
+  lineCount: number,
+  lineHeight: number,
+  ascent: number,
+  descent: number
+): number {
+  return Math.max(0, lineCount - 1) * lineHeight + (ascent - descent);
 }
 
 export function computeTextX(
@@ -2277,7 +2399,14 @@ function drawRowColHeadings(
 
   // Labels, centered in their band cell.
   stream.setFillColor(textColor);
-  const baselineOffset = (bandHeight - fontSize) / 2 + fontSize * 0.2;
+  // Labels are `A`..`XFD` and row numbers — one face, so one measurement. This
+  // is `computeTextStartY`'s middle case with no padding: centring on the em
+  // square instead (`(band - fontSize) / 2 + fontSize * 0.2`) leans the label
+  // low by half the difference between the em square and the ink.
+  const labelAscent = fontManager.getFontAscent(resourceName, fontSize);
+  const labelDescent = fontManager.getFontDescent(resourceName, fontSize);
+  const labelBaseline = (bandBottom: number, bandSize: number) =>
+    bandBottom + bandSize / 2 - (labelAscent + labelDescent) / 2;
 
   for (let i = 0; i < page.sheetCols.length; i++) {
     const label = columnNumberToLetters(page.sheetCols[i]);
@@ -2285,7 +2414,7 @@ function drawRowColHeadings(
     const x = page.columnOffsets[i] + (page.columnWidths[i] - w) / 2;
     emitTextWithMatrix(stream, fontManager, {
       text: label,
-      matrix: [1, 0, 0, 1, x, gridTop + baselineOffset],
+      matrix: [1, 0, 0, 1, x, labelBaseline(gridTop, bandHeight)],
       resourceName,
       fontSize
     });
@@ -2296,7 +2425,7 @@ function drawRowColHeadings(
     const w = fontManager.measureText(label, resourceName, fontSize);
     const rowH = page.rowHeights[i];
     const x = gridLeft - gutterWidth + (gutterWidth - w) / 2;
-    const y = page.rowYPositions[i] - rowH + (rowH - fontSize) / 2 + fontSize * 0.2;
+    const y = labelBaseline(page.rowYPositions[i] - rowH, rowH);
     emitTextWithMatrix(stream, fontManager, {
       text: label,
       matrix: [1, 0, 0, 1, x, y],
@@ -2348,9 +2477,21 @@ function drawCommentBoxes(
     const measure = (t: string) => fontManager.measureText(t, resourceName, box.fontSize);
     const lines = box.text.split("\n").flatMap(part => wrapTextLines(part, measure, innerWidth));
     stream.setFillColor(bw ? toGrayscale({ r: 0, g: 0, b: 0 }) : { r: 0, g: 0, b: 0 });
-    let baseline = rect.y + rect.height - CELL_PADDING_V - box.fontSize;
+    // Top-aligned like a cell: the first line's ascent sits one padding below
+    // the box top. Stepping down by the font size instead would drop the whole
+    // note by the difference between the em square and the ascent.
+    const ascent = fontManager.measureTextMetrics(
+      lines[0] ?? "",
+      resourceName,
+      box.fontSize
+    ).ascent;
+    let baseline = rect.y + rect.height - CELL_PADDING_V - ascent;
+
+    stream.save();
+    stream.rect(rect.x, rect.y, rect.width, rect.height).clip().endPath();
     for (const line of lines) {
-      if (baseline < rect.y + CELL_PADDING_V) {
+      const descent = fontManager.measureTextMetrics(line, resourceName, box.fontSize).descent;
+      if (baseline + descent < rect.y + CELL_PADDING_V) {
         break;
       }
       emitTextWithMatrix(stream, fontManager, {
@@ -2361,6 +2502,7 @@ function drawCommentBoxes(
       });
       baseline -= lineHeight;
     }
+    stream.restore();
     stream.restore();
 
     if (box.marker) {
@@ -2547,9 +2689,13 @@ function renderTextWatermark(
 
   const resourceName = fontManager.resolveFont(fontFamily, bold, italic);
 
-  const textWidth = fontManager.measureText(watermark.text, resourceName, fontSize);
-  // Approximate text height using ascent (roughly 0.7 * fontSize for most fonts)
-  const textHeight = fontSize * 0.7;
+  const metrics = fontManager.measureTextMetrics(watermark.text, resourceName, fontSize);
+  const textWidth = metrics.width;
+  // Distance from the block's centre down to its baseline. Half the ascent —
+  // never mind `0.7 * fontSize` for the ascent itself — ignores the descender
+  // and rides the whole watermark high by half of it, which at watermark sizes
+  // is several points off centre.
+  const halfH = (metrics.ascent + metrics.descent) / 2;
 
   const radians = (rotation * Math.PI) / 180;
   const cos = Math.cos(radians);
@@ -2559,9 +2705,8 @@ function renderTextWatermark(
   const gsName = needsAlpha ? alphaGsName(opacity) : "";
 
   const drawSingleWatermark = (cx: number, cy: number) => {
-    // Center the text at (cx, cy), compensating for both width and ascent height
+    // Center the text at (cx, cy), compensating for both width and ink height
     const halfW = textWidth / 2;
-    const halfH = textHeight / 2;
     const tx = cx - halfW * cos + halfH * sin;
     const ty = cy - halfW * sin - halfH * cos;
 

@@ -138,3 +138,68 @@ describe("layoutTable — gridSpan", () => {
     expect(lastCell.rect.x).toBeCloseTo(spanCell.rect.x + spanCell.rect.width, 1);
   });
 });
+
+describe("layoutTable — vertical cell alignment", () => {
+  /**
+   * A row whose first cell holds three paragraphs, so the other cells have
+   * two lines of slack to distribute according to their `w:vAlign`.
+   */
+  function alignedRow(): Table {
+    return {
+      type: "table",
+      rows: [
+        {
+          cells: [
+            { content: [textPara("a"), textPara("b"), textPara("c")] },
+            { content: [textPara("top")], properties: { verticalAlign: "top" } },
+            { content: [textPara("center")], properties: { verticalAlign: "center" } },
+            { content: [textPara("bottom")], properties: { verticalAlign: "bottom" } },
+            { content: [textPara("default")] }
+          ]
+        }
+      ]
+    };
+  }
+
+  it("moves cell content into the row's slack per w:vAlign", () => {
+    const laid = firstTable(minimalDoc([alignedRow()]));
+    const cells = laid.cells.filter(c => c.row === 0);
+    expect(cells).toHaveLength(5);
+
+    const contentTop = (col: number) => cells[col].content[0].rect.y;
+    const contentBottom = (col: number) =>
+      cells[col].content[0].rect.y + cells[col].content[0].rect.height;
+    const rowHeight = cells[0].rect.height;
+    const slack = rowHeight - contentBottom(1);
+
+    // A row this tall only exists because of the first cell.
+    expect(slack).toBeGreaterThan(0);
+
+    // top and an unset vAlign both stay at the top margin.
+    expect(contentTop(1)).toBeCloseTo(0, 6);
+    expect(contentTop(4)).toBeCloseTo(0, 6);
+    // center splits the slack.
+    expect(contentTop(2)).toBeCloseTo(slack / 2, 6);
+    // bottom takes all of it, landing the content on the bottom margin.
+    expect(contentTop(3)).toBeCloseTo(slack, 6);
+    expect(rowHeight - contentBottom(3)).toBeCloseTo(0, 6);
+  });
+
+  it("leaves content alone when an exact row height removes the slack", () => {
+    const table = alignedRow();
+    const clamped: Table = {
+      ...table,
+      rows: [{ ...table.rows[0], properties: { height: { value: 200, rule: "exact" } } }]
+    };
+    const laid = firstTable(minimalDoc([clamped]));
+    const cells = laid.cells.filter(c => c.row === 0);
+
+    // 200 twips = 10pt, shorter than the three-paragraph cell: Word clips
+    // rather than growing the row, so there is nothing to distribute and
+    // bottom-aligned content must not be pushed off the top.
+    expect(cells[0].rect.height).toBeCloseTo(10, 6);
+    for (const cell of cells) {
+      expect(cell.content[0].rect.y).toBeCloseTo(0, 6);
+    }
+  });
+});

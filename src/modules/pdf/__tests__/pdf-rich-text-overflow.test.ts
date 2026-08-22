@@ -54,6 +54,38 @@ function extractClipWidths(pdfBytes: Uint8Array): number[] {
 }
 
 describe("Rich text PDF rendering", () => {
+  it.each([
+    ["leading", "\nText", -12],
+    ["trailing", "Text\n", 12]
+  ])(
+    "keeps %s blank-line metrics during vertical alignment",
+    async (_kind, text, expectedOffset) => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 20);
+      Column.setWidth(ws, 2, 20);
+      Row.setHeight(ws, 1, 80);
+
+      Cell.setValue(ws, "A1", { richText: [{ text, font: { size: 20 } }] });
+      Cell.setStyle(ws, "A1", { alignment: { wrapText: true, vertical: "middle" } });
+      Cell.setValue(ws, "B1", "Text");
+      Cell.setStyle(ws, "B1", {
+        font: { size: 20 },
+        alignment: { vertical: "middle" }
+      });
+
+      const fragments = (await getFragments(await excelToPdf(wb)))
+        .filter(f => f.text === "Text")
+        .sort((a, b) => a.x - b.x);
+      expect(fragments).toHaveLength(2);
+
+      // The blank line occupies a real 24pt line box. Relative to a centred
+      // single line, the visible line therefore moves by half a line in the
+      // appropriate direction. A zero-metric blank moves it by an ascent.
+      expect(fragments[0].y - fragments[1].y).toBeCloseTo(expectedOffset, 5);
+    }
+  );
+
   describe("rich text overflow into adjacent empty cells", () => {
     it("should expand clip rect beyond cell width for rich text overflow", async () => {
       const wb = Workbook.create();

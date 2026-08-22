@@ -13,6 +13,7 @@ import type { DocxDocument, PageContent } from "@word/index";
 import { describe, it, expect } from "vitest";
 
 import { docxToPdf } from "../word-bridge";
+import { decompressPdfContent } from "./test-helpers";
 import { buildTtfWithCmap } from "./ttf-test-utils";
 
 describe("docxToPdf — layout-driven smoke test", () => {
@@ -643,5 +644,190 @@ describe("docxToPdf — flow layout fidelity", () => {
       visit(page.content);
     }
     expect(bulletInCell).toBe(true);
+  });
+});
+
+describe("docxToPdf — table cell vertical alignment", () => {
+  /** Baselines of every drawn text run, keyed by the text drawn. */
+  function baselines(pdfBytes: Uint8Array): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const m of decompressPdfContent(pdfBytes).matchAll(
+      /1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm\s*\n?\((.*?)\) Tj/g
+    )) {
+      out.set(m[3], Number(m[2]));
+    }
+    return out;
+  }
+
+  /**
+   * A one-row table whose first cell is three paragraphs tall, so the second
+   * cell has slack for `w:vAlign` to distribute.
+   */
+  function tallRow(align: "top" | "center" | "bottom"): DocxDocument {
+    return {
+      body: [
+        {
+          type: "table",
+          rows: [
+            {
+              cells: [
+                {
+                  content: ["one", "two", "three"].map(text => ({
+                    type: "paragraph" as const,
+                    children: [{ content: [{ type: "text" as const, text }] }]
+                  }))
+                },
+                {
+                  content: [
+                    {
+                      type: "paragraph" as const,
+                      children: [{ content: [{ type: "text" as const, text: "MARK" }] }]
+                    }
+                  ],
+                  properties: { verticalAlign: align }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+  }
+
+  it("carries w:vAlign through to the drawn baseline", async () => {
+    const [top, center, bottom] = await Promise.all(
+      (["top", "center", "bottom"] as const).map(async align =>
+        baselines(await docxToPdf(tallRow(align))).get("MARK")
+      )
+    );
+    expect(top).toBeDefined();
+    expect(center).toBeDefined();
+    expect(bottom).toBeDefined();
+
+    // PDF y grows upward, so a lower cell position means a smaller y. The three
+    // must be distinct and ordered — they were identical while the layout
+    // ignored `w:vAlign` entirely.
+    expect(top!).toBeGreaterThan(center!);
+    expect(center!).toBeGreaterThan(bottom!);
+    // center sits exactly halfway between the other two.
+    expect(center!).toBeCloseTo((top! + bottom!) / 2, 4);
+  });
+});
+
+describe("docxToPdf — exact line spacing", () => {
+  it("fixes an exact line's height without slicing its glyphs", async () => {
+    const line = (text: string) => ({
+      type: "paragraph" as const,
+      properties: { spacing: { line: 120, lineRule: "exact" as const } },
+      children: [{ content: [{ type: "text" as const, text }], properties: { size: 48 } }]
+    });
+    const doc: DocxDocument = { body: [line("TALL"), line("NEXT")] };
+
+    const content = decompressPdfContent(await docxToPdf(doc));
+    const baselines = [...content.matchAll(/1 0 0 1 [\d.]+ ([\d.]+) Tm\s*\n?\((TALL|NEXT)\) Tj/g)];
+    expect(baselines).toHaveLength(2);
+
+    // 120 twips = 6pt: the declared height governs how far the next line
+    // advances, so the two baselines are exactly 6pt apart even though the text
+    // is 24pt. Both are drawn in full — clipping each line to 6pt would leave
+    // slices of glyphs, which no typesetter does.
+    const delta = Number(baselines[0][1]) - Number(baselines[1][1]);
+    expect(delta).toBeCloseTo(6, 5);
+    expect(content).not.toMatch(/[\d.]+ [\d.]+ [\d.]+ 6 re\s+W/);
+  });
+
+  it("clips exact-height table rows to each cell", async () => {
+    const doc: DocxDocument = {
+      body: [
+        {
+          type: "table",
+          rows: [
+            {
+              properties: { height: { value: 200, rule: "exact" } },
+              cells: [
+                {
+                  content: ["one", "two", "three"].map(text => ({
+                    type: "paragraph" as const,
+                    children: [{ content: [{ type: "text" as const, text }] }]
+                  }))
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const content = decompressPdfContent(await docxToPdf(doc));
+    // The 10pt cell clip encloses all three paragraph draws. Without it, lines
+    // two and three paint over the following row despite the exact height.
+    expect(content).toMatch(
+      /q\s+[\d.]+ [\d.]+ [\d.]+ 10 re\s+W\s+n[\s\S]*\(one\) Tj[\s\S]*\(three\) Tj[\s\S]*Q/
+    );
+  });
+});
+
+describe("docxToPdf — layout font selection", () => {
+  it("measures layout with the face build() will auto-embed", async () => {
+    // `€` is > 0xFF but WinAnsi encodes it, so it must not drag the document
+    // onto a system-font search that the builder will not repeat.
+    const doc: DocxDocument = {
+      body: [
+        {
+          type: "paragraph",
+          children: [{ content: [{ type: "text", text: "Total: 10 €" }] }]
+        }
+      ]
+    };
+
+    const bytes = await docxToPdf(doc);
+    const content = decompressPdfContent(bytes);
+    // Drawn through the standard WinAnsi face, not a subsetted system font.
+    expect(content).toMatch(/\/F\d+ 11(\.0+)? Tf/);
+    expect(bytes.length).toBeGreaterThan(0);
+  });
+});
+
+describe("docxToPdf — layout-injected marker glyphs", () => {
+  it("measures a normalised bullet with the face that draws it", async () => {
+    // A Wingdings check (U+F0FC) exists nowhere as literal text: the layout
+    // normalises it to U+2713 while building the marker run. Collecting code
+    // points from the source model therefore missed it, and the marker was
+    // measured with Helvetica while the page drew it from an auto-embedded
+    // system face — shifting every list item's text by the width difference.
+    const doc: DocxDocument = {
+      body: [
+        {
+          type: "paragraph",
+          properties: { numbering: { numId: 1, level: 0 } },
+          children: [{ content: [{ type: "text", text: "item" }] }]
+        }
+      ],
+      numberingInstances: [{ numId: 1, abstractNumId: 1 }],
+      abstractNumberings: [
+        { abstractNumId: 1, levels: [{ level: 0, format: "bullet", text: "\uF0FC" }] }
+      ]
+    };
+
+    const layout = Layout.documentFull(doc);
+    const para = layout.pages[0].content.find(c => c.type === "paragraph");
+    expect(para?.type).toBe("paragraph");
+    if (para?.type !== "paragraph") {
+      throw new Error("expected paragraph");
+    }
+    const runs = para.lines[0].runs.filter(r => r.type !== "image") as Array<{
+      text: string;
+      x: number;
+      width: number;
+    }>;
+    const marker = runs.find(r => r.text.includes("\u2713"));
+    const body = runs.find(r => r.text.includes("item"));
+    expect(marker).toBeDefined();
+    expect(body).toBeDefined();
+
+    // The measured marker advance is what positions the text after it, so the
+    // two must be consistent in the layout the renderer consumes.
+    expect(body!.x).toBeCloseTo(marker!.x + marker!.width, 5);
+    await expect(docxToPdf(doc)).resolves.toBeInstanceOf(Uint8Array);
   });
 });

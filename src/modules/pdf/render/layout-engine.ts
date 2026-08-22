@@ -1230,7 +1230,18 @@ function autoRowHeight(
     for (const cell of row.cells.values()) {
       const fontSize = getCellFontSize(cell);
       const wrapLineCount = countWrapLines(cell, fontSize, sheet, fontManager, options);
-      const lineHeight = fontSize * LINE_HEIGHT_FACTOR;
+      // Measured once: both the first line's box and, for rich text, every
+      // subsequent line's box are derived from the same ink height.
+      const inkHeight = cellFirstLineInkHeight(cell, fontSize, fontManager, options);
+      // The positioned rich-text renderer lets a line grow beyond 1.2em when
+      // one of its runs uses a face with taller ink. The estimator does not
+      // retain each wrapped line's ranges, so reserve the largest possible line
+      // box for every line; conservative height is preferable to clipping the
+      // final line, and ordinary faces still resolve to the same 1.2em.
+      const lineHeight =
+        cell.type === PdfCellType.RichText
+          ? Math.max(fontSize * LINE_HEIGHT_FACTOR, inkHeight)
+          : fontSize * LINE_HEIGHT_FACTOR;
       // Account for border width: half of each border extends inward
       const borderTop = cell.style?.border?.top?.style
         ? borderStyleToLineWidth(cell.style.border.top.style) / 2
@@ -1239,7 +1250,7 @@ function autoRowHeight(
         ? borderStyleToLineWidth(cell.style.border.bottom.style) / 2
         : 0;
       const neededHeight =
-        fontSize +
+        Math.max(fontSize, inkHeight) +
         (wrapLineCount - 1) * lineHeight +
         (CELL_PADDING_V + borderTop + borderBottom) * 2;
       if (neededHeight > height) {
@@ -1248,6 +1259,85 @@ function autoRowHeight(
     }
   }
   return height;
+}
+
+/**
+ * Ink height of the tallest face in a cell (`ascent - descent`).
+ *
+ * The renderer places a line by its ink box, so a face whose ink is taller than
+ * its em square needs more room than `fontSize`: give it less and
+ * `computeTextStartY` clamps the block against the top inset, which pushes
+ * bottom-aligned descenders through the bottom border — the same asymmetry seen
+ * from the other side. Callers pair this with `fontSize` as a floor, because
+ * every standard Type1 face has a shorter ink box than that (Helvetica
+ * 0.925 em) and shrinking those rows below the height Excel gives them would be
+ * a regression in the common case.
+ */
+function cellFirstLineInkHeight(
+  cell: PdfCellData,
+  fontSize: number,
+  fontManager: FontManager,
+  options: ResolvedPdfOptions
+): number {
+  let ascent = 0;
+  let descent = 0;
+  // Measured across the whole cell rather than per line: the row only has to be
+  // tall enough, and the extents of a single line can never exceed these.
+  for (const face of cellFaces(cell, fontSize, options)) {
+    const metrics = fontManager.measureTextMetrics(
+      face.text,
+      fontManager.resolveFont(face.fontFamily, face.bold, face.italic),
+      face.fontSize
+    );
+    ascent = Math.max(ascent, metrics.ascent);
+    descent = Math.min(descent, metrics.descent);
+  }
+  return ascent - descent;
+}
+
+/**
+ * Every face that draws part of a cell, with the size it draws at. A plain cell
+ * has one; a rich text cell has one per run, inheriting the cell font for the
+ * slots a run leaves unset.
+ */
+function cellFaces(
+  cell: PdfCellData,
+  fontSize: number,
+  options: ResolvedPdfOptions
+): Array<{ text: string; fontFamily: string; fontSize: number; bold: boolean; italic: boolean }> {
+  const cellFont = cell.style?.font;
+  if (cell.type === PdfCellType.RichText) {
+    const value = cell.value;
+    if (value && typeof value === "object" && "richText" in value) {
+      const runs = (value as { richText: PdfRichTextRunData[] }).richText;
+      if (runs.length > 0) {
+        return runs.map(run => ({
+          text: run.text,
+          ...extractFontProperties(
+            run.font
+              ? {
+                  name: run.font.name ?? cellFont?.name,
+                  size: run.font.size ?? cellFont?.size,
+                  bold: run.font.bold ?? false,
+                  italic: run.font.italic ?? false
+                }
+              : cellFont,
+            options.defaultFontFamily,
+            options.defaultFontSize
+          )
+        }));
+      }
+    }
+  }
+  const props = extractFontProperties(cellFont, options.defaultFontFamily, options.defaultFontSize);
+  // `fontSize` already carries the largest size in the cell, scale included.
+  return [
+    {
+      text: typeof cell.text === "string" ? cell.text : String(cell.text ?? ""),
+      ...props,
+      fontSize
+    }
+  ];
 }
 
 /**

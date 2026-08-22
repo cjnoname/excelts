@@ -190,6 +190,8 @@ export interface LayoutTableCell {
   readonly row: number;
   readonly col: number;
   readonly content: readonly (LayoutParagraph | LayoutTable)[];
+  /** Exact-height row whose overflowing content must be clipped to this cell. */
+  readonly clipToBounds?: boolean;
   readonly backgroundColor?: string;
   readonly borders?: {
     readonly top?: { width: number; color: string };

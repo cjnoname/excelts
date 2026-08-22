@@ -139,6 +139,11 @@ describe("inline image layout", () => {
     const imageLine = paraItem.lines.find(l => l.runs.some(item => item.type === "image"));
     expect(imageLine).toBeDefined();
     expect(imageLine!.height).toBeGreaterThanOrEqual(144);
+    // Inline drawings sit on the same baseline as the text. The tallest image
+    // therefore pushes the baseline to its own bottom edge, with the text's
+    // descent reserved below it.
+    expect(imageLine!.baseline).toBeCloseTo(144, 6);
+    expect(imageLine!.height).toBeGreaterThan(imageLine!.baseline);
   });
 
   it("falls back gracefully when the rId cannot be resolved (no crash)", () => {

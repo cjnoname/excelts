@@ -5,6 +5,8 @@ import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { pdf as standalonePdf } from "@pdf/pdf";
 import { readPdf } from "@pdf/reader/pdf-reader";
+import { CELL_PADDING_H, CELL_PADDING_V, LINE_HEIGHT_FACTOR } from "@pdf/render/constants";
+import { getFontAscent, getFontDescent, measureTextWidth } from "@utils/font-metrics";
 /**
  * Integration tests for PDF rendering edge cases.
  *
@@ -14,7 +16,46 @@ import { readPdf } from "@pdf/reader/pdf-reader";
  */
 import { describe, it, expect } from "vitest";
 
-import { expectValidPdf } from "./test-helpers";
+import { decompressPdfContent, expectValidPdf } from "./test-helpers";
+import { buildTtfWithCmap } from "./ttf-test-utils";
+
+/**
+ * The cell clip rectangles, in page coordinates and page order. A cell clips
+ * text to its own bounds, so this reports the geometry the renderer actually
+ * laid out — no need to reconstruct it from row heights and margins.
+ */
+function cellClipRects(
+  pdfBytes: Uint8Array
+): Array<{ x: number; y: number; width: number; height: number }> {
+  return [
+    ...decompressPdfContent(pdfBytes).matchAll(/([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re\s+W/g)
+  ].map(m => ({
+    x: Number(m[1]),
+    y: Number(m[2]),
+    width: Number(m[3]),
+    height: Number(m[4])
+  }));
+}
+
+/** Filled rectangles (`re` + `f`), in page order. A cell fill pins its bounds. */
+function filledRects(
+  pdfBytes: Uint8Array
+): Array<{ x: number; y: number; width: number; height: number }> {
+  return [
+    ...decompressPdfContent(pdfBytes).matchAll(/([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re\s+f/g)
+  ].map(m => ({
+    x: Number(m[1]),
+    y: Number(m[2]),
+    width: Number(m[3]),
+    height: Number(m[4])
+  }));
+}
+
+function textBaselines(pdfBytes: Uint8Array): number[] {
+  return [...decompressPdfContent(pdfBytes).matchAll(/1 0 0 1 [\d.]+ ([\d.]+) Tm/g)].map(m =>
+    Number(m[1])
+  );
+}
 
 // Helper: extract page text from PDF bytes
 async function extractText(pdfBytes: Uint8Array): Promise<string> {
@@ -320,6 +361,141 @@ describe("PDF Rendering Edge Cases", () => {
   });
 
   // ===========================================================================
+  // Vertical alignment insets
+  // ===========================================================================
+
+  describe("Vertical alignment insets", () => {
+    it("should inset top- and bottom-aligned text equally", async () => {
+      const rowHeight = 80;
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 30);
+      Column.setWidth(ws, 2, 30);
+      Column.setWidth(ws, 3, 30);
+      Row.setHeight(ws, 1, rowHeight);
+      Cell.setValue(ws, "A1", "top");
+      Cell.setAlignment(ws, "A1", { horizontal: "left", vertical: "top" });
+      Cell.setValue(ws, "B1", "middle");
+      Cell.setAlignment(ws, "B1", { horizontal: "left", vertical: "middle" });
+      Cell.setValue(ws, "C1", "bottom");
+      Cell.setAlignment(ws, "C1", { horizontal: "left", vertical: "bottom" });
+
+      const pdfBytes = await excelToPdf(wb);
+      expectValidPdf(pdfBytes);
+      const page = (await readPdf(pdfBytes)).pages[0];
+      const frag = (text: string) => {
+        const found = page.textFragments.find(f => f.text === text);
+        expect(found).toBeDefined();
+        return found!;
+      };
+      const topFrag = frag("top");
+      const middleFrag = frag("middle");
+      const bottomFrag = frag("bottom");
+
+      // Ink extents of the face that actually drew the text, read back from the
+      // PDF rather than assumed.
+      const ascent = getFontAscent(topFrag.fontName, topFrag.fontSize);
+      const descent = getFontDescent(topFrag.fontName, topFrag.fontSize);
+
+      // Top alignment puts the ascent exactly one padding below the row top, so
+      // it pins the row for the other two.
+      const rowTop = topFrag.y + ascent + CELL_PADDING_V;
+
+      // The descent must land the same distance above the row bottom. Deriving
+      // the gap from the line box (fontSize × LINE_HEIGHT_FACTOR) instead of the
+      // ink puts the whole leading below the last baseline and floats the text.
+      expect(bottomFrag.y + descent - (rowTop - rowHeight)).toBeCloseTo(CELL_PADDING_V, 1);
+
+      // ...and a middle-aligned line's ink centres on the row.
+      expect(middleFrag.y + (ascent + descent) / 2).toBeCloseTo(rowTop - rowHeight / 2, 1);
+    });
+
+    it("should bottom-align wrapped text on its last descent", async () => {
+      const rowHeight = 80;
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 12);
+      Column.setWidth(ws, 2, 12);
+      Row.setHeight(ws, 1, rowHeight);
+      Cell.setValue(ws, "A1", "alpha beta gamma delta");
+      Cell.setAlignment(ws, "A1", { wrapText: true, vertical: "bottom" });
+      // Top-aligned neighbour pins the row geometry.
+      Cell.setValue(ws, "B1", "x");
+      Cell.setAlignment(ws, "B1", { vertical: "top" });
+
+      const pdfBytes = await excelToPdf(wb);
+      const page = (await readPdf(pdfBytes)).pages[0];
+      const pin = page.textFragments.find(f => f.text === "x");
+      expect(pin).toBeDefined();
+      const ascent = getFontAscent(pin!.fontName, pin!.fontSize);
+      const descent = getFontDescent(pin!.fontName, pin!.fontSize);
+      const rowTop = pin!.y + ascent + CELL_PADDING_V;
+
+      const wrapped = page.textFragments.filter(f => f.text !== "x").sort((a, b) => b.y - a.y);
+      expect(wrapped.length).toBeGreaterThan(1);
+
+      // Lines still advance by a full line box...
+      expect(wrapped[0].y - wrapped[1].y).toBeCloseTo(pin!.fontSize * LINE_HEIGHT_FACTOR, 5);
+      // ...but only the ink is measured against the bottom inset.
+      const lastLine = wrapped[wrapped.length - 1];
+      expect(lastLine.y + descent - (rowTop - rowHeight)).toBeCloseTo(CELL_PADDING_V, 1);
+    });
+
+    it("should auto-size a row for a face whose ink is taller than its em", async () => {
+      // 1.3 em of ink: taller than the font size the row height used to assume.
+      const ascentEm = 0.95;
+      const descentEm = -0.35;
+      const font = buildTtfWithCmap([{ start: 0x41, end: 0x5a, delta: 1 - 0x41 }], 27, {
+        ascent: ascentEm * 1000,
+        descent: descentEm * 1000
+      });
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 20);
+      Column.setWidth(ws, 2, 20);
+      Cell.setValue(ws, "A1", "TOP");
+      Cell.setAlignment(ws, "A1", { vertical: "top" });
+      Cell.setValue(ws, "B1", "BOT");
+      Cell.setAlignment(ws, "B1", { vertical: "bottom" });
+
+      const pdfBytes = await excelToPdf(wb, { fonts: { default: { regular: font } } });
+      const cells = cellClipRects(pdfBytes);
+      const baselines = textBaselines(pdfBytes);
+      expect(cells.length).toBeGreaterThanOrEqual(2);
+      expect(baselines.length).toBeGreaterThanOrEqual(2);
+
+      const fontSize = 11;
+      const ascent = ascentEm * fontSize;
+      const descent = descentEm * fontSize;
+      const { y, height } = cells[0];
+
+      // The row grew to hold the ink, not just the em square.
+      expect(height).toBeCloseTo(ascent - descent + 2 * CELL_PADDING_V, 5);
+      // Both alignments therefore land on their inset instead of being clamped
+      // against the top and spilling descenders through the bottom border.
+      expect(y + height - (baselines[0] + ascent)).toBeCloseTo(CELL_PADDING_V, 5);
+      expect(baselines[1] + descent - y).toBeCloseTo(CELL_PADDING_V, 5);
+    });
+
+    it("should keep the font size as the auto row height floor", async () => {
+      // Helvetica's ink box is 0.925 em — shorter than the em square. Excel
+      // still gives such a row the full font size, so the ink height is a floor
+      // to raise the row, never a licence to shrink it.
+      const fontSize = 20;
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 20);
+      Cell.setValue(ws, "A1", "Ay");
+      Cell.setStyle(ws, "A1", { font: { size: fontSize } });
+
+      const pdfBytes = await excelToPdf(wb);
+      const cells = cellClipRects(pdfBytes);
+      expect(cells.length).toBeGreaterThanOrEqual(1);
+      expect(cells[0].height).toBeCloseTo(fontSize + 2 * CELL_PADDING_V, 5);
+    });
+  });
+
+  // ===========================================================================
   // Newline handling
   // ===========================================================================
 
@@ -492,6 +668,38 @@ describe("PDF Rendering Edge Cases", () => {
       expect(aFrag!.y).toBeGreaterThan(bFrag!.y);
       expect(bFrag!.y).toBeGreaterThan(cFrag!.y);
     });
+
+    it("should inset stacked text equally at the top and bottom", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 10);
+      Column.setWidth(ws, 2, 10);
+      Row.setHeight(ws, 1, 120);
+      Cell.setValue(ws, "A1", "A");
+      Cell.setStyle(ws, "A1", {
+        alignment: { textRotation: "vertical" as any, vertical: "top" }
+      });
+      Cell.setValue(ws, "B1", "B");
+      Cell.setStyle(ws, "B1", {
+        alignment: { textRotation: "vertical" as any, vertical: "bottom" }
+      });
+
+      const pdfBytes = await excelToPdf(wb);
+      const cells = cellClipRects(pdfBytes);
+      const page = (await readPdf(pdfBytes)).pages[0];
+      const top = page.textFragments.find(f => f.text === "A");
+      const bottom = page.textFragments.find(f => f.text === "B");
+      expect(top).toBeDefined();
+      expect(bottom).toBeDefined();
+
+      const ascent = getFontAscent(top!.fontName, top!.fontSize);
+      const descent = getFontDescent(top!.fontName, top!.fontSize);
+      // A single-character column is one glyph tall, so both alignments must
+      // land on their own inset — the stacked path used to derive the bottom
+      // one from the character pitch and float the glyph above it.
+      expect(cells[0].y + cells[0].height - (top!.y + ascent)).toBeCloseTo(CELL_PADDING_V, 1);
+      expect(bottom!.y + descent - cells[1].y).toBeCloseTo(CELL_PADDING_V, 1);
+    });
   });
 
   // ===========================================================================
@@ -499,6 +707,79 @@ describe("PDF Rendering Edge Cases", () => {
   // ===========================================================================
 
   describe("Rotated text alignment", () => {
+    // --- Horizontal insets: rotation swaps the axes, so the cell's horizontal
+    // insets are measured against the text's ink height, not its line box. ---
+    it.each([90, -90])(
+      "should inset %i° text horizontally by its ink, not its line box",
+      async rotation => {
+        const wb = Workbook.create();
+        const ws = Workbook.addWorksheet(wb, "Sheet1");
+        const aligns = ["left", "center", "right"] as const;
+        aligns.forEach((align, i) => {
+          Column.setWidth(ws, i + 1, 12);
+          const addr = `${String.fromCharCode(65 + i)}1`;
+          Cell.setValue(ws, addr, "Xy");
+          Cell.setStyle(ws, addr, { alignment: { textRotation: rotation, horizontal: align } });
+        });
+        Row.setHeight(ws, 1, 90);
+
+        const pdfBytes = await excelToPdf(wb);
+        const page = (await readPdf(pdfBytes)).pages[0];
+        const cells = cellClipRects(pdfBytes);
+        expect(page.textFragments.length).toBe(3);
+
+        page.textFragments.forEach((frag, i) => {
+          const ascent = getFontAscent(frag.fontName, frag.fontSize);
+          const descent = getFontDescent(frag.fontName, frag.fontSize);
+          // At +90° the ascent points at page-left, at -90° at page-right.
+          const inkLeft = rotation === 90 ? frag.x - ascent : frag.x + descent;
+          const inkRight = rotation === 90 ? frag.x - descent : frag.x + ascent;
+          const cell = cells[i];
+          if (aligns[i] === "left") {
+            expect(inkLeft - cell.x).toBeCloseTo(CELL_PADDING_H, 1);
+          } else if (aligns[i] === "right") {
+            expect(cell.x + cell.width - inkRight).toBeCloseTo(CELL_PADDING_H, 1);
+          } else {
+            expect((inkLeft + inkRight) / 2).toBeCloseTo(cell.x + cell.width / 2, 1);
+          }
+        });
+      }
+    );
+
+    it("should centre an arbitrarily rotated line on the cell middle", async () => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 20);
+      Row.setHeight(ws, 1, 90);
+      Cell.setValue(ws, "A1", "Xy");
+      Cell.setStyle(ws, "A1", {
+        // A fill pins the cell bounds: a slanted rotation clips with a
+        // parallelogram path rather than a rectangle, so there is no `re W`.
+        fill: { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEEEEE" } },
+        alignment: { textRotation: 45, horizontal: "center", vertical: "middle" }
+      });
+
+      const pdfBytes = await excelToPdf(wb);
+      const page = (await readPdf(pdfBytes)).pages[0];
+      const [cell] = filledRects(pdfBytes);
+      const [frag] = page.textFragments;
+      expect(cell).toBeDefined();
+      expect(frag).toBeDefined();
+
+      const ascent = getFontAscent(frag.fontName, frag.fontSize);
+      const descent = getFontDescent(frag.fontName, frag.fontSize);
+      const halfInk = (ascent + descent) / 2;
+      const width = measureTextWidth("Xy", frag.fontName, frag.fontSize);
+      const radians = (45 * Math.PI) / 180;
+      // Undo the rotation about the emitted origin to recover the block centre:
+      // the baseline start sits at local (-width / 2, -halfInk). Only Y is
+      // asserted — a slanted rotation deliberately shifts X to follow the
+      // parallelogram the borders draw.
+      const centreY = frag.y + (width / 2) * Math.sin(radians) + halfInk * Math.cos(radians);
+
+      expect(centreY).toBeCloseTo(cell.y + cell.height / 2, 1);
+    });
+
     // --- 90° vertical alignment ---
     it("should position 90° text according to vertical alignment (top > middle > bottom)", async () => {
       const wb = Workbook.create();

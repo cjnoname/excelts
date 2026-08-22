@@ -11,8 +11,11 @@
  * page geometry, line placement, and pagination explicitly.
  */
 
+import { getFontAscent, getFontDescent, styledFontVariant } from "@utils/font-metrics";
 import { describe, it, expect } from "vitest";
 
+import { layoutDocument } from "../layout/layout";
+import { SCRIPT_BASELINE_SHIFT_FACTOR } from "../layout/layout-constants";
 import { layoutDocumentFull } from "../layout/layout-full";
 import type { DocxDocument, Paragraph, SectionProperties, TableProperties } from "../types";
 
@@ -131,6 +134,120 @@ describe("layoutDocumentFull — paragraph placement", () => {
     // The baseline must be inside the line box (not above it, not below).
     expect(firstLine.baseline).toBeGreaterThan(0);
     expect(firstLine.baseline).toBeLessThanOrEqual(firstLine.height);
+  });
+
+  it("splits a line box's leading evenly above and below the ink", () => {
+    const doc: DocxDocument = { body: [makeParagraph("Hello gjpqy")] };
+    const out = layoutDocumentFull(doc);
+    const para = out.pages[0]!.content.find(c => c.type === "paragraph");
+    if (!para || para.type !== "paragraph") {
+      throw new Error("expected paragraph");
+    }
+    const line = para.lines[0]!;
+
+    const face = styledFontVariant("Calibri", false, false);
+    const ascent = getFontAscent(face, 12);
+    const descent = getFontDescent(face, 12);
+
+    // `baseline` is measured from the top of the line box, so the space above
+    // the ascent and below the descender are the two halves of the leading and
+    // must match. Deriving the baseline from a fraction of the box height
+    // instead (it used to be 0.8) leaves almost nothing under the descender,
+    // and the text sinks against the following line.
+    const above = line.baseline - ascent;
+    const below = line.height - line.baseline + descent;
+    expect(above).toBeCloseTo(below, 6);
+    expect(line.baseline).toBeCloseTo((line.height - (ascent - descent)) / 2 + ascent, 6);
+  });
+
+  it("uses text-aware metrics and keeps exact line spacing exact", () => {
+    const para: Paragraph = {
+      type: "paragraph",
+      properties: { spacing: { line: 160, lineRule: "exact" } },
+      children: [makeRun("fallback glyph")]
+    };
+    const measured: string[] = [];
+    const out = layoutDocumentFull(
+      { body: [para] },
+      {
+        measureTextMetrics: text => {
+          measured.push(text);
+          return { ascent: 11, descent: -4 };
+        }
+      }
+    );
+    const laid = out.pages[0]!.content.find(c => c.type === "paragraph");
+    if (!laid || laid.type !== "paragraph") {
+      throw new Error("expected paragraph");
+    }
+    const line = laid.lines[0]!;
+
+    expect(measured).toContain("fallback glyph");
+    // 160 twips = 8pt. The 15pt ink does not silently turn an exact line into
+    // an at-least line — the box stays 8pt so everything after it keeps its
+    // position — while the baseline stays where the ink puts it, so the glyphs
+    // overlap their neighbours rather than being sliced.
+    expect(line.height).toBe(8);
+    expect(line.baseline).toBe(11);
+  });
+
+  it("keeps pagination and positioned layout consistent for tall embedded-font ink", () => {
+    const doc: DocxDocument = {
+      body: Array.from({ length: 50 }, (_, i) => makeParagraph(`line ${i}`))
+    };
+    const options = {
+      // Deliberately much taller than the nominal 14.4pt line. Before the
+      // pagination pass consumed the same metrics as full layout, it fitted 45
+      // of these on a page while the positioned pass could fit only 21.
+      measureTextMetrics: () => ({ ascent: 24, descent: -6 })
+    };
+
+    const paginated = layoutDocument(doc, options);
+    const positioned = layoutDocumentFull(doc, options);
+
+    expect(paginated.pageCount).toBe(3);
+    expect(positioned.pages).toHaveLength(paginated.pageCount);
+    for (const page of positioned.pages) {
+      for (const item of page.content) {
+        expect(item.rect.y + item.rect.height).toBeLessThanOrEqual(
+          page.geometry.contentHeight + 1e-6
+        );
+      }
+    }
+  });
+
+  it("includes superscript rise and subscript drop in automatic line extents", () => {
+    const scripted = (vertAlign: "superscript" | "subscript"): Paragraph => ({
+      type: "paragraph",
+      children: [
+        {
+          content: [{ type: "text", text: vertAlign }],
+          properties: { size: HALF_PT_12, vertAlign }
+        }
+      ]
+    });
+    const normal = layoutDocumentFull({ body: [makeParagraph("normal")] }).pages[0].content[0];
+    const sup = layoutDocumentFull({ body: [scripted("superscript")] }).pages[0].content[0];
+    const sub = layoutDocumentFull({ body: [scripted("subscript")] }).pages[0].content[0];
+    if (normal.type !== "paragraph" || sup.type !== "paragraph" || sub.type !== "paragraph") {
+      throw new Error("expected paragraphs");
+    }
+
+    // Scripts draw at 65%, and their exact renderer shift participates in the
+    // same line extents. Reconstruct each shifted ink box and prove both edges
+    // remain inside the line.
+    const scriptSize = 12 * 0.65;
+    const face = styledFontVariant("Calibri", false, false);
+    const ascent = getFontAscent(face, scriptSize);
+    const descent = getFontDescent(face, scriptSize);
+    const shift = scriptSize * SCRIPT_BASELINE_SHIFT_FACTOR;
+    const supLine = sup.lines[0]!;
+    const subLine = sub.lines[0]!;
+    expect(supLine.baseline - (ascent + shift)).toBeGreaterThanOrEqual(-1e-10);
+    expect(supLine.baseline - (descent + shift)).toBeLessThanOrEqual(supLine.height + 1e-10);
+    expect(subLine.baseline - (ascent - shift)).toBeGreaterThanOrEqual(-1e-10);
+    expect(subLine.baseline - (descent - shift)).toBeLessThanOrEqual(subLine.height + 1e-10);
+    expect(supLine.baseline).toBeGreaterThan(subLine.baseline);
   });
 });
 
@@ -295,6 +412,19 @@ describe("layoutDocumentFull — style resolution", () => {
     });
     // The 24pt character-styled run must also drive the line box.
     expect(para.lines[0]!.height).toBeCloseTo(28.8, 1);
+
+    // The first pagination pass resolves that same character style. If it read
+    // raw run properties, the metrics callback would see 11pt Calibri instead
+    // of 24pt Courier and could make different page/keep-next decisions.
+    const seen: Array<{ font: string; size: number; bold?: boolean }> = [];
+    layoutDocument(doc, {
+      measureTextMetrics: (_text, font, size, bold) => {
+        seen.push({ font, size, bold });
+        return { ascent: size * 0.8, descent: -size * 0.2 };
+      }
+    });
+    expect(seen).toContainEqual({ font: "Courier New", size: 24, bold: undefined });
+    expect(seen).toContainEqual({ font: "Calibri", size: 11, bold: true });
   });
 
   it("indents a list from the numbering level definition", () => {

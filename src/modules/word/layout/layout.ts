@@ -20,7 +20,12 @@
  *   Half-point 24 = 12pt font; line height ~14.4pt = 288 twips (single-spaced)
  */
 
-import { isFullWidthCodePoint } from "@utils/font-metrics";
+import {
+  getFontAscent,
+  getFontDescent,
+  isFullWidthCodePoint,
+  styledFontVariant
+} from "@utils/font-metrics";
 import { isHyperlink, isRun } from "@word/core/text-utils";
 import {
   DEFAULT_FONT_SIZE_HALF_PT,
@@ -28,9 +33,12 @@ import {
   DEFAULT_PAGE_MARGIN_TWIPS,
   DEFAULT_PAGE_WIDTH_TWIPS,
   LINE_HEIGHT_FACTOR,
+  SCRIPT_BASELINE_SHIFT_FACTOR,
+  SCRIPT_FONT_SIZE_RATIO,
   resolveCellMarginsTwips
 } from "@word/layout/layout-constants";
-import { resolveStyle } from "@word/query/style-resolve";
+import { resolveWordLineMetrics } from "@word/layout/line-metrics";
+import { resolveRunStyle, resolveStyle } from "@word/query/style-resolve";
 import type {
   BodyContent,
   DocxDocument,
@@ -105,6 +113,29 @@ export interface LayoutOptions {
     bold?: boolean,
     italic?: boolean
   ) => number;
+
+  /**
+   * Optional font extent lookup, in points, for precise baseline placement.
+   *
+   * A line box is taller than the glyphs it holds, and where the surplus goes
+   * decides where the text sits: the baseline belongs at `halfLeading + ascent`
+   * from the top of the box. Without real extents the engine falls back to the
+   * built-in standard-font tables, which are right for the base 14 faces but
+   * not for an embedded one — a face with a tall ink box would have
+   * its descenders clipped by the line below.
+   *
+   * `descent` is negative, as font metrics report it.
+   *
+   * The callback should query the same font engine as `measureText`; `text` is
+   * provided because fallback faces may differ glyph-by-glyph.
+   */
+  readonly measureTextMetrics?: (
+    text: string,
+    fontName: string,
+    fontSize: number,
+    bold?: boolean,
+    italic?: boolean
+  ) => { ascent: number; descent: number };
 }
 
 // =============================================================================
@@ -156,6 +187,8 @@ interface ResolvedParagraph {
  * a once-per-paragraph cost.
  */
 let activeStyleCache: Map<Paragraph, ResolvedParagraph> | undefined;
+/** Memoised {@link effectiveRunProperties}, same lifetime as `activeStyleCache`. */
+let activeRunPropsCache: WeakMap<Run, RunProperties | undefined> | undefined;
 let activeDoc: DocxDocument | undefined;
 
 /** Effective properties for `para`, or the raw ones when no document is active. */
@@ -290,9 +323,16 @@ function scaledCharWidth(
   return (base * fontSize) / defaultFontSize;
 }
 
-/** Font name from a run's `font` property. */
-function getRunFontName(run: Run, inherited?: string): string {
-  const font = run.properties?.font;
+/**
+ * Font name from a run's already-resolved properties.
+ *
+ * Takes the merged properties rather than the raw run so a caller that has
+ * already resolved them — every caller does, to read the size and the
+ * bold/italic flags — does not pay for a second `resolveRunStyle`, which
+ * rebuilds a style map each time.
+ */
+function getRunFontName(props: RunProperties | undefined, inherited?: string): string {
+  const font = props?.font;
   if (!font) {
     return inherited ?? "Calibri";
   }
@@ -300,6 +340,28 @@ function getRunFontName(run: Run, inherited?: string): string {
     return font;
   }
   return (font as FontSpec).ascii ?? (font as FontSpec).hAnsi ?? inherited ?? "Calibri";
+}
+
+/** Same character-style/direct-formatting merge the positioned pass uses. */
+function effectiveRunProperties(run: Run, inherited?: RunProperties): RunProperties | undefined {
+  // A run's inherited properties come from its own paragraph, so they are fixed
+  // for a given run within one call — the result can be memoised. Three
+  // consumers ask for it per run (largest size, text width, line extents), and
+  // `resolveRunStyle` rebuilds a style map on every call.
+  const cache = activeRunPropsCache;
+  if (cache?.has(run)) {
+    return cache.get(run);
+  }
+  const merged =
+    activeDoc && run.properties?.style
+      ? resolveRunStyle(activeDoc, run, inherited).runProperties
+      : inherited
+        ? run.properties
+          ? { ...inherited, ...run.properties }
+          : inherited
+        : run.properties;
+  cache?.set(run, merged);
+  return merged;
 }
 
 /** Plain text content of a run. */
@@ -668,25 +730,34 @@ function countBreakElements(children: readonly ParagraphChild[]): number {
 function measureParagraphTextWidth(
   children: readonly ParagraphChild[],
   defaultFontSize: number,
-  measureFn: (text: string, fontName: string, fontSize: number) => number,
-  inheritedFont?: string
+  measureFn: (
+    text: string,
+    fontName: string,
+    fontSize: number,
+    bold?: boolean,
+    italic?: boolean
+  ) => number,
+  inheritedFont?: string,
+  inheritedProps?: RunProperties
 ): number {
   let totalWidth = 0;
   for (const child of children) {
     if (isRun(child)) {
       const text = getRunText(child);
       if (text.length > 0) {
-        const fontName = getRunFontName(child, inheritedFont);
-        const fontSize = (child.properties?.size ?? defaultFontSize) / 2; // half-pt → pt
-        totalWidth += measureFn(text, fontName, fontSize);
+        const props = effectiveRunProperties(child, inheritedProps);
+        const fontName = getRunFontName(props, inheritedFont);
+        const fontSize = getRunLayoutFontSizePt(props, defaultFontSize);
+        totalWidth += measureFn(text, fontName, fontSize, props?.bold, props?.italic);
       }
     } else if (isHyperlink(child)) {
       for (const run of child.children) {
         const text = getRunText(run);
         if (text.length > 0) {
-          const fontName = getRunFontName(run, inheritedFont);
-          const fontSize = (run.properties?.size ?? defaultFontSize) / 2;
-          totalWidth += measureFn(text, fontName, fontSize);
+          const props = effectiveRunProperties(run, inheritedProps);
+          const fontName = getRunFontName(props, inheritedFont);
+          const fontSize = getRunLayoutFontSizePt(props, defaultFontSize);
+          totalWidth += measureFn(text, fontName, fontSize, props?.bold, props?.italic);
         }
       }
     }
@@ -695,17 +766,23 @@ function measureParagraphTextWidth(
 }
 
 /** The largest run font size in a paragraph. */
-function getMaxRunFontSize(children: readonly ParagraphChild[], defaultFontSize: number): number {
+function getMaxRunFontSize(
+  children: readonly ParagraphChild[],
+  defaultFontSize: number,
+  inheritedProps?: RunProperties
+): number {
   let maxSize = 0;
   for (const child of children) {
     if (isRun(child)) {
-      const size = child.properties?.size ?? defaultFontSize;
+      const size =
+        getRunLayoutFontSizePt(effectiveRunProperties(child, inheritedProps), defaultFontSize) * 2;
       if (size > maxSize) {
         maxSize = size;
       }
     } else if (isHyperlink(child)) {
       for (const run of child.children) {
-        const size = run.properties?.size ?? defaultFontSize;
+        const size =
+          getRunLayoutFontSizePt(effectiveRunProperties(run, inheritedProps), defaultFontSize) * 2;
         if (size > maxSize) {
           maxSize = size;
         }
@@ -713,6 +790,17 @@ function getMaxRunFontSize(children: readonly ParagraphChild[], defaultFontSize:
     }
   }
   return maxSize || defaultFontSize;
+}
+
+/** Effective rendered size of a run; Word draws scripts at 65% of their source size. */
+function getRunLayoutFontSizePt(
+  properties: RunProperties | undefined,
+  defaultFontSizeHalfPt: number
+): number {
+  const size = (properties?.size ?? defaultFontSizeHalfPt) / 2;
+  return properties?.vertAlign === "superscript" || properties?.vertAlign === "subscript"
+    ? size * SCRIPT_FONT_SIZE_RATIO
+    : size;
 }
 
 /** Whether any run in the paragraph contains a page break. */
@@ -793,7 +881,8 @@ function estimateParagraphHeight(
   defaultFontSize: number,
   defaultCharsPerLine: number,
   averageCharWidth: number,
-  measureTextFn?: (text: string, fontName: string, fontSize: number) => number
+  measureTextFn?: (text: string, fontName: string, fontSize: number) => number,
+  measureTextMetricsFn?: LayoutOptions["measureTextMetrics"]
 ): number {
   // Effective properties — style chain included. See `resolved`.
   const res = resolved(para);
@@ -820,14 +909,27 @@ function estimateParagraphHeight(
 
   // Paragraph font size — a run that declares no size of its own inherits it
   // from the style chain.
-  const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, inheritedSize));
+  const fontSize = getMaxRunFontSize(
+    para.children,
+    getParagraphFontSize(props, inheritedSize),
+    res.runProperties
+  );
 
   // Line height
   const lineHeight = computeLineHeight(spacing, fontSize);
 
   // Check if inline images increase the effective line height
   const imgMaxHeight = getInlineImageMaxHeight(para.children);
-  const effectiveLineHeight = Math.max(lineHeight, imgMaxHeight);
+  const effectiveLineHeight = estimateParagraphLineHeight(
+    para.children,
+    getParagraphFontSize(props, inheritedSize),
+    inheritedFont,
+    res.runProperties,
+    lineHeight,
+    imgMaxHeight,
+    spacing?.lineRule === "exact",
+    measureTextMetricsFn
+  );
 
   // Line count
   let lineCount: number;
@@ -838,7 +940,8 @@ function estimateParagraphHeight(
       para.children,
       inheritedSize,
       measureTextFn,
-      inheritedFont
+      inheritedFont,
+      res.runProperties
     );
     const textWidthTwips = textWidthPt * 20; // 1pt = 20 twips
 
@@ -883,6 +986,67 @@ function estimateParagraphHeight(
   return spaceBefore + lineCount * effectiveLineHeight + spaceAfter;
 }
 
+/**
+ * Conservative per-line height for the pagination pass.
+ *
+ * This pass does not know which runs wrap onto which line, so it takes the
+ * largest shifted ascent/descent across the paragraph. That may reserve a
+ * little too much for a mixed-font paragraph, but it can never place more on a
+ * page than the positioned pass can fit — the invariant widow/orphan,
+ * keep-with-next and table pagination require.
+ */
+function estimateParagraphLineHeight(
+  children: readonly ParagraphChild[],
+  inheritedSizeHalfPt: number,
+  inheritedFont: string | undefined,
+  inheritedProps: RunProperties | undefined,
+  nominalHeightTwips: number,
+  imageHeightTwips: number,
+  exact: boolean,
+  measureTextMetricsFn: LayoutOptions["measureTextMetrics"]
+): number {
+  let ascent = 0;
+  let descent = 0;
+  const visitRun = (run: Run) => {
+    const text = getRunText(run);
+    const props = effectiveRunProperties(run, inheritedProps);
+    const fontSize = getRunLayoutFontSizePt(props, inheritedSizeHalfPt);
+    const fontName = getRunFontName(props, inheritedFont);
+    const metrics = measureTextMetricsFn
+      ? measureTextMetricsFn(text, fontName, fontSize, props?.bold, props?.italic)
+      : {
+          ascent: getFontAscent(styledFontVariant(fontName, props?.bold, props?.italic), fontSize),
+          descent: getFontDescent(styledFontVariant(fontName, props?.bold, props?.italic), fontSize)
+        };
+    const shift =
+      props?.vertAlign === "superscript"
+        ? fontSize * SCRIPT_BASELINE_SHIFT_FACTOR
+        : props?.vertAlign === "subscript"
+          ? -fontSize * SCRIPT_BASELINE_SHIFT_FACTOR
+          : 0;
+    ascent = Math.max(ascent, metrics.ascent + shift);
+    descent = Math.min(descent, metrics.descent + shift);
+  };
+  for (const child of children) {
+    if (isRun(child)) {
+      visitRun(child);
+    } else if (isHyperlink(child)) {
+      child.children.forEach(visitRun);
+    }
+  }
+  const metrics = resolveWordLineMetrics({
+    nominalHeight: nominalHeightTwips / 20,
+    ascent,
+    descent,
+    imageAscent: imageHeightTwips / 20,
+    exact
+  });
+  // Round up: this estimate must never claim a line is shorter than the
+  // positioned pass will make it, or a page could be judged to have room it
+  // does not have.
+  return Math.ceil(metrics.height * 20);
+}
+
 /** Estimated height of one table row in twips, including cell content. */
 function estimateRowHeight(
   table: Table,
@@ -891,7 +1055,8 @@ function estimateRowHeight(
   availableWidth: number,
   defaultCharsPerLine: number,
   averageCharWidth: number,
-  measureTextFn?: (text: string, fontName: string, fontSize: number) => number
+  measureTextFn?: (text: string, fontName: string, fontSize: number) => number,
+  measureTextMetricsFn?: LayoutOptions["measureTextMetrics"]
 ): number {
   const row = table.rows[rowIndex];
 
@@ -939,7 +1104,8 @@ function estimateRowHeight(
           defaultFontSize,
           defaultCharsPerLine,
           averageCharWidth,
-          measureTextFn
+          measureTextFn,
+          measureTextMetricsFn
         );
       } else if (content.type === "table") {
         cellHeight += estimateTableHeight(
@@ -948,7 +1114,8 @@ function estimateRowHeight(
           cellContentWidth,
           defaultCharsPerLine,
           averageCharWidth,
-          measureTextFn
+          measureTextFn,
+          measureTextMetricsFn
         );
       }
     }
@@ -978,7 +1145,8 @@ function estimateTableHeight(
   availableWidth: number,
   defaultCharsPerLine: number,
   averageCharWidth: number,
-  measureTextFn?: (text: string, fontName: string, fontSize: number) => number
+  measureTextFn?: (text: string, fontName: string, fontSize: number) => number,
+  measureTextMetricsFn?: LayoutOptions["measureTextMetrics"]
 ): number {
   let total = 0;
   for (let i = 0; i < table.rows.length; i++) {
@@ -989,7 +1157,8 @@ function estimateTableHeight(
       availableWidth,
       defaultCharsPerLine,
       averageCharWidth,
-      measureTextFn
+      measureTextFn,
+      measureTextMetricsFn
     );
   }
   return total;
@@ -1074,13 +1243,16 @@ export function layoutDocument(doc: DocxDocument, options?: LayoutOptions): Layo
   // style resolution is active for the whole call. See `resolved`.
   const previousDoc = activeDoc;
   const previousCache = activeStyleCache;
+  const previousRunProps = activeRunPropsCache;
   activeDoc = doc;
   activeStyleCache = new Map();
+  activeRunPropsCache = new WeakMap();
   try {
     return layoutDocumentInner(doc, options);
   } finally {
     activeDoc = previousDoc;
     activeStyleCache = previousCache;
+    activeRunPropsCache = previousRunProps;
   }
 }
 
@@ -1091,6 +1263,7 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
   const averageCharWidth =
     options?.averageCharWidth ?? Math.round((defaultFontSize / 2) * 0.5 * 20);
   const measureTextFn = options?.measureText;
+  const measureTextMetricsFn = options?.measureTextMetrics;
 
   const body = doc.body;
   const contentPages: number[] = [];
@@ -1228,7 +1401,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
       effectiveWidth,
       defaultCharsPerLine,
       averageCharWidth,
-      measureTextFn
+      measureTextFn,
+      measureTextMetricsFn
     );
 
     // Fast path: the whole table fits in the space left on this page.
@@ -1246,7 +1420,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
       effectiveWidth,
       defaultCharsPerLine,
       averageCharWidth,
-      measureTextFn
+      measureTextFn,
+      measureTextMetricsFn
     );
     if (currentY > 0 && currentY + firstRowHeight > availableHeight) {
       if (columnCount > 1 && currentColumn < columnCount - 1) {
@@ -1269,7 +1444,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
           effectiveWidth,
           defaultCharsPerLine,
           averageCharWidth,
-          measureTextFn
+          measureTextFn,
+          measureTextMetricsFn
         );
       } else {
         break; // header rows must be a contiguous run starting at row 0
@@ -1286,7 +1462,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
         effectiveWidth,
         defaultCharsPerLine,
         averageCharWidth,
-        measureTextFn
+        measureTextFn,
+        measureTextMetricsFn
       );
 
       // Header rows are already reserved at the top of a new page via headerHeight.
@@ -1354,7 +1531,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
             defaultFontSize,
             defaultCharsPerLine,
             averageCharWidth,
-            measureTextFn
+            measureTextFn,
+            measureTextMetricsFn
           );
           handleParagraphLayout(para, paraHeight, i, body);
           contentPages.push(currentPage);
@@ -1394,7 +1572,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
           defaultFontSize,
           defaultCharsPerLine,
           averageCharWidth,
-          measureTextFn
+          measureTextFn,
+          measureTextMetricsFn
         );
 
         handleParagraphLayout(para, paraHeight, i, body);
@@ -1613,7 +1792,8 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
           defaultFontSize,
           defaultCharsPerLine,
           averageCharWidth,
-          measureTextFn
+          measureTextFn,
+          measureTextMetricsFn
         );
         // If the pair does not fit on this page, move this paragraph down.
         if (currentY + paraHeight + nextHeight > availableHeight && currentY > 0) {

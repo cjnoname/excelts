@@ -25,6 +25,7 @@ import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import type { PdfFontConfig } from "@pdf/font/font-config";
 import type { PdfColor } from "@pdf/types";
 import { hexToRgb01 } from "@utils/theme-colors";
+import { SCRIPT_BASELINE_SHIFT_FACTOR } from "@word/layout/layout-constants";
 import type {
   LayoutAltChunk,
   LayoutChart,
@@ -393,7 +394,7 @@ function renderLine(
 
   for (const item of line.runs) {
     if (item.type === "image") {
-      renderInlineImage(pdfPage, item, para.rect.x, lineTopLayoutY, line.height, geometry);
+      renderInlineImage(pdfPage, item, para.rect.x, lineTopLayoutY, line.baseline, geometry);
     } else {
       renderRun(pdfPage, item, para.rect.x, baselinePdfY, geometry, opts);
     }
@@ -405,7 +406,7 @@ function renderInlineImage(
   item: PositionedInlineImage,
   paragraphX: number,
   lineTopLayoutY: number,
-  lineHeight: number,
+  lineBaseline: number,
   geometry: PageGeometry
 ): void {
   if (item.data.length === 0) {
@@ -416,12 +417,12 @@ function renderInlineImage(
     return;
   }
   const x = toPdfX(geometry, paragraphX + item.x);
-  // Inline images sit on the line's baseline; translate the layout
-  // top-of-line into PDF coordinates and place the image's bottom
-  // edge there. When the image is shorter than the line, it
-  // bottom-aligns within the line — matches Word's default for inline
-  // images.
-  const imageBottomLayoutY = lineTopLayoutY + Math.min(lineHeight, item.height);
+  // An inline image is anchored on the baseline, like a very tall glyph — which
+  // is OOXML's default for an inline drawing, and what makes a picture share a
+  // line with text sensibly. The layout already pushed the baseline down to the
+  // tallest picture on the line, so this bottom-aligns the shorter ones against
+  // the same line rather than hanging each from the top of the box.
+  const imageBottomLayoutY = lineTopLayoutY + lineBaseline;
   const yPdf = toPdfY(geometry, imageBottomLayoutY);
   pdfPage.drawImage({
     data: item.data,
@@ -454,9 +455,9 @@ function renderRun(
   // the surrounding text is the same size as the source.
   let drawBaselineY = baselinePdfY;
   if (run.verticalAlign === "superscript") {
-    drawBaselineY = baselinePdfY + fontSize * 0.33;
+    drawBaselineY = baselinePdfY + fontSize * SCRIPT_BASELINE_SHIFT_FACTOR;
   } else if (run.verticalAlign === "subscript") {
-    drawBaselineY = baselinePdfY - fontSize * 0.33;
+    drawBaselineY = baselinePdfY - fontSize * SCRIPT_BASELINE_SHIFT_FACTOR;
   }
 
   if (run.text.length > 0) {
@@ -566,6 +567,15 @@ function renderTable(
       }
     }
 
+    // Exact-height rows clip overflowing content instead of painting it over
+    // the following row. The layout model owns that semantic decision; ordinary
+    // rows stay unclipped so glyph overhang is not silently changed.
+    const stream = pdfPage.getContentStream();
+    if (cell.clipToBounds) {
+      stream.save();
+      stream.rect(xPdf, yPdf, w, h).clip().endPath();
+    }
+
     // Cell content — paragraphs and nested tables. Cell-internal
     // coordinates need to be offset by the cell's origin within the
     // table's origin. We rebuild a virtual paragraph/table with rects
@@ -601,6 +611,9 @@ function renderTable(
           opts
         );
       }
+    }
+    if (cell.clipToBounds) {
+      stream.restore();
     }
   }
 }
