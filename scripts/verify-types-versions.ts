@@ -69,10 +69,13 @@ export function typesVersionsProblems(manifest: TypesVersionsManifest, root?: st
         continue;
       }
       // Checking the shape catches a typo; checking the target catches a rename that
-      // moved the declaration, and a subpath pointed at the wrong one. `pnpm check`
-      // builds types before running this, so the files are there to look at — and when
-      // they are not, the shape check above is all that can be said.
-      if (root !== undefined && existsSync(path.join(root, file))) {
+      // moved the declaration, and a subpath pointed at the wrong one. That needs a
+      // build to look at, so when `dist/types` is absent the shape check above is all
+      // that can be said — `pnpm check` builds types first and gets the stronger check.
+      if (root === undefined) {
+        continue;
+      }
+      if (existsSync(path.join(root, file))) {
         const declared = declarationOf(manifest, subpath);
         if (declared !== undefined && declared !== file) {
           problems.push(
@@ -80,9 +83,7 @@ export function typesVersionsProblems(manifest: TypesVersionsManifest, root?: st
               `declares "${declared}" — the two must name the same declaration.`
           );
         }
-      } else if (root !== undefined && !existsSync(path.join(root, "dist", "types"))) {
-        // No build to compare against; the shape check stands on its own.
-      } else if (root !== undefined) {
+      } else if (existsSync(path.join(root, "dist", "types"))) {
         problems.push(`typesVersions["${subpath}"] points at "${file}", which does not exist.`);
       }
     }
@@ -123,11 +124,14 @@ function declarationOf(manifest: TypesVersionsManifest, subpath: string): string
 /** Read the repository's own manifest and report. Exits non-zero on any problem. */
 function main(): void {
   const flag = process.argv.indexOf("--manifest");
-  const file = flag === -1 ? path.join(ROOT, "package.json") : process.argv[flag + 1];
+  const file = flag === -1 ? path.join(ROOT, "package.json") : path.resolve(process.argv[flag + 1]);
   const manifest = JSON.parse(readFileSync(file, "utf8")) as TypesVersionsManifest;
-  // Declarations are always resolved against the repository, whichever manifest was
-  // read: a fixture describes the mapping, not a different `dist/`.
-  const problems = typesVersionsProblems(manifest, ROOT);
+  // A manifest's paths are relative to the manifest, so declarations are resolved against
+  // its own directory. For this repository that is `ROOT`, unchanged; for the fixtures the
+  // test writes it is the fixture's directory, which is what makes those cases hermetic —
+  // resolving every manifest against `ROOT` made them pass or fail depending on whether
+  // `dist/types` happened to be built, and `pnpm test` runs them before it builds.
+  const problems = typesVersionsProblems(manifest, path.dirname(file));
   if (problems.length > 0) {
     console.error("typesVersions does not mirror exports:\n");
     for (const problem of problems) {

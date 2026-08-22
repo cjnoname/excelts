@@ -1,4 +1,3 @@
-import { ValueType } from "@excel/core/enums";
 /**
  * Text measurement engine for auto-fit column width and row height calculation.
  *
@@ -22,10 +21,15 @@ import { ValueType } from "@excel/core/enums";
  * ## Key References
  * - ECMA-376 §18.3.1.13 (col width)
  */
+
+import { ValueType } from "@excel/core/enums";
 import type { Font, Alignment, NumFmt, RichText } from "@excel/types";
 import { getCellDisplayText } from "@excel/utils/cell-format";
 import type { FontMetrics } from "@utils/font-data";
 import { getFontMetrics } from "@utils/font-data";
+import { _measureCharPx, measureTextWidthPx, resolveFont } from "@utils/text-measure";
+import type { MeasuredFont } from "@utils/text-measure";
+import { charWidthToPixel, getPixelPadding, pixelToCharWidth, pixelToPoints } from "@utils/units";
 
 // =============================================================================
 // Constants
@@ -50,10 +54,6 @@ const MAX_COLUMN_WIDTH = 255;
 const AUTOFILTER_ARROW_PX = 16;
 
 // =============================================================================
-// Pixel Width Calculation (per-character)
-// =============================================================================
-
-// =============================================================================
 // Text Width Measurement
 // =============================================================================
 
@@ -62,9 +62,12 @@ const AUTOFILTER_ARROW_PX = 16;
  * so that the drawing engine and anything beside it can reach it. Kept exported here
  * because this is the path the Excel module has always imported it from, and a cell
  * measurer is where a reader looks for it.
+ *
+ * Re-exported straight from the source rather than through a local binding, so the
+ * statement does not depend on an import appearing above it.
  */
-export { getMaxDigitWidth, measureTextWidthPx };
-export type { MeasuredFont };
+export { getMaxDigitWidth, measureTextWidthPx } from "@utils/text-measure";
+export type { MeasuredFont } from "@utils/text-measure";
 
 /** A `Font` reduced to what measurement reads. */
 type ResolvedFont = MeasuredFont;
@@ -125,14 +128,6 @@ export {
   pixelToPoints,
   pointsToPixel
 } from "@utils/units";
-import {
-  _measureCharPx,
-  getMaxDigitWidth,
-  measureTextWidthPx,
-  resolveFont
-} from "@utils/text-measure";
-import type { MeasuredFont } from "@utils/text-measure";
-import { getPixelPadding, pixelToCharWidth, charWidthToPixel, pixelToPoints } from "@utils/units";
 
 // =============================================================================
 // Auto-Fit Column Width

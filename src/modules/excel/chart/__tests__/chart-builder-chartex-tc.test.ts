@@ -2581,7 +2581,17 @@ describe("TC7: pareto chart type in ChartEx builder", () => {
     // Shifted by the legend margins now following `legendPos`: only the side the legend
     // is on reserves room, and the left keeps the axis labels' floor instead of the
     // legend's width. Shape count and census are unchanged.
-    expect(stableHash(describeSvgGeometry(svg))).toBe("f44e827c");
+    //
+    // Moved again when the extractor started decoding entities: the bin labels are
+    // escaped in the markup, and `&lt;=0` is the same label as `<=0` — which is what a
+    // viewer reads and now what is recorded. Only these two strings differ; every
+    // coordinate is unchanged.
+    expect(
+      extractSvgGeometry(svg)
+        .filter(shape => shape.kind === "text")
+        .map(shape => shape.text)
+    ).toEqual(["1.6", "1.2", "0.8", "0.4", "2", "0", "<=0", "0-10", "10-20", ">20"]);
+    expect(stableHash(describeSvgGeometry(svg))).toBe("e1207e7f");
   });
 
   it("buildHistogramBins covers [start, end] with no extra empty bin and catches the axis minimum", () => {

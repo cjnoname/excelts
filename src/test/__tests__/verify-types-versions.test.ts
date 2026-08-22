@@ -17,7 +17,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -26,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const SCRIPT = path.resolve(import.meta.dirname, "../../../scripts/verify-types-versions.ts");
 
 let workspace: string;
+let caseId = 0;
 
 beforeAll(() => {
   workspace = mkdtempSync(path.join(tmpdir(), "types-versions-"));
@@ -35,9 +36,23 @@ afterAll(() => {
   rmSync(workspace, { recursive: true, force: true });
 });
 
-/** Run the gate against a manifest, returning its exit code and output. */
-function run(manifest: unknown): { code: number; output: string } {
-  const file = path.join(workspace, `manifest-${Math.random().toString(36).slice(2)}.json`);
+/**
+ * Run the gate against a manifest, returning its exit code and output.
+ *
+ * Each case gets its own directory, because the gate resolves declarations against the
+ * manifest's own directory: `built` names the declaration files that exist there, so a
+ * case that wants the existence check states so instead of inheriting whether this
+ * repository happens to have been built.
+ */
+function run(manifest: unknown, built: readonly string[] = []): { code: number; output: string } {
+  const directory = path.join(workspace, `case-${caseId++}`);
+  mkdirSync(directory, { recursive: true });
+  for (const declaration of built) {
+    const file = path.join(directory, declaration);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "export {};\n");
+  }
+  const file = path.join(directory, "package.json");
   writeFileSync(file, JSON.stringify(manifest));
   try {
     const output = execFileSync("node", [SCRIPT, "--manifest", file], {
@@ -122,24 +137,41 @@ describe("the typesVersions gate", () => {
   });
 
   it("catches a declaration that does not exist", () => {
-    // The shape check alone passes a path into a directory that was renamed away. `pnpm
-    // check` builds types first, so the file is there to look at.
-    const { code, output } = run({
+    // The shape check alone passes a path into a directory that was renamed away. Seeing
+    // that needs a build to compare against, so the fixture supplies one.
+    const { code, output } = run(
+      {
+        exports: { "./excel": { import: { types: "./dist/types/modules/excel/index.d.ts" } } },
+        typesVersions: { "*": { excel: ["dist/types/modules/excel/gone.d.ts"] } }
+      },
+      ["dist/types/modules/excel/index.d.ts"]
+    );
+    expect(code).toBe(1);
+    expect(output).toContain("does not exist");
+  });
+
+  it("says nothing about existence when there is no build to compare against", () => {
+    // `pnpm test` runs before `build:esm`, and the browser step wipes `dist/`. A gate that
+    // reported a missing file then would fail on the state of the tree rather than on the
+    // manifest, so with no `dist/types` the shape check stands alone.
+    const { code } = run({
       exports: { "./excel": { import: { types: "./dist/types/modules/excel/index.d.ts" } } },
       typesVersions: { "*": { excel: ["dist/types/modules/excel/gone.d.ts"] } }
     });
-    expect(code).toBe(1);
-    expect(output).toContain("does not exist");
+    expect(code).toBe(0);
   });
 
   it("catches a mapping pointed at the wrong declaration", () => {
     // `typesVersions` and `exports` are two answers to the same question. When they
     // disagree, older TypeScript resolves a different file from every other toolchain —
     // and both files exist, so nothing else notices.
-    const { code, output } = run({
-      exports: { "./excel": { import: { types: "./dist/types/modules/excel/index.d.ts" } } },
-      typesVersions: { "*": { excel: ["dist/types/modules/xml/index.d.ts"] } }
-    });
+    const { code, output } = run(
+      {
+        exports: { "./excel": { import: { types: "./dist/types/modules/excel/index.d.ts" } } },
+        typesVersions: { "*": { excel: ["dist/types/modules/xml/index.d.ts"] } }
+      },
+      ["dist/types/modules/excel/index.d.ts", "dist/types/modules/xml/index.d.ts"]
+    );
     expect(code).toBe(1);
     expect(output).toContain("must name the same declaration");
   });

@@ -17,6 +17,8 @@
  * - a percentage length is resolved against the root viewport, so `width="100%"`
  *   and `width="240"` on a 240-unit canvas are the same edge;
  * - an absent `stroke-width` is `1`, which is SVG's initial value;
+ * - a `<text>` element's label is its character data, so wrapping runs in
+ *   `<tspan>` or escaping a character as an entity does not make a new label;
  * - `fill-opacity` / `stroke-opacity` / `opacity` fold into the recorded colour,
  *   because a translucent paint is a property of the paint however it is spelled.
  *
@@ -33,7 +35,12 @@
  * Intended for tests only.
  */
 
-import { parseCssColor, parseSvgAttributes, parseSvgNumberList } from "@utils/svg-lex";
+import {
+  parseCssColor,
+  parseSvgAttributes,
+  parseSvgNumberList,
+  stripSvgMarkup
+} from "@utils/svg-lex";
 
 /** One shape, reduced to the properties a viewer would notice. */
 export interface SvgShape {
@@ -216,7 +223,10 @@ export function extractSvgGeometry(svg: string): SvgShape[] {
         shapes.push({
           kind,
           coords: coordsOf(attrs, ["x", "y"], viewport),
-          text: (match[4] ?? "").replace(/<[^>]*>/g, ""),
+          // The element's character data: child markup (`<tspan>`) is dropped and
+          // entities are decoded, so `&amp;` and a literal `&` are one label and a
+          // nested or unterminated tag cannot leave a stray `<` behind.
+          text: stripSvgMarkup(match[4] ?? ""),
           ...common
         });
         break;
