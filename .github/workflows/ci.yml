@@ -130,6 +130,19 @@ jobs:
       - name: Run type check
         run: pnpm type
 
+      # The repository's own gates. They were previously reachable only through
+      # `pnpm check` — a command nobody is forced to run — so a violation could
+      # reach `main` while every CI job stayed green. `verify:public-types` and
+      # `verify:doc-examples` need the declarations built by the step above; the
+      # rest are pure source scans.
+      - name: Run repository gates
+        run: |
+          pnpm verify:layers
+          pnpm verify:public-types
+          pnpm verify:types-versions
+          pnpm verify:doc-examples
+          pnpm verify:doc-links
+
   packages:
     # Workspace satellite packages (packages/*). Separate from the `lint` job
     # because they consume `documonster` through its published exports map, so

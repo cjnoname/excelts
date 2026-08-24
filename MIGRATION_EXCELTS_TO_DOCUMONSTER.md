@@ -386,10 +386,10 @@ through `Row.*` by row number. So a signature that used to be
 
 ```typescript
 import { Row } from "documonster/excel";
-import type { RowData, WorksheetData } from "documonster/excel";
+import type { RowData, Worksheet } from "documonster/excel";
 
 // preferred — address by number
-const stripe = (ws: WorksheetData, rowNumber: number) =>
+const stripe = (ws: Worksheet.Handle, rowNumber: number) =>
   Row.setFill(ws, rowNumber, { type: "pattern", pattern: "solid", fgColor: { argb: "FFF7F7F7" } });
 
 // when you already hold a handle from Worksheet.eachRow / addRow

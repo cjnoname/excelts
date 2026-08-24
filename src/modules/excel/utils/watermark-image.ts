@@ -3,7 +3,7 @@
  *
  * Renders text into a semi-transparent PNG suitable for use as an Excel watermark.
  * Uses a built-in bitmap font for ASCII characters — no Canvas or external fonts required.
- * Pixels are handed to the shared PNG encoder in `@excel/utils/png`.
+ * Pixels are handed to the shared PNG encoder in `@archive/png`.
  *
  * @example
  * ```typescript
@@ -22,7 +22,7 @@
 // Public API
 // =============================================================================
 
-import { encodePng } from "@excel/utils/png";
+import { encodePng } from "@archive/png";
 
 /**
  * Options for text watermark image generation.

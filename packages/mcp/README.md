@@ -7,7 +7,7 @@ on the local filesystem.
 
 > **Status: usable.** Nineteen tools cover spreadsheets, Word, PDF, templates and
 > archives — reading, writing, editing, searching and converting. See
-> [Roadmap](#roadmap) for what is deliberately absent.
+> See [Deliberately absent](#deliberately-absent) for the intentional scope boundaries.
 
 ## Install
 

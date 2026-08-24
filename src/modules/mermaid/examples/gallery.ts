@@ -12,9 +12,9 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { encodePng } from "@archive/png";
 import { rasterizeToRgba, renderDrawList } from "@draw/index";
 import { toSvg } from "@draw/svg";
-import { encodePng } from "@excel/utils/png";
 import { mermaidToDrawList } from "@mermaid/index";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import { createPdfDrawSurface } from "@pdf/render/draw-surface";

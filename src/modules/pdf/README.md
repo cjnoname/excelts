@@ -279,7 +279,7 @@ const bytes = await Pdf.create({
 
 Add text or image watermarks to any PDF generated via `Pdf.create()` or `Pdf.fromExcel()`:
 
-```typescript
+```text
 // Text watermark — centered, semi-transparent, rotated
 const bytes = await Pdf.create(data, {
   watermark: {
@@ -326,10 +326,8 @@ const bytes = await Pdf.create(data, {
 
 Create PDFs with precise control over text, shapes, and layout:
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
-const doc = new Pdf.Builder();
+```text
+const doc: Pdf.Builder;
 doc.setMetadata({ title: "My Report", author: "documonster" });
 
 const page = doc.addPage({ width: 595, height: 842 }); // A4
@@ -1137,13 +1135,21 @@ Generate a PDF from plain data. Returns `Promise<Uint8Array>`.
 
 ```typescript
 // 2D array
-await Pdf.create([["Name", "Age"], ["Alice", 30]]);
+await Pdf.create([
+  ["Name", "Age"],
+  ["Alice", 30]
+]);
 
 // Single sheet with column widths
 await Pdf.create({ name: "Report", columns: [{ width: 25 }, 15], data: [["A", "B"]] });
 
 // Multiple sheets
-await Pdf.create({ sheets: [{ name: "S1", data: [...] }, { name: "S2", data: [...] }] });
+await Pdf.create({
+  sheets: [
+    { name: "S1", data: [["A"]] },
+    { name: "S2", data: [["B"]] }
+  ]
+});
 
 // With options
 await Pdf.create([["A", 1]], { showGridLines: true, pageSize: "A4" });
@@ -1166,7 +1172,7 @@ const bytes = await Pdf.fromExcel(workbook, { showGridLines: true });
 
 Build free-form PDFs with text, vector graphics, annotations, and form fields.
 
-```typescript
+```text
 import { Pdf } from "documonster/pdf";
 
 const doc = new Pdf.Builder();
@@ -1176,7 +1182,7 @@ doc.setPdfACompliance();       // Enable PDF/A-1b
 doc.embedFont(fontBytes);      // Legacy single-default-font compatibility API
 // Or: doc.embedFonts(fonts);  // Complete PdfFontConfig; the later call replaces earlier config
 
-const page = doc.addPage({ width?, height? }); // Returns PdfPageBuilder
+const page = doc.addPage({ width?, height? }); // Returns Pdf.PageBuilder
 
 // PdfPageBuilder methods:
 page.drawText(text, { x, y, fontSize?, fontFamily?, bold?, italic?, color? });
@@ -1200,9 +1206,7 @@ const bytes = await doc.build(); // Returns Promise<Uint8Array>
 
 Edit existing PDFs — overlay content, fill forms, merge, split, and sign.
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
+```text
 const editor = Pdf.Editor.load(pdfBytes, { password? });
 
 // Page access
@@ -1221,7 +1225,7 @@ page.addAnnotation(options);
 page.addFormField(options);
 
 // Page manipulation
-editor.addPage(options?);              // Returns PdfEditorPage
+editor.addPage(options?);              // Returns Pdf.PageBuilder
 editor.removePage(index);
 editor.rotatePage(index, degrees);     // 90, 180, 270
 editor.copyPagesFrom(otherPdfBytes);
@@ -1259,7 +1263,10 @@ import { Pdf } from "documonster/pdf";
 
 // Step 1: Build placeholder
 const { dictString, placeholder } = Pdf.buildSignatureDictPlaceholder({
-  name?, reason?, location?, contactInfo?
+  name: "Alice",
+  reason: "Approval",
+  location: "London",
+  contactInfo: "alice@example.com"
 });
 
 // Step 2: Sign (certificate = DER X.509, privateKey = DER PKCS#8)

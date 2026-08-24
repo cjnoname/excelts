@@ -279,7 +279,7 @@ const bytes = await Pdf.create({
 
 为任何通过 `Pdf.create()` 或 `Pdf.fromExcel()` 生成的 PDF 添加文本或图像水印:
 
-```typescript
+```text
 // 文本水印 —— 居中、半透明、旋转
 const bytes = await Pdf.create(data, {
   watermark: {
@@ -326,10 +326,8 @@ const bytes = await Pdf.create(data, {
 
 创建对文本、图形和布局拥有精确控制的 PDF:
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
-const doc = new Pdf.Builder();
+```text
+const doc: Pdf.Builder;
 doc.setMetadata({ title: "My Report", author: "documonster" });
 
 const page = doc.addPage({ width: 595, height: 842 }); // A4
@@ -433,7 +431,7 @@ src/modules/pdf/
 ├── core/               # PDF 基元(对象、流、写入器、加密、数字签名)
 ├── font/               # TTF 解析、字形度量、字体子集化、嵌入
 ├── render/             # 布局引擎、页面渲染器、样式转换器
-│   ├── layout-engine   — PdfSheetData → LayoutPage[](零 @excel 导入)
+│   ├── layout-engine   — PdfSheetData → LayoutPage[] (零 @excel 导入)
 │   ├── page-renderer   — LayoutPage → PDF 内容流(零 @excel 导入)
 │   ├── style-converter — PdfCellStyle → PDF 渲染参数(零 @excel 导入)
 │   ├── png-decoder     — 用于 PDF 嵌入的 PNG 图像解码(零 @excel 导入)
@@ -1116,13 +1114,21 @@ const result = await Pdf.read(pdfBytes, {
 
 ```typescript
 // 二维数组
-await Pdf.create([["Name", "Age"], ["Alice", 30]]);
+await Pdf.create([
+  ["Name", "Age"],
+  ["Alice", 30]
+]);
 
 // 带列宽的单个工作表
 await Pdf.create({ name: "Report", columns: [{ width: 25 }, 15], data: [["A", "B"]] });
 
 // 多个工作表
-await Pdf.create({ sheets: [{ name: "S1", data: [...] }, { name: "S2", data: [...] }] });
+await Pdf.create({
+  sheets: [
+    { name: "S1", data: [["A"]] },
+    { name: "S2", data: [["B"]] }
+  ]
+});
 
 // 带选项
 await Pdf.create([["A", 1]], { showGridLines: true, pageSize: "A4" });
@@ -1145,7 +1151,7 @@ const bytes = await Pdf.fromExcel(workbook, { showGridLines: true });
 
 构建带文本、矢量图形、注释和表单字段的自由排版 PDF。
 
-```typescript
+```text
 import { Pdf } from "documonster/pdf";
 
 const doc = new Pdf.Builder();
@@ -1155,7 +1161,7 @@ doc.setPdfACompliance();       // 启用 PDF/A-1b
 doc.embedFont(fontBytes);      // 旧版单默认字体兼容 API
 // 或:doc.embedFonts(fonts);   // 完整 PdfFontConfig;后一次调用替换之前的配置
 
-const page = doc.addPage({ width?, height? }); // 返回 PdfPageBuilder
+const page = doc.addPage({ width?, height? }); // 返回 Pdf.PageBuilder
 
 // PdfPageBuilder 方法:
 page.drawText(text, { x, y, fontSize?, fontFamily?, bold?, italic?, color? });
@@ -1179,9 +1185,7 @@ const bytes = await doc.build(); // 返回 Promise<Uint8Array>
 
 编辑已有 PDF —— 叠加内容、填写表单、合并、拆分和签名。
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
+```text
 const editor = Pdf.Editor.load(pdfBytes, { password? });
 
 // 页面访问
@@ -1200,7 +1204,7 @@ page.addAnnotation(options);
 page.addFormField(options);
 
 // 页面操作
-editor.addPage(options?);              // 返回 PdfEditorPage
+editor.addPage(options?);              // 返回 Pdf.PageBuilder
 editor.removePage(index);
 editor.rotatePage(index, degrees);     // 90, 180, 270
 editor.copyPagesFrom(otherPdfBytes);
@@ -1238,7 +1242,10 @@ import { Pdf } from "documonster/pdf";
 
 // 步骤 1:构建占位符
 const { dictString, placeholder } = Pdf.buildSignatureDictPlaceholder({
-  name?, reason?, location?, contactInfo?
+  name: "Alice",
+  reason: "Approval",
+  location: "London",
+  contactInfo: "alice@example.com"
 });
 
 // 步骤 2:签名(certificate = DER X.509, privateKey = DER PKCS#8)

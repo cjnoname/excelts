@@ -8,10 +8,10 @@
  * @example
  * ```ts
  * import { markdownToDocx } from "documonster/word/markdown";
- * import { Document, toBuffer } from "documonster/word";
+ * import { Io } from "documonster/word";
  *
  * const doc = markdownToDocx("# Hello\n\nWorld **bold**");
- * const buffer = await toBuffer(doc);
+ * const buffer = await Io.toBuffer(doc);
  * ```
  *
  * @stability experimental

@@ -110,6 +110,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { encodePng } from "@archive/png";
 import type {
   AddChartSeriesOptions,
   AddChartOptions,
@@ -181,7 +182,6 @@ import {
   Workbook,
   Worksheet
 } from "@excel/index";
-import { encodePng } from "@excel/utils/png";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import { chartToPdf } from "@pdf/excel-bridge";
 

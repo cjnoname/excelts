@@ -36,7 +36,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Formula — Excel 兼容公式引擎
 
-433 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 workbook;用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤,且引擎不会进入只读写 XLSX 的 bundle。
+448 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 workbook;用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤,且引擎不会进入只读写 XLSX 的 bundle。
 
 - [文档](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [示例](src/modules/formula/examples/)
@@ -71,7 +71,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Archive — 归档创建/读取/编辑
 
-ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工具。
+ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工具，以及 `encodePng` —— PNG 就是带 CRC-32 校验 chunk 的 DEFLATE 流，而这两样原语都在这里。
 
 - [文档](src/modules/archive/README.md) | [中文](src/modules/archive/README_zh.md)
 - [示例](src/modules/archive/examples/)
@@ -82,6 +82,19 @@ ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工�
 
 - [文档](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [示例](src/modules/stream/examples/)
+
+### Draw — 共享绘图引擎
+
+一份结构化显示列表,一个遍历器,多个后端。构建 `DrawList`,即可从同一份输出得到 SVG 标记、RGBA 像素或 PDF 页面 —— 任何渲染器都不必重新解析另一个渲染器的 SVG。自带文本测量与换行,生产者在构建列表之前就能确定盒子尺寸。
+
+- [文档](src/modules/draw/README.md) | [中文](src/modules/draw/README_zh.md)
+
+### Mermaid — 图表文本转绘图
+
+21 种 Mermaid 图表类型 —— 流程图、状态图、类图、ER 图、时序图、甘特图、思维导图、Git 图等 —— 无需浏览器或 headless Chrome 即可渲染。本模块产出显示列表且不实现任何后端,因此 SVG、像素和 PDF 页面都是免费附带的。解析、布局、渲染是分离的三个阶段,可在任一阶段停下。
+
+- [文档](src/modules/mermaid/README.md) | [中文](src/modules/mermaid/README_zh.md)
+- [示例](src/modules/mermaid/examples/)
 
 ## MCP 服务器 — 面向 AI 客户端的 Documonster
 
@@ -210,6 +223,5 @@ const buffer = await Workbook.toBuffer(wb);
 - 🐛 [问题追踪](https://github.com/documonster/documonster/issues)
 - 📋 [更新日志](CHANGELOG.md)
 - 🔄 [迁移指南](MIGRATION.md)
-- 🗺️ [路线图](ROADMAP.md)
 - 📄 [许可证 (Apache-2.0)](LICENSE)
 - 📦 [第三方声明](THIRD_PARTY_NOTICES.md)

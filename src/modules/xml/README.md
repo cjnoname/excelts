@@ -43,7 +43,7 @@ console.log(w.xml);
 
 ### Writing XML (Streaming)
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const chunks: string[] = [];
@@ -59,7 +59,7 @@ sw.closeNode();
 
 ### Reading XML (SAX — Streaming)
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const parser = new Xml.SaxParser();
@@ -72,7 +72,7 @@ parser.close();
 
 ### Reading XML (DOM — Buffered)
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const doc = Xml.parse('<root><item id="1">hello</item></root>');
@@ -87,7 +87,7 @@ Convert XML into plain JavaScript objects.
 
 Two entry points for different scenarios:
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 // Option 1: already have a DOM tree
@@ -255,7 +255,7 @@ Same methods as `Xml.Writer` (both implement `XmlSink`), except:
 
 ### Xml.parseSax (Async Generator)
 
-```typescript
+```text
 Xml.parseSax(
   iterable: AsyncIterable<string | Uint8Array | ArrayBuffer>,
   options?: SaxOptions
@@ -264,7 +264,7 @@ Xml.parseSax(
 
 ### Xml.parse
 
-```typescript
+```text
 Xml.parse(xml: string, options?: XmlParseOptions): XmlDocument;
 ```
 
@@ -302,7 +302,7 @@ Xml.parse(xml: string, options?: XmlParseOptions): XmlDocument;
 
 ### Xml.toPlainObject
 
-```typescript
+```text
 Xml.toPlainObject(
   element: XmlElement,
   options?: ToPlainObjectOptions
@@ -313,7 +313,7 @@ Convert an `XmlElement` DOM tree into a plain JavaScript object.
 
 ### Xml.parseToObject
 
-```typescript
+```text
 Xml.parseToObject(xml: string, options?: ParseXmlToObjectOptions): Record<string, unknown>;
 ```
 

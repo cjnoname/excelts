@@ -148,13 +148,13 @@ function _ensureNumberingInstance(s: _DocumentState, abstractNumId: number): num
  *
  * @example
  * ```ts
- * import { Document, toBuffer } from "documonster/word";
+ * import { Document, Io } from "documonster/word";
  *
  * const doc = Document.create();
  * Document.addHeading(doc, "Hello World", 1);
  * Document.addParagraph(doc, "This is a paragraph.");
  * Document.addTable(doc, [["Name", "Age"], ["Alice", "30"]]);
- * const bytes = await toBuffer(Document.build(doc));
+ * const bytes = await Io.toBuffer(Document.build(doc));
  * ```
  */
 export function create(): DocumentHandle {

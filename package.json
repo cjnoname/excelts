@@ -383,7 +383,7 @@
   "scripts": {
     "example": "node scripts/run-examples.ts",
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
-    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\"",
+    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\" \"pnpm verify:doc-examples\" \"pnpm verify:doc-links\"",
     "test": "vitest run && pnpm build:esm && pnpm test:packages && pnpm test:browser --",
     "test:all": "pnpm test",
     "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
@@ -395,6 +395,8 @@
     "verify:treeshake": "node scripts/treeshake-verify.ts",
     "verify:layers": "node scripts/verify-layers.ts",
     "verify:public-types": "node scripts/verify-public-types.ts",
+    "verify:doc-examples": "node scripts/verify-doc-examples.ts",
+    "verify:doc-links": "node scripts/verify-doc-links.ts",
     "verify:packages": "node scripts/verify-package-imports.ts",
     "build:packages": "pnpm --filter \"./packages/*\" build",
     "type:packages": "pnpm --filter \"./packages/*\" type",

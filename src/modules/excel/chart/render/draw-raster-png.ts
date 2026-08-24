@@ -10,10 +10,10 @@
  * This file is the seam, and it is deliberately the whole of it.
  */
 
+import { encodePng } from "@archive/png";
 import type { RasterizeOptions } from "@draw/raster/surface";
 import { rasterizeToRgba } from "@draw/raster/surface";
 import type { DrawList } from "@draw/types";
-import { encodePng } from "@excel/utils/png";
 
 /** Options for {@link rasterizeDrawList}. */
 export interface RasterizePngOptions extends RasterizeOptions {

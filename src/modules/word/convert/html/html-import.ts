@@ -10,14 +10,14 @@
  * @example
  * ```ts
  * import { htmlToDocxBody } from "documonster/word/html";
- * import { Document, toBuffer } from "documonster/word";
+ * import { Document, Io } from "documonster/word";
  *
  * const body = htmlToDocxBody("<h1>Hello</h1><p>World</p>");
  * const h = Document.create();
  * for (const block of body) {
- *   Document.addBodyContent(h, block);
+ *   Document.addContent(h, block);
  * }
- * const buffer = await toBuffer(Document.build(h));
+ * const buffer = await Io.toBuffer(Document.build(h));
  * ```
  */
 

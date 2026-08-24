@@ -11,11 +11,11 @@
  * @example
  * ```typescript
  * import { Workbook } from "documonster/excel";
- * import { excelToPdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
  * const workbook = Workbook.create();
  * // ... build workbook ...
- * const pdf = await excelToPdf(workbook);
+ * const pdf = await Pdf.fromExcel(workbook);
  * ```
  */
 
@@ -267,8 +267,8 @@ export interface ChartToPdfOptions {
  *
  * Lives in `excel-bridge.ts` because invoking the PDF builder from the
  * chart module would cross the Layer 4 → Layer 5 import boundary
- * documented in `AGENTS.md`. Consumers import it from
- * `documonster/pdf` alongside `excelToPdf`.
+ * documented in `AGENTS.md`. Consumers reach it as `Pdf.fromChart`,
+ * alongside `Pdf.fromExcel`.
  */
 export async function chartToPdf(
   chart: ChartHandle,

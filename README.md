@@ -36,7 +36,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write XLSX.
+448-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write XLSX.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -71,7 +71,7 @@ Streaming and buffered XML processing with query engine, namespace support, and 
 
 ### Archive — Create/Read/Edit Archives
 
-ZIP and TAR archive creation, reading, editing, streaming, encryption, and compression utilities.
+ZIP and TAR archive creation, reading, editing, streaming, encryption, and compression utilities — plus `encodePng`, since a PNG is a DEFLATE stream with CRC-32-checked chunks and this is where both primitives live.
 
 - [Documentation](src/modules/archive/README.md) | [中文](src/modules/archive/README_zh.md)
 - [Examples](src/modules/archive/examples/)
@@ -82,6 +82,19 @@ Node.js-compatible Readable/Writable/Transform/Duplex that works identically in 
 
 - [Documentation](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [Examples](src/modules/stream/examples/)
+
+### Draw — Shared Drawing Engine
+
+One structured display list, one walker, many backends. Build a `DrawList` and get SVG markup, RGBA pixels, or a PDF page from the same output — no renderer ever re-parses another's SVG. Includes text measurement and wrapping, so a producer can size its boxes before it builds a list.
+
+- [Documentation](src/modules/draw/README.md) | [中文](src/modules/draw/README_zh.md)
+
+### Mermaid — Diagram Text to Drawings
+
+Twenty-one Mermaid diagram types — flowchart, state, class, ER, sequence, Gantt, mindmap, git graph and more — rendered without a browser or headless Chrome. The module produces a display list and implements no backend, so SVG, pixels and PDF pages all come for free. Parse, layout and render are separate passes; stop after any of them.
+
+- [Documentation](src/modules/mermaid/README.md) | [中文](src/modules/mermaid/README_zh.md)
+- [Examples](src/modules/mermaid/examples/)
 
 ## MCP Server — Documonster for AI Clients
 
@@ -223,6 +236,5 @@ For older browsers without native `CompressionStream` API, Documonster automatic
 - 🐛 [Issue Tracker](https://github.com/documonster/documonster/issues)
 - 📋 [Changelog](CHANGELOG.md)
 - 🔄 [Migration Guide](MIGRATION.md)
-- 🗺️ [Roadmap](ROADMAP.md)
 - 📄 [License (Apache-2.0)](LICENSE)
 - 📦 [Third-Party Notices](THIRD_PARTY_NOTICES.md)

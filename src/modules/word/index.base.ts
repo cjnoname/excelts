@@ -564,7 +564,8 @@ export type {
 //   import { renderToMarkdown, markdownToDocx } from "documonster/word/markdown"
 //   import { renderToHtml }     from "documonster/word/html"
 //   import { excelToDocx }      from "documonster/word/excel"
-//   import { docxToPdf }        from "documonster/pdf"
+// DOCX → PDF lives in the PDF module's lazy converter namespace:
+//   import { Pdf } from "documonster/pdf"   // await Pdf.fromDocx(doc)
 
 // --- Stable API ---
 export type { EncryptOptions } from "@word/security/encryption";

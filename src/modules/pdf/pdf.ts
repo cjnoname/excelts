@@ -6,9 +6,9 @@
  *
  * @example Simplest — pass a 2D array:
  * ```typescript
- * import { pdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const bytes = await pdf([
+ * const bytes = await Pdf.create([
  *   ["Product", "Revenue"],
  *   ["Widget", 1000],
  *   ["Gadget", 2500]
@@ -17,7 +17,7 @@
  *
  * @example With options:
  * ```typescript
- * const bytes = await pdf([
+ * const bytes = await Pdf.create([
  *   ["Name", "Score"],
  *   ["Alice", 95],
  *   ["Bob", 87]
@@ -26,7 +26,7 @@
  *
  * @example Multiple sheets:
  * ```typescript
- * const bytes = await pdf({
+ * const bytes = await Pdf.create({
  *   sheets: [
  *     { name: "Sales", data: [["Product", "Revenue"], ["Widget", 1000]] },
  *     { name: "Costs", data: [["Item", "Amount"], ["Rent", 500]] }
@@ -36,7 +36,7 @@
  *
  * @example With column widths and styles:
  * ```typescript
- * const bytes = await pdf({
+ * const bytes = await Pdf.create({
  *   name: "Report",
  *   columns: [{ width: 25 }, { width: 15 }],
  *   data: [

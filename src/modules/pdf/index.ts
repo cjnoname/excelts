@@ -5,9 +5,9 @@
  *
  * @example Standalone PDF generation:
  * ```typescript
- * import { pdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const bytes = await pdf([
+ * const bytes = await Pdf.create([
  *   ["Product", "Revenue"],
  *   ["Widget", 1000],
  *   ["Gadget", 2500]
@@ -27,9 +27,9 @@
  *
  * @example Read PDF — extract text, images, and metadata:
  * ```typescript
- * import { readPdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const result = await readPdf(pdfBytes);
+ * const result = await Pdf.read(pdfBytes);
  * console.log(result.text);               // All text
  * console.log(result.pages[0].text);      // Page 1 text
  * console.log(result.pages[0].images);    // Page 1 images

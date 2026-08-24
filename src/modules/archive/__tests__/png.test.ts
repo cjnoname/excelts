@@ -1,5 +1,5 @@
 import { unzlibSync } from "@archive/compression/compress";
-import { encodePng, withPngDpi } from "@excel/utils/png";
+import { encodePng, withPngDpi } from "@archive/png";
 import { describe, expect, it } from "vitest";
 
 const decoder = new TextDecoder();

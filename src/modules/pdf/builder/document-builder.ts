@@ -6,9 +6,9 @@
  *
  * @example Basic usage:
  * ```typescript
- * import { PdfDocumentBuilder } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const doc = new PdfDocumentBuilder();
+ * const doc = new Pdf.Builder();
  * const page = doc.addPage({ width: 595, height: 842 }); // A4
  *
  * page.drawText("Hello, World!", { x: 72, y: 750, fontSize: 24 });

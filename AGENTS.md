@@ -44,6 +44,9 @@ pnpm type:packages
 pnpm test:packages
 pnpm build:packages
 
+pnpm verify:doc-examples  # documented imports & members must exist — see "Documentation" below
+pnpm verify:doc-links     # local Markdown targets & headings must exist
+
 # Single test file
 pnpm exec vitest run src/modules/excel/core/__tests__/cell.test.ts
 # Pattern match
@@ -57,7 +60,7 @@ src/
 ├── modules/
 │   ├── excel/          # core/ (Workbook, Worksheet, Cell, …) surface/ stream/ xlsx/
 │   ├── word/           # DocxDocument, DocumentBuilder, readDocx, packageDocx
-│   ├── formula/        # Tokenizer, parser, evaluator, 433 functions, spill engine
+│   ├── formula/        # Tokenizer, parser, evaluator, 448 functions, spill engine
 │   ├── pdf/            # core/ builder/ font/ render/ reader/ + excel-bridge.ts + word-bridge.ts + word-chart-bridge.ts + word-layout-to-pdf.ts
 │   ├── csv/            # Parsing/formatting + streaming
 │   ├── markdown/       # GFM table parsing/formatting
@@ -204,9 +207,21 @@ rasteriser and the stroke font it needs, and `documonster/draw` exports it.
 **It yields pixels, not a PNG.** Encoding one needs DEFLATE, which lives at Layer 2 in
 `archive/`, and dragging that down into Layer 1 to return a file format would make
 every consumer of the drawing engine pay for a compression library. The seam is
-therefore at the image: `rasterizeToRgba` is the backend, and
-`excel/chart/render/draw-raster-png.ts` is the ten-line adapter that pairs it with the
-library's own encoder. A caller with a different encoder pairs it with that instead.
+therefore at the image: `rasterizeToRgba` is the backend, and the encoder lives with
+DEFLATE and CRC-32 in `archive/png.ts`, published as `encodePng` from
+`documonster/archive` — a PNG is a DEFLATE stream plus CRC-32-checked chunks, so that is
+where it belongs rather than in whichever module first wanted a picture. Pairing the two
+is two lines, and a caller with a different encoder (a browser canvas, say) pairs the
+pixels with that instead.
+
+That placement was arrived at the second time. The encoder sat in `excel/utils/png.ts`
+while both its callers were in `excel/`, with a note to move it down rather than copy it
+a third time. What triggered the move was not a second internal caller but a public
+entry: a consumer of `documonster/draw` or `documonster/mermaid` could obtain pixels and
+had no way to encode them, while a chart consumer could — and publishing the encoder from
+`documonster/excel` to close that gap would have been the wrong answer to the right
+question. `excel/chart/render/draw-raster-png.ts` remains as the internal eight-line
+`DrawList` → PNG convenience the chart and sparkline renderers use.
 
 `createPdfDrawSurface` takes a `PdfDrawPage` — a structural interface naming the six
 marks it puts down — rather than a `PdfPageBuilder`. The concrete builder also carries
@@ -372,6 +387,43 @@ These rules are **machine-enforced** by `scripts/verify-layers.ts` (run via `pnp
 `@utils/*` → `./src/utils/*` | `@test/*` → `./src/test/*`
 
 Use aliases for **all** module imports — both cross-module (`@archive/...` from excel) and same-module (`@excel/cell` from within excel). This matches the IDE auto-import setting (`importModuleSpecifier: "non-relative"`) and keeps imports stable when files move. The only exception is `src/utils/` (Layer 0), whose internal files use relative paths (`./errors`, `./glob`).
+
+## Documentation
+
+Examples are the first thing a consumer copies, and until recently they were the only artefact
+here that nothing in the toolchain read — so they drifted, silently and with the authority of
+sitting next to the implementation. `scripts/verify-doc-examples.ts` (`pnpm verify:doc-examples`,
+included in `pnpm check`) closes that: it resolves every documented import **and** every
+`Namespace.member` reference against the built public surface by handing them to `tsc`.
+
+What it found on its first two runs is the reason it exists: seventeen `@example` blocks in
+`pdf/` and `word/` still naming the flat exports those modules replaced with namespace surfaces
+(`readPdf` → `Pdf.read`, `toBuffer` → `Io.toBuffer`, …); eleven more of the same in the READMEs,
+which carry five times as many imports; a `Document.addBodyContent` that has never existed; and
+a comment instructing readers to call four members on `StyleMap`, which resolves — to a _type_
+of that name, while the namespace is published as `Styles`.
+
+Rules when writing documentation:
+
+- **Name the public form**, not the internal function it forwards to. `Pdf.read`, not `readPdf`;
+  `Worksheet.Handle`, not `WorksheetData`.
+- **Put runnable code in a fence.** Markdown is checked inside fenced blocks only; inline code
+  in a sentence is treated as a reference to a symbol, which is what lets a document _discuss_
+  a broken import. TSDoc comments are read in full, prose included, because their prose
+  instructs.
+- **Use braced imports** (`import { A, B } from "documonster/x"`). A namespace or default import
+  is reported rather than skipped — a gate with a silent hole is worse than no gate.
+- **Keep local links real.** `scripts/verify-doc-links.ts` checks relative files, directories,
+  images and Markdown heading fragments. External URLs are deliberately not fetched. Heading
+  anchors follow GitHub's rule, including the two details that surprise people: a dropped
+  character between spaces leaves _two_ hyphens (`Excel — XLSX` → `excel--xlsx`), and a
+  leading emoji leaves a leading hyphen (`⚠ BREAKING` → `-breaking`).
+- **Do not restate counts.** A number only a human keeps in sync is eventually wrong: the
+  function count said 433 in sixteen places while the registry held 448.
+  `src/modules/formula/__tests__/function-count.test.ts` pins the twelve that remain against
+  `listFunctionNames()`.
+- A member a comment names _in order to say it is absent_ goes in that script's
+  `DELIBERATELY_ABSENT` map, keyed by file, and is documented there.
 
 ## Code Style
 

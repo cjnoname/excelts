@@ -167,7 +167,7 @@ function ns(
 /**
  * `Chart` is the one excel namespace that legitimately reaches `archive/`:
  * `Chart.toPNG` encodes a PNG, a PNG's IDAT *is* a zlib stream, and its chunks
- * are CRC32-checked — so the shared encoder (`@excel/utils/png`) pulls
+ * are CRC32-checked — so the shared encoder (`@archive/png`) pulls
  * `archive/compression/{compress,crc32}`. This used to come out archive-free
  * only because the chart renderer carried a private encoder that emitted
  * *stored* (uncompressed) deflate blocks alongside a second CRC32
@@ -190,11 +190,14 @@ function ns(
 function chartNs(platform?: "browser" | "node"): Scenario {
   const tag = platform === "browser" ? "browser " : "";
   return {
-    name: `${tag}/excel: Chart (allows xml+draw, archive/compression for PNG)`,
+    name: `${tag}/excel: Chart (allows xml+draw, archive/compression+png for PNG)`,
     importFrom: `${PKG_NAME}/excel`,
     imports: ["Chart"],
     mustNotInclude: [...exclude("excel", ["modules/xml/", "modules/draw/"]), ...ARCHIVE_CONTAINERS],
-    allowModules: ["modules/archive/compression/"],
+    // `archive/png` is the encoder, which moved out of `excel/utils/` once it had to be
+    // published for `documonster/draw` consumers. Listed as precisely as the compression
+    // directory it sits beside: the ZIP/TAR containers stay asserted absent.
+    allowModules: ["modules/archive/compression/", "modules/archive/png."],
     platform,
     lazySplit: true
   };
@@ -309,7 +312,7 @@ const scenarios: Scenario[] = [
   // /excel member-level — formula recalculation is published as its own subpath
   // (`documonster/excel/formula`, issue #193) precisely so it stays strictly
   // opt-in: a consumer of `documonster/excel` must NOT pay for the evaluator,
-  // the 433 built-in functions, the calc integration layer, or the excel→engine
+  // the built-in function table, the calc integration layer, or the excel→engine
   // adapter.
   //
   // `modules/formula/syntax/` is deliberately NOT excluded: `DefinedNames`
@@ -384,7 +387,7 @@ const scenarios: Scenario[] = [
   },
 
   // ===========================================================================
-  // /formula member-level — the 433-function evaluator must NOT be pulled by
+  // /formula member-level — the full-table evaluator must NOT be pulled by
   // the light syntax-only members. Guards the `function-registry` lazy-init
   // fix (no top-level `ensureRegistryInitialized()` side effect): a consumer
   // who only tokenizes/parses must never bundle the evaluator or functions.
@@ -493,6 +496,13 @@ const scenarios: Scenario[] = [
     // archive may reach stream; a CRC32-only consumer must not even do that,
     // nor pull any container format built on top of the primitives.
     [...exclude("archive", []), ...ARCHIVE_CONTAINERS]
+  ),
+  s(
+    "/archive: encodePng (compression only, no containers)",
+    `${PKG_NAME}/archive`,
+    ["encodePng"],
+    [...exclude("archive", []), ...ARCHIVE_CONTAINERS],
+    "node"
   ),
   s("/stream: pipeline", `${PKG_NAME}/stream`, ["pipeline"], exclude("stream", [])),
 

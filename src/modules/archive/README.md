@@ -19,6 +19,7 @@ import { Archive } from "documonster/archive";
 - **Encryption** - ZIP Traditional and AES-256 encryption/decryption
 - **ZIP64** - Large file support (> 4GB files, > 65535 entries)
 - **Compression** - DEFLATE, GZIP, and Zlib with sync/async/streaming APIs
+- **PNG Encoding** - `encodePng`, because a PNG is a DEFLATE stream with CRC-32-checked chunks
 - **Progress & Abort** - Built-in progress callbacks and AbortSignal support
 - **File System Integration** - Node.js convenience layer for disk I/O
 
@@ -128,7 +129,9 @@ const op = archive.operation({
   onProgress: p => console.log(`${p.entriesDone}/${p.entriesTotal}`),
   signal: abortController.signal
 });
-for await (const chunk of op.iterable) { ... }
+for await (const chunk of op.iterable) {
+  /* process chunk */
+}
 ```
 
 **`ZipOptions`:**
@@ -171,7 +174,9 @@ for await (const entry of reader.entries()) {
   const data = await entry.bytes();
   const text = await entry.text();
   // Or stream the entry
-  for await (const chunk of entry.stream()) { ... }
+  for await (const chunk of entry.stream()) {
+    /* process chunk */
+  }
   // Or pipe
   await entry.pipeTo(writableStream);
 }
@@ -192,18 +197,20 @@ const op = reader.operation({
 Represents a single entry in an archive.
 
 ```typescript
-entry.path;          // "path/to/file.txt"
-entry.type;          // "file" | "directory" | "symlink"
-entry.mode;          // Unix mode (e.g., 0o644)
-entry.linkTarget;    // Symlink target (after bytes())
+entry.path; // "path/to/file.txt"
+entry.type; // "file" | "directory" | "symlink"
+entry.mode; // Unix mode (e.g., 0o644)
+entry.linkTarget; // Symlink target (after bytes())
 
-await entry.bytes();              // Uint8Array
-await entry.text();               // String (UTF-8)
-await entry.text("latin1");       // String (custom encoding)
-for await (const chunk of entry.stream()) { ... }
+await entry.bytes(); // Uint8Array
+await entry.text(); // String (UTF-8)
+await entry.text("latin1"); // String (custom encoding)
+for await (const chunk of entry.stream()) {
+  /* process chunk */
+}
 await entry.pipeTo(writable);
-entry.readableStream();           // WHATWG ReadableStream
-entry.discard();                  // Skip without reading
+entry.readableStream(); // WHATWG ReadableStream
+entry.discard(); // Skip without reading
 ```
 
 **`UnzipOptions`:**
@@ -235,11 +242,11 @@ const editor = await Archive.editZip(zipBytes, {
 const editor = await Archive.editZipUrl("https://example.com/archive.zip");
 
 // Operations
-editor.has("file.txt");               // Check existence
-editor.set("new.txt", "content");     // Add or replace
-editor.delete("old.txt");             // Delete entry
-editor.deleteDirectory("old-dir/");   // Delete directory recursively
-editor.rename("a.txt", "b.txt");      // Rename entry
+editor.has("file.txt"); // Check existence
+editor.set("new.txt", "content"); // Add or replace
+editor.delete("old.txt"); // Delete entry
+editor.deleteDirectory("old-dir/"); // Delete directory recursively
+editor.rename("a.txt", "b.txt"); // Rename entry
 editor.setComment("Updated archive"); // Set archive comment
 
 // Reusable edit plans
@@ -253,7 +260,9 @@ editor.apply(plan);
 // Output
 const output = await editor.bytes();
 await editor.pipeTo(writable);
-for await (const chunk of editor.stream()) { ... }
+for await (const chunk of editor.stream()) {
+  /* process chunk */
+}
 ```
 
 ---
@@ -387,6 +396,29 @@ state = crc32Update(state, chunk2);
 const checksum = crc32Finalize(state);
 ```
 
+### PNG encoding
+
+A PNG is a DEFLATE stream plus CRC-32-checked chunks — the two primitives above — so the
+encoder lives here rather than in a module that merely happens to need pictures. It exists
+because the drawing engine deliberately stops at pixels: `rasterizeToRgba` from
+`documonster/draw` hands back RGBA, and encoding needs DEFLATE, which sits a layer above
+`draw`.
+
+```typescript
+import { encodePng } from "documonster/archive";
+import { rasterizeToRgba } from "documonster/draw";
+
+// From any display list — a chart, a Mermaid diagram, your own producer
+const image = rasterizeToRgba(list, { scale: 2 });
+const png = encodePng(image.data, image.width, image.height, { dpi: 192 });
+
+// Or from pixels you already have (8-bit RGBA, row-major)
+const bytes = encodePng(rgba, width, height);
+```
+
+8-bit RGBA in, filter 0, one `IDAT`. `dpi` writes a `pHYs` chunk; omit it and none is
+written.
+
 ---
 
 ## TAR Support
@@ -400,7 +432,10 @@ import { Archive } from "documonster/archive";
 
 // Convenience function
 const tarBytes = await Archive.tar(
-  new Map([["file.txt", "content"], ["data.bin", uint8Array]]),
+  new Map([
+    ["file.txt", "content"],
+    ["data.bin", uint8Array]
+  ]),
   { modTime: new Date() }
 );
 
@@ -412,7 +447,9 @@ archive
   .addSymlink("link", "file.txt");
 
 const bytes = await archive.bytes();
-for await (const chunk of archive.stream()) { ... }
+for await (const chunk of archive.stream()) {
+  /* process chunk */
+}
 ```
 
 ### Reading TAR archives
@@ -441,16 +478,15 @@ const paths = await reader.list();
 import { targz, TarGzArchive, parseTarGz, untargz } from "documonster/archive";
 
 // Create .tar.gz
-const tgzBytes = await targz(
-  new Map([["file.txt", "content"]]),
-  { level: 9 }
-);
+const tgzBytes = await targz(new Map([["file.txt", "content"]]), { level: 9 });
 
 // Builder API with streaming gzip
 const archive = new TarGzArchive({ level: 6 });
 archive.add("file.txt", "content");
 const bytes = await archive.bytes();
-for await (const chunk of archive.stream()) { ... }
+for await (const chunk of archive.stream()) {
+  /* process chunk */
+}
 
 // Parse .tar.gz
 const entries = await parseTarGz(tgzBytes);
@@ -499,7 +535,9 @@ af.rename("a.txt", "b.txt");
 await af.writeToFile("modified.zip");
 
 // Streaming output
-for await (const chunk of af.stream()) { ... }
+for await (const chunk of af.stream()) {
+  /* process chunk */
+}
 await af.streamToFile("output.zip");
 
 // TAR format
@@ -599,3 +637,4 @@ import {
 | `createGzipStream`            | Streaming GZIP compressor      |
 | `createGunzipStream`          | Streaming GZIP decompressor    |
 | `crc32`                       | CRC32 checksum                 |
+| `encodePng`                   | RGBA pixels to PNG bytes       |

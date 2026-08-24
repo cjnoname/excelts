@@ -38,18 +38,21 @@ import type {
 export type { Chart as WordChart } from "@word/types";
 
 /**
- * Create a chart renderer callback for use with `docxToPdf`.
+ * Create a chart renderer callback for use with `Pdf.fromDocx`.
  *
  * This factory returns a function that converts Word Chart definitions
  * into Excel's internal ChartModel and renders them using the full
  * Excel chart rendering engine (8000+ lines of vector drawing logic).
  *
+ * Consumers reach it as `Pdf.wordChartRenderer()`, which loads this
+ * bridge lazily and returns the same callback.
+ *
  * @example
  * ```typescript
- * import { docxToPdf, createWordChartPdfRenderer } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const pdfBytes = await docxToPdf(doc, {
- *   chartRenderer: createWordChartPdfRenderer()
+ * const pdfBytes = await Pdf.fromDocx(doc, {
+ *   chartRenderer: await Pdf.wordChartRenderer()
  * });
  * ```
  */

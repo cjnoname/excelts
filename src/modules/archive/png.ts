@@ -10,23 +10,33 @@
  * - the watermark generator compressed properly but never wrote `pHYs`, so the
  *   DPI it had just computed was lost.
  *
- * Both also hand-rolled zlib framing, Adler-32 and CRC-32 that the archive
- * module already provides — and provides better: `zlibSync` reaches native
+ * Both also hand-rolled zlib framing, Adler-32 and CRC-32 that this module
+ * already provides — and provides better: `zlibSync` reaches native
  * `zlib.deflateSync` on Node and falls back to the bundled JS deflate in the
  * browser, both synchronously.
  *
- * Placement: this file has no Excel-specific dependency. It lives here because
- * both callers are in `excel/`, which keeps the layering trivial (excel →
- * archive is already allowed). If a second module ever needs it, move it down
- * rather than copying it a third time — that is the mistake this file undoes.
+ * Placement: a PNG is a DEFLATE stream plus CRC-32-checked chunks, which is
+ * exactly the pair of primitives this module owns and already publishes. It
+ * lived in `excel/utils/` while both callers were in `excel/`, with a note to
+ * move it down rather than copy it a third time if anything else needed it.
+ * What needed it was not a second internal module but a *public* one: the draw
+ * engine hands out RGBA pixels (`rasterizeToRgba`) and cannot encode them,
+ * because encoding needs DEFLATE and `draw` sits a layer below it — so a
+ * consumer of `documonster/draw` or `documonster/mermaid` had no way to write a
+ * PNG at all, while a chart consumer did. Publishing the encoder from
+ * `documonster/excel` to serve them would have been the wrong answer to the
+ * right question.
  *
- * Bundle consequence: this is the only edge from `excel/` into `archive/` that
- * a chart consumer walks, so `Chart.toPNG` pays for DEFLATE + CRC32 (≈4 KB on
- * Node, which reaches `node:zlib`; ≈24 KB in a browser, which needs the JS
+ * Bundle consequence: `documonster/archive` already exports `zlibSync` and
+ * `crc32`, so DEFLATE is reachable from this entry with or without this file;
+ * the encoder adds only its chunk framing. From the other direction the edge is
+ * unchanged in cost, one hop longer: `excel/chart → archive/png →
+ * archive/compression`, so `Chart.toPNG` still pays for DEFLATE + CRC32 (≈4 KB
+ * on Node, which reaches `node:zlib`; ≈24 KB in a browser, which needs the JS
  * deflate because `CompressionStream` is async). `scripts/treeshake-verify.ts`
- * allows exactly `archive/compression/` for the `Chart` namespace and nothing
- * else in `archive/`. A consumer that only builds charts never gets here: the
- * renderers sit behind `chart-render-ops.ts`.
+ * allows exactly `archive/compression/` and `archive/png` for the `Chart`
+ * namespace and nothing else in `archive/`. A consumer that only builds charts
+ * never gets here: the renderers sit behind `chart-render-ops.ts`.
  */
 
 import { zlibSync } from "@archive/compression/compress";

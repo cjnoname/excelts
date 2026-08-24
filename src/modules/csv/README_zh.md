@@ -83,7 +83,7 @@ Csv.format(data, {
 
 同步 CSV 解析器，支持类型安全的重载。
 
-```typescript
+```text
 // 无选项 -> string[][]
 Csv.parse(csvString): string[][];
 

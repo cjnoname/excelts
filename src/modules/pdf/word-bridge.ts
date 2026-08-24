@@ -25,11 +25,11 @@
  *
  * @example
  * ```typescript
- * import { readDocx } from "documonster/word";
- * import { docxToPdf } from "documonster/pdf";
+ * import { Io } from "documonster/word";
+ * import { Pdf } from "documonster/pdf";
  *
- * const doc = await readDocx(docxBytes);
- * const pdfBytes = await docxToPdf(doc);
+ * const doc = await Io.read(docxBytes);
+ * const pdfBytes = await Pdf.fromDocx(doc);
  * ```
  */
 
@@ -110,9 +110,9 @@ export interface DocxToPdfOptions {
    * to plug in the Excel chart renderer for publication-quality output:
    *
    * ```typescript
-   * import { createWordChartPdfRenderer } from "documonster/pdf";
-   * const pdfBytes = await docxToPdf(doc, {
-   *   chartRenderer: createWordChartPdfRenderer()
+   * import { Pdf } from "documonster/pdf";
+   * const pdfBytes = await Pdf.fromDocx(doc, {
+   *   chartRenderer: await Pdf.wordChartRenderer()
    * });
    * ```
    *

@@ -192,7 +192,7 @@ calculateFormulas(workbook); // 结果就地写回
 console.log(Cell.getResult(worksheet, "A4"));
 ```
 
-433 个支持的函数、以及如何在非 excel 宿主上驱动引擎,见
+448 个支持的函数、以及如何在非 excel 宿主上驱动引擎,见
 [formula 模块文档](../formula/README_zh.md)。
 
 ### 数据验证
@@ -438,7 +438,7 @@ Documonster 包含结构化的图表 API、用于模板的原始 XML 保留，�
 
 ### 渲染范围
 
-内置的 `chart.toSVG()` / `chart.toPNG()` / `chartToPdf(chart)` 辅助方法生成的是**零依赖的确定性预览** —— 并非 Excel 像素级精确的合成器。经典图表由一个在 SVG、PNG 和 PDF 之间共享的 `ChartScene` 中间表示驱动；ChartEx 图表使用专门的几何收集器，从构造上保证 SVG 与矢量 PDF 路径等价。该预览非常适合：
+内置的 `Chart.toSVG(chart)` / `Chart.toPNG(chart)` / `Pdf.fromChart(chart)` 辅助方法生成的是**零依赖的确定性预览** —— 并非 Excel 像素级精确的合成器。经典图表由一个在 SVG、PNG 和 PDF 之间共享的 `ChartScene` 中间表示驱动；ChartEx 图表使用专门的几何收集器，从构造上保证 SVG 与矢量 PDF 路径等价。该预览非常适合：
 
 - 服务端缩略图、电子邮件附件和 README 图片
 - CI 健全性检查（"该图表能否在不崩溃的情况下渲染"）
@@ -500,34 +500,29 @@ import {
 
 // 99 个经典预设 + 10 个 ChartEx 预设（Excel UI 别名）
 Chart.addPreset(ws, "col3DConeStacked100", { series: [{ values: "Sales!$B$2:$B$4" }] }, "E1:M16");
-Chart.addPresetEx(
-  ws,
-  "boxAndWhisker",
-  { series: [{ values: "Samples!$A$2:$A$50" }] },
-  "N1:V16"
-);
+Chart.addPresetEx(ws, "boxAndWhisker", { series: [{ values: "Samples!$A$2:$A$50" }] }, "N1:V16");
 
 // 各类型快捷方法——`type` 字段已隐含。
-Chart.addColumn(ws, { series: [...] }, "E18:M32");
-Chart.addBar(ws, { series: [...] }, "E34:M48");
-Chart.addLine(ws, { series: [...] }, "E50:M64");
-Chart.addArea(ws, { series: [...] }, "E66:M80");
-Chart.addPie(ws, { series: [...] }, "P1:X16");
-Chart.addDoughnut(ws, { series: [...] }, "P18:X32");
-Chart.addScatter(ws, { series: [...] }, "P34:X48");
-Chart.addBubble(ws, { series: [...] }, "P50:X64");
-Chart.addRadar(ws, { series: [...] }, "P66:X80");
-Chart.addStock(ws, { series: [...] }, "AA1:AI16");
-Chart.addSurface(ws, { series: [...] }, "AA18:AI32");
+Chart.addColumn(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E18:M32");
+Chart.addBar(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E34:M48");
+Chart.addLine(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E50:M64");
+Chart.addArea(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E66:M80");
+Chart.addPie(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P1:X16");
+Chart.addDoughnut(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P18:X32");
+Chart.addScatter(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P34:X48");
+Chart.addBubble(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P50:X64");
+Chart.addRadar(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P66:X80");
+Chart.addStock(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA1:AI16");
+Chart.addSurface(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA18:AI32");
 // ChartEx 快捷方法
-Chart.addHistogram(ws, { series: [...] }, "AA34:AI48");
-Chart.addPareto(ws, { series: [...] }, "AA50:AI64");
-Chart.addWaterfall(ws, { series: [...] }, "AA66:AI80");
-Chart.addFunnel(ws, { series: [...] }, "AK1:AS16");
-Chart.addTreemap(ws, { series: [...] }, "AK18:AS32");
-Chart.addSunburst(ws, { series: [...] }, "AK34:AS48");
-Chart.addBoxWhisker(ws, { series: [...] }, "AK50:AS64");
-Chart.addRegionMap(ws, { series: [...] }, "AK66:AS80");
+Chart.addHistogram(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA34:AI48");
+Chart.addPareto(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA50:AI64");
+Chart.addWaterfall(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA66:AI80");
+Chart.addFunnel(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK1:AS16");
+Chart.addTreemap(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK18:AS32");
+Chart.addSunburst(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK34:AS48");
+Chart.addBoxWhisker(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK50:AS64");
+Chart.addRegionMap(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK66:AS80");
 
 console.log(EXCEL_CHART_PRESETS.length, EXCEL_CHART_EX_PRESETS.length); // 99, 10
 ```
@@ -552,7 +547,13 @@ Chart.addColumnFromRows(ws, rows, { x: "quarter", y: "revenue", startCell: "A1" 
 
 // Excel 表格 → 图表。系列引用是结构化的（`Table1[Col]`），
 // 因此当表格增长时图表会自动扩展。
-const table = Table.add(ws, { name: "Kpi", ref: "A1", headerRow: true, columns: [...], rows: [...] });
+const table = Table.add(ws, {
+  name: "Kpi",
+  ref: "A1",
+  headerRow: true,
+  columns: [{ name: "Month" }, { name: "Revenue" }, { name: "Profit" }],
+  rows: [["Jan", 1000, 250]]
+});
 Chart.addFromTable(
   ws,
   table,
@@ -659,18 +660,18 @@ Chart.addPivot(
   },
   "F1:N20"
 );
-Chart.addPivotCombo(ws, pivot, { groups: [...] }, "F22:N40");
+Chart.addPivotCombo(ws, pivot, { groups: [] }, "F22:N40");
 
 // 图表工作表——独立标签页上的整页图表。可与
 // `AddChartOptions`、`AddComboChartOptions` 或 `AddChartExOptions` 中的任意一种配合使用。
 Workbook.addChartsheet(workbook, "Revenue Chart", {
   tabSelected: true,
   zoomToFit: true,
-  chart: { type: "bar", series: [...] }
+  chart: { type: "bar", series: [{ values: "Sales!$B$2:$B$4" }] }
 });
 
 Workbook.addPivotChartsheet(workbook, "Pivot Dashboard", pivot, {
-  chart: { type: "line", showMarker: true, series: [...] }
+  chart: { type: "line", showMarker: true, series: [{ values: "Sales!$B$2:$B$4" }] }
 });
 ```
 
@@ -678,7 +679,7 @@ Workbook.addPivotChartsheet(workbook, "Pivot Dashboard", pivot, {
 
 ```typescript
 // 字符串 A1 区域（双格锚定，最常见的形式）。
-Chart.add(ws, { type: "bar", series: [...] }, "A1:H15");
+Chart.add(ws, { type: "bar", series: [{ values: "Sales!$B$2:$B$4" }] }, "A1:H15");
 
 // 带行/列坐标的双格锚定。
 Chart.add(ws, options, { tl: { col: 1, row: 2 }, br: { col: 8, row: 17 } });
@@ -795,7 +796,7 @@ Chart.add(
   ws,
   {
     type: "bar",
-    series: [...],
+    series: [{ values: "Sales!$B$2:$B$4" }],
     chartStyle: {
       id: 201,
       elements: {
@@ -1003,7 +1004,7 @@ Excel 和 WPS 可以通过提供 CI 作业接入同样的模式，这些作业�
 | boxWhisker |   ✅   |  ✅  |  ✅  |     ✅     |      ✅      | ✅  | ⬛  | ✅  |     ⬛      |
 | regionMap  |   ✅   |  ✅  |  ✅  |     ✅     |      ✅      | ✅  | ⬛  | ✅  |     ⬛      |
 
-🟨 =（此表中不再使用）—— 自 regionMap 矢量移植以来，每个 ChartEx 布局都通过 `drawChartExPdf` 走矢量路径。当与 SVG 预览的像素一致性比可选中文本更重要时，调用方仍可在每次调用时通过 `chartToPdf(chart, { forceRaster: true })` 选择栅格化。参见下方的"ChartEx PDF 说明"。
+🟨 =（此表中不再使用）—— 自 regionMap 矢量移植以来，每个 ChartEx 布局都通过 `drawChartExPdf` 走矢量路径。当与 SVG 预览的像素一致性比可选中文本更重要时，调用方仍可在每次调用时通过 `Pdf.fromChart(chart, { forceRaster: true })` 选择栅格化。参见下方的"ChartEx PDF 说明"。
 
 ##### 已知但有意为之的能力差距
 
@@ -1014,11 +1015,11 @@ Excel 和 WPS 可以通过提供 CI 作业接入同样的模式，这些作业�
 
 **3D 说明：** `bar3D` 渲染为一个**真实的拉伸盒体**，其轴测投影由 `view3D.rotX` / `view3D.rotY` / `view3D.rAngAx` 驱动——每根柱形有三个着色面（顶 + 前 + 右），深度按柱宽缩放，使 3D 效果在各种图表尺寸下保持可读。默认回退（`rotX=15°, rotY=20°, rAngAx=true`）匹配 Excel 的新建图表默认值。`line3D`、`pie3D`、`area3D`、`surface3D` 以及更丰富的 `view3D` / `Scene3D` / `ShapeProperties3D` 元数据**在 XML 中保留**，因此干净的往返和 Excel 重新打开都能完好无损地存活，但预览仍将这些类型渲染为其 2D 等价形式——对于非柱形的 3D，没有投影矩阵、没有光照装置、没有深度排序。这是一个预览级渲染器，不是 3D 引擎；需要商业级 3D 输出的用户应使用 Excel 或 LibreOffice。
 
-**字体与 CJK：** 每当页面包含非 WinAnsi 字符且未显式嵌入字体时，`PdfDocumentBuilder` 会自动发现系统字体（与 `excelToPdf` 相同的机制）。传入 `disableFontAutoDiscovery()` 可在各宿主间获得字节稳定的输出，或传入 `embedFont(ttfBytes)` 以使用确定性的字型。注册 `onWarning(handler)` 可在以下情况各收到一条诊断：每个不同的未知 `fontFamily`（例如回退到 Helvetica 度量的非标准名称），以及每次构建中当非 WinAnsi 字符落在没有覆盖字体的页面上时（渲染 Type3 NOTDEF 方框）。
+**字体与 CJK：** 每当页面包含非 WinAnsi 字符且未显式嵌入字体时，`Pdf.Builder` 会自动发现系统字体（与 `Pdf.fromExcel` 相同的机制）。传入 `disableFontAutoDiscovery()` 可在各宿主间获得字节稳定的输出，或传入 `embedFont(ttfBytes)` 以使用确定性的字型。注册 `onWarning(handler)` 可在以下情况各收到一条诊断：每个不同的未知 `fontFamily`（例如回退到 Helvetica 度量的非标准名称），以及每次构建中当非 WinAnsi 字符落在没有覆盖字体的页面上时（渲染 Type3 NOTDEF 方框）。
 
 **最小化 PDF 表面：** `ChartPdfDrawingSurface.drawPath?` 和 `drawCircle?` 是可选的。当某个表面缺少 `drawPath` 时，pie/doughnut/ofPie 切片轮廓降级为 `drawLine` 折线描边（形状保留，填充丢失）；area 和 radar 填充被丢弃，但周围的描边仍会发出；标记回退到 circle→rect→line 链。`PdfPageBuilder` / `PdfEditorPage` 都提供完整接口，因此这只对自定义表面才有影响。
 
-**regionMap 说明：** ChartEx 的 `regionMap` 预览附带一张约 180 条目的国家质心表和四个真实投影公式（`mercator`、`miller`、`albers` 等积圆锥投影、`robinson`）。默认情况下这是质心点地理预览；未匹配的标签回退到确定性的六边形瓦片布局。对于真实的国家多边形，请通过渲染选项 `regionMap: { topology, objectName, match, projection }` 传入 TopoJSON 拓扑——渲染器将解码要素、将标签匹配到 `feature.id` 或 `feature.properties.<key>`，并绘制 choropleth 路径。这使得本库保持零数据捆绑：调用方加载他们自己的 `world-atlas`/`natural-earth` 文件。相同的三模式流水线（TopoJSON → 质心预览 → 六边形瓦片回退）对 **SVG 和矢量 PDF 都**实现了——`chartToPdf` 会将相同的 `regionMap` 选项透传给 `drawChartExPdf`。参见 `src/modules/excel/chart/topojson.ts` 以及导出的 `RegionMapDataOptions` / `TopologyLike` 类型。
+**regionMap 说明：** ChartEx 的 `regionMap` 预览附带一张约 180 条目的国家质心表和四个真实投影公式（`mercator`、`miller`、`albers` 等积圆锥投影、`robinson`）。默认情况下这是质心点地理预览；未匹配的标签回退到确定性的六边形瓦片布局。对于真实的国家多边形，请通过渲染选项 `regionMap: { topology, objectName, match, projection }` 传入 TopoJSON 拓扑——渲染器将解码要素、将标签匹配到 `feature.id` 或 `feature.properties.<key>`，并绘制 choropleth 路径。这使得本库保持零数据捆绑：调用方加载他们自己的 `world-atlas`/`natural-earth` 文件。相同的三模式流水线（TopoJSON → 质心预览 → 六边形瓦片回退）对 **SVG 和矢量 PDF 都**实现了——`Pdf.fromChart` 会将相同的 `regionMap` 选项透传给 `drawChartExPdf`。参见 `src/modules/excel/chart/topojson.ts` 以及导出的 `RegionMapDataOptions` / `TopologyLike` 类型。
 
 **内置图表样式：** `Chart.setStyle(chart, 1..48)`（别名 `Chart.setBuiltInStyle(chart, 1..48)`）在经典图表上写入 `<c:style val="N"/>`，从内置样式索引中选择一个。这是映射到 2007/2010 样式目录的轻量级旋钮。对于带完整 `styleN.xml` / `colorsN.xml` 附属文件的现代 Office-2013 时代样式，请使用 `Chart.add(ws, { …, chartStyle: ChartStyleModel })`。
 
@@ -1032,9 +1033,9 @@ Excel 和 WPS 可以通过提供 CI 作业接入同样的模式，这些作业�
 **ChartEx PDF 说明：** 经典图表通过 `drawChartPdf` 渲染为矢量 PDF 内容（文本保持可选中，形状保持与分辨率无关）。ChartEx 图表现在全部通过 `drawChartExPdf` 渲染为矢量 PDF 内容：
 
 - **矢量路径（默认）** —— `sunburst`、`treemap`、`waterfall`、`funnel`、`histogram`、`pareto`、`boxWhisker`、`regionMap` 全都经过 `drawChartExPdf`，它与 SVG 渲染器共享几何收集器，因此两个后端在栅格化之外保持像素等价。Sunburst 弧线以三次贝塞尔近似发出（最大误差 ≤ 0.03 %）；其余都是 PDF 原生理解的直接 `drawRect` / `drawLine` / `drawPath` 基元。`regionMap` 复用与 SVG 渲染器相同的 TopoJSON 解码器 + 投影数学 + 质心表；唯一有意的视觉分歧是圆角框（`rx="14"`）在 PDF 中变为尖角框（`drawRect` 不暴露圆角半径）。
-- **栅格选择启用** —— 当与 SVG 预览的像素一致性比可选中文本或矢量可缩放性更重要时，任何 ChartEx 类型都可按需通过 `chartToPdf(chart, { forceRaster: true })` 栅格化。
+- **栅格选择启用** —— 当与 SVG 预览的像素一致性比可选中文本或矢量可缩放性更重要时，任何 ChartEx 类型都可按需通过 `Pdf.fromChart(chart, { forceRaster: true })` 栅格化。
 
-使用来自 `documonster/pdf` 的 `chartToPdf(chart, options)` —— 它会自动选择路径，在你有意需要栅格路径时遵循 `forceRaster: true`，并暴露 `canRenderChartExAsVectorPdf(model)`，以便你想从辅助方法外部检查该决策。
+使用来自 `documonster/pdf` 的 `Pdf.fromChart(chart, options)` —— 它会自动选择路径，在你有意需要栅格路径时遵循 `forceRaster: true`，并暴露 `canRenderChartExAsVectorPdf(model)`，以便你想从辅助方法外部检查该决策。
 
 **透视图说明：** Documonster 支持**仅元数据**的透视图 —— `pivotSource`、字段按钮、拖放区选项、`refreshOnOpen` 和 `c16:showExpandCollapseFieldButtons` 扩展全都通过 XML 往返，`addPivotChart` / `addPivotChartsheet` 创建 Excel 重建图表所需的引用。**不存在**运行时透视图引擎：预览渲染器将透视图视为普通图表，不绘制字段按钮、拖放区提示，也不对数据应用透视筛选。一旦文件在 Excel / LibreOffice / WPS 中打开，宿主应用程序便会从透视表驱动真实渲染。对于透视缓存数据的程序化操作，请直接使用 `pivotTable` 模块；图表这一侧有意保持轻量。
 
@@ -1042,7 +1043,7 @@ Excel 和 WPS 可以通过提供 CI 作业接入同样的模式，这些作业�
 
 **测试范围边界（本库*不*测试的内容）：**
 
-- **没有像素级视觉差异。** 预览输出通过 SVG 结构断言和 PNG 头/签名哈希进行测试——真正的 RMS/SSIM 像素差异需要捆绑一个 PNG 解码器和一个差异算法，而且预览本来就明确不是像素级精确的（参见上方的渲染说明）。如果你的工作流需要与 Excel 的像素对等，请通过 LibreOffice 的无头 PDF 导出运行 `chartToPdf(chart)` 并在那里比较。
+- **没有像素级视觉差异。** 预览输出通过 SVG 结构断言和 PNG 头/签名哈希进行测试——真正的 RMS/SSIM 像素差异需要捆绑一个 PNG 解码器和一个差异算法，而且预览本来就明确不是像素级精确的（参见上方的渲染说明）。如果你的工作流需要与 Excel 的像素对等，请通过 LibreOffice 的无头 PDF 导出运行 `Pdf.fromChart(chart)` 并在那里比较。
 - **没有树内的 Office 生成的固定数据。** 该仓库中每一个真实文件固定数据（`src/modules/excel/__tests__/data/`）要么由 Documonster 自身生成，要么为回归测试而最小化手工编写。对于宿主应用程序兼容性覆盖，请使用选择启用的 `DOCUMONSTER_ENTERPRISE_CORPUS_DIR` 机制：将其指向一个由三家厂商生成的文件目录，`chart-oracle.integration.test.ts` 将审计其中每一个。manifest 形态参见 `docs/enterprise-corpus-manifest.example.json`。
 - **没有自动化的 Excel / WPS 运行时。** CI 仅在 LibreOffice 上对打开验证设关卡。任何 CI 运行器中都不附带 Excel 和 WPS 二进制文件，对这些应用的 GUI 驱动验证超出范围。`DOCUMONSTER_OFFICE_OPEN_VALIDATION` + `DOCUMONSTER_OFFICE_OPEN_ARGS` 钩子让安装了 Office 的自托管运行器能参与相同的检查模式。
 
@@ -1409,16 +1410,15 @@ export const REPORT_COLUMNS: ColumnDefn[] = [
 ];
 ```
 
-句柄（API 交给你的不透明对象）既有声明名，也可以通过所属命名空间上的 `Handle`
-访问，按可读性任选：
+句柄（API 交给你的不透明对象）通过所属命名空间上的 `Handle` 别名命名：
 
 ```typescript
-import type { Workbook, Worksheet, WorkbookData, WorksheetData } from "documonster/excel";
+import type { Workbook, Worksheet } from "documonster/excel";
 
 const render = (ws: Worksheet.Handle) => {
   /* … */
 };
-const save = (wb: WorkbookData) => {
+const save = (wb: Workbook.Handle) => {
   /* … */
 };
 ```

@@ -43,7 +43,7 @@ console.log(w.xml);
 
 ### 写入 XML（流式模式）
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const chunks: string[] = [];
@@ -59,7 +59,7 @@ sw.closeNode();
 
 ### 读取 XML（SAX — 流式）
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const parser = new Xml.SaxParser();
@@ -72,7 +72,7 @@ parser.close();
 
 ### 读取 XML（DOM — 缓冲模式）
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 const doc = Xml.parse('<root><item id="1">hello</item></root>');
@@ -87,7 +87,7 @@ console.log(Xml.textContent(item!)); // "hello"
 
 两种入口适用于不同场景：
 
-```typescript
+```text
 import { Xml } from "documonster/xml";
 
 // 方式 1：已有 DOM 树
@@ -255,7 +255,7 @@ Xml.SaxParser        — 事件驱动的流式解析器
 
 ### Xml.parseSax（异步生成器）
 
-```typescript
+```text
 Xml.parseSax(
   iterable: AsyncIterable<string | Uint8Array | ArrayBuffer>,
   options?: SaxOptions
@@ -264,7 +264,7 @@ Xml.parseSax(
 
 ### Xml.parse
 
-```typescript
+```text
 Xml.parse(xml: string, options?: XmlParseOptions): XmlDocument;
 ```
 
@@ -302,7 +302,7 @@ Xml.parse(xml: string, options?: XmlParseOptions): XmlDocument;
 
 ### Xml.toPlainObject
 
-```typescript
+```text
 Xml.toPlainObject(
   element: XmlElement,
   options?: ToPlainObjectOptions
@@ -313,7 +313,7 @@ Xml.toPlainObject(
 
 ### Xml.parseToObject
 
-```typescript
+```text
 Xml.parseToObject(xml: string, options?: ParseXmlToObjectOptions): Record<string, unknown>;
 ```
 

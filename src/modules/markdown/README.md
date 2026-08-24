@@ -19,8 +19,8 @@ import { Markdown } from "documonster/markdown";
 - **Pipe Escaping** — Handles `\|` and `\\` in both parse and format directions
 - **CJK/Emoji Width** — Built-in display width calculation for proper column alignment
 - **Multiline Cells** — `<br>` tag support for newlines within cells
-- **Multi-Table** — Extract all tables from a Markdown document with `parseMarkdownAll`
-- **Workbook Integration** — `Workbook.readMarkdown()` / `writeMarkdown()` for Excel↔Markdown
+- **Multi-Table** — Extract all tables from a Markdown document with `Markdown.parseAll`
+- **Workbook Integration** — `readMarkdown(workbook, input)` / `writeMarkdown(workbook)` from `documonster/excel/markdown` for Excel↔Markdown
 
 ---
 
@@ -113,7 +113,7 @@ await writeMarkdownFile(workbook, "output.md");
 
 Parse the first Markdown table found in the input string.
 
-```typescript
+```text
 Markdown.parse(input: string, options?: MarkdownParseOptions): MarkdownParseResult
 ```
 
@@ -123,7 +123,7 @@ Throws `MarkdownParseError` if no valid table is found.
 
 Parse all Markdown tables from a document.
 
-```typescript
+```text
 Markdown.parseAll(input: string, options?: MarkdownParseOptions): MarkdownParseResult[]
 ```
 
@@ -157,7 +157,7 @@ interface MarkdownParseResult {
 
 Format data as a Markdown table string.
 
-```typescript
+```text
 Markdown.format(headers: string[], rows: unknown[][], options?: MarkdownFormatOptions): string
 ```
 
