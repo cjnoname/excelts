@@ -310,6 +310,16 @@ import { markdownToDocx, markdownToDocxBody } from "documonster/word/markdown";
 const doc = markdownToDocx("# Title\n\nHello **world**");
 const bodyItems = markdownToDocxBody("- a\n- b");
 
+// Table columns are sized from their content and a fenced code block is set
+// small enough that its longest line does not wrap — both are decisions the
+// producer has to make, because a `.docx` carries a column grid and a run size,
+// not an instruction to work them out later. Say which measure they should be
+// sized against if the body is going somewhere other than a Letter page:
+const wide = markdownToDocx(markdown, {
+  contentWidth: 15840 - 2 * 720, // landscape Letter, half-inch margins
+  codeBlockFit: "shrink" // the default; "wrap" keeps the size and breaks lines
+});
+
 // DOCX → HTML
 import { renderToHtml } from "documonster/word/html";
 const html = renderToHtml(doc);

@@ -16,7 +16,7 @@ import path from "node:path";
 
 import { ArchiveFile } from "documonster/archive";
 import { Csv } from "documonster/csv";
-import { Workbook } from "documonster/excel";
+import { Image, Workbook } from "documonster/excel";
 import { Pdf } from "documonster/pdf";
 import { Io, Layout, Query, Template } from "documonster/word";
 import { z } from "zod";
@@ -24,6 +24,8 @@ import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { resolveInRoot } from "../sandbox.js";
+import { describeFences } from "./diagram.js";
+import { tryReadImageHeader } from "./image.js";
 import { formatBytes, textResult } from "./result.js";
 import { describeWindow, sheetName, usedWindow } from "./spreadsheet.js";
 import { defineTool } from "./types.js";
@@ -44,6 +46,8 @@ type FileKind =
   | "tar"
   | "csv"
   | "markdown"
+  | "mermaid"
+  | "image"
   | "xml"
   | "text"
   | "cfb"
@@ -193,7 +197,11 @@ const CLAIMED_BY_EXTENSION: Readonly<Record<string, FileKind>> = {
   ".dotx": "word",
   ".pptx": "powerpoint",
   ".pdf": "pdf",
-  ".zip": "zip"
+  ".zip": "zip",
+  ".png": "image",
+  ".jpg": "image",
+  ".jpeg": "image",
+  ".gif": "image"
 };
 
 /** Per-kind extra facts worth knowing before reading. */
@@ -206,6 +214,15 @@ async function describeKind(
   switch (kind) {
     case "csv":
       return describeCsv(head);
+    case "markdown":
+      return describeMarkdown(head);
+    case "image":
+      return describeImage(head);
+    case "mermaid":
+      return [
+        "This is a Mermaid diagram source file. Use `diagram_inspect` to see what it declares,",
+        "or `diagram_render` to draw it as .svg / .png / .pdf."
+      ];
     case "excel":
       return await describeWorkbook(resolved, config);
     case "word":
@@ -271,18 +288,28 @@ async function describeWorkbook(resolved: string, config: ServerConfig): Promise
   const lines = [
     "## Sheets",
     "",
-    "| sheet | used range | rows | cols |",
-    "| --- | --- | --- | --- |"
+    "| sheet | used range | rows | cols | images |",
+    "| --- | --- | --- | --- | --- |"
   ];
+  let totalImages = 0;
   for (const ws of sheets) {
     const window = usedWindow(ws);
+    // Counted here because a picture occupies no cell, so it is invisible in the
+    // used range — and a model that cannot see one will not think to look for it.
+    const images = Image.list(ws).length;
+    totalImages += images;
     lines.push(
       window === undefined
-        ? `| \`${sheetName(ws)}\` | (empty) | 0 | 0 |`
-        : `| \`${sheetName(ws)}\` | ${describeWindow(window)} | ${window.bottom - window.top + 1} | ${window.right - window.left + 1} |`
+        ? `| \`${sheetName(ws)}\` | (empty) | 0 | 0 | ${images} |`
+        : `| \`${sheetName(ws)}\` | ${describeWindow(window)} | ${window.bottom - window.top + 1} | ${window.right - window.left + 1} | ${images} |`
     );
   }
   lines.push("", "Read one with `sheet_read`, naming the sheet and a range.");
+  if (totalImages > 0) {
+    lines.push(
+      `This workbook holds ${totalImages} picture(s). \`sheet_read\` names their anchors; nothing here can show you the pictures themselves.`
+    );
+  }
   return lines;
 }
 
@@ -492,6 +519,64 @@ function describeChar(value: string): string {
 }
 
 /**
+ * Identify a raster image and read its intrinsic size.
+ *
+ * Routing, mainly: the tools that place a picture point here when a header will not
+ * parse, so this has to be able to answer. It reuses the same reader they do, which
+ * means a file this call reports as unreadable is exactly one they will refuse.
+ */
+function describeImage(head: Uint8Array): string[] {
+  const measured = tryReadImageHeader(head);
+  if (measured === undefined) {
+    return [
+      "This looks like an image from its first bytes, but its header could not be read —",
+      "it is probably truncated or corrupt. The tools that place a picture will refuse it."
+    ];
+  }
+  const lines = [
+    `- format: **${measured.mediaType}**`,
+    `- pixels: ${measured.width}×${measured.height}`,
+    `- declared resolution: ${measured.dpi === undefined ? "none (96 dpi is assumed)" : `${Math.round(measured.dpi)} dpi`}`,
+    `- placed size: ${round(measured.points.width)}×${round(measured.points.height)} pt`
+  ];
+  if (measured.damage !== undefined) {
+    // The header parsed, so the size above is real — but the file is not usable, and
+    // the tools that place a picture will refuse it. Saying so here is what makes
+    // their advice ("run doc_inspect on it") lead anywhere.
+    return [
+      ...lines,
+      "",
+      `- **damaged**: ${measured.damage}`,
+      "",
+      "This file cannot be embedded. Tell the user it is corrupt or incomplete rather than",
+      "retrying — re-exporting or re-downloading it is the only fix."
+    ];
+  }
+  return [
+    ...lines,
+    "",
+    "Place it with `sheet_write`/`sheet_edit` (`images`, `add_image`) or `template_fill`",
+    "(`images`, for a `{{%name}}` placeholder). Nothing here can show you the picture."
+  ];
+}
+
+function round(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+/**
+ * Report the mermaid fences in a Markdown file.
+ *
+ * The point of mentioning them at all is routing: a fence is a diagram, and a
+ * model that does not know one is there will read the file as prose and carry the
+ * fence's source into its answer as text.
+ */
+function describeMarkdown(head: Uint8Array): string[] {
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(head);
+  return describeFences(text, { sampled: head.length >= HEAD_SAMPLE_BYTES });
+}
+
+/**
  * Identify the file from its magic bytes, falling back to its extension.
  *
  * Magic bytes come first because extensions lie — a `.xlsx` that is really a
@@ -503,6 +588,17 @@ async function detectKind(filePath: string, head: Uint8Array): Promise<FileKind>
   }
   if (startsWith(head, [0x25, 0x50, 0x44, 0x46, 0x2d])) {
     return "pdf";
+  }
+  // Raster images, so the advice "run doc_inspect to check the type" that the image
+  // tools give is actually followable. Without these a .png reported `unknown`.
+  if (startsWith(head, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return "image";
+  }
+  if (startsWith(head, [0xff, 0xd8, 0xff])) {
+    return "image";
+  }
+  if (startsWith(head, [0x47, 0x49, 0x46, 0x38])) {
+    return "image";
   }
   if (startsWith(head, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) {
     return "cfb";
@@ -542,6 +638,9 @@ function textKindFromExtension(filePath: string): FileKind {
     case ".md":
     case ".markdown":
       return "markdown";
+    case ".mmd":
+    case ".mermaid":
+      return "mermaid";
     case ".xml":
       return "xml";
     case ".tar":

@@ -831,3 +831,70 @@ describe("docxToPdf — layout-injected marker glyphs", () => {
     await expect(docxToPdf(doc)).resolves.toBeInstanceOf(Uint8Array);
   });
 });
+
+describe("docxToPdf — measurement agrees with the glyphs drawn", () => {
+  /**
+   * Every `Tm`-positioned string in the content stream, in draw order.
+   *
+   * A run containing anything outside ASCII is written as a hex string rather
+   * than a literal one, because WinAnsi puts those code points above 0x7F.
+   */
+  function positionedStrings(content: string): Array<{ x: number; text: string }> {
+    return [
+      ...content.matchAll(/1 0 0 1 ([\d.]+) [\d.]+ Tm\s*\n?(?:\((.*?)\)|<([0-9A-Fa-f]*)>) Tj/g)
+    ].map(m => ({ x: Number(m[1]), text: m[2] ?? m[3] }));
+  }
+
+  it("reserves an em dash's full width, so the run after it is not overlapped", async () => {
+    // The width tables covered ASCII only, so every code point outside it was
+    // charged `avgWidth` — 513 for Helvetica. An em dash draws at 1000, and
+    // because a run is placed at the x the layout computed and never reconciled,
+    // everything after it slid half an em left: `— **Admin**` rendered as
+    // `—Admin`, with the space swallowed under the bold run.
+    const doc: DocxDocument = {
+      body: [
+        {
+          type: "paragraph",
+          children: [
+            { content: [{ type: "text", text: "A\u2014B " }] },
+            { properties: { bold: true }, content: [{ type: "text", text: "C" }] }
+          ]
+        }
+      ]
+    };
+
+    const drawn = positionedStrings(decompressPdfContent(await docxToPdf(doc)));
+    expect(drawn).toHaveLength(2);
+    // Helvetica AFM: A 667, emdash 1000, B 667, space 278 — 2612/1000 at 11pt.
+    expect(drawn[1].x - drawn[0].x).toBeCloseTo((2612 / 1000) * 11, 3);
+  });
+
+  it("reserves the AFM width for the rest of the WinAnsi repertoire", async () => {
+    // Same defect, same fix, for the characters a Markdown document produces
+    // next most often: curly quotes, an ellipsis, an en dash and a bullet.
+    const cases: Array<[string, number]> = [
+      ["\u2019", 222], // quoteright
+      ["\u201c", 333], // quotedblleft
+      ["\u2013", 556], // endash
+      ["\u2026", 1000], // ellipsis
+      ["\u2022", 350], // bullet
+      ["\u00e9", 556] // eacute
+    ];
+    for (const [char, units] of cases) {
+      const doc: DocxDocument = {
+        body: [
+          {
+            type: "paragraph",
+            children: [
+              { content: [{ type: "text", text: char }] },
+              { properties: { bold: true }, content: [{ type: "text", text: "C" }] }
+            ]
+          }
+        ]
+      };
+      const drawn = positionedStrings(decompressPdfContent(await docxToPdf(doc)));
+      expect(drawn).toHaveLength(2);
+      expect(drawn[1].x - drawn[0].x).toBeCloseTo((units / 1000) * 11, 3);
+    }
+  });
+});

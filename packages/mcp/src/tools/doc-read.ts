@@ -20,7 +20,14 @@ import { z } from "zod";
 
 import { toolError } from "../errors.js";
 import { resolveInRoot } from "../sandbox.js";
-import { continuationNote, parsePages, requireFormat, takeLines } from "./document.js";
+import { describeFences } from "./diagram.js";
+import {
+  continuationNote,
+  parsePages,
+  requireFormat,
+  takeLines,
+  type DocFormat
+} from "./document.js";
 import { assertReadableSize } from "./fs-helpers.js";
 import { formatBytes, textResult } from "./result.js";
 import { defineTool } from "./types.js";
@@ -33,7 +40,7 @@ export const docReadTool = defineTool({
   group: ["word", "pdf"],
   title: "Read a document's text",
   description:
-    "Read the text of a .docx, .pdf, .md or .txt file. Word documents come back as Markdown so headings, lists and tables survive; PDFs are reported page by page. Reads a bounded number of lines and always says what it omitted. Call doc_inspect first to learn the file's real type.",
+    "Read the text of a .docx, .pdf, .md, .txt or .mmd file. Word documents come back as Markdown so headings, lists and tables survive; PDFs are reported page by page; a Markdown file's ```mermaid fences are indexed so you can draw one without copying its source. Reads a bounded number of lines and always says what it omitted. Call doc_inspect first to learn the file's real type.",
   inputSchema: {
     path: z.string().min(1).describe("Document path, relative to the server root."),
     pages: z
@@ -76,13 +83,14 @@ export const docReadTool = defineTool({
       case "md":
       case "txt":
       case "html":
+      case "mermaid":
         return textResult(config, await readPlainText(resolved, args, format));
       default:
         throw toolError.unsupported(
           `doc_read cannot read .${format} files`,
           format === "xlsx" || format === "csv"
             ? "Use sheet_read for spreadsheets and CSV files."
-            : "Supported: .docx, .pdf, .md, .txt, .html"
+            : "Supported: .docx, .pdf, .md, .txt, .html, .mmd"
         );
     }
   }
@@ -203,18 +211,49 @@ async function readPdf(resolved: string, args: DocReadArgs): Promise<string> {
   return [...header, window.text].join("\n");
 }
 
-async function readPlainText(resolved: string, args: DocReadArgs, format: string): Promise<string> {
+/**
+ * Read a text file, and route anything in it that is not really text.
+ *
+ * A Markdown file's mermaid fences arrive here as source code, and a `.mmd` file
+ * is nothing but a diagram. Both are shown verbatim — this tool's output is text,
+ * and a model cannot see a picture — but the footer names the tool that can draw
+ * it, so the model does not resort to copying the source back out through its own
+ * reply in order to render it.
+ */
+async function readPlainText(
+  resolved: string,
+  args: DocReadArgs,
+  format: DocFormat
+): Promise<string> {
   const raw = await readFile(resolved, "utf8");
   const window = takeLines(raw, args.startLine ?? 1, args.maxLines ?? DEFAULT_MAX_LINES);
 
   return [
-    `# ${args.path} (${format})`,
+    `# ${args.path} (${format === "mermaid" ? "Mermaid diagram source" : format})`,
     "",
     `- showing lines ${window.startLine}–${window.endLine} of ${window.totalLines}`,
     ...continuationNote(window),
     "",
-    window.text
+    window.text,
+    ...(format === "mermaid"
+      ? [
+          "",
+          "This whole file is one diagram. Draw it with",
+          `\`diagram_render({ from: ${JSON.stringify(args.path)}, to: "diagram.svg" })\`, or read its`,
+          "structure with `diagram_inspect`. Do not paste the source above back as `source`.",
+          "",
+          "There is no conversion **to** a .mmd file: a diagram is written, not derived."
+        ]
+      : // The whole file is scanned, not just the returned window, so the indices
+        // are stable no matter which lines this call happened to show.
+        appendFenceNote(raw))
   ].join("\n");
+}
+
+/** The fence index, separated from the body by a blank line when there is one. */
+function appendFenceNote(raw: string): string[] {
+  const fences = describeFences(raw);
+  return fences.length === 0 ? [] : ["", ...fences];
 }
 
 interface DocReadArgs {

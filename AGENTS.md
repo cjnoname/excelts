@@ -420,8 +420,9 @@ Rules when writing documentation:
   leading emoji leaves a leading hyphen (`⚠ BREAKING` → `-breaking`).
 - **Do not restate counts.** A number only a human keeps in sync is eventually wrong: the
   function count said 433 in sixteen places while the registry held 448.
-  `src/modules/formula/__tests__/function-count.test.ts` pins the twelve that remain against
-  `listFunctionNames()`.
+  `src/modules/formula/__tests__/function-count.node.test.ts` pins the twelve that remain against
+  `listFunctionNames()`. It carries the `.node` suffix because it reads Markdown off disk: the
+  browser config excludes `*.node.test.ts` by glob, which is a rule rather than a hand-kept list.
 - A member a comment names _in order to say it is absent_ goes in that script's
   `DELIBERATELY_ABSENT` map, keyed by file, and is documented there.
 

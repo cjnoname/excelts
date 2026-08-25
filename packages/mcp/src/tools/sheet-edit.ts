@@ -19,6 +19,7 @@ import { Cell, Workbook, Worksheet } from "documonster/excel";
 import { calculateFormulas } from "documonster/excel/formula";
 import { z } from "zod";
 
+import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, resolveEditTarget, resolveInRoot } from "../sandbox.js";
 import { addChart, chartSchema } from "./chart.js";
@@ -29,7 +30,9 @@ import {
   fingerprint,
   replaceAtomically
 } from "./fs-helpers.js";
+import { newImageBudget, resolveImageSource, type ResolvedImage } from "./image.js";
 import { textResult } from "./result.js";
+import { imageSchema, placeImage } from "./sheet-image.js";
 import {
   describeWindow,
   normalizeFormula,
@@ -100,6 +103,10 @@ const opSchema = z.discriminatedUnion("op", [
     op: z.literal("add_sheet"),
     name: z.string().min(1).max(31),
     rows: z.array(z.array(cellValue)).optional()
+  }),
+  z.object({
+    op: z.literal("add_image"),
+    ...imageSchema.shape
   }),
   z.object({
     op: z.literal("add_chart"),
@@ -180,11 +187,17 @@ export const sheetEditTool = defineTool({
     const target = sheetName(ws);
     const applied: string[] = [];
 
+    // Images are read, and diagrams drawn, before the first op runs. The op loop
+    // is synchronous by design — every change lands in memory before anything is
+    // written — so the one asynchronous step has to happen ahead of it, and a
+    // picture that cannot be read fails before any edit is applied.
+    const images = await resolveOpImages(config, args.ops);
+
     // Every op runs against the in-memory workbook first. Nothing is written
     // until all of them have succeeded, so a failure leaves the file untouched.
     for (const [index, op] of args.ops.entries()) {
       try {
-        applied.push(applyOp(wb, ws, op));
+        applied.push(applyOp(wb, ws, op, images));
       } catch (cause) {
         throw cause instanceof Error && cause.name === "McpToolError"
           ? cause
@@ -251,11 +264,32 @@ export const sheetEditTool = defineTool({
   }
 });
 
+/**
+ * Resolve every `add_image` source up front, keyed by its own op.
+ *
+ * Keyed by object identity rather than by position so `applyOp` stays
+ * synchronous without carrying an index it could get wrong.
+ */
+async function resolveOpImages(
+  config: ServerConfig,
+  ops: readonly z.infer<typeof opSchema>[]
+): Promise<Map<object, ResolvedImage>> {
+  const resolved = new Map<object, ResolvedImage>();
+  const budget = newImageBudget();
+  for (const op of ops) {
+    if (op.op === "add_image") {
+      resolved.set(op, await resolveImageSource(config, op, { budget }));
+    }
+  }
+  return resolved;
+}
+
 /** Apply one op, returning a human description of what it did. */
 function applyOp(
   wb: ReturnType<typeof Workbook.create>,
   ws: SheetHandle,
-  op: z.infer<typeof opSchema>
+  op: z.infer<typeof opSchema>,
+  images: Map<object, ResolvedImage>
 ): string {
   switch (op.op) {
     case "set_cell": {
@@ -365,6 +399,15 @@ function applyOp(
         }
       }
       return `added sheet ${JSON.stringify(op.name)}${op.rows === undefined ? "" : ` with ${op.rows.length} row(s)`}`;
+    }
+
+    case "add_image": {
+      const image = images.get(op);
+      if (image === undefined) {
+        // Unreachable: `resolveOpImages` walked this very list.
+        throw toolError.invalidInput("an add_image op was not resolved before placement");
+      }
+      return placeImage(wb, ws, op.at, image);
     }
 
     case "add_chart":

@@ -23,6 +23,7 @@ import { z } from "zod";
 
 import { toolError } from "../errors.js";
 import { assertWritable, outputDisplay, resolveInRoot, resolveOutputPath } from "../sandbox.js";
+import { prepareMarkdownDiagrams } from "./diagram-markdown.js";
 import { assertNonMacroOutput, requireFormat, type DocFormat } from "./document.js";
 import {
   assertReadableSize,
@@ -67,6 +68,12 @@ export const docConvertTool = defineTool({
       .union([z.string(), z.number().int().positive()])
       .optional()
       .describe("xlsx→csv only: which sheet to export. Defaults to the first."),
+    diagrams: z
+      .boolean()
+      .optional()
+      .describe(
+        "md→docx/pdf only: render ```mermaid fences as embedded diagrams. Defaults to true when the diagram tool group is enabled."
+      ),
     overwrite: z
       .boolean()
       .optional()
@@ -92,6 +99,16 @@ export const docConvertTool = defineTool({
 
     const allowed = ROUTES[fromFormat];
     if (allowed === undefined || !allowed.includes(toFormat)) {
+      // A diagram is drawn, not converted, and saying "nothing converts from
+      // mermaid" would be true of this tool and false of the server.
+      if (fromFormat === "mermaid" || toFormat === "mermaid") {
+        throw toolError.unsupported(
+          `doc_convert does not handle Mermaid diagrams`,
+          fromFormat === "mermaid"
+            ? "Use diagram_render to draw a .mmd file as .svg / .png / .pdf."
+            : "Nothing produces a .mmd file — a diagram is written, not derived from a document."
+        );
+      }
       throw toolError.unsupported(
         `cannot convert ${fromFormat} to ${toFormat}`,
         allowed === undefined
@@ -102,7 +119,10 @@ export const docConvertTool = defineTool({
 
     let note: string[] = [];
     await writeWithPolicy(target, args.overwrite === true, async temporary => {
-      note = await convert(fromFormat, toFormat, source, temporary, args);
+      note = await convert(fromFormat, toFormat, source, temporary, {
+        ...args,
+        renderDiagrams: args.diagrams ?? config.groups.has("diagram")
+      });
     });
     const size = (await stat(target)).size;
 
@@ -126,7 +146,7 @@ async function convert(
   to: DocFormat,
   source: string,
   target: string,
-  args: { readonly sheet?: string | number }
+  args: { readonly sheet?: string | number; readonly renderDiagrams?: boolean }
 ): Promise<string[]> {
   if (from === "docx") {
     const doc = await readWord(source);
@@ -189,14 +209,22 @@ async function convert(
 
   if (from === "md") {
     const markdown = await readFile(source, "utf8");
-    const doc = await markdownToDocx(markdown);
+    const prepared =
+      args.renderDiagrams === true
+        ? await prepareMarkdownDiagrams(markdown)
+        : { markdown, count: 0, notes: [] as readonly string[] };
+    const doc = await markdownToDocx(prepared.markdown, {
+      ...("resolveImage" in prepared && prepared.resolveImage !== undefined
+        ? { resolveImage: prepared.resolveImage }
+        : {})
+    });
     if (to === "docx") {
       await replaceAtomically(target, temporary => Io.writeFile(doc, temporary));
-      return ["- Markdown structure mapped to Word styles"];
+      return ["- Markdown structure mapped to Word styles", ...prepared.notes];
     }
     if (to === "pdf") {
       await writeFileAtomic(target, await Pdf.fromDocx(doc));
-      return ["- rendered via Word layout, so pagination is real"];
+      return ["- rendered via Word layout, so pagination is real", ...prepared.notes];
     }
     throw unreachable(from, to);
   }

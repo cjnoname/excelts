@@ -30,6 +30,16 @@
  *
  * `listFunctionNames()` is the authority. It exists because there was previously no way to
  * ask the registry how large it is.
+ *
+ * ## Why `.node.test.ts`
+ *
+ * This reads Markdown off disk, so it is Node-only — and it is a check on *documentation*,
+ * not on shipped logic, so there is nothing a browser could usefully re-verify. The suffix
+ * is how this repository states that: `vitest.browser.config.ts` excludes
+ * `*.node.test.ts` by glob, which is a rule rather than a list somebody has to remember to
+ * extend. Naming the file instead in that config's hand-maintained `exclude` array is the
+ * other option and the worse one, because the next such test would fail the browser run
+ * before anyone thought to add it.
  */
 
 import fs from "node:fs";

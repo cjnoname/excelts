@@ -27,8 +27,8 @@ export const HELP_TOPICS = {
     summary: "What this server can do and the order to do it in.",
     body: `# documonster MCP server
 
-Reads, writes and converts Excel, Word, PDF, CSV and ZIP documents on the local
-filesystem. All work happens server-side: you send structure and parameters,
+Reads, writes and converts Excel, Word, PDF, CSV, ZIP and Mermaid documents on the
+local filesystem. All work happens server-side: you send structure and parameters,
 never document bytes.
 
 ## Working discipline
@@ -82,23 +82,32 @@ widened.`
 
 ## Spreadsheets
 - \`sheet_read\` — read a bounded window.
-- \`sheet_write\` — create an .xlsx from a spec.
-- \`sheet_edit\` — patch an existing .xlsx.
+- \`sheet_write\` — create an .xlsx from a spec, images included.
+- \`sheet_edit\` — patch an existing .xlsx; \`add_image\` places a picture.
 - \`formula_evaluate\` — evaluate a formula against supplied values.
 
 ## Documents
-- \`doc_read\` — read .docx / .pdf / .md / .txt.
+- \`doc_read\` — read .docx / .pdf / .md / .txt / .mmd.
 - \`doc_write\` — create a .docx or .pdf from Markdown.
 - \`doc_edit\` — find and replace text in a .docx.
 - \`doc_search\` — find text, or find text by its formatting.
 - \`doc_paginate\` — real page counts and per-heading page numbers.
 - \`doc_review\` — compare two versions, or review tracked changes.
 - \`doc_convert\` — convert between formats.
-- \`pdf_edit\` — watermark, number, stamp, rotate, delete/keep pages, append.
+- \`pdf_edit\` — watermark, number, stamp, draw a diagram, rotate, delete/keep
+  pages, append.
 
 ## Forms and templates
-- \`template_inspect\` / \`template_fill\` — Word {{placeholder}} templates.
+- \`template_inspect\` / \`template_fill\` — Word {{placeholder}} templates,
+  including {{%image}} placeholders.
 - \`form_fill\` — Word form fields and PDF AcroForms.
+
+## Diagrams
+- \`diagram_inspect\` — parse Mermaid text and report what it means. Writes nothing.
+- \`diagram_render\` — draw it as .svg / .png / .pdf.
+- A \`\`\`mermaid fence in \`doc_write\` / \`doc_convert\` Markdown becomes an
+  embedded picture, not a code block.
+- \`pdf_edit\` with \`op: "diagram"\` draws one onto a page of an existing PDF.
 
 ## Archives
 - \`archive_read\` — list or extract a .zip/.tar.
@@ -109,7 +118,9 @@ widened.`
 - PDF → Word, or any conversion with a PDF as the source
 - OCR: a scanned PDF page yields no text, and a scanned form has no fields
 - legacy binary .doc / .xls
-- pivot tables and image insertion (the library supports them; no tool does yet)
+- pivot tables (the library supports them; no tool does yet)
+- an image in a Word **header or footer** placeholder — the template engine
+  substitutes images in the body only
 
 ## Choosing between similar tools
 - A Word file with \`{{placeholders}}\` → \`template_fill\`, not \`doc_edit\`.
@@ -118,9 +129,242 @@ widened.`
 - Producing a PDF → make a .docx or .xlsx first, then \`doc_convert\`.
   \`pdf_edit\` changes an existing PDF; it does not create content.
 - Two versions of a document → \`doc_review\`, not two \`doc_read\` calls.
-- A chart → a \`charts\` entry in \`sheet_write\`, or an \`add_chart\` op in
-  \`sheet_edit\`. There is no separate chart tool.
-- Test data → \`generate\` in \`sheet_write\`. Never emit thousands of rows yourself.`
+- A chart of *numbers* → a \`charts\` entry in \`sheet_write\`, or an \`add_chart\` op
+  in \`sheet_edit\`. There is no separate chart tool.
+- A diagram of *relationships* — a flow, a sequence, a state machine, an ER model
+  → \`diagram_render\` with Mermaid text.
+- Test data → \`generate\` in \`sheet_write\`. Never emit thousands of rows yourself.
+- A picture in a document → see the \`images\` topic. Every destination takes the
+  same source shape, and a Mermaid diagram is one of the sources.`
+  },
+
+  images: {
+    summary: "Putting a picture in a workbook, a template or a PDF — one source shape.",
+    body: `# Images
+
+Four destinations take a picture, and they all take it the **same way**:
+
+| Destination | How |
+| --- | --- |
+| a worksheet | \`images\` in \`sheet_write\`, or \`op: "add_image"\` in \`sheet_edit\` |
+| a Word template's \`{{%name}}\` | \`images\` in \`template_fill\` |
+| a page of an existing PDF | \`op: "diagram"\` in \`pdf_edit\` (diagrams only) |
+| a Word/PDF document you write | a \`\`\`mermaid fence in \`doc_write\`'s Markdown |
+
+## The source shape
+
+Every one of them accepts the same fields, and the **extension decides** what
+happens — there is no format argument to get wrong:
+
+- \`from: "logo.png"\` — a \`.png\` / \`.jpg\` / \`.gif\`, embedded as it is.
+- \`from: "flow.mmd"\` — a Mermaid file, drawn server-side.
+- \`from: "design.md"\` (+ \`index\`) — a \`\`\`mermaid fence out of a Markdown file.
+- \`source: "flowchart LR\\n A --> B"\` — Mermaid text you write.
+
+Plus \`width\` / \`height\` in **points** (72 per inch), \`altText\`, and — for
+diagram sources — \`theme\` and \`background\`.
+
+A Mermaid diagram is deliberately just *one source of an image* here rather than a
+feature of its own. A caller with a PNG on disk has the same route as a caller with
+a diagram, and neither has to know how the other works.
+
+These fields work whether or not the \`diagram\` tool group is enabled: that group
+governs which tools are listed, and whether a \`\`\`mermaid fence in \`doc_write\`'s
+Markdown is *implicitly* turned into a picture. Naming a diagram in \`images\` is an
+explicit request, so nothing gates it.
+
+## Sizing
+
+Give **one** of \`width\`/\`height\` and the other follows, keeping the aspect ratio —
+an image squashed to a ratio nobody asked for is a defect you cannot see. Give both
+and they are taken literally. Give neither and the file's own size is used: its pixels
+at the resolution it declares (a PNG's \`pHYs\`, a JPEG's JFIF density), or 96 per inch
+when it declares none. A diagram uses its own layout size.
+
+Sizes are in **points**, 72 to the inch. That is not what a worksheet anchor or a Word
+drawing stores — those want CSS pixels at 96 and EMU at 914400 — but the conversion is
+this server's problem, not yours.
+
+## Damaged files are refused
+
+A file's header parsing is not evidence it works: the first bytes of a truncated PNG
+are identical to a whole one's. Every image is checked for integrity before it enters
+a document — each PNG chunk's CRC-32, and that its compressed data inflates to exactly
+the scanlines its size needs; a JPEG's segment chain reaching its end-of-image marker;
+a GIF's block chain reaching its trailer. Truncation is how images actually arrive
+broken, and embedding one produces a document showing a broken-image box that no tool
+here could ever see. \`doc_inspect\` reports the same damage rather than only refusing
+it later.
+
+This is an integrity check, not a decoder: a complete, uncorrupted container whose
+pixels a viewer still rejects is a decoder bug rather than a damaged file.
+
+## Limits
+
+One call may place at most **20 pictures**, totalling 64 MiB of source and 80 million
+decoded pixels; a Markdown document may embed at most 20 diagrams. These are aggregate,
+because twenty images each just under a per-file limit is the same memory as one
+enormous one, and every picture is held until the file is written. Split a bigger job
+across calls.
+
+In a Word template the width is capped to the 468-point text column, because Word
+does not shrink an oversized inline image — it runs it off the paper.
+
+## Anchoring in a worksheet
+
+\`at\` decides which of two genuinely different things you get:
+
+- **A single cell**, \`at: "F2"\` — the picture keeps its own size and hangs from
+  that corner. This is "put the logo at F2".
+- **A range**, \`at: "A10:H30"\` — the picture is bound to those cells and moves and
+  resizes with them. This is "fill this block with the diagram".
+
+## Verifying
+
+Nothing here can show you a picture, so verification is indirect and you have to
+know where to look.
+
+- The **write** report names the source, the size and the anchor. For a diagram it
+  also reports what the parser recognised — \`flowchart — 5 node(s), 4 edge(s)\` —
+  which is the only check there is on the content. See the \`diagrams\` topic.
+- **\`sheet_read\`** reports \`images: N\` with each anchor, because a picture
+  occupies no cell and so cannot appear in the grid it prints.
+- **\`doc_inspect\`** counts them per sheet for a workbook, and \`doc_read\` reports
+  \`images: N\` for a Word document.
+
+An anchor is reported as the range you asked for. The file stores the bottom-right
+as an *edge* one cell past the last one covered, so a raw reading of it would report
+\`A6:H26\` back as \`A6:I27\` — which looks like an off-by-one in the placement rather
+than in the description.
+
+## Naming a template image
+
+The key is the placeholder's path without the \`%\`, and a **dotted key is a path**:
+\`{{%client.logo}}\` takes \`images: { "client.logo": … }\`.
+
+Images share the engine's data namespace, so a name cannot be both text and a picture.
+\`data.logo\` together with \`images.logo\` is refused rather than silently resolved —
+it used to render the entire image object, pixel bytes and all, as JSON into the
+document.
+
+## Where a template's \`{{%name}}\` may sit
+
+**A paragraph of its own** — in the body, in a table cell, or in a header or footer.
+Nested tables work too.
+
+One placement remains impossible: scoped to a \`{{#each}}\` item (\`{{%.photo}}\`).
+Images are substituted before loops are expanded, so there is no current item to read
+from, and one picture per row is not expressible. \`template_fill\` refuses it up
+front and \`template_inspect\` marks it \`cannot be filled\` rather than inventing an
+\`images\` key for it. Put the picture outside the loop, or have the template author
+place the row images directly.
+
+## One report worth reading carefully
+
+Images are substituted **before** conditionals are evaluated, so a \`{{%logo}}\`
+inside a \`{{#if}}\` whose condition turns out false is put in and then removed with
+its block. The fill succeeds. \`template_fill\` says so — **not in the output** —
+because otherwise the report would claim a picture that is not there, and you would
+pass that claim on. Its bytes are dropped from the package too: a picture the document
+withholds must not be recoverable by unzipping it.
+
+Every placeholder's picture is verified by **re-opening the written file**, not by
+trusting the document that was handed to the writer. If a report says a picture
+\`could not be verified\`, read the file with \`doc_read\` before relying on it.`
+  },
+
+  diagrams: {
+    summary: "Mermaid: which diagram types work, and how to verify one you cannot see.",
+    body: `# Diagrams
+
+\`diagram_render\` and \`diagram_inspect\` take **Mermaid** text. \`doc_write\` and
+\`doc_convert\` also render \`\`\`mermaid fences found in their Markdown.
+
+## Verify, because you cannot look at it
+
+This is the one place in this server where reading the output back is impossible —
+you cannot see a picture. So both tools report the **parsed structure** instead:
+every node, edge, participant, task or slice the parser recognised.
+
+Read that list. The parser implements a subset of Mermaid, and a subset fails by
+*silently dropping* what it did not understand — a mistyped arrow yields one fewer
+edge, not an error. A missing entry in that list is the only symptom, and nothing
+about the file itself will look wrong.
+
+Use \`diagram_inspect\` before rendering when the diagram is long or generated: it
+writes nothing, works under \`--readonly\`, and tells you the size it would render
+at.
+
+## Supported diagram types
+
+\`flowchart\` / \`graph\`, \`sequenceDiagram\`, \`classDiagram\`, \`stateDiagram\`,
+\`erDiagram\`, \`gantt\`, \`gitGraph\`, \`mindmap\`, \`timeline\`, \`journey\`,
+\`kanban\`, \`quadrantChart\`, \`xychart\`, \`radar\`, \`sankey\`, \`packet\`,
+\`block\`, \`pie\`, \`C4Context\` (and the other C4 forms), \`requirementDiagram\`,
+\`architecture\`.
+
+The first non-empty line chooses the type. Anything else is rejected with a list of
+what is possible, so a wrong guess costs one turn rather than a retry loop.
+
+## Choosing a format
+
+- **\`.svg\`** — smallest, resolution-independent, text stays selectable. The right
+  default for anything that will be viewed on a screen or edited later.
+- **\`.png\`** — pastes into anything. \`scale\` sets pixels per point; the default
+  of 2 is 144 DPI. This is what a \`\`\`mermaid fence becomes inside a document.
+- **\`.pdf\`** — one page sized to the diagram, drawn as vectors rather than pixels.
+
+All three come from the *same* display list, so they are the same picture rather
+than three renderings that might disagree.
+
+## Colour
+
+\`theme\` picks a colour set: \`default\` reproduces Mermaid's own base theme token
+for token; \`dark\` and \`neutral\` are this server's own and are not Mermaid's
+themes of those names. \`themeOverrides\` sets individual tokens on top —
+\`nodeFill\`, \`nodeStroke\`, \`nodeText\`, \`edge\`, \`groupFill\`, \`palette\` and
+the rest. \`palette\` is what colours the slices of a pie, the series of an
+xychart or radar, and the bands of a journey or quadrant.
+
+\`background\` defaults to **white**, not transparent: a transparent PNG is
+invisible in a dark viewer, and that is a failure you would never see. Pass
+\`"transparent"\` explicitly if you are compositing it onto something else.
+
+## Layout
+
+\`rankGap\`, \`nodeGap\`, \`maxLabelWidth\` and \`padding\` tune the graph diagrams
+(flowchart, state, class, ER, requirement, C4, architecture). Reach for
+\`maxLabelWidth\` first when a diagram comes out too wide — long labels, not the
+graph, are usually the cause.
+
+## Embedding in a document
+
+Put a \`\`\`mermaid fence in the Markdown you pass to \`doc_write\`. It is rendered
+and embedded as a picture, scaled down if needed to fit the text column — Word does
+not shrink an oversized image, it runs it off the page. A fence that fails to parse
+is left as a code block and reported, so one bad diagram does not lose the document.
+Pass \`diagrams: false\` to keep every fence as code.
+
+## Adding one to a PDF that already exists
+
+\`pdf_edit\` takes \`{ op: "diagram", source | from, pages, x, y, width, height }\`.
+It draws **vectors** onto the page rather than pasting a picture, so the diagram
+stays sharp at any zoom, and the file is saved as an incremental update — bookmarks,
+form fields and signature bytes survive.
+
+Two defaults differ from \`diagram_render\`, both because this draws *over* content
+that is already there:
+
+- \`background\` is \`"transparent"\`. A white plate would hide the page beneath it.
+- Omitting \`x\`/\`y\` centres it, and omitting \`width\`/\`height\` uses the diagram's
+  natural size **shrunk to fit** the page. So \`{ op: "diagram", source, pages: [3] }\`
+  lands on the page rather than off the edge of it.
+
+## Everywhere else a diagram can go
+
+A worksheet, and a Word template's \`{{%name}}\` placeholder. Both go through the
+generic image source described in the \`images\` topic, where a diagram is one
+source among several rather than a special case.`
   },
 
   formulas: {
@@ -168,9 +412,14 @@ In \`sheet_write\`, a formula may reference another sheet in the same spec:
 
 ## Reading
 
-\`doc_read\` handles .docx, .pdf, .md and .txt. Word comes back as **Markdown**, so
-headings, lists and tables survive. Use \`outline: true\` on a long Word file to
-get just the headings before deciding what to read.
+\`doc_read\` handles .docx, .pdf, .md, .txt and .mmd. Word comes back as
+**Markdown**, so headings, lists and tables survive. Use \`outline: true\` on a long
+Word file to get just the headings before deciding what to read.
+
+A Markdown file's \`\`\`mermaid fences come back as source, because this tool's
+output is text — but they are **indexed** in a footer. Draw one with
+\`diagram_render({ from, index, to })\`; do not copy the source out through your own
+reply to pass it back as \`source\`.
 
 PDFs are reported page by page with \`## Page N\` markers, so you can cite a page.
 There is **no OCR**: a scanned page reports no extractable text. \`doc_inspect\`
@@ -179,7 +428,8 @@ tells you up front whether a PDF has any text at all.
 ## Writing
 
 \`doc_write\` takes **Markdown** and produces .docx or .pdf. Write the content as
-Markdown — that is the input language.
+Markdown — that is the input language. A \`\`\`mermaid fence in it becomes a real
+embedded diagram rather than a code block; see the \`diagrams\` topic.
 
 ## Converting
 

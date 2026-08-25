@@ -3199,6 +3199,214 @@ function noteMarkFor(kind: "footnoteRef" | "endnoteRef", id: number): string {
  * the content area. Callers use the slot to set per-line indent /
  * available width for alignment.
  */
+/**
+ * A unit of wrapping: a word, a run of whitespace, an inline image or a hard
+ * break, carrying its measured width and whether a line may break before it.
+ */
+interface WrapAtom {
+  readonly kind: "word" | "space" | "image" | "break";
+  /** Measured width in points. Zero for a break and for a marker segment. */
+  readonly width: number;
+  /**
+   * There is no break opportunity between this atom and the one before it.
+   *
+   * A line may break at whitespace, and after a hard break — nowhere else. Two
+   * words that meet directly are one unbreakable cluster even when they came
+   * from different runs, which is exactly what an inline code span and the
+   * punctuation beside it are: `` `sybase.ts`, `` is two runs and one word.
+   * Treating every run boundary as a break opportunity instead put that comma
+   * alone at the head of the next line, and split `bridge (` from the code span
+   * it had just opened.
+   */
+  readonly glued: boolean;
+  /** Text of a word or space atom; empty for an image, a break or a marker. */
+  readonly text: string;
+  /**
+   * The segment this atom came from, so reassembly keeps its run properties and
+   * carries its note ids and bookmarks onto the line the atom landed on.
+   */
+  readonly segment: ParagraphSegment;
+  /** Measurer for this atom's formatting, for a mid-word split. */
+  readonly measure: (text: string) => number;
+}
+
+/** Measurer for atoms that carry no text. */
+const MEASURE_NOTHING = (): number => 0;
+
+/**
+ * Split a paragraph's segments into wrap atoms.
+ *
+ * One tokenizer serves both wrappers below. They differ in how a line's width
+ * is chosen — a fixed measure, or a slot between floats — not in what a line is
+ * made of, and while each had its own tokenizer the two could disagree about
+ * where a break was allowed.
+ */
+function tokenizeSegments(
+  segments: readonly ParagraphSegment[],
+  headingScale: number,
+  options: FullLayoutOptions | undefined
+): WrapAtom[] {
+  const atoms: WrapAtom[] = [];
+  // One memoised measurer per distinct formatting rather than per segment: a
+  // paragraph of many short runs shares a handful of faces between them.
+  const measurers = new Map<string, (text: string) => number>();
+  const measurerFor = (properties: Run["properties"]): ((text: string) => number) => {
+    const fontSize = getRunFontSizePt(properties) * headingScale;
+    const fontName = resolveRunFontName(properties);
+    const bold = properties?.bold === true;
+    const italic = properties?.italic === true;
+    const key = `${fontName}|${fontSize}|${bold ? "b" : ""}${italic ? "i" : ""}`;
+    let measure = measurers.get(key);
+    if (measure === undefined) {
+      measure = memoizedWordMeasure(fontName, fontSize, options, bold, italic);
+      measurers.set(key, measure);
+    }
+    return measure;
+  };
+  /** Whether an atom pushed now would be glued to the one before it. */
+  const gluedToPrevious = (): boolean => {
+    const previous = atoms[atoms.length - 1];
+    return previous !== undefined && previous.kind !== "space" && previous.kind !== "break";
+  };
+
+  for (const segment of segments) {
+    if ("type" in segment && segment.type === "break") {
+      atoms.push({
+        kind: "break",
+        width: 0,
+        glued: false,
+        text: "",
+        segment,
+        measure: MEASURE_NOTHING
+      });
+      continue;
+    }
+    if ("type" in segment && segment.type === "image") {
+      atoms.push({
+        kind: "image",
+        width: emuToPt(segment.content.width),
+        glued: gluedToPrevious(),
+        text: "",
+        segment,
+        measure: MEASURE_NOTHING
+      });
+      continue;
+    }
+    const measure = measurerFor(segment.properties);
+    if (segment.text.length === 0) {
+      // A marker segment draws nothing, but a bookmark or footnote reference it
+      // carries has a position — so it travels with the word it sits inside
+      // rather than opening a break opportunity of its own.
+      atoms.push({ kind: "word", width: 0, glued: gluedToPrevious(), text: "", segment, measure });
+      continue;
+    }
+    for (const token of segment.text.split(/(\s+)/)) {
+      if (token.length === 0) {
+        continue;
+      }
+      const isSpace = /^\s/.test(token);
+      atoms.push({
+        kind: isSpace ? "space" : "word",
+        width: measure(token),
+        glued: isSpace ? false : gluedToPrevious(),
+        text: token,
+        segment,
+        measure
+      });
+    }
+  }
+  return atoms;
+}
+
+/** Whether an atom is a `w:br w:type="page"` (see `BreakSegment.pageBreak`). */
+function isPageBreakAtom(atom: WrapAtom): boolean {
+  const segment = atom.segment;
+  return "type" in segment && segment.type === "break" && segment.pageBreak === true;
+}
+
+/**
+ * How many atoms at the end of `placed` belong to the same unbreakable cluster
+ * as `next`, and therefore have to move down with it.
+ *
+ * Zero when `next` may legally open a line, and zero when the cluster is the
+ * whole line: a cluster wider than the measure has to break somewhere, and the
+ * boundary already reached is as good a place as any.
+ */
+function gluedTailLength(placed: readonly WrapAtom[], next: WrapAtom): number {
+  if (!next.glued) {
+    return 0;
+  }
+  let count = 0;
+  while (count < placed.length) {
+    const atom = placed[placed.length - 1 - count];
+    count++;
+    if (!atom.glued) {
+      break;
+    }
+  }
+  return count >= placed.length ? 0 : count;
+}
+
+/**
+ * Turn a line's atoms back into paragraph segments.
+ *
+ * Consecutive atoms from the same source segment merge, so a run that arrived
+ * whole leaves whole: one segment per atom would make the renderer emit a
+ * separately positioned string per word, re-adding by hand the spacing the wrap
+ * had just measured.
+ */
+function reassembleLine(atoms: readonly WrapAtom[]): ParagraphSegment[] {
+  const out: ParagraphSegment[] = [];
+  let source: ParagraphSegment | undefined;
+  let text = "";
+  const flushText = (): void => {
+    if (source !== undefined && isTextSegment(source)) {
+      out.push(text === source.text ? source : { ...source, text });
+    }
+    source = undefined;
+    text = "";
+  };
+  for (const atom of atoms) {
+    if (atom.kind === "break" || atom.kind === "image") {
+      flushText();
+      out.push(atom.segment);
+      continue;
+    }
+    if (atom.segment !== source) {
+      flushText();
+      source = atom.segment;
+    }
+    text += atom.text;
+  }
+  flushText();
+
+  // Trailing spaces are invisible in left-aligned text but they widen the line
+  // for centring and right-alignment, and they leave the paragraph's measured
+  // width wrong.
+  while (out.length > 0) {
+    const last = out[out.length - 1];
+    if (!isTextSegment(last)) {
+      break;
+    }
+    const trimmed = last.text.replace(/\s+$/, "");
+    if (trimmed === last.text) {
+      break;
+    }
+    out.pop();
+    if (trimmed.length > 0) {
+      out.push({ ...last, text: trimmed });
+      break;
+    }
+    // The segment drew nothing, but a bookmark or note reference it carries
+    // still has a position on this line.
+    if (last.noteIds !== undefined || last.bookmarks !== undefined) {
+      out.push({ ...last, text: "" });
+      break;
+    }
+  }
+  return out;
+}
+
 function wrapSegmentsToLinesWithExclusions(
   segments: ParagraphSegment[],
   leftIndentPt: number,
@@ -3209,73 +3417,7 @@ function wrapSegmentsToLinesWithExclusions(
   pageContext: PageLayoutContext,
   options: FullLayoutOptions | undefined
 ): { lines: ParagraphSegment[][]; slots: { xOffset: number; width: number }[] } {
-  // Tokenize all segments into a flat sequence of "atoms" (words,
-  // whitespace, and inline images) carrying their measured width.
-  // Inline images are unbreakable atoms with `isImage: true`; they
-  // never split on whitespace.
-  type Atom = {
-    readonly width: number;
-    readonly isSpace: boolean;
-    readonly isImage: boolean;
-    /** A hard break: ends the line it lands on and draws nothing. */
-    readonly isBreak?: boolean;
-    readonly text?: string;
-    readonly properties?: Run["properties"];
-    readonly imageContent?: InlineImageContent;
-    /** Note ids whose reference mark this atom is (see `TextSegment.noteIds`). */
-    readonly noteIds?: readonly number[];
-    /** A `w:br w:type="page"` (see `BreakSegment.pageBreak`). */
-    readonly isPageBreak?: boolean;
-  };
-  const atoms: Atom[] = [];
-  for (const seg of segments) {
-    if ("type" in seg && seg.type === "break") {
-      atoms.push({
-        width: 0,
-        isSpace: false,
-        isImage: false,
-        isBreak: true,
-        properties: seg.properties
-      });
-      continue;
-    }
-    if ("type" in seg && seg.type === "image") {
-      atoms.push({
-        width: emuToPt(seg.content.width),
-        isSpace: false,
-        isImage: true,
-        properties: seg.properties,
-        imageContent: seg.content
-      });
-      continue;
-    }
-    const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-    const fontName = resolveRunFontName(seg.properties);
-    // Split on runs of whitespace, keeping the whitespace tokens so
-    // wrapping can decide whether to drop trailing space at line end.
-    const tokens = seg.text.split(/(\s+)/);
-    for (const tok of tokens) {
-      if (tok.length === 0) {
-        continue;
-      }
-      atoms.push({
-        text: tok,
-        width: measureLayoutText(
-          tok,
-          fontName,
-          fontSize,
-          options,
-          seg.properties?.bold,
-          seg.properties?.italic
-        ),
-        properties: seg.properties,
-        isSpace: /^\s+$/.test(tok),
-        isImage: false,
-        ...(seg.noteIds ? { noteIds: seg.noteIds } : {})
-      });
-    }
-  }
-
+  const atoms = tokenizeSegments(segments, headingScale, options);
   const lines: ParagraphSegment[][] = [];
   const slots: { xOffset: number; width: number }[] = [];
 
@@ -3283,12 +3425,12 @@ function wrapSegmentsToLinesWithExclusions(
     return { lines, slots };
   }
 
-  let cursorAtom = 0;
+  let cursor = 0;
   let lineIdx = 0;
   // The first line of the paragraph is not the result of a wrap, so its leading
   // whitespace is the author's.
   let openedByWrap = false;
-  while (cursorAtom < atoms.length) {
+  while (cursor < atoms.length) {
     const lineY = paragraphTopPageY + lineIdx * lineHeightPt;
     const slot = availableSlotForLine(pageContext, lineY, lineHeightPt);
 
@@ -3327,26 +3469,28 @@ function wrapSegmentsToLinesWithExclusions(
       continue;
     }
 
-    // Greedily pack atoms into the line until the next atom would overflow
-    // `usable`. Whitespace that opens a *wrapped* line is dropped — it is the
-    // separator the break consumed. After a hard break it is the author's
-    // (a code block's indentation), so it stays.
-    if (openedByWrap && atoms[cursorAtom].isSpace) {
-      cursorAtom++;
-      if (cursorAtom >= atoms.length) {
+    // Whitespace that opens a *wrapped* line is dropped — it is the separator
+    // the break consumed. After a hard break it is the author's (a code block's
+    // indentation), so it stays.
+    if (openedByWrap && atoms[cursor].kind === "space") {
+      cursor++;
+      if (cursor >= atoms.length) {
         break;
       }
     }
     openedByWrap = true;
-    const lineAtoms: Atom[] = [];
+
+    const lineAtoms: WrapAtom[] = [];
     let lineWidth = 0;
-    while (cursorAtom < atoms.length) {
-      const atom = atoms[cursorAtom];
-      if (atom.isBreak) {
+    // Every pass consumes an atom, shortens one, or closes a line that already
+    // holds content, so this terminates.
+    while (cursor < atoms.length) {
+      const atom = atoms[cursor];
+      if (atom.kind === "break") {
         // A leading page break is a break-before and leaves no blank line —
         // see the sister case in `wrapSegmentsToLines`.
-        if (atom.isPageBreak && lines.length === 0 && lineAtoms.length === 0) {
-          cursorAtom++;
+        if (isPageBreakAtom(atom) && lines.length === 0 && lineAtoms.length === 0) {
+          cursor++;
           openedByWrap = false;
           continue;
         }
@@ -3354,93 +3498,56 @@ function wrapSegmentsToLinesWithExclusions(
         // whatever follows keeps its leading whitespace. Kept on the line so a
         // page break's position survives (see `BreakSegment.pageBreak`).
         lineAtoms.push(atom);
-        cursorAtom++;
+        cursor++;
         openedByWrap = false;
         break;
       }
-      const next = lineWidth + atom.width;
-      if (next > usable) {
-        if (lineAtoms.length > 0) {
-          // Atom would overflow; commit the line and go to next.
+      if (lineWidth + atom.width <= usable) {
+        lineAtoms.push(atom);
+        lineWidth += atom.width;
+        cursor++;
+        continue;
+      }
+      // The atom overflows. Give back the cluster it belongs to, so the whole
+      // cluster moves down together rather than breaking at a run boundary.
+      const retreat = gluedTailLength(lineAtoms, atom);
+      if (retreat > 0) {
+        let keptWidth = lineWidth;
+        for (let i = 0; i < retreat; i++) {
+          keptWidth -= lineAtoms[lineAtoms.length - 1 - i].width;
+        }
+        if (keptWidth > 0) {
+          lineAtoms.length -= retreat;
+          cursor -= retreat;
+          lineWidth = keptWidth;
           break;
         }
-        if (!atom.isImage && atom.text !== undefined) {
-          // Alone on the line and still too wide: break inside the token, the
-          // way CSS `overflow-wrap: break-word` does. An image is left whole —
-          // there is nothing to break — and overflows as Word lets it.
-          const measure = memoizedWordMeasure(
-            resolveRunFontName(atom.properties),
-            getRunFontSizePt(atom.properties) * headingScale,
-            options,
-            atom.properties?.bold,
-            atom.properties?.italic
-          );
-          const { head, tail } = splitTextToFit(atom.text, measure, usable);
-          if (tail.length > 0) {
-            // Replace the atom with its remainder so the next line continues
-            // from the break point.
-            atoms[cursorAtom] = { ...atom, text: tail, width: measure(tail) };
-            lineAtoms.push({ ...atom, text: head, width: measure(head) });
-            lineWidth += measure(head);
-            break;
-          }
+      }
+      if (lineWidth > 0) {
+        // Something is already on the line — try again on a fresh one.
+        break;
+      }
+      // Alone on the line and still too wide: break inside the word, the way
+      // CSS `overflow-wrap: break-word` does. An image is left whole — there is
+      // nothing to break — and overflows as Word lets it.
+      if (atom.kind === "word" && atom.text.length > 0) {
+        const { head, tail } = splitTextToFit(atom.text, atom.measure, usable);
+        if (tail.length > 0) {
+          // Replace the atom with its remainder so the next line continues
+          // from the break point.
+          atoms[cursor] = { ...atom, text: tail, width: atom.measure(tail), glued: true };
+          const headWidth = atom.measure(head);
+          lineAtoms.push({ ...atom, text: head, width: headWidth });
+          lineWidth += headWidth;
+          break;
         }
       }
       lineAtoms.push(atom);
-      lineWidth = next;
-      cursorAtom++;
-    }
-    // Trim trailing whitespace so alignment computation is correct.
-    // Don't trim trailing image atoms (they're not whitespace).
-    while (lineAtoms.length > 0 && lineAtoms[lineAtoms.length - 1].isSpace) {
-      const drop = lineAtoms.pop()!;
-      lineWidth -= drop.width;
+      lineWidth += atom.width;
+      cursor++;
     }
 
-    // Reassemble the line into `ParagraphSegment[]`. Adjacent text
-    // atoms with identical properties merge; image atoms remain
-    // standalone.
-    const merged: ParagraphSegment[] = [];
-    for (const atom of lineAtoms) {
-      if (atom.isBreak) {
-        merged.push({
-          type: "break",
-          properties: atom.properties,
-          ...(atom.isPageBreak ? { pageBreak: true } : {})
-        });
-        continue;
-      }
-      if (atom.isImage) {
-        merged.push({
-          type: "image",
-          content: atom.imageContent!,
-          properties: atom.properties
-        });
-        continue;
-      }
-      const last = merged[merged.length - 1];
-      const lastIsText = last && !("type" in last);
-      if (lastIsText && (last as TextSegment).properties === atom.properties) {
-        const previous = last as TextSegment;
-        const noteIds =
-          previous.noteIds || atom.noteIds
-            ? [...(previous.noteIds ?? []), ...(atom.noteIds ?? [])]
-            : undefined;
-        merged[merged.length - 1] = {
-          text: previous.text + atom.text!,
-          properties: atom.properties,
-          ...(noteIds ? { noteIds } : {})
-        };
-      } else {
-        merged.push({
-          text: atom.text!,
-          properties: atom.properties,
-          ...(atom.noteIds ? { noteIds: atom.noteIds } : {})
-        });
-      }
-    }
-
-    lines.push(merged);
+    lines.push(reassembleLine(lineAtoms));
     slots.push({ xOffset: lineXOffset, width: usable });
     lineIdx++;
 
@@ -3521,207 +3628,130 @@ function wrapSegmentsToLines(
   headingScale: number,
   options: FullLayoutOptions | undefined
 ): ParagraphSegment[][] {
+  const atoms = tokenizeSegments(segments, headingScale, options);
   const lines: ParagraphSegment[][] = [];
-  let currentLine: ParagraphSegment[] = [];
-  let currentLineWidth = 0;
+  let line: WrapAtom[] = [];
+  let lineWidth = 0;
   let isFirstLine = true;
   let effectiveWidth = availableWidth - firstLineIndent;
-
   /**
-   * Commit the current line, trimming the whitespace that ran off its end.
-   *
-   * Trailing spaces are invisible in left-aligned text but they widen the line
-   * for centring and right-alignment, and they leave the paragraph's measured
-   * width wrong.
+   * Whether the line being built was opened by a *wrap*, in which case
+   * whitespace at its head is the separator the break consumed and keeping it
+   * indents the line by a stray space. After a hard break — and at the start of
+   * the paragraph — leading whitespace is the author's, and in a code block it
+   * is the indentation.
    */
+  let openedByWrap = false;
+
   const flushLine = (): void => {
-    while (currentLine.length > 0) {
-      const last = currentLine[currentLine.length - 1];
-      if (!isTextSegment(last)) {
-        break;
-      }
-      const trimmed = last.text.replace(/\s+$/, "");
-      if (trimmed === last.text) {
-        break;
-      }
-      currentLine.pop();
-      if (trimmed.length > 0) {
-        currentLine.push({ ...last, text: trimmed });
-        break;
-      }
-    }
-    lines.push(currentLine);
-    currentLine = [];
-    currentLineWidth = 0;
+    lines.push(reassembleLine(line));
+    line = [];
+    lineWidth = 0;
     if (isFirstLine) {
       isFirstLine = false;
       effectiveWidth = availableWidth;
     }
   };
 
-  /**
-   * Whether whitespace opening the current line should be dropped.
-   *
-   * Only true when the line was opened by *wrapping*: the space is then the
-   * separator the break consumed and keeping it indents the line by a stray
-   * space. After a hard break — and at the start of the paragraph — leading
-   * whitespace is the author's, and in a code block it is the indentation.
-   */
-  let dropLeadingSpace = false;
+  let index = 0;
+  // Every pass consumes an atom, shortens one, or closes a line that already
+  // holds content, so this terminates.
+  while (index < atoms.length) {
+    const atom = atoms[index];
 
-  /** True when nothing has been placed on the line being built yet. */
-  const lineIsEmpty = (): boolean => currentLine.length === 0;
-  /** True when whitespace at this position must be discarded. */
-  const skipOpeningSpace = (): boolean => dropLeadingSpace && lineIsEmpty();
-
-  for (const segment of segments) {
-    if ("type" in segment && segment.type === "break") {
+    if (atom.kind === "break") {
       // A *page* break at the very start of a paragraph is a break-before: the
-      // block-level machinery has already moved the paragraph, and Word leaves no
-      // blank line behind. A leading *line* break does produce an empty line.
-      if (segment.pageBreak === true && lines.length === 0 && currentLine.length === 0) {
-        dropLeadingSpace = false;
+      // block-level machinery has already moved the paragraph, and Word leaves
+      // no blank line behind. A leading *line* break does produce an empty line.
+      if (isPageBreakAtom(atom) && lines.length === 0 && line.length === 0) {
+        openedByWrap = false;
+        index++;
         continue;
       }
       // A hard break closes the current line even though there is room left,
       // and whatever follows keeps its leading whitespace. The marker is kept on
       // the line so a page break's position is recoverable; the line-box builder
       // draws nothing for it.
-      currentLine.push(segment);
+      line.push(atom);
       flushLine();
-      dropLeadingSpace = false;
-      continue;
-    }
-    if ("type" in segment && segment.type === "image") {
-      // Inline images are unbreakable atoms.  Width comes from the
-      // source EMU; if the image alone exceeds the line we still
-      // place it (avoids losing content) — the renderer will overflow
-      // visually on that line, matching Word's behaviour for
-      // oversized inline images.
-      const imageWidth = emuToPt(segment.content.width);
-      const fitsCurrent =
-        currentLineWidth + imageWidth <= effectiveWidth || currentLine.length === 0;
-      if (!fitsCurrent) {
-        flushLine();
-        dropLeadingSpace = true;
-      }
-      currentLine.push(segment);
-      currentLineWidth += imageWidth;
+      openedByWrap = false;
+      index++;
       continue;
     }
 
-    const text = segment.text;
-    const fontSize = getRunFontSizePt(segment.properties) * headingScale;
-    const fontName = resolveRunFontName(segment.properties);
-    const segmentWidth = measureLayoutText(
-      text,
-      fontName,
-      fontSize,
-      options,
-      segment.properties?.bold,
-      segment.properties?.italic
-    );
-
-    if (currentLineWidth + segmentWidth <= effectiveWidth) {
-      // Whole segment fits on the current line — fast path. Whitespace that
-      // would open a line is dropped: it is the separator the wrap consumed,
-      // and keeping it indents the line by a stray space.
-      if (skipOpeningSpace()) {
-        const opened = text.replace(/^\s+/, "");
-        if (opened.length === 0) {
-          continue;
-        }
-        if (opened !== text) {
-          currentLine.push({ ...segment, text: opened });
-          currentLineWidth += measureLayoutText(
-            opened,
-            fontName,
-            fontSize,
-            options,
-            segment.properties?.bold,
-            segment.properties?.italic
-          );
-          continue;
-        }
+    if (atom.kind === "space") {
+      if (openedByWrap && lineWidth === 0) {
+        index++;
+        continue;
       }
-      currentLine.push(segment);
-      currentLineWidth += segmentWidth;
-    } else {
-      // Segment does not fit — break it at word boundaries, and at code-point
-      // boundaries for a token too wide for any line (CSS `overflow-wrap:
-      // break-word`). Without the second rule a long URL, a hex digest or any
-      // space-less script ran straight off the right edge: a CJK paragraph
-      // measured 924pt in a 468pt column.
-      const measureWord = memoizedWordMeasure(
-        fontName,
-        fontSize,
-        options,
-        segment.properties?.bold,
-        segment.properties?.italic
-      );
-      const words = text.split(/(\s+)/);
-      let bufferedText = "";
-      let bufferedWidth = 0;
+      // A space that overflows is trailing whitespace, which `reassembleLine`
+      // trims off the line it closes.
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
 
-      /** Commit what is buffered and close the line, as a wrap. */
-      const wrapHere = (): void => {
-        if (bufferedText.length > 0) {
-          currentLine.push({ text: bufferedText, properties: segment.properties });
-        }
+    // A word or an inline image.
+    if (lineWidth + atom.width <= effectiveWidth) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+
+    // It does not fit. Give back the cluster it belongs to, so the whole
+    // cluster moves down together rather than breaking at a run boundary.
+    const retreat = gluedTailLength(line, atom);
+    if (retreat > 0) {
+      let keptWidth = lineWidth;
+      for (let i = 0; i < retreat; i++) {
+        keptWidth -= line[line.length - 1 - i].width;
+      }
+      if (keptWidth > 0) {
+        line.length -= retreat;
+        index -= retreat;
+        lineWidth = keptWidth;
         flushLine();
-        dropLeadingSpace = true;
-        bufferedText = "";
-        bufferedWidth = 0;
-      };
-
-      for (const word of words) {
-        const isSpace = /^\s+$/.test(word);
-
-        let remainder = word;
-        let remainderWidth = measureWord(word);
-        // Each pass either buffers the whole remainder, closes the line, or
-        // takes at least one code point off the front, so this terminates.
-        while (remainder.length > 0) {
-          // Whitespace never opens a wrapped line — see the fast path above.
-          // Re-checked every pass, not once before the loop: a space that fits
-          // the line it was measured against can still be pushed to the next
-          // one by the word that follows it, and it must be dropped then too.
-          if (isSpace && skipOpeningSpace() && bufferedText.length === 0) {
-            break;
-          }
-          const room = effectiveWidth - currentLineWidth - bufferedWidth;
-          if (remainderWidth <= room) {
-            bufferedText += remainder;
-            bufferedWidth += remainderWidth;
-            break;
-          }
-          if (currentLine.length > 0 || bufferedText.length > 0) {
-            // Something is already on the line — try the token again on a
-            // fresh one, intact. Only a token that cannot fit a line *by
-            // itself* is ever broken mid-word.
-            wrapHere();
-            continue;
-          }
-          // Fresh line and still too wide: break inside the token.
-          const { head, tail } = splitTextToFit(remainder, measureWord, room);
-          bufferedText += head;
-          bufferedWidth += measureWord(head);
-          remainder = tail;
-          if (remainder.length === 0) {
-            break;
-          }
-          remainderWidth = measureWord(remainder);
-          wrapHere();
-        }
-      }
-      if (bufferedText.length > 0) {
-        currentLine.push({ ...segment, text: bufferedText });
-        currentLineWidth += bufferedWidth;
+        openedByWrap = true;
+        continue;
       }
     }
+
+    if (lineWidth > 0) {
+      // Something is already on the line — try the atom again on a fresh one,
+      // intact. Only a cluster that cannot fit a line *by itself* is broken.
+      flushLine();
+      openedByWrap = true;
+      continue;
+    }
+
+    // Alone on the line and still too wide. An image is left whole — there is
+    // nothing to break — and overflows the way Word lets it. A word breaks
+    // inside, the way CSS `overflow-wrap: break-word` does: without that a long
+    // URL, a hex digest or any space-less script ran off the right edge.
+    if (atom.kind === "image" || atom.text.length === 0) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+    const { head, tail } = splitTextToFit(atom.text, atom.measure, effectiveWidth);
+    if (tail.length === 0) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+    const headWidth = atom.measure(head);
+    line.push({ ...atom, text: head, width: headWidth });
+    lineWidth += headWidth;
+    atoms[index] = { ...atom, text: tail, width: atom.measure(tail), glued: true };
+    flushLine();
+    openedByWrap = true;
   }
 
-  if (currentLine.length > 0) {
+  if (line.length > 0) {
     // Through `flushLine`, so the last line has its trailing whitespace trimmed
     // like every other one.
     flushLine();

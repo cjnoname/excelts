@@ -23,7 +23,9 @@ import { assertWritable, outputDisplay, resolveInRoot, resolveOutputPath } from 
 import { addChart, chartSchema, generateSchema, writeGenerated } from "./chart.js";
 import { assertNonMacroOutput } from "./document.js";
 import { writeWithPolicy } from "./fs-helpers.js";
+import { newImageBudget, resolveImageSource, type ResolvedImage } from "./image.js";
 import { textResult } from "./result.js";
+import { placeImage, imageSchema } from "./sheet-image.js";
 import {
   normalizeFormula,
   parseRange,
@@ -107,6 +109,12 @@ const sheetSchema = z.object({
     .optional()
     .describe(
       "Charts to place on this sheet. Ranges are plain A1 — the sheet qualification is added for you."
+    ),
+  images: z
+    .array(imageSchema)
+    .optional()
+    .describe(
+      'Pictures to place on this sheet: a .png/.jpg/.gif file, or a Mermaid diagram drawn server-side. e.g. [{ at: "F2", from: "logo.png" }, { at: "A10:H30", source: "flowchart LR\n A --> B" }].'
     )
 });
 
@@ -156,9 +164,15 @@ export const sheetWriteTool = defineTool({
     const wb = Workbook.create();
     const report: string[] = [];
 
+    // Every image is read and, where it is a diagram, drawn *before* a single
+    // sheet is built. A picture that cannot be read must not leave a half-built
+    // workbook behind, and the resolution is the only asynchronous step in the
+    // whole spec.
+    const images = await resolveImages(config, args.sheets);
+
     for (const spec of args.sheets) {
       const ws = await buildSheet(wb, spec, config, report);
-      applyLayout(ws, spec, report);
+      applyLayout(wb, ws, spec, images, report);
     }
 
     const recalculate = args.recalculate ?? true;
@@ -250,8 +264,36 @@ async function buildSheet(
   return ws;
 }
 
-/** Apply widths, freeze panes, merges and styles. */
-function applyLayout(ws: SheetHandle, spec: z.infer<typeof sheetSchema>, report: string[]): void {
+/**
+ * Resolve every image in the spec up front, keyed by its own entry.
+ *
+ * Keyed by object identity rather than by position so the placement loop below
+ * can stay synchronous without carrying an index it could get wrong.
+ */
+async function resolveImages(
+  config: ServerConfig,
+  sheets: readonly z.infer<typeof sheetSchema>[]
+): Promise<Map<object, ResolvedImage>> {
+  const resolved = new Map<object, ResolvedImage>();
+  // One budget for the whole call: twenty sheets of one big picture each is the
+  // same memory as one sheet of twenty.
+  const budget = newImageBudget();
+  for (const sheet of sheets) {
+    for (const spec of sheet.images ?? []) {
+      resolved.set(spec, await resolveImageSource(config, spec, { budget }));
+    }
+  }
+  return resolved;
+}
+
+/** Apply widths, freeze panes, merges, styles, charts and images. */
+function applyLayout(
+  wb: WorkbookHandle,
+  ws: SheetHandle,
+  spec: z.infer<typeof sheetSchema>,
+  images: Map<object, ResolvedImage>,
+  report: string[]
+): void {
   if (spec.columnWidths !== undefined && spec.columnWidths.length > 0) {
     Worksheet.setColumns(
       ws,
@@ -282,6 +324,15 @@ function applyLayout(ws: SheetHandle, spec: z.infer<typeof sheetSchema>, report:
   // Charts last, so a default anchor sees the sheet's final used area.
   for (const chart of spec.charts ?? []) {
     report.push(`- sheet ${JSON.stringify(spec.name)}: ${addChart(ws, chart)}`);
+  }
+
+  for (const entry of spec.images ?? []) {
+    const image = images.get(entry);
+    if (image === undefined) {
+      // Unreachable: `resolveImages` walked this very array.
+      throw toolError.invalidInput("an image entry was not resolved before placement");
+    }
+    report.push(`- sheet ${JSON.stringify(spec.name)}: ${placeImage(wb, ws, entry.at, image)}`);
   }
 }
 

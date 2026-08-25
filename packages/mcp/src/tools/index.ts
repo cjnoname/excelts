@@ -9,6 +9,8 @@
 import type { ServerConfig } from "../config.js";
 import { archiveReadTool } from "./archive-read.js";
 import { archiveWriteTool } from "./archive-write.js";
+import { diagramInspectTool } from "./diagram-inspect.js";
+import { diagramRenderTool } from "./diagram-render.js";
 import { docConvertTool } from "./doc-convert.js";
 import { docPaginateTool } from "./doc-paginate.js";
 import { docReadTool } from "./doc-read.js";
@@ -52,6 +54,8 @@ export const ALL_TOOLS: readonly AnyToolDefinition[] = [
   templateInspectTool,
   templateFillTool,
   formFillTool,
+  diagramInspectTool,
+  diagramRenderTool,
   archiveReadTool,
   archiveWriteTool
 ];

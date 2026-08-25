@@ -20,12 +20,20 @@ import { parseArgs } from "node:util";
  * `core` (`documonster_help`, `doc_inspect`) is always enabled — it is how a
  * model orients itself before doing anything else.
  */
-export const TOOL_GROUPS = ["core", "excel", "word", "pdf", "forms", "archive"] as const;
+export const TOOL_GROUPS = ["core", "excel", "word", "pdf", "forms", "archive", "diagram"] as const;
 
 export type ToolGroup = (typeof TOOL_GROUPS)[number];
 
 /** Groups enabled when `--enable` is omitted. */
-const DEFAULT_GROUPS: readonly ToolGroup[] = ["core", "excel", "word", "pdf", "forms", "archive"];
+const DEFAULT_GROUPS: readonly ToolGroup[] = [
+  "core",
+  "excel",
+  "word",
+  "pdf",
+  "forms",
+  "archive",
+  "diagram"
+];
 
 /** Default ceiling for a single input document, in bytes (64 MiB). */
 const DEFAULT_MAX_FILE_SIZE = 64 * 1024 * 1024;

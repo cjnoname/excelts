@@ -341,7 +341,7 @@ The page should carry arity from `FunctionDescriptor` (`minArity`/`maxArity`/`vo
 which no hand-written list would ever keep accurate.
 
 The count itself has been corrected: it appeared sixteen times across ten files, all saying 433. The twelve user-facing claims now say 448 and are pinned by
-`src/modules/formula/__tests__/function-count.test.ts`, which fails if any of them drifts
+`src/modules/formula/__tests__/function-count.node.test.ts`, which fails if any of them drifts
 again; the other four were internal comments and were reworded to drop the number. That test
 is a curated list of claim sites, which is a stopgap — it cannot cover a _new_ claim written
 somewhere it does not know about. Generating the number is still the fix.
@@ -510,7 +510,7 @@ artefact no tool read.
 5. **The function count was wrong in sixteen places across ten files** — READMEs,
    `AGENTS.md` and a public TSDoc block said 433 while the registry held 448. The twelve
    user-facing claims were corrected and are pinned by
-   `src/modules/formula/__tests__/function-count.test.ts`; the four internal comments (two in
+   `src/modules/formula/__tests__/function-count.node.test.ts`; the four internal comments (two in
    `function-registry.ts`, two in `scripts/treeshake-verify.ts`) were reworded to drop the
    number, because a count in a comment about tree-shaking costs maintenance and tells its
    reader nothing. `listFunctionNames()` was added so the number can be derived at all.
