@@ -116,11 +116,28 @@ for await (const chunk of Xlsb.toStream(workbook)) {
 }
 ```
 
-`XlsbReadOptions` controls base64 input, row and column limits, and formula
-handling. `XlsbWriteOptions` controls strict fidelity checks and ZIP metadata;
-`unsupported: "ignore"` explicitly opts into dropping unsupported edited state.
-Malformed BIFF12 data throws `XlsbParseError`, while a strict write that cannot
-preserve workbook state throws `ExcelNotSupportedError`.
+`XlsbReadOptions` controls base64 input, row and column limits, formula handling,
+and blank-cell materialization. `blankCells` defaults to `"keep"`, preserving
+value-less styled cells exactly as before. Use `blankCells: "skip"` for files
+with large formatted-but-empty regions: blank BIFF12 cell records are not
+materialized, so they do not extend physical row counts or retain their styles
+in memory. Value cells and their styles are unaffected.
+
+Skipping styled blanks is an explicitly lossy model view. An unchanged loaded
+workbook still writes the original XLSB bytes byte-for-byte. After an edit, a
+strict write throws `ExcelNotSupportedError` with the number of skipped cells;
+`unsupported: "ignore"` explicitly opts into dropping that formatting.
+`XlsbWriteOptions` also controls ZIP metadata. Malformed BIFF12 data throws
+`XlsbParseError`.
+
+#### Untrusted workbook security
+
+`maxRows` and `maxCols` stop reading at fixed physical BIFF12 coordinates and
+can therefore omit value cells when the data extent is not known in advance.
+`blankCells: "skip"` is the safer memory optimization for Excel-generated XLSB
+files with styled blank tails: it removes only value-less cells while retaining
+all value, formula, date, and styled-value records. The option is additive and
+opt-in; omitted or `"keep"` retains the historical behavior.
 
 The explicit namespace exposes the complete format-specific IO surface:
 
@@ -155,7 +172,9 @@ returned byte-for-byte, including macros and opaque package parts.
 
 Maintainers can run `pnpm verify:xlsb-corpus` for the pinned Calamine, Apache
 POI, and `jsxlsb` interoperability corpus, and `pnpm benchmark:xlsb` for the
-same-workbook XLSX/XLSB IO comparison. The corpus also pins semantic probes for
+same-workbook XLSX/XLSB IO comparison. Set
+`XLSB_BENCHMARK_TRAILING_BLANK_ROWS` to compare normal and
+`blankCells: "skip"` XLSB reads with a styled blank tail. The corpus also pins semantic probes for
 sheet names, dates and epochs, formulas, comments, hyperlinks, Unicode, merges,
 and one edited XLSB round-trip. Cache, offline, refresh, private-corpus, and
 benchmark sizing options are documented in

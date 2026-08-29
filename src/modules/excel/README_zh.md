@@ -115,10 +115,22 @@ for await (const chunk of Xlsb.toStream(workbook)) {
 }
 ```
 
-`XlsbReadOptions` 控制 base64 输入、行列限制和公式处理。`XlsbWriteOptions`
-控制严格保真检查及 ZIP 元数据；`unsupported: "ignore"` 表示明确允许丢弃编辑后
-仍不受支持的状态。格式错误的 BIFF12 数据会抛出 `XlsbParseError`，严格写入无法
-保留工作簿状态时会抛出 `ExcelNotSupportedError`。
+`XlsbReadOptions` 控制 base64 输入、行列限制、公式处理以及空单元格的实体化。
+`blankCells` 默认为 `"keep"`，与既有行为一样保留无值但带样式的单元格。对于包含
+大面积已格式化空白区域的文件，可以使用 `blankCells: "skip"`：空白 BIFF12 单元格
+记录不会进入内存模型，也不会扩大物理行数；带值单元格及其样式不受影响。
+
+跳过带样式空白单元格属于明确的有损模型视图。未修改的已加载工作簿仍会逐字节写回
+原始 XLSB；一旦编辑，严格写入会抛出 `ExcelNotSupportedError` 并报告跳过数量，只有
+`unsupported: "ignore"` 才明确允许丢弃这些格式。`XlsbWriteOptions` 还控制 ZIP
+元数据，格式错误的 BIFF12 数据会抛出 `XlsbParseError`。
+
+#### 不受信任工作簿的安全读取
+
+`maxRows` 和 `maxCols` 按固定的 BIFF12 物理坐标停止读取；如果事先不知道数据范围，
+它们可能连带省略有值单元格。对于 Excel 生成的带样式空白尾部，
+`blankCells: "skip"` 是更合适的内存优化：它只移除无值单元格，并保留所有值、公式、
+日期以及带值单元格的样式。该选项是新增的显式选择；省略或使用 `"keep"` 时保持历史行为。
 
 显式命名空间提供完整的格式专用 IO 接口：
 
@@ -147,7 +159,9 @@ for await (const chunk of Xlsb.toStream(workbook)) {
 逐字节原样返回，包括宏及不透明包部件。
 
 维护者可运行 `pnpm verify:xlsb-corpus` 验证固定的 Calamine、Apache POI 与 `jsxlsb`
-互操作语料库，并运行 `pnpm benchmark:xlsb` 比较同一工作簿的 XLSX/XLSB IO。
+互操作语料库，并运行 `pnpm benchmark:xlsb` 比较同一工作簿的 XLSX/XLSB IO。设置
+`XLSB_BENCHMARK_TRAILING_BLANK_ROWS` 可使用带样式空白尾部比较普通 XLSB 读取与
+`blankCells: "skip"` 读取。
 语料库还固定验证工作表名称、日期与日期系统、公式、备注、超链接、Unicode、合并单元格
 以及一次编辑后的 XLSB 往返。缓存、离线、刷新、私有语料库和基准规模选项记录在
 [`xlsb/README.md`](xlsb/README.md) 中。可运行的创建、写入、读取、编辑与验证示例见

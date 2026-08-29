@@ -32,6 +32,13 @@ The reader preserves supported BIFF12 formula token arrays by default. Use
 choice is recorded so a later strict write fails instead of replacing formulas
 with constants. `formulas: "error"` rejects formula cells during reading.
 
+The reader keeps value-less styled cells by default. `blankCells: "skip"`
+avoids materializing `BrtCellBlank` and `BrtShortBlank` records and suppresses
+otherwise-default row headers left behind by those cells. The skipped count is
+recorded: unchanged workbooks still use byte-for-byte passthrough, while edited
+strict writes fail unless `unsupported: "ignore"` explicitly permits the lost
+blank-cell formatting.
+
 An unchanged loaded XLSB is returned byte-for-byte, preserving macros and
 opaque package parts. Once the model is edited, strict writing rejects any
 unmodeled part instead of silently deleting it.
@@ -117,7 +124,13 @@ fixed ZIP timestamp, data, table, formulas, styles, note, views, and metadata.
 ```bash
 pnpm benchmark:xlsb
 XLSB_BENCHMARK_ROWS=50000 XLSB_BENCHMARK_RUNS=7 pnpm benchmark:xlsb
+XLSB_BENCHMARK_TRAILING_BLANK_ROWS=16000 pnpm benchmark:xlsb
 ```
+
+When trailing blank rows are requested, the XLSB result includes both the
+default read statistics and `readSkipBlankCells` statistics. The generated
+cells carry styles but no values, matching the formatted tails produced by
+Excel.
 
 The benchmark is diagnostic rather than a CI performance budget: machine load,
 runtime version, and garbage collection materially affect timings. Its JSON
