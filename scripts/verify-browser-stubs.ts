@@ -38,6 +38,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { relPosix } from "./lib/paths.ts";
+
 /**
  * `--root <dir>` retargets the whole check — both trees and the policy list's source
  * paths. It exists for `src/test/__tests__/platform-variants.test.ts`, following
@@ -84,7 +86,7 @@ const REQUIRE_BROWSER_STUB: readonly { readonly module: string; readonly why: st
 const missingTrees = TREES.filter(tree => !fs.existsSync(tree));
 if (missingTrees.length > 0) {
   console.error(
-    `verify:browser-stubs — ${missingTrees.map(t => path.relative(ROOT, t)).join(", ")} ` +
+    `verify:browser-stubs — ${missingTrees.map(t => relPosix(ROOT, t)).join(", ")} ` +
       "is missing; run `pnpm build:esm` first."
   );
   process.exit(1);
@@ -134,10 +136,13 @@ function walk(tree: string, dir: string): void {
         continue;
       }
       if (fs.existsSync(`${base}.browser${siblingExtension}`)) {
+        // `relPosix`, not `path.relative`: a native separator makes the message differ by
+        // operating system, which is what `scripts/lib/paths.ts` exists to prevent. It broke
+        // this gate's own test on Windows (`dist\\esm\\…` against an expected `dist/esm/…`).
         violations.push({
-          file: path.relative(ROOT, full),
+          file: relPosix(ROOT, full),
           specifier,
-          shouldBe: `#platform/${path.relative(tree, base).split(path.sep).join("/")}`
+          shouldBe: `#platform/${relPosix(tree, base)}`
         });
       }
     }

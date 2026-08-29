@@ -23,17 +23,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22.13.0 exactly, not 22.x: it is the floor `engines.node` promises, and the
-        # only version where that promise can actually break. `require(esm)` is unflagged
-        # from 22.12 but prints an ExperimentalWarning until 22.13, so the floor was chosen
-        # empirically — and a floor nothing runs is a floor nobody has checked. The newest
-        # 22 behaves like 24/26, which are covered below.
+        # `22.x`, not the `engines.node` floor. This job runs the repository's own
+        # toolchain, and every gate is a `node scripts/*.ts` — which needs Node's type
+        # stripping, unflagged only from 22.18 (22.17.1 still throws
+        # ERR_UNKNOWN_FILE_EXTENSION). Pinning the consumer floor here made the whole
+        # matrix fail for a reason that has nothing to do with the package. The floor is
+        # a promise about the *published artifact*, so it is checked where that can be
+        # checked: `pnpm verify:install`, against a real install of the tarball.
         #
         # Odd-numbered lines are deliberately absent. Node 25 never becomes LTS — it is a
         # six-month staging line for what lands in 26 — so 24 (LTS) and 26 bracket it, and
         # a failure unique to 25 would be a failure in a runtime no consumer is asked to
         # use. Three versions across three operating systems is nine jobs; four was twelve.
-        node-version: [22.13.0, 24.x, 26.x]
+        node-version: [22.x, 24.x, 26.x]
         os: [ubuntu-latest, macOS-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 
@@ -188,6 +190,61 @@ jobs:
           pnpm verify:types-versions
           pnpm verify:doc-examples
           pnpm verify:doc-links
+
+  consumer-floor:
+    # `engines.node` is a promise about the published artifact, so it is checked against
+    # the published artifact — a real `npm install` of the packed tarball in a CommonJS
+    # project, on the exact floor version.
+    #
+    # The `test` matrix cannot do this. It runs the repository's own toolchain, and every
+    # gate is a `node scripts/*.ts`, which needs Node's type stripping — unflagged only
+    # from 22.18. Pinning the floor there failed the whole matrix on
+    # ERR_UNKNOWN_FILE_EXTENSION for a reason that has nothing to do with the package.
+    # Hence the split: the toolchain runs on modern Node, the artifact is verified on the
+    # floor, and `verify-installed-package.cjs` is plain CommonJS so it can run there.
+    #
+    # A symlinked `node_modules` would not do either: resolution has to run against the
+    # installed manifest — `exports` conditions, the `#platform/*` `imports` map, and the
+    # real directory layout.
+    needs: should-run
+    timeout-minutes: 15
+    name: Consumer floor (Node 22.13)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26 to build
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Build and pack
+        run: |
+          pnpm build
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+
+      - name: Use Node.js 22.13.0 — the engines.node floor
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Install the tarball into a CommonJS project and require every subpath
+        run: |
+          node -v
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          # No "type" field: this is a CommonJS project, which is the case under test.
+          echo '{"name":"consumer","version":"1.0.0","private":true}' > package.json
+          npm install --no-fund --no-audit "$RUNNER_TEMP"/documonster-*.tgz
+          node "$GITHUB_WORKSPACE/scripts/verify-installed-package.cjs" .
 
   packages:
     # Workspace satellite packages (packages/*). Separate from the `lint` job

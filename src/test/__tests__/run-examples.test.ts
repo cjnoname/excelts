@@ -316,12 +316,17 @@ describe("runner failure reporting", () => {
   });
 
   it("times out a hanging example rather than blocking forever", () => {
-    // Must keep the event loop alive: `new Promise(() => {})` alone lets Node
-    // exit cleanly with status 0, which would test nothing.
-    file(
-      "src/modules/excel/examples/hang.ts",
-      "await new Promise(resolve => setTimeout(resolve, 60_000));\n"
-    );
+    // Must keep the event loop alive: `new Promise(() => {})` alone lets Node exit
+    // cleanly with status 0, which would test nothing. A pending timer does it.
+    //
+    // Deliberately *not* a top-level await, which is what this used to be. That coupled the
+    // fixture to whether the transform's target supports TLA — a question with nothing to do
+    // with timing out — and the answer differed by platform: it transformed on macOS and
+    // failed on Windows with "Top-level await is not available in the configured target
+    // environment", so the example errored instead of hanging and the timeout path went
+    // untested. It is also the one construct the package now forbids outright, since
+    // `require(esm)` throws on it (see `verify:cjs`).
+    file("src/modules/excel/examples/hang.ts", "setTimeout(() => {}, 60_000);\n");
 
     const result = run(["--filter", "hang", "--timeout", "1"]);
     expect(result.code).toBe(1);

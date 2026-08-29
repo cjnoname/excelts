@@ -553,6 +553,15 @@ has no need for it.
 The whole matrix was measured against a real `npm install` of the packed tarball, not a
 symlinked `node_modules`: all 19 subpaths `require()`d, destructured and executed on
 22.12.0 / 22.13.0 / 22.22.1 / 24.16.0 / 26.8.1 and on Bun 1.4, plus ESM `import` on each.
+`pnpm verify:install` is that check, and the `Consumer floor` CI job runs it on 22.13.0.
+
+**Two floors, and conflating them breaks CI.** `engines.node` (>=22.13) is what a _consumer_
+needs; the _toolchain_ needs >=22.18, because every gate is a `node scripts/*.ts` and Node's
+type stripping is unflagged only from 22.18 — 22.17.1 still throws
+`ERR_UNKNOWN_FILE_EXTENSION`. Pinning the consumer floor in the `test` matrix therefore failed
+all nine jobs for a reason unrelated to the package. So the `test` matrix runs `22.x`, and the
+floor is verified where it can be: against the installed artifact, by the one script here
+written in plain CommonJS (`scripts/verify-installed-package.cjs`) so that it runs there at all.
 
 One methodological trap is worth recording, because it produced a wrong "verified" reading
 first time round: the `ExperimentalWarning` goes through `process.emitWarning`, which defers
