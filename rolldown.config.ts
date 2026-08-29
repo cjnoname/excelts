@@ -40,6 +40,24 @@ const footer = `}).call(globalThis);`;
 // so CDN consumers load only the script(s) they need — there is no
 // whole-family bundle. Browser version has NO Node.js polyfills.
 //
+// **One artifact per module, minified, with no sourcemap.** There used to be a
+// second, unminified copy of each bundle plus a sourcemap for it — 32 of the 36 MB
+// this directory occupied, and every byte of it published to npm, where it was 55%
+// of what an `npm install` downloaded. Neither had a consumer:
+//
+//   - the sourcemap mapped the *unminified* file, which nobody loads; the minified
+//     one was emitted with `sourcemap: false`, so the file people actually run had
+//     no map at all. Attaching a map to the readable artifact and withholding it
+//     from the unreadable one is the wrong way round, and `.npmignore` had already
+//     tried to stop the maps shipping — ineffectively, because a `files` allowlist
+//     supersedes it.
+//   - the unminified bundle had no test loading it (`src/test/browser/load-iife.ts`
+//     asks for `.min.js`) and no document naming it.
+//
+// Readable code is not this build's job: `dist/esm` ships the whole tree
+// unminified with declarations beside it, which is a better artifact for reading
+// than a 3.5 MB single-file bundle.
+//
 // The table itself lives in `scripts/lib/iife-bundles.ts` so the documentation
 // gate can read it without loading the bundler; `input` points at each module's
 // browser entry when it has one, else its Node entry (pure modules resolve
@@ -70,7 +88,7 @@ const common = (input: string) => ({
 });
 
 export default defineConfig(
-  IIFE_BUNDLES.flatMap(({ global, file, input }, i) => {
+  IIFE_BUNDLES.map(({ global, file, input }, i) => {
     const analyzePlugins =
       analyze && i === 0
         ? [
@@ -83,38 +101,21 @@ export default defineConfig(
             })
           ]
         : [];
-    return [
-      {
-        ...common(input),
-        output: {
-          dir: "./dist/iife",
-          format: "iife" as const,
-          name: `Documonster.${global}`,
-          extend: true,
-          sourcemap: true,
-          banner,
-          footer,
-          exports: "named" as const,
-          entryFileNames: `documonster.${file}.iife.js`
-        },
-        plugins: [...common(input).plugins, copyLicensePlugin, ...analyzePlugins]
+    return {
+      ...common(input),
+      output: {
+        dir: "./dist/iife",
+        format: "iife" as const,
+        name: `Documonster.${global}`,
+        extend: true,
+        sourcemap: false,
+        banner,
+        footer,
+        exports: "named" as const,
+        minify: true,
+        entryFileNames: `documonster.${file}.iife.min.js`
       },
-      {
-        ...common(input),
-        output: {
-          dir: "./dist/iife",
-          format: "iife" as const,
-          name: `Documonster.${global}`,
-          extend: true,
-          sourcemap: false,
-          banner,
-          footer,
-          exports: "named" as const,
-          minify: true,
-          entryFileNames: `documonster.${file}.iife.min.js`
-        },
-        plugins: [...common(input).plugins, copyLicensePlugin]
-      }
-    ];
+      plugins: [...common(input).plugins, copyLicensePlugin, ...analyzePlugins]
+    };
   })
 );

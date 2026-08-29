@@ -9,8 +9,9 @@
  * `/System/Library/Fonts/Supplemental`, `msyh.ttc`, `PingFang SC` and several
  * hundred more names that no browser can act on. A runtime guard cannot remove
  * them, because a bundler has to keep any string the module might reach; only a
- * separate module can, and `scripts/fix-browser-imports.ts` swaps this one in for
- * every relative import of its sibling.
+ * separate module can. `scripts/link-platform-variants.ts` routes every import of the
+ * sibling through `#platform/modules/pdf/font/system-fonts`, and the manifest's
+ * `imports` map selects this file under the `browser` condition.
  *
  * A browser consumer therefore falls back exactly as it did before — Type1 for
  * WinAnsi text and Type3 for the rest, with `onWarning` reporting the code points

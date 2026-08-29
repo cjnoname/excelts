@@ -651,7 +651,7 @@ function normalizePath(filePath: string): string {
  * leaves in **un-minified** output:
  *
  *   esbuild   `// dist/esm/modules/excel/cell.js`
- *   rolldown  `//#region dist/browser/modules/excel/cell.js`
+ *   rolldown  `//#region dist/esm/modules/excel/cell.js`
  *   rspack    `// CONCATENATED MODULE: ./dist/esm/modules/excel/cell.js`
  *
  * This is the ground-truth tree-shaking signal: a module that the bundler

@@ -73,9 +73,10 @@
  * is about existence and not about which of the two a name is. A member is probed in both
  * forms for the same reason.
  *
- * The Node (`import`) condition is the one resolved. The browser condition deliberately
- * omits Node-only surfaces (file-path IO), so an example demonstrating one of those is
- * correct rather than broken, and checking both conditions would report a lie nobody told.
+ * The unconditional (`types`) surface is the one resolved — the Node one, since the package
+ * is ESM-only and `browser` is the only condition that narrows it. The browser condition
+ * deliberately omits Node-only surfaces (file-path IO), so an example demonstrating one of
+ * those is correct rather than broken, and checking both would report a lie nobody told.
  *
  * An import in a shape this parser cannot read — a namespace import, a default import — is
  * **reported rather than skipped**. A gate with a silent hole is worse than no gate: the
@@ -429,16 +430,29 @@ export function collectDocImports(root: string): {
  */
 export function entryPaths(root: string): Record<string, string[]> {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as {
-    exports?: Record<string, { import?: { types?: string } }>;
+    exports?: Record<string, { types?: string; import?: { types?: string } }>;
   };
   const paths: Record<string, string[]> = {};
   for (const [key, entry] of Object.entries(manifest.exports ?? {})) {
     if (key === "./package.json") {
       continue;
     }
-    const types = entry?.import?.types;
+    // `types` at the top level is the current shape; `import.types` was the shape while a
+    // `require` condition existed beside it.
+    //
+    // A subpath whose declaration cannot be found is **reported**, not skipped. Skipping it
+    // removes the specifier from the allowed set, so every documented import from it is
+    // then blamed on the *document* — "which the exports map does not publish" — when the
+    // cause is a manifest shape this script cannot read. Collapsing the manifest to
+    // `{ browser, types, default }` produced exactly that: 556 accusations against the
+    // READMEs and none against the reader.
+    const types = entry?.types ?? entry?.import?.types;
     if (typeof types !== "string") {
-      continue;
+      throw new Error(
+        `exports["${key}"] names no "types" declaration this script can read. The condition ` +
+          "shape changed; update entryPaths() rather than letting every documented import " +
+          "from this subpath be reported as unpublished."
+      );
     }
     // `paths` targets carry no extension, and must be absolute because the generated
     // project lives outside the repository.

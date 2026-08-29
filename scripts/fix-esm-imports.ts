@@ -16,19 +16,14 @@ import { relPosix, toPosixPath } from "./lib/paths.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 
-function readArg(name: string): string | null {
-  const idx = process.argv.indexOf(name);
-  return idx === -1 ? null : (process.argv[idx + 1] ?? null);
-}
-
-function resolveDirArg(value: string | null): string | null {
-  if (!value || typeof value !== "string") return null;
-  return path.isAbsolute(value) ? value : path.resolve(projectRoot, value);
-}
-
-const esmDir =
-  resolveDirArg(readArg("--dist") ?? readArg("--esm")) ?? path.join(projectRoot, "dist/esm");
-const typesDir = resolveDirArg(readArg("--types")) ?? path.join(projectRoot, "dist/types");
+// The two trees this runs on. It used to take `--dist` / `--esm` / `--types` so the same
+// script could also process `dist/browser`; that target is gone — the browser variant is
+// resolved through `#platform/*` now, not compiled a second time — and `build:esm` is the
+// only caller left, passing nothing. The flags were also a trap: they resolved a relative
+// value against the *repository* root, so `--dist dist/esm` from any other directory
+// silently retargeted the real tree.
+const esmDir = path.join(projectRoot, "dist/esm");
+const typesDir = path.join(projectRoot, "dist/types");
 
 let filesModified = 0;
 

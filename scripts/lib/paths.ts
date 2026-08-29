@@ -18,8 +18,7 @@
  *
  * Lives under `scripts/` rather than `src/utils/`: these are build-time tools, and
  * putting them in the published tree would make the scripts that audit `src/` depend
- * on it, and would emit a script-only helper into `dist/esm`, `dist/cjs` and
- * `dist/browser`.
+ * on it, and would emit a script-only helper into `dist/esm` and `dist/cjs`.
  */
 
 import path from "node:path";

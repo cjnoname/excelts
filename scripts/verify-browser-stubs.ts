@@ -1,11 +1,16 @@
 /**
- * The browser build must never reference a Node-only module that has a stub.
+ * The published tree must never reach a Node-only module that has a browser variant
+ * except through a `#platform/*` specifier.
  *
- * A `*.browser.ts` file exists because its sibling cannot work — or should not
- * ship — in a browser, and `scripts/fix-browser-imports.ts` redirects every
- * relative import to it. This checks that the redirect actually happened
- * everywhere, which is the difference between a stub that works and a stub that is
- * merely present.
+ * A `*.browser.ts` file exists because its sibling cannot work — or should not ship —
+ * in a browser. Selecting between them is a *resolution* concern: `link-platform-variants.ts`
+ * rewrites every such import to `#platform/<path>`, and the manifest's `imports` field maps
+ * that to the Node or browser file per condition. A relative specifier left behind is a
+ * silent hole: the browser condition cannot fire for it, so a browser consumer receives the
+ * Node module and nothing fails.
+ *
+ * That is what this checks, and why it checks the artifact rather than the source: the source
+ * deliberately imports the Node name (`@utils/fs`), and the rewrite happens on the way out.
  *
  * The concrete failure that prompted it: `pdf/font/system-fonts.ts` and
  * `draw/raster/system-raster-font.ts` exist only to read font files off a disk, and
@@ -19,15 +24,39 @@
  * Why not assert on the module graph in `treeshake-verify`: those scenarios inspect
  * the entry chunk, so a module that lands in a lazily-split chunk passes while
  * still shipping. Why not grep the output for `/System/Library/Fonts`: that only
- * catches the tables that exist today. The invariant is structural — a browser file
+ * catches the tables that exist today. The invariant is structural — a shipped file
  * importing a Node module that has a browser variant — so it is checked as such,
  * and covers `fs`, `crypto`, `stream` and every other pair as a side effect.
+ *
+ * Declarations are checked alongside the JavaScript. Skipping them once left the
+ * browser type graph pointing at Node variants (csv's parser typed `Transform` from
+ * the Node `stream` entry while the JS loaded the browser one), so browser consumers
+ * needed `@types/node`. `pnpm build:verify:browser` guards the same property from the
+ * other direction, by type-checking the browser declarations with `--customConditions
+ * browser` and no Node types available.
  */
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = process.cwd();
-const DIST = path.resolve(ROOT, "dist/browser");
+/**
+ * `--root <dir>` retargets the whole check — both trees and the policy list's source
+ * paths. It exists for `src/test/__tests__/platform-variants.test.ts`, following
+ * `verify-doc-links.ts` and `verify-layers.ts`: a gate that cannot be pointed at a tree
+ * built to break it on purpose has never been shown to fire.
+ */
+function rootFromArgv(): string {
+  const flag = process.argv.indexOf("--root");
+  return flag === -1 ? process.cwd() : path.resolve(process.argv[flag + 1]);
+}
+
+const ROOT = rootFromArgv();
+
+/**
+ * The published trees. Both must be free of un-linked platform imports: the JavaScript
+ * because it is what runs, the declarations because they are what a consumer's compiler
+ * follows.
+ */
+const TREES = [path.resolve(ROOT, "dist/esm"), path.resolve(ROOT, "dist/types")];
 
 /**
  * Modules that **must** keep a browser stub, and why.
@@ -52,8 +81,12 @@ const REQUIRE_BROWSER_STUB: readonly { readonly module: string; readonly why: st
   }
 ];
 
-if (!fs.existsSync(DIST)) {
-  console.error("verify:browser-stubs — dist/browser is missing; run `pnpm build:browser` first.");
+const missingTrees = TREES.filter(tree => !fs.existsSync(tree));
+if (missingTrees.length > 0) {
+  console.error(
+    `verify:browser-stubs — ${missingTrees.map(t => path.relative(ROOT, t)).join(", ")} ` +
+      "is missing; run `pnpm build:esm` first."
+  );
   process.exit(1);
 }
 
@@ -70,21 +103,20 @@ const violations: Violation[] = [];
 let filesScanned = 0;
 let stubsFound = 0;
 
-function walk(dir: string): void {
+function walk(tree: string, dir: string): void {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walk(full);
+      walk(tree, full);
       continue;
     }
-    if (entry.name.endsWith(".browser.js")) {
+    if (entry.name.endsWith(".browser.js") || entry.name.endsWith(".browser.d.ts")) {
       stubsFound++;
     }
-    // `.d.ts` too: the browser build's type graph pointed at Node variants once,
-    // which made browser consumers need `@types/node`.
     if (!entry.name.endsWith(".js") && !entry.name.endsWith(".d.ts")) {
       continue;
     }
+    const siblingExtension = entry.name.endsWith(".d.ts") ? ".d.ts" : ".js";
     filesScanned++;
     const text = fs.readFileSync(full, "utf-8");
     SPECIFIER.lastIndex = 0;
@@ -92,22 +124,29 @@ function walk(dir: string): void {
     while ((match = SPECIFIER.exec(text)) !== null) {
       const specifier = match[1];
       if (!specifier.startsWith(".")) {
-        continue; // a bare specifier is resolved by the consumer, not by us
+        // A `#platform/*` specifier is the linked form and the whole point; any other
+        // bare specifier is resolved by the consumer, not by us.
+        continue;
       }
       const resolved = path.resolve(path.dirname(full), specifier);
-      const stub = resolved.replace(/\.js$/u, ".browser.js");
-      if (stub !== resolved && fs.existsSync(stub)) {
+      const base = resolved.replace(/\.js$/u, "");
+      if (base === resolved) {
+        continue;
+      }
+      if (fs.existsSync(`${base}.browser${siblingExtension}`)) {
         violations.push({
-          file: path.relative(DIST, full),
+          file: path.relative(ROOT, full),
           specifier,
-          shouldBe: specifier.replace(/\.js$/u, ".browser.js")
+          shouldBe: `#platform/${path.relative(tree, base).split(path.sep).join("/")}`
         });
       }
     }
   }
 }
 
-walk(DIST);
+for (const tree of TREES) {
+  walk(tree, tree);
+}
 
 // Policy: the stub has to exist in the first place.
 const missingStubs = REQUIRE_BROWSER_STUB.filter(
@@ -125,16 +164,20 @@ if (missingStubs.length > 0) {
 
 if (violations.length > 0) {
   console.error(
-    `✗ verify:browser-stubs — ${violations.length} import(s) reach a Node-only module that has a browser stub:`
+    `✗ verify:browser-stubs — ${violations.length} import(s) reach a Node-only module that ` +
+      "has a browser variant without going through `#platform/*`, so the browser condition " +
+      "cannot select the variant:"
   );
   for (const { file, specifier, shouldBe } of [...new Set(violations.map(v => JSON.stringify(v)))]
     .map(v => JSON.parse(v) as Violation)
     .slice(0, 40)) {
-    console.error(`  ${file}\n    ${specifier} → should resolve to ${shouldBe}`);
+    console.error(`  ${file}\n    ${specifier} → should be ${shouldBe}`);
   }
+  console.error("\nDid `scripts/link-platform-variants.ts` run after `fix-esm-imports.ts`?");
   process.exit(1);
 }
 
 console.log(
-  `✓ verify:browser-stubs — ${filesScanned} browser file(s) checked against ${stubsFound} stub(s); none reach a Node-only sibling.`
+  `✓ verify:browser-stubs — ${filesScanned} published file(s) checked against ${stubsFound} ` +
+    "variant(s); every platform import is linked through `#platform/*`."
 );

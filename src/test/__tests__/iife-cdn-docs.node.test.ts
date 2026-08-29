@@ -67,8 +67,14 @@ const { version } = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), 
 const URL_PATTERN =
   /https?:\/\/(?:unpkg\.com|cdn\.jsdelivr\.net\/npm)\/documonster(@[^/]*)?\/dist\/iife\/([\w.@-]+\.js)/g;
 
-/** `documonster.<module>.iife.js`, optionally minified — what `rolldown.config.ts` emits. */
-const BUNDLE_FILENAME = /^documonster\.([\w-]+)\.iife(?:\.min)?\.js$/;
+/**
+ * `documonster.<module>.iife.min.js` — the only artifact `rolldown.config.ts` emits.
+ *
+ * `.min` is required rather than optional. The unminified twin and its sourcemap were
+ * removed because nothing loaded them, so a document naming `documonster.excel.iife.js`
+ * now describes a 404.
+ */
+const BUNDLE_FILENAME = /^documonster\.([\w-]+)\.iife\.min\.js$/;
 
 /**
  * A snippet destructuring the root global. The bundles install
@@ -147,7 +153,7 @@ describe("documented IIFE CDN URLs", () => {
       expect(
         shape,
         `${where} references "${filename}", which is not of the form ` +
-          `documonster.<module>.iife[.min].js`
+          `documonster.<module>.iife.min.js`
       ).not.toBeNull();
       expect(
         names.has(shape?.[1] ?? ""),

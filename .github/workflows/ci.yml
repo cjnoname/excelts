@@ -23,7 +23,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22.x, 24.x, 25.x, 26.x]
+        # 22.13.0 exactly, not 22.x: it is the floor `engines.node` promises, and the
+        # only version where that promise can actually break. `require(esm)` is unflagged
+        # from 22.12 but prints an ExperimentalWarning until 22.13, so the floor was chosen
+        # empirically — and a floor nothing runs is a floor nobody has checked. The newest
+        # 22 behaves like 24/26, which are covered below.
+        #
+        # Odd-numbered lines are deliberately absent. Node 25 never becomes LTS — it is a
+        # six-month staging line for what lands in 26 — so 24 (LTS) and 26 bracket it, and
+        # a failure unique to 25 would be a failure in a runtime no consumer is asked to
+        # use. Three versions across three operating systems is nine jobs; four was twelve.
+        node-version: [22.13.0, 24.x, 26.x]
         os: [ubuntu-latest, macOS-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 

@@ -77,7 +77,9 @@ export function typesVersionsProblems(manifest: TypesVersionsManifest, root?: st
       }
       if (existsSync(path.join(root, file))) {
         const declared = declarationOf(manifest, subpath);
-        if (declared !== undefined && declared !== file) {
+        if (declared === undefined) {
+          problems.push(declarationMissing(subpath));
+        } else if (declared !== file) {
           problems.push(
             `typesVersions["${subpath}"] points at "${file}" but its exports entry ` +
               `declares "${declared}" — the two must name the same declaration.`
@@ -102,23 +104,47 @@ export function typesVersionsProblems(manifest: TypesVersionsManifest, root?: st
 }
 
 /**
- * The declaration an `exports` entry names for the Node import condition.
+ * The declaration an `exports` entry names for a Node consumer.
  *
  * `typesVersions` and `exports` are two answers to the same question — where a
  * consumer's types are — so they have to agree. A rename that updates one and not the
  * other leaves older TypeScript resolving a different file from every other toolchain.
+ *
+ * `types` at the top level is the current shape; `import.types` was the shape while a
+ * `require` condition existed beside it. Reading only the latter is how this half of the
+ * gate went vacuous when the manifest collapsed to `{ browser, types, default }`: every
+ * lookup returned `undefined`, the comparison below was skipped for all 19 subpaths, and
+ * the script still printed `✓`. Hence {@link declarationMissing} — a lookup that finds
+ * nothing is now reported rather than treated as "nothing to compare".
  */
 function declarationOf(manifest: TypesVersionsManifest, subpath: string): string | undefined {
   const entry = manifest.exports[`./${subpath}`];
   if (typeof entry !== "object" || entry === null) {
     return undefined;
   }
-  const importEntry = (entry as Record<string, unknown>).import;
-  if (typeof importEntry !== "object" || importEntry === null) {
-    return undefined;
+  const record = entry as Record<string, unknown>;
+  const importEntry = record.import;
+  const candidates = [
+    record.types,
+    typeof importEntry === "object" && importEntry !== null
+      ? (importEntry as Record<string, unknown>).types
+      : undefined
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      return candidate.replace(/^\.\//, "");
+    }
   }
-  const types = (importEntry as Record<string, unknown>).types;
-  return typeof types === "string" ? types.replace(/^\.\//, "") : undefined;
+  return undefined;
+}
+
+/** Message for an `exports` entry whose declaration this script cannot locate. */
+function declarationMissing(subpath: string): string {
+  return (
+    `exports["./${subpath}"] names no "types" declaration this script can find — ` +
+    "the condition shape changed, and leaving it unread would make the comparison " +
+    "below pass without comparing anything."
+  );
 }
 
 /** Read the repository's own manifest and report. Exits non-zero on any problem. */
