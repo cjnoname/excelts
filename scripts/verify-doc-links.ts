@@ -44,8 +44,16 @@ interface Link {
 
 function markdownFiles(dir: string): string[] {
   const found: string[] = [];
-  if (!fs.existsSync(dir)) return found;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  // Read the directory and let the read say whether it is there: an `existsSync` guard
+  // in front of it is a check-then-use race, and the only caller that can miss is a
+  // bogus `--root`, which the walk answers with an empty list either way.
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (!SKIP_DIRS.has(entry.name)) found.push(...markdownFiles(full));
@@ -118,7 +126,7 @@ function linksIn(file: string, source: string): Link[] {
  * GitHub, while `## do_something` keeps its underscore, so only boundary underscores are
  * stripped rather than every one.
  */
-function stripInlineMarkup(text: string): string {
+function stripInlineMarkupOnce(text: string): string {
   return text
     .replace(/<[^>]*>/g, "")
     .replace(/`+([^`]*)`+/g, "$1")
@@ -127,6 +135,30 @@ function stripInlineMarkup(text: string): string {
     .replace(/~~([^~]*)~~/g, "$1")
     .replace(/\*+([^*]*)\*+/g, "$1")
     .replace(/(^|[\s(])__?([^_]+)__?(?=[\s).,:;!?]|$)/g, "$1$2");
+}
+
+/**
+ * Strip to a fixed point, because a single pass is not idempotent.
+ *
+ * Removing a construct splices what surrounded it together, and the halves can form a
+ * construct that was not there before. A badge — a link whose label is an image, which is
+ * what `linksIn` allows one level of nesting for — is the case that bites:
+ * `[![](img.svg)](https://ci.example)` becomes `![](https://ci.example)` after one pass, so
+ * the destination survives into the text and `httpsciexample` lands in the slug — characters
+ * the heading does not contain. A second pass removes what is left.
+ *
+ * The loop terminates: every rewrite that changes the string deletes at least two
+ * delimiter characters, so the length strictly decreases and the bound below can never be
+ * the thing that stops it.
+ */
+function stripInlineMarkup(text: string): string {
+  let current = text;
+  for (let pass = 0; pass <= text.length; pass += 1) {
+    const next = stripInlineMarkupOnce(current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
 }
 
 /**
@@ -189,6 +221,29 @@ function decode(value: string): string | undefined {
   }
 }
 
+type ReadResult = { readonly source: string } | { readonly failure: string };
+
+/**
+ * Read a Markdown target, and let the read say what is wrong with it.
+ *
+ * Deliberately not preceded by an existence check: `existsSync` followed by `readFileSync`
+ * is a time-of-check/time-of-use race — between the two calls the path can be replaced by
+ * a directory or removed, and the gate then crashes with a raw `ENOENT` instead of
+ * reporting a broken link. The error code carries everything the check did and more:
+ * `EISDIR` is the `foo.md/` directory case that a separate `statSync(…).isFile()` was
+ * there to catch.
+ */
+function readMarkdown(target: string): ReadResult {
+  try {
+    return { source: fs.readFileSync(target, "utf8") };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { failure: "does not exist" };
+    if (code === "EISDIR") return { failure: "is a directory, not a Markdown file" };
+    return { failure: `could not be read (${code ?? String(error)})` };
+  }
+}
+
 function main(): void {
   const files = markdownFiles(ROOT);
   const sourceByFile = new Map(files.map(file => [file, fs.readFileSync(file, "utf8")]));
@@ -220,20 +275,31 @@ function main(): void {
         continue;
       }
       const target = decodedPath === "" ? file : path.resolve(path.dirname(file), decodedPath);
-      if (!fs.existsSync(target)) {
-        problems.push(`${link.file}:${link.line} — local target "${rawPath}" does not exist.`);
-        continue;
-      }
-      if (decodedFragment === "") continue;
-      if (!target.endsWith(".md") || !fs.statSync(target).isFile()) {
-        problems.push(
-          `${link.file}:${link.line} — "${raw}" has a fragment on a non-Markdown target.`
-        );
+      if (decodedFragment === "" || !target.endsWith(".md")) {
+        // Existence is the whole question here — a directory, an image, a link with no
+        // fragment — and nothing else touches the path afterwards, so this `statSync` is
+        // the use rather than a check standing in front of one.
+        if (fs.statSync(target, { throwIfNoEntry: false }) === undefined) {
+          problems.push(`${link.file}:${link.line} — local target "${rawPath}" does not exist.`);
+        } else if (decodedFragment !== "") {
+          problems.push(
+            `${link.file}:${link.line} — "${raw}" has a fragment on a non-Markdown target.`
+          );
+        }
         continue;
       }
       let targetAnchors = anchorCache.get(target);
       if (!targetAnchors) {
-        targetAnchors = anchors(sourceByFile.get(target) ?? fs.readFileSync(target, "utf8"));
+        const cached = sourceByFile.get(target);
+        // A Markdown target outside the walk — a skipped directory, or a file added since
+        // it ran. The read is the only file-system call on this path, so a target that
+        // disappears is reported rather than thrown.
+        const read: ReadResult = cached === undefined ? readMarkdown(target) : { source: cached };
+        if (!("source" in read)) {
+          problems.push(`${link.file}:${link.line} — local target "${rawPath}" ${read.failure}.`);
+          continue;
+        }
+        targetAnchors = anchors(read.source);
         anchorCache.set(target, targetAnchors);
       }
       if (!targetAnchors.has(decodedFragment.toLowerCase())) {

@@ -104,6 +104,24 @@ describe("the local Markdown link gate", () => {
     expect(result.code).toBe(1);
     expect(result.output).toContain("malformed percent-encoding");
   });
+
+  it("fails a fragment on a target that cannot have headings", () => {
+    file("README.md", "[bad](assets/pixel.png#section)\n");
+    file("assets/pixel.png", "not actually decoded");
+    const result = run();
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("has a fragment on a non-Markdown target");
+  });
+
+  it("fails a directory that is named like a Markdown file", () => {
+    // The anchors of a `.md` target come from reading it, so the read is what reports this
+    // — there is no `statSync().isFile()` standing in front of it to race with.
+    file("README.md", "[bad](docs/notes.md#section)\n");
+    mkdirSync(path.join(root, "docs/notes.md"), { recursive: true });
+    const result = run();
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('local target "docs/notes.md" is a directory');
+  });
 });
 
 /**
@@ -147,14 +165,23 @@ describe("the heading slug rule", () => {
     ["keeps CJK letters and drops CJK punctuation", "渲染范围（预览）", "渲染范围预览"],
     ["keeps a hyphen as written", "Zero-Dependency Engine", "zero-dependency-engine"],
     ["ignores a trailing closing sequence", "Options ##", "options"],
-    ["strips inline HTML", "A <em>b</em> c", "a-b-c"]
+    ["strips inline HTML", "A <em>b</em> c", "a-b-c"],
+    // A badge is a link wrapping an image, so stripping it needs two passes: one pass
+    // leaves `![](https://ci.example)`, whose destination would slug to
+    // `httpsciexample-status`. The image contributes no text, hence the leading hyphen.
+    [
+      "strips a badge, which nests two constructs",
+      "[![](img.svg)](https://ci.example) Status",
+      "-status"
+    ]
   ];
 
   it.each(cases)("%s", (_description, heading, anchor) => {
     file("README.md", `## ${heading}\n\n[link](#${anchor})\n`);
-    // One case embeds a link in the heading; the gate checks that too, so the target has
-    // to exist for the slug assertion to be the only thing under test.
+    // Two cases embed a link in the heading; the gate checks those too, so their targets
+    // have to exist for the slug assertion to be the only thing under test.
     file("docs/g.md", "# Guide\n");
+    file("img.svg", "<svg/>\n");
     const result = run();
     expect(result.output).not.toContain("does not exist");
     expect(result.code).toBe(0);

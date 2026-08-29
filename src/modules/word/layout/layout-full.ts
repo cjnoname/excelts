@@ -3484,6 +3484,23 @@ function gluedTailLength(placed: readonly WrapAtom[], next: WrapAtom): number {
 }
 
 /**
+ * The width `placed` would have left after giving back its last `count` atoms.
+ *
+ * Both wrappers use this as the test for whether a retreat is worth making: a
+ * retreat that empties the line has not moved a cluster down, it has produced a
+ * blank line and left the cluster to be broken anyway. The remaining width is
+ * only ever read as that predicate — the closing line takes its width from the
+ * slot, not from the atoms — so it is computed here rather than written back.
+ */
+function widthWithoutTail(placed: readonly WrapAtom[], count: number, total: number): number {
+  let width = total;
+  for (let i = 0; i < count; i++) {
+    width -= placed[placed.length - 1 - i].width;
+  }
+  return width;
+}
+
+/**
  * Turn a line's atoms back into paragraph segments.
  *
  * Consecutive atoms from the same source segment merge, so a run that arrived
@@ -3647,17 +3664,10 @@ function wrapSegmentsToLinesWithExclusions(
       // The atom overflows. Give back the cluster it belongs to, so the whole
       // cluster moves down together rather than breaking at a run boundary.
       const retreat = gluedTailLength(lineAtoms, atom);
-      if (retreat > 0) {
-        let keptWidth = lineWidth;
-        for (let i = 0; i < retreat; i++) {
-          keptWidth -= lineAtoms[lineAtoms.length - 1 - i].width;
-        }
-        if (keptWidth > 0) {
-          lineAtoms.length -= retreat;
-          cursor -= retreat;
-          lineWidth = keptWidth;
-          break;
-        }
+      if (retreat > 0 && widthWithoutTail(lineAtoms, retreat, lineWidth) > 0) {
+        lineAtoms.length -= retreat;
+        cursor -= retreat;
+        break;
       }
       if (lineWidth > 0) {
         // Something is already on the line — try again on a fresh one.
@@ -3839,19 +3849,12 @@ function wrapSegmentsToLines(
     // It does not fit. Give back the cluster it belongs to, so the whole
     // cluster moves down together rather than breaking at a run boundary.
     const retreat = gluedTailLength(line, atom);
-    if (retreat > 0) {
-      let keptWidth = lineWidth;
-      for (let i = 0; i < retreat; i++) {
-        keptWidth -= line[line.length - 1 - i].width;
-      }
-      if (keptWidth > 0) {
-        line.length -= retreat;
-        index -= retreat;
-        lineWidth = keptWidth;
-        flushLine();
-        openedByWrap = true;
-        continue;
-      }
+    if (retreat > 0 && widthWithoutTail(line, retreat, lineWidth) > 0) {
+      line.length -= retreat;
+      index -= retreat;
+      flushLine();
+      openedByWrap = true;
+      continue;
     }
 
     if (lineWidth > 0) {

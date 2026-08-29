@@ -158,7 +158,16 @@ for (const { name } of declarations) {
     counts.set(name, { prod: 0, test: 0, self: new Map() });
   }
 }
-const WORD = (n: string): RegExp => new RegExp(`\\b${n.replace(/\$/g, "\\$")}\\b`, "g");
+/**
+ * A whole-word matcher for a declared name.
+ *
+ * The name comes from source, so it is escaped in full rather than for the one
+ * metacharacter an identifier may contain: escaping only `$` leaves the pattern
+ * correct by accident, and stops being correct the moment `DECL` is widened to
+ * match a quoted or computed export name.
+ */
+const escapeRegExp = (source: string): string => source.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+const WORD = (n: string): RegExp => new RegExp(`\\b${escapeRegExp(n)}\\b`, "g");
 
 for (const file of files) {
   const text = fs.readFileSync(file, "utf8");
