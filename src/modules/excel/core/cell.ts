@@ -1006,6 +1006,12 @@ class HyperlinkValue {
   set hyperlink(value: string | undefined) {
     this.model.hyperlink = value;
   }
+  get formula(): string | undefined {
+    return (this.model as HyperlinkValueModel & { formula?: string }).formula;
+  }
+  get result(): FormulaResult | undefined {
+    return (this.model as HyperlinkValueModel & { result?: FormulaResult }).result;
+  }
   get type(): ValueType {
     return Types.Hyperlink;
   }

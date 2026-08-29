@@ -1,3 +1,4 @@
+import { Enums } from "@excel/core/enums";
 import type { ImageModel } from "@excel/core/image";
 import type { ConditionalFormattingRule } from "@excel/types";
 import { colCache } from "@excel/utils/col-cache";
@@ -1262,6 +1263,32 @@ class WorkSheetXform extends BaseXform {
       }
       return h;
     }, {});
+    // Comments are stored in a separate part and may legitimately target a
+    // blank cell that the worksheet XML omits entirely. Materialize that cell
+    // before cell reconciliation so the comment has a model object to attach
+    // to instead of disappearing on read.
+    for (const comment of model.comments ?? []) {
+      if (!comment.ref) {
+        continue;
+      }
+      const address = colCache.decodeAddress(comment.ref);
+      let row = model.rows?.find(candidate => candidate.number === address.row);
+      if (!row) {
+        row = { number: address.row, cells: [] };
+        model.rows ??= [];
+        model.rows.push(row);
+        model.rows.sort((left, right) => left.number - right.number);
+      }
+      if (!row.cells.some(cell => cell.address === comment.ref)) {
+        row.cells.push({ address: comment.ref, type: Enums.ValueType.Null });
+        row.cells.sort(
+          (left, right) =>
+            colCache.decodeAddress(left.address).col - colCache.decodeAddress(right.address).col
+        );
+        row.min = row.min === undefined ? address.col : Math.min(row.min, address.col);
+        row.max = row.max === undefined ? address.col : Math.max(row.max, address.col);
+      }
+    }
     options.hyperlinkMap = (model.hyperlinks ?? []).reduce((h, hyperlink) => {
       if (hyperlink.rId) {
         // External link: resolve target from relationship

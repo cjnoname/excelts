@@ -11,6 +11,7 @@ import {
   rowHasValues,
   rowSetBorder,
   rowSetFont,
+  rowSetHidden,
   rowSetOutlineLevel,
   rowValues,
   rowValuesToString
@@ -326,6 +327,8 @@ describe("Row", () => {
 
     const row2 = Worksheet.getRow(sheet, 2);
     expect(rowGetModel(row2)).toBeNull();
+    rowSetHidden(row2, true);
+    expect(rowGetModel(row2)).toMatchObject({ number: 2, hidden: true, cells: [] });
 
     const row3 = Worksheet.getRow(sheet, 3);
     cellSetValue(rowGetCell(row3, 1), 5);

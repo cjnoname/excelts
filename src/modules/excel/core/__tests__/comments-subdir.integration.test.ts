@@ -85,11 +85,49 @@ async function repackToSubdirLayout(buffer: Uint8Array): Promise<Uint8Array> {
   return archive.bytes();
 }
 
+async function omitWorksheetCell(buffer: Uint8Array, address: string): Promise<Uint8Array> {
+  const { extractAll } = await import("@archive/unzip/extract");
+  const entries = await extractAll(buffer);
+  const archive = new ZipArchive({ level: 0, reproducible: true });
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  for (const [name, entry] of entries) {
+    if (name === "xl/worksheets/sheet1.xml") {
+      const escaped = address.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const xml = decoder
+        .decode(entry.data)
+        .replace(new RegExp(`<c\\b[^>]*\\br="${escaped}"[^>]*(?:/>|>[\\s\\S]*?</c>)`), "");
+      archive.add(name, encoder.encode(xml));
+    } else {
+      archive.add(name, entry.data);
+    }
+  }
+  return archive.bytes();
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
 
 describe("Comments subdirectory layout", () => {
+  it("materializes a blank cell referenced only by the comments part", async () => {
+    const source = Workbook.create();
+    const sourceSheet = Workbook.addWorksheet(source, "Sheet1");
+    Cell.setComment(sourceSheet, "C3", {
+      author: "Blank cell author",
+      note: "Comment on an omitted blank cell"
+    });
+    const generated = new Uint8Array(await Workbook.toBuffer(source));
+    const withoutCell = await omitWorksheetCell(generated, "C3");
+
+    const target = Workbook.create();
+    await Workbook.read(target, withoutCell);
+    expect(Cell.getComment(Workbook.getWorksheet(target, "Sheet1")!, "C3")).toEqual({
+      author: "Blank cell author",
+      note: "Comment on an omitted blank cell"
+    });
+  });
+
   it("round-trips comments and authors through flat layout", async () => {
     const buffer = await buildCommentsXlsx();
     const wb = Workbook.create();
