@@ -16,7 +16,7 @@
  * the package entrypoint (not the platform-agnostic Archive namespace); the TAR
  * guards live on the Archive namespace.
  *
- * Usage: npx tsx src/modules/archive/examples/archive-compression-streams.ts
+ * Usage: pnpm example --filter archive-compression-streams
  */
 import { Readable, pipeline } from "node:stream";
 import { promisify } from "node:util";

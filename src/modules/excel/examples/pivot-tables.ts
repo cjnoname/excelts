@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Column, Pivot, Table, Workbook, Worksheet } from "@excel/index";
 /**
  * Pivot Table Examples — 25 variations showcasing all supported features
- * Usage: npx tsx src/modules/excel/examples/pivot-tables.ts
+ * Usage: pnpm example --filter pivot-tables
  */
 
 async function main() {

@@ -13,7 +13,7 @@
  *   Archive.createAbortError, with an AbortController cancelling a streaming
  *   ZipArchive.operation({ signal }) mid-flight.
  *
- * Usage: npx tsx src/modules/archive/examples/archive-encryption-remote-abort.ts
+ * Usage: pnpm example --filter archive-encryption-remote-abort
  * Output: tmp/archive-examples/aes-128.zip, aes-192.zip, aes-256.zip
  */
 import fs from "node:fs";

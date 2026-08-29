@@ -68,7 +68,7 @@ import {
 import type { ValueType } from "@excel/core/enums";
 import type { NoteData } from "@excel/core/note";
 import { getCellStyle } from "@excel/core/workbook-core";
-import { getCell, getSheetWorkbook } from "@excel/core/worksheet-core";
+import { findCell, getCell, getSheetWorkbook } from "@excel/core/worksheet-core";
 import type { WorksheetData } from "@excel/core/worksheet-core";
 import { ExcelError } from "@excel/errors";
 import type {
@@ -713,6 +713,45 @@ export function getFullAddress(ws: Sheet, addr: string | number, col?: number): 
 }
 
 // --- cell handles ---
+
+/**
+ * Look up a cell **without creating it** — `undefined` if the sheet has no cell
+ * at that address.
+ *
+ * Every other reader in this namespace resolves its address through `getCell`,
+ * which *materialises* the row and the cell if they do not exist yet. That is
+ * the right default for writing, but it means `Cell.getValue(ws, "ZZ1000")`
+ * leaves a thousand rows behind and moves `Worksheet.rowCount`. Use `find` when
+ * the question is whether a cell is there at all — probing a sparse sheet,
+ * walking the ghost cells of a spilled dynamic array, or reading a range whose
+ * extent is not known.
+ *
+ * Read the returned handle with {@link view} and write it with the `Stream`
+ * handle operations. Once `find` has proved the cell exists, addressing it again
+ * by `"A1"` is also safe — `getCell` only creates what is missing.
+ *
+ * @example
+ * ```typescript
+ * import { Cell, Workbook } from "documonster/excel";
+ *
+ * const wb = Workbook.create();
+ * const ws = Workbook.addWorksheet(wb, "Sheet1");
+ * const cell = Cell.find(ws, "B7");
+ * const value = cell ? Cell.view(cell).value : null;
+ * ```
+ */
+export function find(ws: Sheet, addr: string): CellData | undefined;
+/** Look up a cell by 1-based (row, col) without creating it. */
+export function find(ws: Sheet, row: number, col: number): CellData | undefined;
+export function find(ws: Sheet, addr: string | number, col?: number): CellData | undefined {
+  // Same `argc` discipline as `target`: which overload was called is decided by
+  // the argument *count*, not by inspecting `col`, so `(ws, 1, 2)` cannot be
+  // mistaken for the address form. The overload signatures are what reject
+  // `(ws, "A1", 99)`; a JavaScript caller that gets past them lands on the
+  // (row, col) path and resolves some other address, exactly as every other
+  // reader in this namespace does.
+  return arguments.length >= 3 ? findCell(ws, addr, col) : findCell(ws, addr);
+}
 
 /**
  * Read a cell **handle** — the `CellData` handed to `Row.eachCell` /

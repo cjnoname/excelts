@@ -93,6 +93,8 @@ describe("documonster/excel namespace surface", () => {
     for (const m of [
       "getValue",
       "setValue",
+      "find",
+      "view",
       "getFont",
       "setFont",
       "setNumFmt",
@@ -104,6 +106,142 @@ describe("documonster/excel namespace surface", () => {
     ]) {
       expect(typeof (Excel.Cell as Record<string, unknown>)[m], `Cell.${m}`).toBe("function");
     }
+  });
+
+  /**
+   * A number format is owned by a cell, a row or a column depending on the sheet,
+   * and a consumer who finds `Cell.setNumFmt` reaches for `Column.setNumFmt`
+   * next. That guess used to fail — `Column` had no facet setter at all and `Row`
+   * was missing this one — so three examples had to reach into `@excel/core` to
+   * format a column.
+   *
+   * Only `setNumFmt` and `setStyle` are asserted, because only those two exist on
+   * all three. The remaining facets go through `setStyle` on a row or column
+   * (`setStyle(ws, col, { font })`), which is both sufficient and a single pass;
+   * per-facet setters for them would be public API with no caller.
+   */
+  it("Cell, Row and Column can all set a number format and a style", () => {
+    // Static property access on the namespace, then a computed member lookup —
+    // indexing `Excel` itself defeats the linter's namespace validation.
+    const surfaces: [string, Record<string, unknown>][] = [
+      ["Cell", Excel.Cell as unknown as Record<string, unknown>],
+      ["Row", Excel.Row as unknown as Record<string, unknown>],
+      ["Column", Excel.Column as unknown as Record<string, unknown>]
+    ];
+    for (const [name, surface] of surfaces) {
+      for (const m of ["setNumFmt", "setStyle"]) {
+        expect(typeof surface[m], `${name}.${m}`).toBe("function");
+      }
+    }
+  });
+
+  it("Column.setNumFmt applies to the column and to cells already in it", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "C1", 1234.5);
+
+    Excel.Column.setNumFmt(ws, "C", "#,##0.00");
+
+    // The facet lands on the column's own style …
+    expect(Excel.Column.getStyle(ws, "C").numFmt).toBe("#,##0.00");
+    // … and propagates to the cell that already existed, which is why this is a
+    // function and not a property assignment.
+    expect(Excel.Cell.getNumFmt(ws, "C1")).toBe("#,##0.00");
+    // … and to cells created afterwards.
+    Excel.Cell.setValue(ws, "C2", 99);
+    expect(Excel.Cell.getNumFmt(ws, "C2")).toBe("#,##0.00");
+  });
+
+  it("Row.setNumFmt applies to the row and to cells already in it", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "A3", 0.25);
+
+    Excel.Row.setNumFmt(ws, 3, "0.00%");
+
+    expect(Excel.Row.getStyle(ws, 3).numFmt).toBe("0.00%");
+    expect(Excel.Cell.getNumFmt(ws, "A3")).toBe("0.00%");
+  });
+
+  /**
+   * Every one of these signatures accepts `| undefined`, so all three must clear.
+   * `Row.*` used to guard with `if (value !== undefined)` and silently keep the
+   * old value — five row setters whose signature said one thing and whose body
+   * did another, with no test on either side of the difference.
+   */
+  it("Cell, Row and Column all clear a facet when passed undefined", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "A1", 1);
+
+    Excel.Cell.setNumFmt(ws, "A1", "0.00");
+    Excel.Cell.setNumFmt(ws, "A1", undefined);
+    expect(Excel.Cell.getNumFmt(ws, "A1")).toBeUndefined();
+
+    Excel.Row.setNumFmt(ws, 2, "0.00");
+    Excel.Row.setNumFmt(ws, 2, undefined);
+    expect(Excel.Row.getStyle(ws, 2).numFmt).toBeUndefined();
+
+    Excel.Column.setNumFmt(ws, "C", "0.00");
+    Excel.Column.setNumFmt(ws, "C", undefined);
+    expect(Excel.Column.getStyle(ws, "C").numFmt).toBeUndefined();
+
+    // The other row facets share the implementation that used to swallow it.
+    Excel.Row.setFont(ws, 4, { bold: true });
+    Excel.Row.setFont(ws, 4, undefined);
+    expect(Excel.Row.getStyle(ws, 4).font).toBeUndefined();
+  });
+
+  it("clearing a row facet also clears it on cells already in the row", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "A5", 1);
+
+    Excel.Row.setNumFmt(ws, 5, "0.00");
+    expect(Excel.Cell.getNumFmt(ws, "A5")).toBe("0.00");
+
+    Excel.Row.setNumFmt(ws, 5, undefined);
+    expect(Excel.Cell.getNumFmt(ws, "A5")).toBeUndefined();
+  });
+
+  it("Cell.find reports absence without materialising the cell", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "A1", "here");
+
+    expect(Excel.Cell.find(ws, "A1")).toBeDefined();
+    expect(Excel.Cell.find(ws, "B50")).toBeUndefined();
+    expect(Excel.Cell.find(ws, 50, 2)).toBeUndefined();
+    // The probe left the sheet alone — the whole point of `find`.
+    expect(Excel.Worksheet.rowCount(ws)).toBe(1);
+
+    // Contrast: every other reader resolves through `getCell`, which creates.
+    Excel.Cell.getValue(ws, "B50");
+    expect(Excel.Worksheet.rowCount(ws)).toBe(50);
+  });
+
+  it("Cell.find hands back a handle readable through Cell.view", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "D4", 7);
+    Excel.Cell.setNumFmt(ws, "D4", "0.00");
+
+    const cell = Excel.Cell.find(ws, "D4")!;
+    expect(Excel.Cell.view(cell).value).toBe(7);
+    // `text` is the value's own string form; the format sits beside it rather
+    // than being applied to it.
+    expect(Excel.Cell.view(cell).text).toBe("7");
+    expect(Excel.Cell.view(cell).numFmt).toBe("0.00");
+  });
+
+  it("Cell.find addresses by (row, col) only when given three arguments", () => {
+    const wb = Excel.Workbook.create();
+    const ws = Excel.Workbook.addWorksheet(wb, "S");
+    Excel.Cell.setValue(ws, "B2", "b2");
+
+    expect(Excel.Cell.find(ws, 2, 2)).toBe(Excel.Cell.find(ws, "B2"));
+    // The 2-arg form must not treat a trailing column as part of the address.
+    expect(Excel.Cell.find(ws, "B2")).toBeDefined();
   });
 
   it("Chart / Table / Pivot / Sparkline / Image creation members exist", () => {

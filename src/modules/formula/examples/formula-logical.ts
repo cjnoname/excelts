@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -54,6 +52,7 @@ Cell.setValue(ws, "E2", { formula: 'CHOOSE(2, "low", "mid", "high")' }); // "mid
 calculateFormulas(wb);
 
 for (const addr of ["B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2", "E1", "E2"]) {
-  const c = getCell(ws, addr);
-  console.log(`${addr}  ${String(cellFormula(c)).padEnd(60)}  = ${JSON.stringify(cellResult(c))}`);
+  console.log(
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(60)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`
+  );
 }

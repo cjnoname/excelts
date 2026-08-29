@@ -1,3 +1,15 @@
+/**
+ * Stream performance benchmark — library primitives vs Node's own `node:stream`.
+ *
+ * A benchmark, not an example: it measures the cost of internal machinery
+ * (`@utils/event-emitter`, the pull-based readers) against the platform's
+ * equivalents. Nothing here is a usage pattern to copy, which is why it lives
+ * beside the other benchmarks rather than under `examples/` — an example that
+ * has to reach into internals is either the wrong file or a missing API, and
+ * this one is the former.
+ *
+ * Run: node --import @oxc-node/core/register benchmark/stream-benchmark.ts
+ */
 import { Readable, Writable, Transform, pipeline } from "stream";
 import { promisify } from "util";
 
@@ -6,7 +18,7 @@ import {
   createTransform,
   createCollector,
   pipeline as myPipeline
-} from "@stream";
+} from "../src/modules/stream/index";
 
 const pipelineAsync = promisify(pipeline);
 
@@ -75,7 +87,7 @@ async function benchmarkWrapped(chunks: Buffer[]): Promise<number> {
 // Benchmark: EventEmitter overhead
 async function benchmarkEventEmitter(): Promise<{ native: number; wrapped: number }> {
   const { EventEmitter } = await import("events");
-  const { EventEmitter: BrowserEmitter } = await import("@utils/event-emitter");
+  const { EventEmitter: BrowserEmitter } = await import("../src/utils/event-emitter");
 
   const EMIT_COUNT = 100000;
 

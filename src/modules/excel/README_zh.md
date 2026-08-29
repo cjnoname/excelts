@@ -136,6 +136,23 @@ Cell.setAlignment(worksheet, "A1", { vertical: "middle", horizontal: "center", w
 Cell.setNumFmt(worksheet, "A1", "$#,##0.00");
 ```
 
+数字格式往往属于整列而不是逐个单元格，所以 `setNumFmt` 在三个层级都有：
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Column.setNumFmt(worksheet, "revenue", "$#,##0.00"); // 可用 key、字母或列号
+Row.setNumFmt(worksheet, 2, "0.00%");
+```
+
+在行或列上设置某个样式面，会同时应用到该行/列**以及其中已存在的单元格**。`Row` 另有
+`setFont` / `setFill` / `setBorder` / `setAlignment`；其余组合走 `setStyle` ——
+一次设置多个样式面时也该用它，因为它只遍历一遍：
+
+```typescript
+Column.setStyle(worksheet, "revenue", { numFmt: "$#,##0.00", alignment: { horizontal: "right" } });
+```
+
 ### 数字格式
 
 ```typescript
@@ -387,6 +404,31 @@ worksheet.pageSetup.printArea = "A1:G20";
 
 // 打印标题（每页重复第 1-2 行）
 worksheet.pageSetup.printTitlesRow = "1:2";
+```
+
+### 分页符
+
+手动分页符，等价于 Excel 的**页面布局 → 分隔符 → 插入分页符**。它影响打印与
+`Pdf.fromExcel`，不影响屏幕上的网格。
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // 第 2 页从第 21 行开始
+Column.addPageBreak(worksheet, "F"); // 下一页从 G 列开始
+```
+
+分页符总是贯穿整个工作表的宽度或高度。`CT_Break` 有 `min`/`max` 属性，理论上可以把
+分页符限制在若干列或若干行的区带内，但这里刻意不暴露：Excel 的界面无法创建这种分页符，
+Excel 写出的文件一律贯穿全幅，而 `Pdf.fromExcel` 只读取分页位置 —— 因此区带是一个
+两边都观察不到的值。
+
+用流式写入器时，你持有的是行**句柄**而不是行号，因此分页符走 `Stream` 面：
+
+```typescript
+import { Stream } from "documonster/excel";
+
+Stream.addRowPageBreak(sheet.getRow(20));
 ```
 
 ### 工作表保护
@@ -1366,6 +1408,27 @@ Row.eachCell(ws, 1, cell => {
   Stream.setCellFont(cell, { bold: true });
 });
 ```
+
+`Cell.find` 是句柄的第四个来源，也是唯一一个**不会创建**所查对象的读取方式：
+
+```typescript
+const cell = Cell.find(ws, "B7"); // CellData | undefined
+const value = cell ? Cell.view(cell).value : null;
+```
+
+其余所有读取方式 —— `Cell.getValue`、`Cell.getFont` 等 —— 都通过 `getCell` 解析地址，
+而它在行与单元格不存在时会把它们**创建出来**。写入时这正是你想要的，但这意味着读取稀疏
+工作表中一个很远的单元格会留下一堆行，并改变 `Worksheet.rowCount`：
+
+```typescript
+Cell.getValue(ws, "A1000"); // 创建了 1000 行
+Worksheet.rowCount(ws); // 1000
+
+Cell.find(ws, "A1000"); // undefined；工作表未被改动
+```
+
+当问题是"这个单元格到底存不存在"时用 `find`。要在不创建任何东西的前提下读取整个区域，
+用 `Range.getValues` / `Worksheet.toAoa`。
 
 公开 API 涉及的每一个类型都以**声明处的名字**从 `documonster/excel` 导出——也就是
 TypeScript 在报错和悬浮提示里显示的那个名字。没有别名要记，也不需要绕路：可以直接

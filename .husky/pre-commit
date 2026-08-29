@@ -1,13 +1,14 @@
 #!/usr/bin/env sh
-# Pre-commit hook: format, lint, and type-check the whole project.
+# Pre-commit hook: format, lint, type-check, and run the examples this commit touches.
 #
 # 1. Check formatting without modifying the working tree or index.
 # 2. Run `pnpm lint` and `pnpm type` in parallel. If either fails, abort
 #    the commit so broken code never lands on a branch.
+# 3. Execute any example this commit adds or edits.
 
 set -e
 
-echo "[pre-commit] 1/3 checking formatting…"
+echo "[pre-commit] 1/4 checking formatting…"
 # Never auto-stage from a hook: doing so converts a partially staged file into
 # a fully staged one (and shell word splitting also breaks filenames with
 # spaces). The hook is a gate, not an editor; run `pnpm format`, inspect, and
@@ -22,7 +23,7 @@ if [ ! -d "dist/types" ]; then
   pnpm -s build:esm
 fi
 
-echo "[pre-commit] 2/3 running lint + type in parallel…"
+echo "[pre-commit] 2/4 running lint + type in parallel…"
 # Reuse the concurrently binary (already a devDependency). Using
 # `pnpm exec` avoids hard-coding the path; both commands run in parallel
 # and the first failure fails the whole step.
@@ -40,10 +41,24 @@ pnpm exec concurrently --raw --kill-others-on-fail \
 # skipping unconditionally would let a type error in packages/* sail through to
 # CI, while requiring it unconditionally would break the hook on a fresh clone.
 if [ -d "dist/types" ]; then
-  echo "[pre-commit] 2b/3 type-checking workspace packages…"
+  echo "[pre-commit] 2b/4 type-checking workspace packages…"
   pnpm -s type:packages
 else
-  echo "[pre-commit] 2b/3 skipping type:packages — no dist/types (run 'pnpm build:esm' to enable)"
+  echo "[pre-commit] 2b/4 skipping type:packages — no dist/types (run 'pnpm build:esm' to enable)"
 fi
 
-echo "[pre-commit] 3/3 done — proceeding with commit."
+# Examples are a public contract — the first thing a consumer copies — so an
+# example that cannot run is a broken one. The full set takes over a minute, too
+# slow for a hook, so this runs only what the commit affects: the examples it
+# edits, plus every example in a directory whose helpers or fixtures it edits. An
+# example broken by a change to the *library* it calls is caught by the `Examples`
+# CI job, which runs all of them.
+#
+# The selection lives in the runner (`--changed`), not here. A shell one-liner in
+# this hook had drifted from the runner's own definition of "example" in three
+# ways at once: it ignored renames, it could not see a nested example directory,
+# and piping newline-separated paths through `xargs` split any path with a space.
+echo "[pre-commit] 3/4 running examples affected by this commit…"
+node scripts/run-examples.ts --changed
+
+echo "[pre-commit] 4/4 done — proceeding with commit."

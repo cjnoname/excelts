@@ -10,7 +10,7 @@
  * ChunkedBuilder consolidates accumulated pieces into chunks once `chunkSize`
  * pieces are buffered, keeping large concatenations cheap.
  *
- * Usage: npx tsx src/modules/stream/examples/09-chunked-builder.ts
+ * Usage: pnpm example --filter 09-chunked-builder
  */
 
 import { ChunkedBuilder, TransactionalChunkedBuilder } from "@stream";

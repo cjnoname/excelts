@@ -18,7 +18,7 @@
  * The DOCX is generated first with the streaming *writer* (mirroring example
  * 22), then read straight back from the in-memory buffer.
  *
- * Usage:   npx tsx src/modules/word/examples/49-streaming-read.ts
+ * Usage:   pnpm example --filter 49-streaming-read
  * Output:  tmp/word-examples/49-streaming-read-source.docx
  */
 import fs from "node:fs";

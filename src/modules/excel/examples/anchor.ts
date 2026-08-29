@@ -13,7 +13,7 @@
  * section uses two anchors as the top-left / bottom-right of a two-cell image
  * anchor via Image.place.
  *
- * Usage:   npx tsx src/modules/excel/examples/anchor.ts
+ * Usage:   pnpm example --filter anchor
  * Output:  tmp/excel-examples/anchor.xlsx
  */
 import fs from "node:fs";

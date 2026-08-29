@@ -18,7 +18,7 @@
  * write the filled copy. Also demonstrates Document.insertContentAt to splice a
  * heading in at a specific body index.
  *
- * Usage:   npx tsx src/modules/word/examples/48-legacy-form-fields.ts
+ * Usage:   pnpm example --filter 48-legacy-form-fields
  * Output:  tmp/word-examples/48-legacy-form-fields.docx
  *          tmp/word-examples/48-legacy-form-fields-filled.docx
  */

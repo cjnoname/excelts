@@ -16,7 +16,7 @@
  *   12. PdfEditor — incremental save
  *   13. PdfEditor — copy pages from other PDFs
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-builder.ts
+ * Run: pnpm example --filter pdf-builder
  */
 
 import fs from "node:fs";

@@ -19,17 +19,14 @@
  *   - Image extraction and binary verification
  *   - Error handling (wrong password, corrupted data)
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-reader-stress.ts
+ * Run: pnpm example --filter pdf-reader-stress
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getWorksheets } from "@excel/core/workbook";
-import { addWorkbookImage } from "@excel/core/workbook-core";
-import { addImage } from "@excel/core/worksheet";
-import { Workbook, Worksheet } from "@excel/index";
+import { Image, Workbook, Worksheet } from "@excel/index";
 
 import { PdfStructureError } from "../errors";
 import { Pdf } from "../index";
@@ -426,8 +423,8 @@ for (let i = 0; i < 150; i++) {
 }
 
 const jpegData = buildJpeg();
-const jpegId = addWorkbookImage(wb, { buffer: Buffer.from(jpegData), extension: "jpeg" });
-addImage(ws5, jpegId, { tl: { col: 0, row: 6 }, ext: { width: 80, height: 60 } });
+const jpegId = Image.add(wb, { buffer: Buffer.from(jpegData), extension: "jpeg" });
+Image.place(ws5, jpegId, { tl: { col: 0, row: 6 }, ext: { width: 80, height: 60 } });
 
 // --- Sheet 6: Symbols & Edge Cases ---
 const ws6 = Workbook.addWorksheet(wb, "Edge Cases");
@@ -497,9 +494,9 @@ for (const q of quarters) {
   }
 }
 
-log(`  Sheets: ${getWorksheets(wb).length}`);
+log(`  Sheets: ${Workbook.getWorksheets(wb).length}`);
 log(
-  `  Cells: ~${getWorksheets(wb).reduce((n, ws) => n + Worksheet.rowCount(ws) * (Worksheet.columnCount(ws) || 0), 0)}`
+  `  Cells: ~${Workbook.getWorksheets(wb).reduce((n, ws) => n + Worksheet.rowCount(ws) * (Worksheet.columnCount(ws) || 0), 0)}`
 );
 
 // =============================================================================

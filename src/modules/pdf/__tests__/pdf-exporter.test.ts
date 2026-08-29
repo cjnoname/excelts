@@ -5,7 +5,7 @@ import {
   cellSetFont,
   cellSetValue
 } from "@excel/core/cell";
-import { rowAddPageBreak, rowSetHidden } from "@excel/core/row";
+import { rowSetHidden } from "@excel/core/row";
 import { addWorkbookImage } from "@excel/core/workbook-core";
 import { addImage, addWatermark, getCell } from "@excel/core/worksheet";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
@@ -1217,7 +1217,7 @@ describe("excelToPdf", () => {
         Cell.setValue(ws, `A${r}`, `Row ${r}`);
       }
       // Break after row 5: rows 1-5 on first page, 6-10 on second
-      rowAddPageBreak(Worksheet.getRow(ws, 5));
+      Row.addPageBreak(ws, 5);
 
       const pdf = await excelToPdf(wb);
       expectValidPdf(pdf);

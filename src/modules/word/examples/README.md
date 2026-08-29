@@ -10,11 +10,15 @@ byte literals.
 
 ```bash
 # Run a single example
-npx tsx src/modules/word/examples/01-basics.ts
+pnpm example --filter 01-basics
 
-# Run all examples (writes everything into tmp/word-examples/)
-npx tsx src/modules/word/examples/index.ts
+# Run every Word example (writes everything into tmp/word-examples/)
+pnpm example --filter word/examples
 ```
+
+`pnpm example` runs the whole tree; `--filter` narrows it by path substring. It
+resolves imports the way the test suite does, which a bare `tsx` invocation does
+not — see `scripts/run-examples.ts`.
 
 Output is written to `tmp/word-examples/`.
 

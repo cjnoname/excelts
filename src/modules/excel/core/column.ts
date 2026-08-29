@@ -172,15 +172,23 @@ export function columnHeaderCount(c: ColumnData): number {
   return columnHeaders(c).length;
 }
 
-export function columnAddPageBreak(c: ColumnData, top?: number, bottom?: number): void {
-  const ws = c.worksheet;
-  const topRow = Math.max(0, (top ?? 0) - 1) || 0;
-  const bottomRow = Math.max(0, (bottom ?? 0) - 1) || 1048575;
-  const pb: ColBreak = { id: c.number, max: bottomRow, man: 1 };
-  if (topRow) {
-    pb.min = topRow;
-  }
-  ws.colBreaks.push(pb);
+/**
+ * The last row index a column break spans, **0-based** — `brk/@max` in
+ * `SpreadsheetML` counts from zero, so Excel's last row (1-based 1048576) is
+ * 1048575 here. Mirrors `LAST_COLUMN_INDEX` in `core/row.ts`.
+ */
+const LAST_ROW_INDEX = 1048575;
+
+/**
+ * Add a manual vertical page break to the **right** of this column, spanning the
+ * full sheet height.
+ *
+ * No band parameters, for the reason given on `rowAddPageBreak`: Excel cannot
+ * author a partial break, never writes one, and the PDF exporter reads only
+ * `brk/@id`.
+ */
+export function columnAddPageBreak(c: ColumnData): void {
+  c.worksheet.colBreaks.push({ id: c.number, max: LAST_ROW_INDEX, man: 1 } satisfies ColBreak);
 }
 
 export function columnNumFmt(c: ColumnData): string | NumFmt | undefined {

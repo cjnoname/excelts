@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -70,6 +68,7 @@ Cell.setValue(ws, "G5", { formula: "COLUMNS(A2:C4)" }); // 3
 calculateFormulas(wb);
 
 for (const addr of ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "G1", "G2", "G3", "G4", "G5"]) {
-  const c = getCell(ws, addr);
-  console.log(`${addr}  ${String(cellFormula(c)).padEnd(48)}  = ${JSON.stringify(cellResult(c))}`);
+  console.log(
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(48)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`
+  );
 }

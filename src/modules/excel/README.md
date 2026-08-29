@@ -147,6 +147,26 @@ Cell.setAlignment(worksheet, "A1", { vertical: "middle", horizontal: "center", w
 Cell.setNumFmt(worksheet, "A1", "$#,##0.00");
 ```
 
+A number format is often owned by the column rather than by each cell, so
+`setNumFmt` exists at all three levels:
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Column.setNumFmt(worksheet, "revenue", "$#,##0.00"); // by key, letter or number
+Row.setNumFmt(worksheet, 2, "0.00%");
+```
+
+Setting a facet on a row or column applies it to the row/column **and** to the
+cells already in it. `Row` also has `setFont` / `setFill` / `setBorder` /
+`setAlignment`; every other combination goes through `setStyle`, which is also
+the better call for several facets at once — it makes a single pass for all of
+them:
+
+```typescript
+Column.setStyle(worksheet, "revenue", { numFmt: "$#,##0.00", alignment: { horizontal: "right" } });
+```
+
 ### Number Formats
 
 ```typescript
@@ -405,6 +425,33 @@ worksheet.pageSetup.printArea = "A1:G20";
 
 // Print titles (repeat rows 1-2 on every page)
 worksheet.pageSetup.printTitlesRow = "1:2";
+```
+
+### Page Breaks
+
+Manual page breaks, the equivalent of Excel's **Page Layout → Breaks → Insert
+Page Break**. They affect printing and `Pdf.fromExcel`, not the on-screen grid.
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // page 2 starts at row 21
+Column.addPageBreak(worksheet, "F"); // the next page starts at column G
+```
+
+A break always spans the full width or height of the sheet. `CT_Break` has
+`min`/`max` attributes that could narrow one to a band of columns or rows, and
+they are deliberately not exposed: Excel's UI cannot author such a break, every
+file Excel writes spans the full extent, and `Pdf.fromExcel` reads only the break
+position — so a band would be a value nothing on either side can observe.
+
+When writing with the streaming writer you hold a row _handle_ rather than a row
+number, so the break goes through the `Stream` surface:
+
+```typescript
+import { Stream } from "documonster/excel";
+
+Stream.addRowPageBreak(sheet.getRow(20));
 ```
 
 ### Sheet Protection
@@ -1389,6 +1436,29 @@ Row.eachCell(ws, 1, cell => {
   Stream.setCellFont(cell, { bold: true });
 });
 ```
+
+`Cell.find` is the fourth source of a handle, and the only reader that does not
+create what it looks at:
+
+```typescript
+const cell = Cell.find(ws, "B7"); // CellData | undefined
+const value = cell ? Cell.view(cell).value : null;
+```
+
+Every other reader — `Cell.getValue`, `Cell.getFont`, … — resolves its address
+through `getCell`, which **materialises** the row and the cell when they do not
+exist. That is what you want when writing, but it means reading a cell far out in
+a sparse sheet leaves rows behind and moves `Worksheet.rowCount`:
+
+```typescript
+Cell.getValue(ws, "A1000"); // creates 1000 rows
+Worksheet.rowCount(ws); // 1000
+
+Cell.find(ws, "A1000"); // undefined; sheet untouched
+```
+
+Use `find` when the question is whether a cell is there at all. To read a whole
+region without materialising anything, use `Range.getValues` / `Worksheet.toAoa`.
 
 Every type the public API speaks is exported from `documonster/excel` under its
 **declared** name — the same name TypeScript prints in errors and hovers. There

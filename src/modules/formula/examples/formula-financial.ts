@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -54,6 +52,7 @@ Cell.setValue(ws, "E3", { formula: "SYD(10000, 1000, 5, 1)" }); // sum-of-years
 calculateFormulas(wb);
 
 for (const addr of ["B1", "B2", "B3", "B4", "B5", "D1", "D2", "D3", "D4", "E1", "E2", "E3"]) {
-  const c = getCell(ws, addr);
-  console.log(`${addr}  ${String(cellFormula(c)).padEnd(36)}  = ${JSON.stringify(cellResult(c))}`);
+  console.log(
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(36)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`
+  );
 }

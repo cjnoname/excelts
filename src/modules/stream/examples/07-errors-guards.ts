@@ -8,7 +8,7 @@
  * - isStream / isReadable / isWritable / isTransform / isDuplex —
  *   runtime type guards for stream shapes
  *
- * Usage: npx tsx src/modules/stream/examples/07-errors-guards.ts
+ * Usage: pnpm example --filter 07-errors-guards
  */
 
 import {

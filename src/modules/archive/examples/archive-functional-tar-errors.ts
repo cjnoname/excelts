@@ -9,7 +9,7 @@
  * - Error class handling: deliberately trigger and catch ZipParseError,
  *   Crc32MismatchError, and PasswordRequiredError.
  *
- * Usage: npx tsx src/modules/archive/examples/archive-functional-tar-errors.ts
+ * Usage: pnpm example --filter archive-functional-tar-errors
  * Output: tmp/archive-examples/functional.tar, functional.tar.gz
  */
 import fs from "node:fs";

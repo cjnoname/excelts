@@ -24,6 +24,7 @@ export {
 // --- streaming row handle operations (operate on a `RowData`) ---
 export {
   rowValues,
+  rowAddPageBreak as addRowPageBreak,
   rowSetFont as setRowFont,
   rowSetFill as setRowFill,
   rowSetBorder as setRowBorder,

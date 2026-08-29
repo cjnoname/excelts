@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -69,11 +67,9 @@ calculateFormulas(wb);
 for (const row of [1, 2, 3, 4, 5]) {
   for (const col of ["D", "E", "F", "G", "H", "I"]) {
     const addr = `${col}${row}`;
-    const c = getCell(ws, addr);
-    if (cellFormula(c)) {
-      console.log(
-        `${addr}  ${String(cellFormula(c)).padEnd(40)}  = ${JSON.stringify(cellResult(c))}`
-      );
+    const formula = Cell.getFormula(ws, addr);
+    if (formula) {
+      console.log(`${addr}  ${formula.padEnd(40)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`);
     }
   }
 }

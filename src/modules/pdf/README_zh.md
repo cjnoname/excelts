@@ -830,8 +830,14 @@ worksheet.pageSetup.verticalCentered = true;
 ### 手动分页
 
 ```typescript
-worksheet.rowBreaks.push({ id: 20, max: 16838, man: 1 }); // 在第 20 行后分页
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // 第 2 页从第 21 行开始
+Column.addPageBreak(worksheet, "F"); // 下一页从 G 列开始
 ```
+
+分页符贯穿整个工作表的宽度或高度 —— 这是 Excel 唯一能创建、也是本导出器唯一会渲染的
+形式。
 
 ### 打印区域
 
@@ -1120,13 +1126,13 @@ import { Pdf } from "documonster/pdf";
 运行任意示例:
 
 ```bash
-npx tsx src/modules/pdf/examples/pdf-basic.ts
+pnpm example --filter pdf-basic
 # 输出: tmp/pdf-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-builder.ts
+pnpm example --filter pdf-builder
 # 输出: tmp/pdf-builder-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-signatures.ts
+pnpm example --filter pdf-signatures
 # 输出: tmp/pdf-signature-examples/
 ```
 

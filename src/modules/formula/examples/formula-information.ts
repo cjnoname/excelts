@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -19,7 +17,7 @@ import { Cell, Workbook } from "@excel/index";
  * - Constructors:     NA
  * - Cell metadata:    CELL (address / row / col / contents / type)
  *
- * Usage: npx tsx src/modules/formula/examples/formula-information.ts
+ * Usage: pnpm example --filter formula-information
  */
 const wb = Workbook.create();
 const ws = Workbook.addWorksheet(wb, "Info");
@@ -99,9 +97,8 @@ console.log("=== Information Functions ===\n");
 for (const [title, addrs] of Object.entries(groups)) {
   console.log(`--- ${title} ---`);
   for (const addr of addrs) {
-    const c = getCell(ws, addr);
     console.log(
-      `  ${addr}  ${String(cellFormula(c)).padEnd(24)}  = ${JSON.stringify(cellResult(c))}`
+      `  ${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(24)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`
     );
   }
   console.log("");

@@ -100,6 +100,42 @@ jobs:
         env:
           CI: true
 
+  examples:
+    # Examples are the first thing a consumer copies, so a broken one is a broken
+    # public contract. Nothing executed them until this job: the runner carried a
+    # hand-written list covering a sixth of the tree, and CI never invoked it. The
+    # first full run found five examples that could not resolve their imports, one
+    # that hit a real stack-overflow in the PDF exporter, and one that could not
+    # run twice. Discovery is automatic, so a new example is covered the moment it
+    # lands.
+    #
+    # One OS: the failures this catches are API and resolution failures, not
+    # platform ones, and the job spawns one process per example.
+    needs: should-run
+    timeout-minutes: 25
+    name: Examples
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Run every example
+        run: pnpm verify:examples
+        env:
+          CI: true
+
   lint:
     needs: should-run
     timeout-minutes: 10

@@ -1,13 +1,29 @@
 /**
- * Test-only utility: generate a self-signed RSA test certificate.
+ * Generate a self-signed RSA certificate — an *input* to the signing examples,
+ * not part of the library.
  *
- * This file lives outside production source so it is never bundled into the
- * browser build. It depends on `node:crypto` which is only available in Node.js.
+ * Signing a PDF needs a certificate and a private key, and producing those is
+ * not this library's job: in production they come from a CA, a keystore, or an
+ * HSM. This file exists only so `pdf-signatures.ts` can run unattended, and it
+ * lives beside the examples rather than under `__tests__/` for exactly that
+ * reason — an example that imports from a test directory cannot be copied, and
+ * the test tree is not a contract. The signature tests reuse it because they
+ * need the same input.
+ *
+ * The equivalent on the command line, if you would rather supply your own:
+ *
+ * ```sh
+ * openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+ *   -subj "/CN=Example Signer" -outform DER -keyout key.der -out cert.der
+ * ```
+ *
+ * Not bundled into any build: `tsconfig.esm.json` excludes `src/**\/examples/**`,
+ * and `node:crypto` makes it Node-only regardless.
  */
 import type * as cryptoType from "node:crypto";
 
-/** Result of generating a test certificate. */
-export interface TestCertificate {
+/** A self-signed certificate and its private key, both DER-encoded. */
+export interface SelfSignedCertificate {
   /** DER-encoded X.509 certificate. */
   certificate: Uint8Array;
   /** DER-encoded PKCS#8 private key. */
@@ -126,21 +142,19 @@ function concatDer(...parts: Uint8Array[]): Uint8Array {
 
 const OID_SHA256_WITH_RSA = "1.2.840.113549.1.1.11";
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
- * Generate a self-signed RSA test certificate for development and testing.
+ * Generate a self-signed RSA certificate for development and testing.
  *
- * **Not for production use.** The generated certificate uses a random RSA-2048
- * key pair and a minimal X.509 v3 structure. It is valid for 10 years from
- * 2025-01-01.
+ * **Not for production use.** A fresh random RSA-2048 key pair and a minimal
+ * X.509 v3 structure, valid 2025-01-01 to 2035-01-01. Nothing trusts it, so a
+ * signature made with it verifies cryptographically but establishes no identity.
  *
  * @param commonName - Certificate CN field. Default: "Test"
  * @returns DER-encoded certificate and private key
  */
-export async function generateTestCertificate(commonName?: string): Promise<TestCertificate> {
+export async function generateSelfSignedCertificate(
+  commonName?: string
+): Promise<SelfSignedCertificate> {
   const nodeCrypto: typeof cryptoType = await import("node:crypto");
 
   const cn = commonName ?? "Test";

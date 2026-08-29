@@ -15,16 +15,13 @@
  * - Explicit newlines in non-wrapped cells
  * - Rich text with mixed styles
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-edge-cases.ts
+ * Run: pnpm example --filter pdf-edge-cases
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { cellSetNumFmt } from "@excel/core/cell";
-import { rowSetFill, rowSetFont } from "@excel/core/row";
-import { rowGetCell } from "@excel/core/worksheet";
-import { Cell, Column, Workbook, Worksheet } from "@excel/index";
+import { Cell, Column, Row, Stream, Workbook, Worksheet } from "@excel/index";
 import type { CellErrorValue } from "@excel/types";
 
 import { Pdf } from "../index";
@@ -191,7 +188,7 @@ const zeroFormats: [string, string][] = [
 ];
 for (const [fmt, desc] of zeroFormats) {
   const row = Worksheet.addRow(wsZero, [`${fmt}  →  ${desc}`, 0]);
-  cellSetNumFmt(rowGetCell(row, 2), fmt);
+  Stream.setCellNumFmt(Stream.rowCell(row, 2), fmt);
 }
 
 // =============================================================================
@@ -202,13 +199,16 @@ const wsHeight = Workbook.addWorksheet(wb, "Row Heights");
 Column.setWidth(wsHeight, 1, 30);
 
 Cell.setValue(wsHeight, "A1", "Auto height (default)");
-const r2 = Worksheet.getRow(wsHeight, 2);
-r2.height = 40;
+// `Row.setHeight` also marks the row `customHeight`, which is what tells the
+// exporter to honour the number as-is. Assigning `row.height` on a handle sets
+// the value but not the flag, and the exporter then treats it as Excel's own
+// auto-calculated height — a floor to grow from, not a height to keep. That is
+// why the cramped row below only actually looks cramped through this call.
+Row.setHeight(wsHeight, 2, 40);
 Cell.setValue(wsHeight, "A2", "Custom height = 40pt");
 Cell.setValue(wsHeight, "A3", "Tall font (auto expand)");
 Cell.setStyle(wsHeight, "A3", { font: { size: 24 } });
-const r4 = Worksheet.getRow(wsHeight, 4);
-r4.height = 10;
+Row.setHeight(wsHeight, 4, 10);
 Cell.setValue(wsHeight, "A4", "Cramped: height=10pt");
 
 // =============================================================================
@@ -224,9 +224,8 @@ Cell.setStyle(wsMixed, "A1", { font: { color: { argb: "FF0563C1" }, underline: t
 Cell.setValue(wsMixed, "A2", { error: "#DIV/0!" } as CellErrorValue);
 
 // Empty row with styling
-const r3 = Worksheet.getRow(wsMixed, 3);
-rowSetFont(r3, { bold: true, size: 14 });
-rowSetFill(r3, { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFCCCC" } });
+Row.setFont(wsMixed, 3, { bold: true, size: 14 });
+Row.setFill(wsMixed, 3, { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFCCCC" } });
 
 Cell.setValue(wsMixed, "A4", "Normal cell after styled empty row");
 

@@ -91,9 +91,18 @@ export class PdfContentStream {
   /**
    * Append another content stream without serialising it. Deferred fragments
    * stay deferred, so text encoding can still resolve after fonts are frozen.
+   *
+   * Copied with a loop rather than `push(...other.parts)`: a spread becomes an
+   * *argument list*, and V8 throws `RangeError: Maximum call stack size
+   * exceeded` somewhere past ~125k arguments. A content stream's fragment count
+   * grows with the marks on the page and has no ceiling — a vector chart over a
+   * five-figure row count crosses it — so the number of fragments must never
+   * become a number of function arguments.
    */
   append(other: PdfContentStream): this {
-    this.parts.push(...other.parts);
+    for (const part of other.parts) {
+      this.parts.push(part);
+    }
     return this;
   }
 

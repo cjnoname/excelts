@@ -144,9 +144,9 @@ Runnable examples live in `src/modules/formula/examples/`:
 Run any example:
 
 ```bash
-npx tsx src/modules/formula/examples/formula-math.ts
-npx tsx src/modules/formula/examples/formula-dynamic-array.ts
-npx tsx src/modules/formula/examples/formula-pdf-integration.ts
+pnpm example --filter formula-math
+pnpm example --filter formula-dynamic-array
+pnpm example --filter formula-pdf-integration
 # Output: tmp/formula-examples/formula-pdf-integration.pdf
 ```
 

@@ -235,7 +235,12 @@ async function layoutSheetInto(
     const pages = isPdfChartsheet(sheet)
       ? layoutChartsheet(sheet, resolved)
       : await layoutSheet(sheet, resolved, ctx.fontManager);
-    ctx.allPages.push(...pages);
+    // Loop rather than `push(...pages)`: a sheet's page count grows with its
+    // rows and has no ceiling, and a spread would turn that count into an
+    // argument list. See `PdfContentStream.append` for the same hazard.
+    for (const page of pages) {
+      ctx.allPages.push(page);
+    }
   } catch (err) {
     throw new PdfRenderError(`Failed to layout sheet "${sheet.name}"`, { cause: err });
   }

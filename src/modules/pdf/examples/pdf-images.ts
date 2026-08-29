@@ -5,16 +5,14 @@
  * 1. Pdf.fromExcel() — Excel workbook with images → PDF
  * 2. pdf() — Standalone PDF with images (no Excel)
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-images.ts
+ * Run: pnpm example --filter pdf-images
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { addWorkbookImage } from "@excel/core/workbook-core";
-import { addImage } from "@excel/core/worksheet";
-import { Cell, Workbook, Worksheet } from "@excel/index";
+import { Cell, Image, Workbook, Worksheet } from "@excel/index";
 
 import { Pdf } from "../index";
 import { pdf } from "../pdf";
@@ -57,8 +55,8 @@ if (hasJpeg) {
     { product: "Widget C", status: "Active", notes: "Updated design" }
   ]);
 
-  const jpegId = addWorkbookImage(wb, { buffer: fs.readFileSync(jpegPath), extension: "jpeg" });
-  addImage(ws, jpegId, { tl: { col: 0, row: 4 }, ext: { width: 300, height: 200 } });
+  const jpegId = Image.add(wb, { buffer: fs.readFileSync(jpegPath), extension: "jpeg" });
+  Image.place(ws, jpegId, { tl: { col: 0, row: 4 }, ext: { width: 300, height: 200 } });
 
   fs.writeFileSync(
     path.join(outDir, "excel-images-jpeg.pdf"),
@@ -85,8 +83,8 @@ if (hasPng) {
     Cell.setValue(ws, `C${r}`, "filler");
   }
 
-  const pngId = addWorkbookImage(wb, { buffer: fs.readFileSync(pngPath), extension: "png" });
-  addImage(ws, pngId, { tl: { col: 1, row: 2 }, ext: { width: 150, height: 150 } });
+  const pngId = Image.add(wb, { buffer: fs.readFileSync(pngPath), extension: "png" });
+  Image.place(ws, pngId, { tl: { col: 1, row: 2 }, ext: { width: 150, height: 150 } });
 
   fs.writeFileSync(
     path.join(outDir, "excel-images-png.pdf"),
@@ -117,10 +115,10 @@ if (hasJpeg && hasPng) {
     Cell.setValue(ws, `G${r}`, " ");
   }
 
-  const img1 = addWorkbookImage(wb, { buffer: fs.readFileSync(jpegPath), extension: "jpeg" });
-  const img2 = addWorkbookImage(wb, { buffer: fs.readFileSync(pngPath), extension: "png" });
-  addImage(ws, img1, { tl: { col: 4, row: 1 }, ext: { width: 200, height: 150 } });
-  addImage(ws, img2, { tl: { col: 4, row: 10 }, ext: { width: 150, height: 150 } });
+  const img1 = Image.add(wb, { buffer: fs.readFileSync(jpegPath), extension: "jpeg" });
+  const img2 = Image.add(wb, { buffer: fs.readFileSync(pngPath), extension: "png" });
+  Image.place(ws, img1, { tl: { col: 4, row: 1 }, ext: { width: 200, height: 150 } });
+  Image.place(ws, img2, { tl: { col: 4, row: 10 }, ext: { width: 150, height: 150 } });
 
   fs.writeFileSync(
     path.join(outDir, "excel-images-multi.pdf"),

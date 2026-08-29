@@ -12,7 +12,7 @@
  *   8. Excel-to-PDF roundtrip
  *   9. Error handling (wrong password, invalid data)
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-reader.ts
+ * Run: pnpm example --filter pdf-reader
  */
 
 import fs from "node:fs";

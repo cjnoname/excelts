@@ -850,8 +850,14 @@ await Pdf.fromExcel(workbook, { pageOrder: "overThenDown" });
 ### Manual Page Breaks
 
 ```typescript
-worksheet.rowBreaks.push({ id: 20, max: 16838, man: 1 }); // Break after row 20
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // page 2 starts at row 21
+Column.addPageBreak(worksheet, "F"); // the next page starts at column G
 ```
+
+A break spans the full width or height of the sheet — the only kind Excel can
+author, and the only kind this exporter renders.
 
 ### Print Area
 
@@ -1181,13 +1187,13 @@ Runnable examples are in `src/modules/pdf/examples/`:
 Run any example:
 
 ```bash
-npx tsx src/modules/pdf/examples/pdf-basic.ts
+pnpm example --filter pdf-basic
 # Output: tmp/pdf-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-builder.ts
+pnpm example --filter pdf-builder
 # Output: tmp/pdf-builder-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-signatures.ts
+pnpm example --filter pdf-signatures
 # Output: tmp/pdf-signature-examples/
 ```
 

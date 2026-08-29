@@ -10,6 +10,7 @@
  */
 import type { ColumnDefn, ColumnHeaderValue } from "@excel/core/column";
 import {
+  columnAddPageBreak,
   columnDefn,
   columnHidden,
   columnLetter,
@@ -21,6 +22,7 @@ import {
   getColumn,
   columnSetHeader,
   columnSetKey,
+  columnSetNumFmt,
   columnSetStyle
 } from "@excel/core/worksheet-core";
 import type { WorksheetData } from "@excel/core/worksheet-core";
@@ -93,6 +95,41 @@ export function setStyle(ws: Sheet, col: string | number, style: Partial<Style>)
   columnSetStyle(getColumn(ws, col), style);
 }
 
+// --- number format ---
+
+/**
+ * Set the column's number format.
+ *
+ * The mirror of `Cell.setNumFmt` / `Row.setNumFmt`, so a format can be set at
+ * whichever level owns it. It is the one facet with its own setter here because
+ * it is the one consumers reach for by column; every other facet goes through
+ * {@link setStyle} (`setStyle(ws, col, { font })`), which also walks the column a
+ * single time when several facets are set together.
+ *
+ * The format lands on the column *and* on the cells of every row that holds a
+ * value, which is not quite "every existing cell": a row with values elsewhere
+ * gains a cell in this column if it had none, and a materialised-but-empty cell in
+ * a row with no values at all is skipped. That is the behaviour of every
+ * `columnSet*`, not a property of this one.
+ *
+ * Passing `undefined` clears the format.
+ *
+ * There is no matching *getter*: a column's style is one record and
+ * {@link getStyle} hands it over whole, so `getStyle(ws, col).numFmt` is the read.
+ *
+ * @example
+ * ```typescript
+ * import { Column, Workbook } from "documonster/excel";
+ *
+ * const wb = Workbook.create();
+ * const ws = Workbook.addWorksheet(wb, "Sales");
+ * Column.setNumFmt(ws, "C", "#,##0.00");
+ * ```
+ */
+export function setNumFmt(ws: Sheet, col: string | number, value: string | undefined): void {
+  columnSetNumFmt(getColumn(ws, col), value);
+}
+
 // --- definition ---
 
 /**
@@ -106,4 +143,27 @@ export function setStyle(ws: Sheet, col: string | number, style: Partial<Style>)
  */
 export function getDefinition(ws: Sheet, col: string | number): ColumnDefn {
   return columnDefn(getColumn(ws, col));
+}
+
+// --- printing ---
+
+/**
+ * Add a manual vertical page break to the **right** of `col`, the equivalent of
+ * Excel's *Page Layout → Breaks → Insert Page Break*. Applies to printing and
+ * to `Pdf.fromExcel`; it does not affect the on-screen grid.
+ *
+ * The break spans the full height of the sheet, which is the only kind Excel can
+ * author or render — see `columnAddPageBreak` for why no row band is offered.
+ *
+ * @example
+ * ```typescript
+ * import { Column, Workbook } from "documonster/excel";
+ *
+ * const wb = Workbook.create();
+ * const ws = Workbook.addWorksheet(wb, "Report");
+ * Column.addPageBreak(ws, "F"); // the next page starts at column G
+ * ```
+ */
+export function addPageBreak(ws: Sheet, col: string | number): void {
+  columnAddPageBreak(getColumn(ws, col));
 }

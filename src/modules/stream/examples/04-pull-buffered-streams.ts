@@ -11,7 +11,7 @@
  * push/event flow of a normal Readable, the consumer *pulls* exactly the
  * bytes it wants, which is ideal for parsers (line readers, framed protocols).
  *
- * Usage: npx tsx src/modules/stream/examples/04-pull-buffered-streams.ts
+ * Usage: pnpm example --filter 04-pull-buffered-streams
  */
 
 import { createBufferedStream, createPullStream } from "@stream";

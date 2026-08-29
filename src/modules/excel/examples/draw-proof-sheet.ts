@@ -6,14 +6,15 @@
  * compared side by side rather than trusted one at a time. A hash test says the
  * output did not change; this says whether it is right.
  *
- * Run: npx tsx src/modules/excel/examples/draw-proof-sheet.ts
+ * Run: pnpm example --filter draw-proof-sheet
  * Output: tmp/proof/
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { renderDrawList, toSvg } from "@draw/index";
+import { encodePng } from "@archive/png";
+import { rasterizeToRgba, renderDrawList, toSvg } from "@draw/index";
 import type { DrawList, DrawNode, DrawPathCommand } from "@draw/index";
 import {
   fillChartCaches,
@@ -23,11 +24,8 @@ import {
   renderChartPng,
   renderChartSvg
 } from "@excel/chart";
-import { rasterizeDrawList } from "@excel/chart/render/draw-raster-png";
-import { addChart, addChartEx, getCharts } from "@excel/core/worksheet";
 import { Chart, Workbook, Worksheet } from "@excel/index";
-import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
-import { createPdfDrawSurface } from "@pdf/render/draw-surface";
+import { createPdfDrawSurface, Pdf } from "@pdf/index";
 
 const OUT = path.resolve("tmp/proof");
 mkdirSync(OUT, { recursive: true });
@@ -40,12 +38,14 @@ const INK = { r: 0.15, g: 0.15, b: 0.15, a: 1 };
 function threeWays(name: string, list: DrawList): void {
   writeFileSync(path.join(OUT, `${name}.svg`), toSvg(list));
 
-  writeFileSync(
-    path.join(OUT, `${name}.png`),
-    rasterizeDrawList(list, { width: list.width, height: list.height, scale: 2 })
-  );
+  // Pixels and PNG encoding are separate steps on purpose: the rasteriser is
+  // part of the drawing engine, while encoding needs DEFLATE and so lives with
+  // it in `documonster/archive`. Pair them, or pair the pixels with any other
+  // encoder.
+  const image = rasterizeToRgba(list, { width: list.width, height: list.height, scale: 2 });
+  writeFileSync(path.join(OUT, `${name}.png`), encodePng(image.data, image.width, image.height));
 
-  const builder = new PdfDocumentBuilder();
+  const builder = new Pdf.Builder();
   const page = builder.addPage({ width: list.width, height: list.height });
   renderDrawList(
     list,
@@ -486,8 +486,8 @@ const classic: Array<[string, Record<string, unknown>]> = [
 
 for (const [name, options] of classic) {
   const { ws, wb } = sheet();
-  addChart(ws, options as never, "E1:L14");
-  const model = Chart.chartModel(getCharts(ws)[0])!;
+  Chart.add(ws, options as never, "E1:L14");
+  const model = Chart.chartModel(Chart.get(ws)[0])!;
   // Without the caches the renderer has no category strings to read and falls back
   // to 1..n, which would make a real labelling bug indistinguishable from a
   // half-built example.
@@ -600,8 +600,8 @@ const chartEx: Array<[string, Record<string, unknown>]> = [
 
 for (const [name, options] of chartEx) {
   const { ws, wb } = sheet();
-  addChartEx(ws, options as never, "E1:L14");
-  const model = Chart.chartExModel(getCharts(ws)[0])!;
+  Chart.addEx(ws, options as never, "E1:L14");
+  const model = Chart.chartExModel(Chart.get(ws)[0])!;
   fillChartExCaches(model, wb);
   const size = { width: 460, height: 300 };
   writeFileSync(path.join(OUT, `04-${name}.svg`), renderChartExSvg(model, size));

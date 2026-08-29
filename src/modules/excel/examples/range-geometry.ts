@@ -16,7 +16,7 @@
  * - Range.getValues     — read a rectangular range as a row-major matrix
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/range-geometry.ts
+ *   pnpm example --filter range-geometry
  */
 import { Cell, Range, Workbook } from "@excel/index";
 import type { DecodedAddress } from "@excel/types";

@@ -11,8 +11,8 @@ import {
   serializeResourceDict
 } from "../builder/resource-merger";
 import type { PdfResourceDict } from "../builder/resource-merger";
+import { generateSelfSignedCertificate } from "../examples/utils/self-signed-certificate";
 import { Pdf } from "../index";
-import { generateTestCertificate } from "./test-certificate";
 import { buildTtfWithCmap } from "./ttf-test-utils";
 
 // =============================================================================
@@ -2412,7 +2412,7 @@ describe("Digital Signature", () => {
   });
 
   it("should sign+verify roundtrip with PdfDocumentBuilder", async () => {
-    const { certificate, privateKey } = await generateTestCertificate("TestBuilder");
+    const { certificate, privateKey } = await generateSelfSignedCertificate("TestBuilder");
 
     const doc = new Pdf.Builder();
     doc.addPage().drawText("Signed doc", { x: 72, y: 750, fontSize: 14 });
@@ -2437,7 +2437,7 @@ describe("Digital Signature", () => {
   });
 
   it("should sign+verify roundtrip with PdfEditor", async () => {
-    const { certificate, privateKey } = await generateTestCertificate("TestEditor");
+    const { certificate, privateKey } = await generateSelfSignedCertificate("TestEditor");
 
     // Create unsigned PDF
     const doc = new Pdf.Builder();
@@ -2466,7 +2466,7 @@ describe("Digital Signature", () => {
   });
 
   it("should detect tampering after signing", async () => {
-    const { certificate, privateKey } = await generateTestCertificate("TamperTest");
+    const { certificate, privateKey } = await generateSelfSignedCertificate("TamperTest");
 
     const doc = new Pdf.Builder();
     doc.addPage().drawText("Tamper test", { x: 72, y: 750, fontSize: 14 });
@@ -2493,7 +2493,7 @@ describe("Digital Signature", () => {
   });
 
   it("should generate a valid test certificate", async () => {
-    const { certificate, privateKey } = await generateTestCertificate("UnitTest");
+    const { certificate, privateKey } = await generateSelfSignedCertificate("UnitTest");
     expect(certificate).toBeInstanceOf(Uint8Array);
     expect(privateKey).toBeInstanceOf(Uint8Array);
     expect(certificate.length).toBeGreaterThan(100);

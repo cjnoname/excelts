@@ -46,11 +46,15 @@ pnpm build:packages
 
 pnpm verify:doc-examples  # documented imports & members must exist — see "Documentation" below
 pnpm verify:doc-links     # local Markdown targets & headings must exist
+pnpm verify:examples      # every example must actually run — see "Examples" below
 
 # Single test file
 pnpm exec vitest run src/modules/excel/core/__tests__/cell.test.ts
 # Pattern match
 pnpm exec vitest run -t "should handle empty cells"
+
+# Run examples (same runner as the gate; --filter narrows by path substring)
+pnpm example --filter pdf-page-setup
 ```
 
 ## Project Structure
@@ -453,6 +457,54 @@ Choose the form by purpose, not by preference. Do **not** make everything an arr
 - **Use a `class` only when you genuinely need** instance identity with mutable state, inheritance/polymorphism, lifecycle (`implements`/`extends`), or a public API where `new`/methods read more naturally than free functions.
 - **Avoid classes that are just namespaces** — a class with only static members (or a single method) should be plain exported functions instead.
 
-## Example Output
+## Examples
 
 All runnable examples write output to `tmp/` under the project root. This directory is gitignored.
+
+`scripts/run-examples.ts` (`pnpm verify:examples`, and the `Examples` CI job) **discovers and
+runs every one of them**. Until it did, examples were the only artefact here that nothing
+executed: the runner carried a hand-written list covering a sixth of the tree, and no CI job
+invoked it. The first full run found six failures — five examples that could not resolve their
+imports and one that hit a genuine `RangeError: Maximum call stack size exceeded` in the PDF
+exporter (`push(...parts)` turning an unbounded array into an argument list). A seventh surfaced
+on the second run: an example that could not run twice.
+
+It runs at two levels, because the two ways an example breaks are different. The pre-commit hook
+runs `--changed`: the examples the commit edits, plus every example beside a `utils/` helper it
+edits, which is seconds. The `Examples` CI job runs **all** of them, catching an example broken
+by a change to the library it calls; that is over a minute, too slow for a hook. It is
+deliberately absent from `pnpm test`, which CI runs across four Node versions and three operating
+systems: the failures this catches are neither version- nor platform-specific, so repeating them
+a dozen times would buy nothing.
+
+Both the discovery rules and `--changed` are covered by
+`src/test/__tests__/run-examples.test.ts`, against fixture trees built to break each one — the
+runner takes `--root` for that, like the other gates. The hook used to carry its own shell
+pattern for the same job, and it had drifted three ways: renames were skipped, nested example
+directories were invisible, and a path containing a space was split in two.
+
+Rules when writing an example:
+
+- **Use the public API.** An example that has to import from `@excel/core/...`, `@pdf/reader/...`
+  or `__tests__/` is either the wrong file or evidence of a missing public member — treat it as
+  the latter until proven otherwise. That is how `Row.addPageBreak`, `Column.setNumFmt` and
+  `Cell.find` came to exist.
+- **Be re-runnable.** The gate runs an example against the `tmp/` output of its own previous
+  run. Anything that defaults to `overwrite: "error"` needs the opt-in.
+- **Write only to `tmp/`.** Accept an optional output path as `process.argv[2]` and default it
+  under `tmp/`; never write into the source tree.
+- **Run it with `pnpm example`, not `npx tsx`.** `tsx` hands the resolved path to Node's ESM
+  resolver, which treats a dot-suffix as a complete filename — so a specifier ending `.node` or
+  `.browser` never gets `.ts` appended, and this repository's platform-variant convention breaks.
+  `pnpm example` runs `node --import @oxc-node/core/register`, which resolves both tsconfig
+  `paths` and an extensionless TypeScript target. Node's own `--experimental-strip-types` is not
+  enough either: it is strip-only and this tree uses parameter properties. Fifty-three
+  `Run: npx tsx …` comments said otherwise; five of them were instructions that could not work.
+- **A benchmark is not an example.** Something that measures internal machinery against the
+  platform's belongs in `benchmark/`, where reaching into internals is legitimate. Two stream
+  benchmarks sat in `examples/` and were the sole reason anything wanted `@utils/event-emitter`
+  published.
+- **Fixtures live in `examples/data/`,** not in `__tests__/data/`. The test tree is excluded from
+  every build and absent from the published package, so an example reading from it cannot be
+  copied — and its output would be coupled to an asset free to change for unrelated reasons.
+  A file needed by both is duplicated on purpose.

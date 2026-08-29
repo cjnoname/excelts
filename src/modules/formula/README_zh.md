@@ -132,9 +132,9 @@ const ast = Formula.parse(tokens); // 语法错误时抛异常
 运行任意示例:
 
 ```bash
-npx tsx src/modules/formula/examples/formula-math.ts
-npx tsx src/modules/formula/examples/formula-dynamic-array.ts
-npx tsx src/modules/formula/examples/formula-pdf-integration.ts
+pnpm example --filter formula-math
+pnpm example --filter formula-dynamic-array
+pnpm example --filter formula-pdf-integration
 # 输出: tmp/formula-examples/formula-pdf-integration.pdf
 ```
 

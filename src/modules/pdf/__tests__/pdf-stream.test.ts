@@ -188,6 +188,47 @@ describe("PdfContentStream", () => {
     });
   });
 
+  describe("append", () => {
+    it("copies deferred fragments without evaluating them", () => {
+      const target = new PdfContentStream();
+      const source = new PdfContentStream();
+      let evaluated = 0;
+      source.deferred(() => {
+        evaluated++;
+        return "(late) Tj";
+      });
+
+      target.append(source);
+      expect(evaluated).toBe(0);
+      expect(new TextDecoder().decode(target.toUint8Array())).toBe("(late) Tj");
+      expect(evaluated).toBe(1);
+    });
+
+    /**
+     * A content stream's fragment count grows with the marks on the page and has
+     * no ceiling. `append` used to copy with `push(...other.parts)`, which turns
+     * that count into an *argument list* — V8 throws
+     * `RangeError: Maximum call stack size exceeded` past roughly 125k arguments.
+     * A vector chart over a five-figure row count crossed it, so exporting the
+     * `sales-dashboard` example failed outright with no way for a caller to
+     * work around it.
+     *
+     * 200k is chosen to sit clearly above the threshold measured on V8 (~125k);
+     * the operators themselves are trivial so the test stays fast.
+     */
+    it("copies a fragment count past the engine's argument limit", () => {
+      const source = new PdfContentStream();
+      const COUNT = 200_000;
+      for (let i = 0; i < COUNT; i++) {
+        source.raw("q Q");
+      }
+
+      const target = new PdfContentStream();
+      expect(() => target.append(source)).not.toThrow();
+      expect(new TextDecoder().decode(target.toUint8Array()).split("\n")).toHaveLength(COUNT);
+    });
+  });
+
   describe("WinAnsi Encoding", () => {
     it("should encode non-ASCII Latin chars as WinAnsi hex string", () => {
       const stream = new PdfContentStream();

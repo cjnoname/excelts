@@ -11,7 +11,7 @@
  * added through the namespace are persisted into the written workbook.
  * Multiple validation types are shown: list, whole, decimal, date, textLength.
  *
- * Usage:   npx tsx src/modules/excel/examples/data-validation.ts
+ * Usage:   pnpm example --filter data-validation
  * Output:  tmp/excel-examples/data-validation.xlsx
  */
 import fs from "node:fs";
