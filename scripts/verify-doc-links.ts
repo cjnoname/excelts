@@ -122,41 +122,49 @@ function linksIn(file: string, source: string): Link[] {
  * The slug is derived from a heading's *text content*, so anything the renderer turns into
  * an element rather than characters has to go first: tags, code-span backticks, link syntax
  * (label kept, destination dropped) and emphasis delimiters. Underscore emphasis is the one
- * that matters, because `_` survives the character filter below — `## _Draft_` is `draft` on
- * GitHub, while `## do_something` keeps its underscore, so only boundary underscores are
+ * that matters, because `_` survives the character filter in `slug` — `## _Draft_` is `draft`
+ * on GitHub, while `## do_something` keeps its underscore, so only boundary underscores are
  * stripped rather than every one.
+ *
+ * Kept as data and applied in a loop by `stripInlineMarkup` rather than written as a
+ * `.replace().replace()` chain. The repetition is what makes the strip correct, and it is
+ * also the only shape `js/incomplete-multi-character-sanitization` accepts: it treats a
+ * replacement as repeated when the result flows back into its own receiver, which a chain
+ * hides — each result becomes the *next* call's receiver instead. Re-chaining these would
+ * reintroduce both the bug and the alert.
  */
-function stripInlineMarkupOnce(text: string): string {
-  return text
-    .replace(/<[^>]*>/g, "")
-    .replace(/`+([^`]*)`+/g, "$1")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1")
-    .replace(/~~([^~]*)~~/g, "$1")
-    .replace(/\*+([^*]*)\*+/g, "$1")
-    .replace(/(^|[\s(])__?([^_]+)__?(?=[\s).,:;!?]|$)/g, "$1$2");
-}
+const INLINE_MARKUP: readonly (readonly [pattern: RegExp, replacement: string])[] = [
+  [/<[^>]*>/g, ""],
+  [/`+([^`]*)`+/g, "$1"],
+  [/!?\[([^\]]*)\]\([^)]*\)/g, "$1"],
+  [/!?\[([^\]]*)\]\[[^\]]*\]/g, "$1"],
+  [/~~([^~]*)~~/g, "$1"],
+  [/\*+([^*]*)\*+/g, "$1"],
+  [/(^|[\s(])__?([^_]+)__?(?=[\s).,:;!?]|$)/g, "$1$2"]
+];
 
 /**
- * Strip to a fixed point, because a single pass is not idempotent.
+ * Apply every rule until the text stops changing, because one pass is not idempotent.
  *
  * Removing a construct splices what surrounded it together, and the halves can form a
  * construct that was not there before. A badge — a link whose label is an image, which is
  * what `linksIn` allows one level of nesting for — is the case that bites:
  * `[![](img.svg)](https://ci.example)` becomes `![](https://ci.example)` after one pass, so
- * the destination survives into the text and `httpsciexample` lands in the slug — characters
+ * the destination survives into the text and `httpsciexample` lands in the slug, characters
  * the heading does not contain. A second pass removes what is left.
  *
- * The loop terminates: every rewrite that changes the string deletes at least two
- * delimiter characters, so the length strictly decreases and the bound below can never be
- * the thing that stops it.
+ * The loop terminates: every rewrite that changes the string deletes at least two delimiter
+ * characters, so the length strictly decreases and the bound can never be the thing that
+ * stops it.
  */
 function stripInlineMarkup(text: string): string {
   let current = text;
   for (let pass = 0; pass <= text.length; pass += 1) {
-    const next = stripInlineMarkupOnce(current);
-    if (next === current) break;
-    current = next;
+    const before = current;
+    for (const [pattern, replacement] of INLINE_MARKUP) {
+      current = current.replace(pattern, replacement);
+    }
+    if (current === before) break;
   }
   return current;
 }
