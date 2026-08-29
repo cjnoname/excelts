@@ -65,6 +65,12 @@ const examples: ExampleTest[] = [
     args: ["src/modules/excel/examples/data/tiny-workbook.xlsx"]
   },
   {
+    file: "src/modules/excel/examples/xlsb.ts",
+    description: "XLSB: create, read, edit, and verify a binary workbook",
+    outputFiles: ["tmp/excel-examples/xlsb-round-trip.xlsb"],
+    args: ["tmp/excel-examples/xlsb-round-trip.xlsb"]
+  },
+  {
     file: "src/modules/excel/examples/web-streams-reader-writer.ts",
     description: "Web Streams: writer -> reader roundtrip",
     outputFiles: []

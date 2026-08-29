@@ -1,10 +1,11 @@
 /**
- * Browser xlsx IO handle accessor and the canonical public IO surface.
+ * Browser XLSX handle accessor and the canonical workbook IO surface.
  *
  * Kept out of `workbook.browser` so the heavy `XLSX` serializer is not a static
  * dependency of the workbook record module (which would create a
  * workbook ↔ xlsx import cycle). Selected over `xlsx-io.ts` (Node) via the
- * `.browser` same-name swap at build/test time.
+ * `.browser` same-name swap at build/test time. The public functions dispatch
+ * to XLSB when requested or detected.
  */
 import { ZipParser } from "@archive/unzip/zip-parser";
 import type { WorkbookData } from "@excel/core/workbook-core";
@@ -27,13 +28,17 @@ import type { XlsxReadOptions, XlsxWriteOptions, IParseStream } from "@excel/xls
 import { XLSX } from "@excel/xlsx/xlsx.browser";
 import { base64ToUint8Array } from "@utils/utils";
 
+/** Workbook package formats supported by the canonical IO surface. */
 export type WorkbookFormat = "xlsx" | "xlsb";
+/** Read options shared by XLSX and XLSB, with an optional explicit format. */
 export type WorkbookReadOptions = XlsxReadOptions & XlsbReadOptions & { format?: WorkbookFormat };
+/** Write options shared by XLSX and XLSB, with an optional explicit format. */
 export type WorkbookWriteOptions = XlsxWriteOptions &
   Omit<XlsbWriteOptions, "zip"> & {
     format?: WorkbookFormat;
     zip?: XlsxWriteOptions["zip"] & XlsbWriteOptions["zip"];
   };
+/** Canonical workbook write options plus readable-stream queue configuration. */
 export type WorkbookStreamOptions = WorkbookWriteOptions & XlsbStreamOptions;
 
 /** Get (or lazily create) the xlsx IO handle bound to a workbook. */
@@ -48,7 +53,7 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // Cross-platform flat IO functions (the canonical public surface).
 // =============================================================================
 
-/** Serialize a workbook to xlsx bytes. */
+/** Serialize a workbook to XLSX bytes, or XLSB when `options.format` requests it. */
 export function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions): Promise<Uint8Array> {
   return options?.format === "xlsb"
     ? toXlsbBuffer(wb, xlsbWriteOptions(options))

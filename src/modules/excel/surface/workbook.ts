@@ -6,7 +6,7 @@
  * `Workbook.readFile(wb, path)`, `Workbook.writeFile(wb, path)`, …
  *
  * Re-exports the workbook management functions (de-prefixed) plus the
- * Node xlsx IO (includes file-path `readFile` / `writeFile`).
+ * canonical Node workbook IO (including XLSX/XLSB file-path helpers).
  */
 export {
   createWorkbook as create,

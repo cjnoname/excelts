@@ -46,20 +46,28 @@ import { base64ToUint8Array } from "@utils/utils";
 import { xmlEncode, xmlEncodeAttr } from "@utils/xml-encode";
 import { parseXml, findChildren, attr, textContent } from "@xml/dom";
 
+/** Controls how an XLSB package is decoded into the workbook model. */
 export interface XlsbReadOptions extends XlsbWorksheetReadOptions {
   /** Interpret string input as base64-encoded XLSB bytes. */
   base64?: boolean;
 }
 
+/** Controls XLSB fidelity checks and ZIP package generation. */
 export interface XlsbWriteOptions extends XlsbWorksheetWriteOptions {
+  /** ZIP container options used when packaging the BIFF12 parts. */
   zip?: {
+    /** DEFLATE compression level from 0 through 9. */
     level?: number;
+    /** Timestamp stored in generated ZIP entries. */
     modTime?: Date;
+    /** Use deterministic archive metadata for reproducible output. */
     reproducible?: boolean;
   };
 }
 
+/** XLSB write options accepted by the pull-driven stream serializer. */
 export interface XlsbStreamOptions extends XlsbWriteOptions {
+  /** Preferred readable-stream queue size in bytes; this is a backpressure hint. */
   highWaterMark?: number;
 }
 

@@ -116,6 +116,12 @@ for await (const chunk of Xlsb.toStream(workbook)) {
 }
 ```
 
+`XlsbReadOptions` controls base64 input, row and column limits, and formula
+handling. `XlsbWriteOptions` controls strict fidelity checks and ZIP metadata;
+`unsupported: "ignore"` explicitly opts into dropping unsupported edited state.
+Malformed BIFF12 data throws `XlsbParseError`, while a strict write that cannot
+preserve workbook state throws `ExcelNotSupportedError`.
+
 The XLSB implementation covers scalar and rich values, errors, dates, full cell
 styles, rows and columns, workbook and sheet views, merges, hyperlinks, legacy
 notes, data validation, protection, page setup, defined names, tables,
@@ -134,6 +140,8 @@ sheet names, dates and epochs, formulas, comments, hyperlinks, Unicode, merges,
 and one edited XLSB round-trip. Cache, offline, refresh, private-corpus, and
 benchmark sizing options are documented in
 [`xlsb/README.md`](xlsb/README.md).
+See [`examples/xlsb.ts`](examples/xlsb.ts) for a runnable create, write, read,
+edit, and verify round-trip.
 
 ### Reading a Range
 
@@ -1460,7 +1468,14 @@ import type {
   ConditionalFormattingOptions,
   TableProperties,
   WorksheetModel,
-  XlsxWriteOptions
+  XlsxWriteOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions,
+  XlsbReadOptions,
+  XlsbWriteOptions,
+  XlsbStreamOptions
 } from "documonster/excel";
 
 // Style values are now declarable, so styles can be composed and shared.
@@ -1573,6 +1588,7 @@ try {
 See the [examples directory](examples/) for runnable code covering all features:
 
 - Workbook creation, reading, and copying
+- XLSB creation, autodetection, editing, and strict-fidelity round-trips
 - Cell styling, fonts, borders, fills
 - Formulas, data validation, conditional formatting
 - Images (JPEG, PNG), hyperlinks, comments

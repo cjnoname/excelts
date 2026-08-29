@@ -1,3 +1,4 @@
+/** Node XLSB IO primitives, including file-path helpers. */
 import { readFile as readFileBytes, writeFile as writeFileBytes } from "node:fs/promises";
 import type { Readable } from "node:stream";
 
@@ -19,6 +20,7 @@ import {
   type XlsbWriteOptions
 } from "@excel/xlsb/package";
 
+/** Serialize a workbook to an XLSB `Buffer` without copying when possible. */
 export async function toBuffer(
   workbook: WorkbookData,
   options?: XlsbWriteOptions
@@ -29,6 +31,7 @@ export async function toBuffer(
     : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
+/** Serialize a workbook into a Node-readable XLSB byte stream. */
 export function toStream(
   workbook: WorkbookData,
   options?: XlsbStreamOptions
@@ -36,6 +39,7 @@ export function toStream(
   return toPortableStream(workbook, options) as XlsbReadable & Readable;
 }
 
+/** Node-only: read an XLSB file into `workbook`, mutating and returning it. */
 export async function readFile(
   workbook: WorkbookData,
   filename: string,
@@ -48,6 +52,7 @@ export async function readFile(
   }
 }
 
+/** Node-only: write a workbook to an XLSB file path. */
 export async function writeFile(
   workbook: WorkbookData,
   filename: string,

@@ -2,11 +2,12 @@
 
 [English](README.md)
 
-现代化的 TypeScript Excel 工作簿管理器 —— 零运行时依赖，读取、操作并写入 XLSX 与 JSON 电子表格。
+现代化的 TypeScript Excel 工作簿管理器 —— 零运行时依赖，读取、操作并写入 XLSX、XLSB 与 JSON 电子表格。
 
 ## 特性
 
 - **创建、读取并修改 XLSX 文件** —— 完整的 Open XML 支持
+- **读取并写入 XLSB 文件** —— 跨平台支持 BIFF12 单元格、公式、样式、表格、筛选、备注、保护与页面设置
 - **多工作表支持** —— 添加、删除、重排、复制
 - **单元格样式** —— 字体、颜色、边框、填充、对齐、数字格式
 - **单元格合并与格式化** —— 合并区域、富文本、超链接
@@ -84,6 +85,55 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
   console.log("Row " + rowNumber + " = " + JSON.stringify(Row.values(worksheet, rowNumber)));
 });
 ```
+
+### XLSB 文件
+
+XLSB 与 XLSX 共用相同的工作簿、工作表、行、列、单元格模型以及规范的
+`Workbook` IO 接口。缓冲区读取会自动检测包格式；Node 路径方法根据 `.xlsb`
+扩展名选择 XLSB；缓冲区和流写入则接受 `format: "xlsb"`。也可以直接使用
+`Xlsb` 命名空间：
+
+```typescript
+import { Cell, Workbook, Xlsb } from "documonster/excel";
+
+const workbook = Workbook.create();
+const sheet = Workbook.addWorksheet(workbook, "Data");
+Cell.setValue(sheet, "A1", "binary workbook");
+
+// Node.js file paths
+await Workbook.writeFile(workbook, "report.xlsb");
+await Workbook.readFile(Workbook.create(), "report.xlsb");
+
+// Node.js and browsers
+const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+const parsed = Workbook.create();
+await Workbook.read(parsed, bytes); // autodetects XLSB
+
+// Pull-based streaming uses the same contract as Workbook XLSX IO.
+for await (const chunk of Xlsb.toStream(workbook)) {
+  // upload or persist chunk
+}
+```
+
+`XlsbReadOptions` 控制 base64 输入、行列限制和公式处理。`XlsbWriteOptions`
+控制严格保真检查及 ZIP 元数据；`unsupported: "ignore"` 表示明确允许丢弃编辑后
+仍不受支持的状态。格式错误的 BIFF12 数据会抛出 `XlsbParseError`，严格写入无法
+保留工作簿状态时会抛出 `ExcelNotSupportedError`。
+
+当前实现覆盖标量与富文本值、错误、日期、完整单元格样式、行列属性、工作簿与
+工作表视图、合并单元格、超链接、传统备注、数据验证、保护、页面设置、定义名称、
+表格、结构化引用、AutoFilter 条件以及经典 BIFF12 公式，包括共享公式与传统数组公式。
+默认保留公式表达式；可以用 `formulas: "cached"` 进行明确的有损读取，或用
+`formulas: "error"` 拒绝公式单元格。绘图、图表、数据透视表、外部链接、条件格式和
+动态数组在编辑后的严格写入中仍会失败，而不会被静默丢弃。未修改的已加载工作簿会
+逐字节原样返回，包括宏及不透明包部件。
+
+维护者可运行 `pnpm verify:xlsb-corpus` 验证固定的 Calamine、Apache POI 与 `jsxlsb`
+互操作语料库，并运行 `pnpm benchmark:xlsb` 比较同一工作簿的 XLSX/XLSB IO。
+语料库还固定验证工作表名称、日期与日期系统、公式、备注、超链接、Unicode、合并单元格
+以及一次编辑后的 XLSB 往返。缓存、离线、刷新、私有语料库和基准规模选项记录在
+[`xlsb/README.md`](xlsb/README.md) 中。可运行的创建、写入、读取、编辑与验证示例见
+[`examples/xlsb.ts`](examples/xlsb.ts)。
 
 ### 读取区域
 
@@ -1387,7 +1437,14 @@ import type {
   ConditionalFormattingOptions,
   TableProperties,
   WorksheetModel,
-  XlsxWriteOptions
+  XlsxWriteOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions,
+  XlsbReadOptions,
+  XlsbWriteOptions,
+  XlsbStreamOptions
 } from "documonster/excel";
 
 // 样式值可以被声明，因此样式能够组合与复用。
@@ -1497,6 +1554,7 @@ try {
 参见[示例目录](examples/)，其中包含覆盖所有特性的可运行代码：
 
 - 工作簿的创建、读取和复制
+- XLSB 创建、自动检测、编辑及严格保真的往返验证
 - 单元格样式、字体、边框、填充
 - 公式、数据验证、条件格式
 - 图片（JPEG、PNG）、超链接、批注

@@ -1,3 +1,8 @@
+/**
+ * `Xlsb` namespace surface for Node.js.
+ *
+ * Includes byte, stream, and file-path IO plus the XLSB-specific option types.
+ */
 export {
   read,
   readFile,

@@ -61,14 +61,19 @@ import {
 import { addStyle, type XlsbStyleRegistry, type XlsbStyleTable } from "@excel/xlsb/styles";
 import { dateToExcel, excelToDate, isDateFmt } from "@utils/utils";
 
+/** Controls worksheet limits and formula handling while reading XLSB. */
 export interface XlsbWorksheetReadOptions {
+  /** Maximum number of worksheet rows to load. Defaults to no limit. */
   maxRows?: number;
+  /** Maximum number of worksheet columns to load. Defaults to no limit. */
   maxCols?: number;
-  /** Preserve supported BIFF12 formulas, keep only cached results, or reject formula cells. */
+  /** Preserve formulas, keep cached results, or reject formula cells. Defaults to `preserve`. */
   formulas?: "preserve" | "cached" | "error";
 }
 
+/** Controls how the writer handles workbook state that XLSB cannot preserve. */
 export interface XlsbWorksheetWriteOptions {
+  /** Reject unsupported state by default, or omit it with `ignore`. */
   unsupported?: "error" | "ignore";
 }
 

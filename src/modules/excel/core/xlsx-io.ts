@@ -1,12 +1,13 @@
 import type { Readable } from "node:stream";
 
 /**
- * Node xlsx IO handle accessor and the canonical public IO surface (Node).
+ * Node XLSX handle accessor and the canonical workbook IO surface.
  *
  * Same shape as `xlsx-io.browser.ts`, but binds the Node `XLSX` serializer
  * (which adds file-path `readFile` / `writeFile` and true-streaming `read`)
- * and layers the Node-only file-path free functions on top. Selected over the
- * browser variant via the `.browser` same-name swap at build/test time.
+ * and dispatches to XLSB when requested or detected. It layers the Node-only
+ * file-path functions on top and is selected over the browser variant via the
+ * `.browser` same-name swap at build/test time.
  */
 import { ZipParser } from "@archive/unzip/zip-parser";
 import type { WorkbookData } from "@excel/core/workbook-core";
@@ -31,13 +32,17 @@ import { XLSX } from "@excel/xlsx/xlsx";
 import type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser";
 import { base64ToUint8Array } from "@utils/utils";
 
+/** Workbook package formats supported by the canonical IO surface. */
 export type WorkbookFormat = "xlsx" | "xlsb";
+/** Read options shared by XLSX and XLSB, with an optional explicit format. */
 export type WorkbookReadOptions = XlsxReadOptions & XlsbReadOptions & { format?: WorkbookFormat };
+/** Write options shared by XLSX and XLSB, with an optional explicit format. */
 export type WorkbookWriteOptions = XlsxWriteOptions &
   Omit<XlsbWriteOptions, "zip"> & {
     format?: WorkbookFormat;
     zip?: XlsxWriteOptions["zip"] & XlsbWriteOptions["zip"];
   };
+/** Canonical workbook write options plus readable-stream queue configuration. */
 export type WorkbookStreamOptions = WorkbookWriteOptions & XlsbStreamOptions;
 
 /** Get (or lazily create) the Node xlsx IO handle bound to a workbook. */
@@ -54,7 +59,7 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // =============================================================================
 
 /**
- * Serialize a workbook to xlsx bytes.
+ * Serialize a workbook to XLSX bytes, or XLSB when `options.format` requests it.
  *
  * Returns a `Buffer` on Node — the same nominal type `fs.writeFile`, `res.end`,
  * and SDK upload bodies ask for — so callers do not need the defensive
@@ -77,7 +82,7 @@ export async function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions)
     : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
-/** Read xlsx bytes into a workbook (mutates and returns `wb`). */
+/** Read XLSX or XLSB bytes into a workbook, mutating and returning `wb`. */
 export async function read(
   wb: WorkbookData,
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
@@ -260,10 +265,10 @@ export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 
 // =============================================================================
-// Node-only xlsx file-path IO.
+// Node-only workbook file-path IO.
 // =============================================================================
 
-/** Node-only: read a workbook from an xlsx file path (mutates and returns `wb`). */
+/** Node-only: read an XLSX or XLSB file, mutating and returning `wb`. */
 export function readFile(
   wb: WorkbookData,
   filename: string,
@@ -275,7 +280,7 @@ export function readFile(
   return getXlsxIo(wb).readFile(filename, options);
 }
 
-/** Node-only: write a workbook to an xlsx file path. */
+/** Node-only: write an XLSX or XLSB file, inferred from the extension or options. */
 export function writeFile(
   wb: WorkbookData,
   filename: string,

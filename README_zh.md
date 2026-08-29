@@ -20,9 +20,10 @@ Documonster 是一个零依赖的 TypeScript 电子表格和文档工具包：
 
 Documonster 由九个独立模块组成,每个模块都有自己的文档和可运行示例。
 
-### Excel — XLSX/JSON 工作簿管理器
+### Excel — XLSX/XLSB/JSON 工作簿管理器
 
-创建、读取和修改 Excel 电子表格,完整支持样式、公式、图片和流式处理。
+创建、读取和修改 Excel 电子表格，完整支持 XLSX 样式、公式、图片和流式处理，
+并提供零依赖的 XLSB 单元格、样式、公式、流式处理、自动检测和严格保真保护。
 
 - [文档](src/modules/excel/README.md) | [中文](src/modules/excel/README_zh.md)
 - [示例](src/modules/excel/examples/)
