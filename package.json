@@ -407,6 +407,7 @@
     "format": "oxfmt",
     "benchmark": "rimraf dist && pnpm build && node --expose-gc scripts/benchmark.ts",
     "benchmark:formula": "pnpm build && node --expose-gc benchmark/formula-benchmark.mjs",
+    "benchmark:xlsb": "pnpm build:esm && node --expose-gc scripts/benchmark-xlsb.ts",
     "build:esm": "tsc --project tsconfig.esm.json && node scripts/fix-esm-imports.ts",
     "build:cjs": "tsc --project tsconfig.cjs.json && node scripts/fix-cjs-imports.ts",
     "build:browser": "tsc --project tsconfig.browser.json && node scripts/fix-esm-imports.ts --dist dist/browser --types dist/browser && node scripts/fix-browser-imports.ts --dir dist/browser",
