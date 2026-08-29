@@ -10,7 +10,7 @@
  * The pdf module is allowed to reach into @word via its bridge layer, so
  * this example builds the document with @word directly.
  *
- * Usage:  npx tsx src/modules/pdf/examples/pdf-from-docx.ts
+ * Usage:  pnpm example --filter pdf-from-docx
  * Output: tmp/pdf-examples/from-docx-letter.pdf
  *         tmp/pdf-examples/from-docx-a5.pdf
  */

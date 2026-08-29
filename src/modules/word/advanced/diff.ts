@@ -7,9 +7,9 @@
  *
  * @example
  * ```ts
- * import { diffDocuments } from "documonster/word";
+ * import { Diff } from "documonster/word";
  *
- * const changes = diffDocuments(oldDoc, newDoc);
+ * const changes = Diff.documents(oldDoc, newDoc);
  * console.log(changes.filter(c => c.type === "modified"));
  * ```
  */

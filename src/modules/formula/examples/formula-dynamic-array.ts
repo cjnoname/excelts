@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellGetValue, cellResult } from "@excel/core/cell";
-import { findCell, getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -81,9 +79,10 @@ calculateFormulas(wb);
 // Dynamic array sources print their scalar top-left; the full spill
 // lives in surrounding cells.
 for (const addr of ["E1", "E10", "J1", "L1", "T1"]) {
-  const c = getCell(ws, addr);
   console.log(
-    `${addr}  ${String(cellFormula(c)).padEnd(52)}  top-left = ${JSON.stringify(cellResult(c))}`
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(52)}  top-left = ${JSON.stringify(
+      Cell.getResult(ws, addr)
+    )}`
   );
 }
 
@@ -94,14 +93,18 @@ console.log("\nFILTER spill E1:G?");
 for (let rn = 1; rn <= 6; rn++) {
   const row: unknown[] = [];
   for (let cn = 5; cn <= 7; cn++) {
-    const cell = findCell(ws, rn, cn);
+    // `Cell.find` rather than any `Cell.get*` reader: the latter resolve their
+    // address through `getCell`, which would *create* every cell probed here and
+    // so manufacture the very ghost cells this loop is trying to observe.
+    const cell = Cell.find(ws, rn, cn);
     if (!cell) {
       row.push(null);
       continue;
     }
     // For the source cell, the spilled value is carried in `result`;
-    // ghost cells carry it in `value`.
-    row.push(rn === 1 && cn === 5 ? cellResult(cell) : cellGetValue(cell));
+    // ghost cells carry it in `value`. The cell is known to exist by now, so
+    // addressing it again is safe.
+    row.push(rn === 1 && cn === 5 ? Cell.getResult(ws, rn, cn) : Cell.view(cell).value);
   }
   if (row.some(v => v !== null)) {
     console.log(`  row ${rn}: ${JSON.stringify(row)}`);

@@ -6,6 +6,7 @@ import type { CellData } from "@excel/core/cell";
  * `Row.setStyle(ws, 3, { font })`, `Row.getValues(ws, 2)`.
  */
 import {
+  rowAddPageBreak,
   rowGetStyle,
   rowGetValues,
   rowHidden,
@@ -15,6 +16,7 @@ import {
   rowSetFill,
   rowSetFont,
   rowSetHidden,
+  rowSetNumFmt,
   rowSetOutlineLevel,
   rowSetStyle,
   rowValues
@@ -94,6 +96,21 @@ export function values(ws: Sheet, row: number): CellValue[] {
 
 // --- individual style facets ---
 
+/**
+ * Setting a facet on a row applies it to the row *and* to every cell that
+ * already exists in it. Each call walks the row once, so {@link setStyle} is
+ * the better call when setting several facets together — it walks the row a
+ * single time for all of them.
+ *
+ * Passing `undefined` clears the facet, on the row and on its cells.
+ *
+ * There are no matching per-facet *getters*: a row's style is one record and
+ * {@link getStyle} hands it over whole, so `getStyle(ws, row).numFmt` is the
+ * read.
+ */
+export function setNumFmt(ws: Sheet, row: number, value: string | undefined): void {
+  rowSetNumFmt(getRow(ws, row), value);
+}
 export function setFont(ws: Sheet, row: number, value: Partial<Font> | undefined): void {
   rowSetFont(getRow(ws, row), value);
 }
@@ -122,4 +139,27 @@ export function eachCell(
 }
 export function commit(ws: Sheet, row: number): void {
   rowCommit(getRow(ws, row));
+}
+
+// --- printing ---
+
+/**
+ * Add a manual horizontal page break **below** `row`, the equivalent of
+ * Excel's *Page Layout → Breaks → Insert Page Break*. Applies to printing and
+ * to `Pdf.fromExcel`; it does not affect the on-screen grid.
+ *
+ * The break spans the full width of the sheet, which is the only kind Excel can
+ * author or render — see `rowAddPageBreak` for why no column band is offered.
+ *
+ * @example
+ * ```typescript
+ * import { Row, Workbook } from "documonster/excel";
+ *
+ * const wb = Workbook.create();
+ * const ws = Workbook.addWorksheet(wb, "Report");
+ * Row.addPageBreak(ws, 20); // page 2 starts at row 21
+ * ```
+ */
+export function addPageBreak(ws: Sheet, row: number): void {
+  rowAddPageBreak(getRow(ws, row));
 }

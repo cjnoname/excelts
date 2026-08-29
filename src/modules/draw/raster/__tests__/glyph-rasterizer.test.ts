@@ -104,8 +104,22 @@ function glyphBytes(shape: GlyphShape): Uint8Array {
   }
 }
 
+/**
+ * Which `cmap` encoding record the fixture advertises.
+ *
+ * A real font chooses this, and the choice is not cosmetic: several macOS system
+ * fonts publish a Unicode-platform subtable and nothing on the Windows platform.
+ */
+interface CmapEncoding {
+  platformID: number;
+  encodingID: number;
+}
+
+/** Windows Unicode BMP — what the overwhelming majority of fonts carry. */
+const WINDOWS_BMP: CmapEncoding = { platformID: 3, encodingID: 1 };
+
 /** Build a font whose glyphs are `specs`, with 'A' mapped to glyph 1 onwards. */
-function buildFont(specs: GlyphSpec[]): Uint8Array {
+function buildFont(specs: GlyphSpec[], encoding: CmapEncoding = WINDOWS_BMP): Uint8Array {
   const numGlyphs = specs.length;
 
   const head = new Uint8Array(54);
@@ -124,7 +138,7 @@ function buildFont(specs: GlyphSpec[]): Uint8Array {
   const maxp = new Uint8Array(6);
   new DataView(maxp.buffer).setUint16(4, numGlyphs, false);
 
-  // cmap: one (3,1) format 4 subtable mapping 'A'… onto glyph 1…
+  // cmap: one format 4 subtable mapping 'A'… onto glyph 1…
   const lastChar = 0x41 + numGlyphs - 2;
   const segments = [
     { start: 0x41, end: lastChar, delta: 1 - 0x41 },
@@ -134,8 +148,8 @@ function buildFont(specs: GlyphSpec[]): Uint8Array {
   const cmap = new Uint8Array(12 + subtableLength);
   const cmapV = new DataView(cmap.buffer);
   cmapV.setUint16(2, 1, false); // numTables
-  cmapV.setUint16(4, 3, false); // platformID = Windows
-  cmapV.setUint16(6, 1, false); // encodingID = Unicode BMP
+  cmapV.setUint16(4, encoding.platformID, false);
+  cmapV.setUint16(6, encoding.encodingID, false);
   cmapV.setUint32(8, 12, false); // subtable offset
   cmapV.setUint16(12, 4, false); // format
   cmapV.setUint16(14, subtableLength, false);
@@ -370,5 +384,37 @@ describe("Glyph Rasterizer Horizontal Metrics", () => {
     expect(glyfLength).toBeGreaterThan(0);
     // Clamped to the end of glyf, so every glyph is empty rather than garbage.
     expect(font.getOutline(A)?.contours).toEqual([]);
+  });
+});
+
+describe("Glyph Rasterizer cmap subtable selection", () => {
+  // A Unicode-platform subtable is not an exotic fallback. macOS `STHeiti` and
+  // `STFangsong` publish `(0,4)` and nothing on platform 3, and `Helvetica.ttc`
+  // publishes `(0,3)` plus platform-1 subtables only — so a Windows-only scan
+  // yielded an empty map and drew nothing at all, silently. `Helvetica.ttc` is
+  // the rasteriser's own macOS fallback when Arial is absent, which made this
+  // reachable for Latin text and not only for CJK.
+  const UNICODE_ENCODINGS: Array<[string, CmapEncoding]> = [
+    ["(0,3) Unicode BMP", { platformID: 0, encodingID: 3 }],
+    ["(0,4) Unicode full repertoire", { platformID: 0, encodingID: 4 }],
+    ["(0,6) Unicode full, later spec", { platformID: 0, encodingID: 6 }],
+    ["(3,1) Windows BMP", { platformID: 3, encodingID: 1 }],
+    ["(3,10) Windows full repertoire", { platformID: 3, encodingID: 10 }]
+  ];
+
+  it.each(UNICODE_ENCODINGS)("resolves glyphs through a %s subtable", (_label, encoding) => {
+    const font = parseRasterFont(buildFont(SPECS, encoding));
+
+    const outline = font.getOutline(A);
+    expect(outline?.advanceWidth).toBe(600);
+    expect(outline?.contours.length).toBeGreaterThan(0);
+  });
+
+  it("ignores a subtable on a non-Unicode platform", () => {
+    // Platform 1 (Macintosh) is a legacy 8-bit encoding, not Unicode: reading it
+    // as though the code points were Unicode maps the wrong glyphs.
+    const font = parseRasterFont(buildFont(SPECS, { platformID: 1, encodingID: 0 }));
+
+    expect(font.getOutline(A)).toBeUndefined();
   });
 });

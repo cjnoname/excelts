@@ -16,6 +16,7 @@
 
 import { unzlibSync } from "@archive/compression/compress";
 import { inflateRaw } from "@archive/compression/deflate-fallback";
+import { undoPngFilters } from "@pdf/core/png-filters";
 import type { PdfDictValue } from "@pdf/reader/pdf-parser";
 import { dictGetNumber, isPdfDict, isPdfArray } from "@pdf/reader/pdf-parser";
 
@@ -203,59 +204,8 @@ function undoPngPredictor(
 ): Uint8Array {
   const bytesPerPixel = Math.max(1, Math.ceil((colors * bitsPerComponent) / 8));
   const rowBytes = Math.ceil((columns * colors * bitsPerComponent) / 8);
-  const rowWithFilter = rowBytes + 1; // 1 byte for filter type
-  const rows = Math.floor(data.length / rowWithFilter);
-  const result = new Uint8Array(rows * rowBytes);
-
-  for (let row = 0; row < rows; row++) {
-    const srcRow = row * rowWithFilter;
-    const dstRow = row * rowBytes;
-    const filterType = data[srcRow];
-
-    for (let i = 0; i < rowBytes; i++) {
-      const raw = data[srcRow + 1 + i];
-      const a = i >= bytesPerPixel ? result[dstRow + i - bytesPerPixel] : 0; // left
-      const b = row > 0 ? result[dstRow - rowBytes + i] : 0; // above
-      const c = row > 0 && i >= bytesPerPixel ? result[dstRow - rowBytes + i - bytesPerPixel] : 0; // upper-left
-
-      switch (filterType) {
-        case 0: // None
-          result[dstRow + i] = raw;
-          break;
-        case 1: // Sub
-          result[dstRow + i] = (raw + a) & 0xff;
-          break;
-        case 2: // Up
-          result[dstRow + i] = (raw + b) & 0xff;
-          break;
-        case 3: // Average
-          result[dstRow + i] = (raw + ((a + b) >> 1)) & 0xff;
-          break;
-        case 4: // Paeth
-          result[dstRow + i] = (raw + paethPredictor(a, b, c)) & 0xff;
-          break;
-        default:
-          result[dstRow + i] = raw;
-          break;
-      }
-    }
-  }
-
-  return result;
-}
-
-function paethPredictor(a: number, b: number, c: number): number {
-  const p = a + b - c;
-  const pa = Math.abs(p - a);
-  const pb = Math.abs(p - b);
-  const pc = Math.abs(p - c);
-  if (pa <= pb && pa <= pc) {
-    return a;
-  }
-  if (pb <= pc) {
-    return b;
-  }
-  return c;
+  const rows = Math.floor(data.length / (rowBytes + 1)); // +1 for the filter byte
+  return undoPngFilters(data, rows, rowBytes, bytesPerPixel);
 }
 
 // =============================================================================

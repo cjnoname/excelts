@@ -131,6 +131,8 @@ describe("documonster-mcp executable", () => {
       expect(tools.map(tool => tool.name).toSorted()).toEqual([
         "archive_read",
         "archive_write",
+        "diagram_inspect",
+        "diagram_render",
         "doc_convert",
         "doc_edit",
         "doc_inspect",

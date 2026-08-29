@@ -130,16 +130,6 @@ export function probeDeflateRawDecompressionStream(): boolean {
   }
 }
 
-/**
- * Non-cached probe for full deflate-raw Web Streams support.
- *
- * Returns true only if BOTH CompressionStream("deflate-raw") and
- * DecompressionStream("deflate-raw") are supported.
- */
-export function probeDeflateRawWebStreams(): boolean {
-  return probeDeflateRawCompressionStream() && probeDeflateRawDecompressionStream();
-}
-
 let _hasDeflateRawCompressionStream: boolean | null = null;
 let _hasDeflateRawDecompressionStream: boolean | null = null;
 

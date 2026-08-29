@@ -10,7 +10,7 @@
  * - createStringChunk() / createByteChunk() — build DataChunk objects from
  *   strings / bytes for use with BufferedStream-style buffering
  *
- * Usage: npx tsx src/modules/stream/examples/08-readable-factories.ts
+ * Usage: pnpm example --filter 08-readable-factories
  */
 
 import {

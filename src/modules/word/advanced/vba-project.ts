@@ -41,9 +41,6 @@ export const DOCM_CONTENT_TYPES = {
   vbaData: "application/vnd.ms-word.vbaData+xml"
 } as const;
 
-/** VBA-related relationship type. */
-export const VBA_REL_TYPE = "http://schemas.microsoft.com/office/2006/relationships/vbaProject";
-
 // =============================================================================
 // VBA Detection & Extraction
 // =============================================================================

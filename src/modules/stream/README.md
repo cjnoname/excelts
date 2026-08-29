@@ -767,7 +767,7 @@ isDuplex(stream); // true if duplex stream
 isStream(stream); // true if any stream type
 
 // Usage
-function processStream(input: unknown) {
+async function processStream(input: unknown) {
   if (isReadable(input)) {
     // TypeScript knows input is Readable here
     for await (const chunk of input) {
@@ -798,19 +798,27 @@ isErrored(stream); // true if error occurred
 
 ## Binary Utilities
 
+These helpers exist inside the library but are **not** part of any published entry point —
+`stringToUint8Array`, `uint8ArrayToString`, `concatUint8Arrays`, `uint8ArrayEquals` and
+`uint8ArrayIndexOf` all live in the internal `utils/` layer, which is deliberately never
+exported. They are thin wrappers over platform built-ins, so use those directly:
+
 ```typescript
-// NOTE: These binary helpers are NOT exported from documonster/stream.
-// stringToUint8Array / uint8ArrayToString / concatUint8Arrays are available
-// from documonster/archive; uint8ArrayEquals / uint8ArrayIndexOf are not part
-// of any public subpath entry.
-import { stringToUint8Array, uint8ArrayToString, concatUint8Arrays } from "documonster/archive";
-
 // String <-> Uint8Array conversion (UTF-8)
-const bytes = stringToUint8Array("Hello, 世界!");
-const text = uint8ArrayToString(bytes);
+const bytes = new TextEncoder().encode("Hello, 世界!");
+const text = new TextDecoder().decode(bytes);
 
-// Concatenate multiple arrays efficiently
-const combined = concatUint8Arrays([arr1, arr2, arr3]);
+// Other encodings, where the runtime supports them
+const latin1 = new TextDecoder("latin1").decode(bytes);
+
+// Concatenate multiple arrays
+const total = arrays.reduce((n, a) => n + a.length, 0);
+const combined = new Uint8Array(total);
+let offset = 0;
+for (const a of arrays) {
+  combined.set(a, offset);
+  offset += a.length;
+}
 ```
 
 ---

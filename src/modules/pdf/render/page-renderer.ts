@@ -11,8 +11,8 @@
  */
 
 import { parseImageDimensions } from "@pdf/builder/image-utils";
+import { pdfNumber } from "@pdf/core/pdf-object";
 import { PdfContentStream } from "@pdf/core/pdf-stream";
-import { graphemeClusters, isGlyphShapingControl } from "@pdf/font/font-embedder";
 import type { FontManager } from "@pdf/font/font-manager";
 import {
   CELL_PADDING_H,
@@ -41,6 +41,8 @@ import type {
   PdfHeaderFooterContent,
   PdfHeaderFooterRun
 } from "@pdf/types";
+import { countGlyphAdvances, isGlyphlessControl, segmentForWrap, wrapUnitsOf } from "@utils/cjk";
+import { graphemeClusters } from "@utils/grapheme";
 
 // =============================================================================
 // Border-aware Padding
@@ -591,8 +593,18 @@ function drawCellText(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineY = textStartY - i * lineHeight;
-    const textWidth = measure(line);
-    const textX = computeTextX(horizontalAlign, rect, textWidth, indentPts, pad.left, pad.right);
+    // Already measured with the ascent and descent above. The two agree to within
+    // a few ulps — bit for bit on the configured path, and within 4e-11pt on the
+    // legacy mixed path, where `measureText` scales per character while this scales
+    // once — so measuring again only re-routes the same string for no gain.
+    const textX = computeTextX(
+      horizontalAlign,
+      rect,
+      lineMetrics[i].width,
+      indentPts,
+      pad.left,
+      pad.right
+    );
 
     emitTextWithType3(stream, line, textX, lineY, resourceName, fontSize, fontManager, useType3);
   }
@@ -649,12 +661,13 @@ function drawRichText(
 
     // Run-aware word-wrap using each character's actual run font size
     const runResources: string[] = runs.map(r => runResource(r));
+    const runFontSizes: number[] = runs.map(r => r.fontSize);
 
     // Word-wrap using actual per-run measurements — returns character ranges
     const lineRanges = wrapRichTextLines(
       fullText,
       runForChar,
-      runs,
+      runFontSizes,
       runResources,
       fontManager,
       availWidth
@@ -912,7 +925,7 @@ function drawRotatedText(
   const measureBlock = (size: number) => {
     const lineHeight = size * LINE_HEIGHT_FACTOR;
     const metrics = lines.map(line => fontManager.measureTextMetrics(line, resourceName, size));
-    const widths = lines.map(line => fontManager.measureText(line, resourceName, size));
+    const widths = metrics.map(m => m.width);
     let ccwLeft = Number.POSITIVE_INFINITY;
     let ccwRight = Number.NEGATIVE_INFINITY;
     for (let i = 0; i < metrics.length; i++) {
@@ -1220,14 +1233,67 @@ function emitText(
   stream: PdfContentStream,
   fontManager: FontManager,
   text: string,
-  resourceName: string
+  resourceName: string,
+  wordSpacing = 0,
+  fontSize = 0
 ): void {
   const hex = fontManager.encodeText(text, resourceName);
-  if (hex) {
-    stream.showTextHex(hex);
-  } else {
+  if (hex === null) {
     stream.showText(text);
+    return;
   }
+  if (wordSpacing !== 0 && fontSize > 0 && text.includes(" ")) {
+    stream.showTextHexWithAdjustments(
+      cidWordSpacingRun(fontManager, text, resourceName, wordSpacing, fontSize)
+    );
+    return;
+  }
+  stream.showTextHex(hex);
+}
+
+/**
+ * A justified run for a CIDFont, as alternating hex strings and displacements.
+ *
+ * `Tw` cannot deliver word spacing here — PDF 32000-1 §9.3.3 applies it to a
+ * single-byte code 32 only, and every code in an `Identity-H` CIDFont is two
+ * bytes — so the gap is opened with an explicit `TJ` adjustment after each space
+ * instead. Emitting `Tw` anyway is what made a justified Latin line fall 11–17pt
+ * short of a 468pt column while the layout believed it had filled it.
+ *
+ * `TJ` numbers are thousandths of a unit of *text* space, and are subtracted from
+ * the displacement — hence the negative sign and the division by the font size.
+ */
+function cidWordSpacingRun(
+  fontManager: FontManager,
+  text: string,
+  resourceName: string,
+  wordSpacing: number,
+  fontSize: number
+): (string | number)[] {
+  const adjustment = (-wordSpacing / fontSize) * 1000;
+  const parts: (string | number)[] = [];
+  // Split *after* each space so the space keeps its own advance and only the extra
+  // gap is added, exactly as `Tw` would have done.
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== " ") {
+      continue;
+    }
+    const chunk = text.slice(start, i + 1);
+    const hex = fontManager.encodeText(chunk, resourceName);
+    if (hex !== null) {
+      parts.push(hex);
+    }
+    parts.push(adjustment);
+    start = i + 1;
+  }
+  if (start < text.length) {
+    const hex = fontManager.encodeText(text.slice(start), resourceName);
+    if (hex !== null) {
+      parts.push(hex);
+    }
+  }
+  return parts;
 }
 
 /**
@@ -1307,6 +1373,15 @@ export interface TextBlockOptions {
   lineHeightFactor: number;
   /** Clockwise rotation in degrees about (x, y); applied to every line. */
   rotation: number;
+  /**
+   * Extra advance after every character, in points (PDF `Tc`).
+   *
+   * Used to justify East Asian text, which has no spaces to widen. Included in
+   * measurement so anchored text stays anchored.
+   */
+  charSpacing?: number;
+  /** Extra advance on every space, in points (PDF `Tw`). The Latin equivalent. */
+  wordSpacing?: number;
 }
 
 /**
@@ -1362,12 +1437,18 @@ function renderTextBlockLayout(
 ): string {
   const { text, x, y, type1ResourceName, fontSize, anchor, maxWidth, lineHeightFactor, rotation } =
     options;
+  const charSpacing = options.charSpacing ?? 0;
+  const wordSpacing = options.wordSpacing ?? 0;
 
   // Resolve the resource name once; measurement and rendering share it so a
   // build-time auto-embedded CIDFont (or Type3 fallback) is measured with the
   // metrics that will actually render the glyphs.
   const measureResource = fontManager.resolveRenderResourceName(type1ResourceName);
-  const measure = (s: string) => fontManager.measureText(s, measureResource, fontSize);
+  // Justification spacing is part of the advance, so measurement has to include
+  // it or an anchored line would be positioned from the wrong width.
+  const measure = (s: string) =>
+    fontManager.measureText(s, measureResource, fontSize) +
+    justifyAdvance(s, charSpacing, wordSpacing);
 
   const lines = maxWidth ? wrapTextLines(text, measure, maxWidth) : [text];
   const leading = fontSize * lineHeightFactor;
@@ -1397,11 +1478,57 @@ function renderTextBlockLayout(
         ty,
         type1ResourceName,
         fontSize,
-        fontManager
+        fontManager,
+        0,
+        charSpacing,
+        wordSpacing
       )
     );
   }
-  return parts.join("\n");
+  const body = parts.join("\n");
+  if (charSpacing === 0 && wordSpacing === 0) {
+    return body;
+  }
+  // `Tc`/`Tw` are text state, so they belong to the graphics state and are
+  // restored by the enclosing `q`/`Q`. They are still reset explicitly: a caller
+  // may emit this fragment without a save/restore pair, and leaking a character
+  // spacing onto everything drawn afterwards is a far worse failure than the two
+  // extra operators.
+  //
+  // `Tw` is emitted even though a CIDFont segment delivers its word spacing
+  // through `TJ` instead (see `cidWordSpacingRun`): with an `Identity-H` encoding
+  // every code is two bytes, so `Tw` matches nothing and cannot double-apply.
+  // A Type1 or Type3 segment in the same block is a simple font, where `Tw` is
+  // exactly the right mechanism and `emitText` leaves it to do the work.
+  return `${pdfNumber(charSpacing)} Tc ${pdfNumber(wordSpacing)} Tw\n${body}\n0 Tc 0 Tw`;
+}
+
+/**
+ * The width justification spacing adds to a stretch of text.
+ *
+ * `Tc` advances once per glyph and `Tw` only on byte 32, so this must agree with
+ * both the renderer's operators and the layout engine's `justificationWidth` —
+ * three places that all have to compute the same number, or a line's measured
+ * width stops matching what is drawn.
+ */
+function justifyAdvance(text: string, charSpacing: number, wordSpacing: number): number {
+  if (charSpacing === 0 && wordSpacing === 0) {
+    return 0;
+  }
+  // `countGlyphAdvances`, not a per-code-point count: `Tc` is added after every
+  // glyph shown, and a variation selector or ZWJ is folded into the glyph before it
+  // rather than drawing one.
+  //
+  // A space is itself a drawn glyph, so it takes `Tc` as well as `Tw` — which is
+  // why the glyph count is taken over the whole string and the spaces subtracted,
+  // rather than building a space-free copy of it just to count what is left.
+  let spaces = 0;
+  for (const char of text) {
+    if (char === " ") {
+      spaces++;
+    }
+  }
+  return spaces * wordSpacing + charSpacing * (countGlyphAdvances(text) - spaces);
 }
 
 /**
@@ -1425,7 +1552,9 @@ function renderTextBlock(
   type1ResourceName: string,
   fontSize: number,
   fontManager: FontManager,
-  renderingMode: 0 | 1 | 2 = 0
+  renderingMode: 0 | 1 | 2 = 0,
+  charSpacing = 0,
+  wordSpacing = 0
 ): string {
   const sink = new PdfContentStream();
 
@@ -1440,9 +1569,13 @@ function renderTextBlock(
       }
       sink.setFont(segment.resourceName, fontSize);
       sink.setTextMatrix(a, b, c, d, curTx, curTy);
-      emitText(sink, fontManager, segment.text, segment.resourceName);
+      emitText(sink, fontManager, segment.text, segment.resourceName, wordSpacing, fontSize);
       sink.endText();
-      const width = segment.width * fontSize;
+      // The renderer applies `Tc`/`Tw` to this segment, so the origin of the
+      // next one has to move by that too. Advancing by the font's natural width
+      // alone made every segment after the first overlap the one before it.
+      const width =
+        segment.width * fontSize + justifyAdvance(segment.text, charSpacing, wordSpacing);
       curTx += a * width;
       curTy += b * width;
     }
@@ -1465,7 +1598,7 @@ function renderTextBlock(
     }
     sink.setFont(resourceName, fontSize);
     sink.setTextMatrix(a, b, c, d, tx, ty);
-    emitText(sink, fontManager, text, resourceName);
+    emitText(sink, fontManager, text, resourceName, wordSpacing, fontSize);
     sink.endText();
     return sink.toString();
   }
@@ -1486,10 +1619,12 @@ function renderTextBlock(
     if (run.type3Hex !== null) {
       sink.showTextHex(run.type3Hex);
     } else {
-      emitText(sink, fontManager, run.text, resourceName);
+      emitText(sink, fontManager, run.text, resourceName, wordSpacing, fontSize);
     }
     sink.endText();
-    const w = fontManager.measureText(run.text, resourceName, fontSize);
+    const w =
+      fontManager.measureText(run.text, resourceName, fontSize) +
+      justifyAdvance(run.text, charSpacing, wordSpacing);
     // Advance along the text direction (first column of the matrix)
     curTx += a * w;
     curTy += b * w;
@@ -1518,6 +1653,17 @@ interface TextRun {
   type3Hex: string | null;
 }
 
+/** A cluster with its joiners and variation selectors removed. */
+function stripShapingControls(cluster: string): string {
+  let out = "";
+  for (const char of cluster) {
+    if (!isGlyphlessControl(char.codePointAt(0)!)) {
+      out += char;
+    }
+  }
+  return out;
+}
+
 /**
  * Split a line of text into the fewest possible runs, where each run is
  * rendered by exactly one font resource.
@@ -1538,17 +1684,6 @@ interface TextRun {
  * Non-WinAnsi characters that no face can draw join the Type1 run (the WinAnsi
  * encoder renders them as a space).
  */
-/** A cluster with its joiners and variation selectors removed. */
-function stripShapingControls(cluster: string): string {
-  let out = "";
-  for (const char of cluster) {
-    if (!isGlyphShapingControl(char.codePointAt(0)!)) {
-      out += char;
-    }
-  }
-  return out;
-}
-
 function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
   const runs: TextRun[] = [];
 
@@ -1593,7 +1728,7 @@ function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
     let base = cluster.codePointAt(0)!;
     for (const char of cluster) {
       const cp = char.codePointAt(0)!;
-      if (!isGlyphShapingControl(cp)) {
+      if (!isGlyphlessControl(cp)) {
         base = cp;
         break;
       }
@@ -1620,7 +1755,7 @@ function splitTextRuns(text: string, fontManager: FontManager): TextRun[] {
       // only the drawable code points get a glyph.
       for (const char of cluster) {
         const cp = char.codePointAt(0)!;
-        if (!isGlyphShapingControl(cp)) {
+        if (!isGlyphlessControl(cp)) {
           pendingCodePoints.push(cp);
         }
       }
@@ -1932,31 +2067,48 @@ export function wrapTextLines(
       continue;
     }
 
-    const words = paragraph.split(/\s+/);
-    const spaceWidth = measure(" ");
+    // Segments carry their own trailing whitespace, so they are concatenated
+    // rather than re-joined with a space. The previous `split(/\s+/)` +
+    // `+= " " + word` pair also silently collapsed runs of whitespace, which
+    // this no longer does — the cell's own spacing is the author's.
+    //
+    // Trailing whitespace counts toward the *accumulated* width (the next
+    // segment starts after it) but not toward the width being tested, because a
+    // space at the end of a line does not occupy the column. Charging it would
+    // wrap one segment too early — `"aa bb"` at width 5 would become two lines.
+    const words = segmentForWrap(paragraph);
     let currentLine = "";
     let currentWidth = 0;
 
     for (const word of words) {
-      const wordWidth = measure(word);
+      const visible = word.trimEnd();
+      const visibleWidth = measure(visible);
+      const fullWidth = visible.length === word.length ? visibleWidth : measure(word);
+
       if (!currentLine) {
         currentLine = word;
-        currentWidth = wordWidth;
+        currentWidth = fullWidth;
         continue;
       }
 
-      if (currentWidth + spaceWidth + wordWidth <= maxWidth) {
-        currentLine += ` ${word}`;
-        currentWidth += spaceWidth + wordWidth;
+      if (currentWidth + visibleWidth <= maxWidth) {
+        currentLine += word;
+        currentWidth += fullWidth;
       } else {
-        allLines.push(currentLine);
-        currentLine = word;
-        currentWidth = wordWidth;
+        allLines.push(currentLine.trimEnd());
+        // Whitespace that lands at a break is consumed by it.
+        if (visible === "") {
+          currentLine = "";
+          currentWidth = 0;
+        } else {
+          currentLine = word;
+          currentWidth = fullWidth;
+        }
       }
     }
 
     if (currentLine) {
-      allLines.push(currentLine);
+      allLines.push(currentLine.trimEnd());
     }
   }
 
@@ -1975,16 +2127,68 @@ export function wrapTextLines(
  * This avoids the need for indexOf-based re-positioning which can fail with
  * duplicate text content.
  */
-interface RichTextLineRange {
+export interface RichTextLineRange {
   start: number;
   end: number;
 }
 
-function wrapRichTextLines(
+/**
+ * Measure a substring of rich text, each span at its own run's font.
+ *
+ * Shared with the layout pass, which builds `runFontSizes` and `runResources` from
+ * a different source but needs the same arithmetic — and, crucially, the same
+ * *segmentation*: measuring `[a,c)` in one call and `[a,b) + [b,c)` in two sums
+ * different sets of per-run measurements, which is a floating-point difference the
+ * two passes must not have between them.
+ */
+export function measureRichTextRange(
   fullText: string,
-  runForChar: number[],
-  runs: LayoutRichTextRun[],
-  runResources: string[],
+  runForChar: readonly number[],
+  runFontSizes: readonly number[],
+  runResources: readonly string[],
+  fontManager: FontManager,
+  start: number,
+  end: number
+): number {
+  if (start >= end) {
+    return 0;
+  }
+  let width = 0;
+  let segStart = start;
+  let currentRi = runForChar[start] ?? 0;
+  for (let i = start + 1; i <= end; i++) {
+    const ri = i < end ? (runForChar[i] ?? currentRi) : -1;
+    if (ri !== currentRi) {
+      const seg = fullText.slice(segStart, i);
+      width += fontManager.measureText(seg, runResources[currentRi], runFontSizes[currentRi]);
+      segStart = i;
+      currentRi = ri;
+    }
+  }
+  return width;
+}
+
+/**
+ * Break rich text into the lines it will be drawn as.
+ *
+ * **The** rich-text wrapping rule, in one place. The layout pass needs the line
+ * *count* to reserve a row's height and the renderer needs the line *ranges* to
+ * draw them, and each used to carry its own transcription — the layout's copy
+ * comparing `measureRange(lineStart, wordEnd)` against the width while the
+ * renderer accumulated `lineWidth += measureRange(previousEnd, wordEnd)`.
+ *
+ * Those are not the same computation, and they disagreed: with leading whitespace
+ * in a paragraph the layout charged the indent to the first line and the renderer
+ * did not, so `"   aaa bbb ccc ddd"` reserved three lines and drew two. Earlier the
+ * same split had a worse consequence — only the renderer's copy was updated for
+ * East Asian breaking, so a Chinese cell reserved one line, drew six, and
+ * overprinted itself. The count is now the length of the list that is drawn.
+ */
+export function wrapRichTextLines(
+  fullText: string,
+  runForChar: readonly number[],
+  runFontSizes: readonly number[],
+  runResources: readonly string[],
   fontManager: FontManager,
   maxWidth: number
 ): RichTextLineRange[] {
@@ -1992,26 +2196,8 @@ function wrapRichTextLines(
     return [{ start: 0, end: 0 }];
   }
 
-  // Measure a substring using each character's actual run font size
-  const measureRange = (start: number, end: number): number => {
-    if (start >= end) {
-      return 0;
-    }
-    let width = 0;
-    let segStart = start;
-    let currentRi = runForChar[start] ?? 0;
-    for (let i = start + 1; i <= end; i++) {
-      const ri = i < end ? (runForChar[i] ?? currentRi) : -1;
-      if (ri !== currentRi) {
-        const run = runs[currentRi];
-        const seg = fullText.slice(segStart, i);
-        width += fontManager.measureText(seg, runResources[currentRi], run.fontSize);
-        segStart = i;
-        currentRi = ri;
-      }
-    }
-    return width;
-  };
+  const measureRange = (start: number, end: number): number =>
+    measureRichTextRange(fullText, runForChar, runFontSizes, runResources, fontManager, start, end);
 
   const allLines: RichTextLineRange[] = [];
   let globalOffset = 0;
@@ -2045,23 +2231,18 @@ function wrapRichTextLines(
 
     // Word-wrap this paragraph
     const paraText = fullText.slice(globalOffset, paraContentEnd);
-    // Find word boundaries within this paragraph
-    const wordStarts: number[] = [];
-    const wordEnds: number[] = [];
-    let inWord = false;
-    for (let i = 0; i < paraText.length; i++) {
-      const isSpace = paraText[i] === " " || paraText[i] === "\t";
-      if (!isSpace && !inWord) {
-        wordStarts.push(i);
-        inWord = true;
-      } else if (isSpace && inWord) {
-        wordEnds.push(i);
-        inWord = false;
-      }
-    }
-    if (inWord) {
-      wordEnds.push(paraText.length);
-    }
+    // Find the placement units within this paragraph.
+    //
+    // These used to be "runs of non-whitespace", which gave a Chinese paragraph
+    // exactly one unit — so it was placed unconditionally as the first word on
+    // the line and overflowed the cell however narrow it was. A unit is now
+    // delimited by a break opportunity (`@utils/cjk`): after a space or hyphen
+    // for Latin, and between characters for East Asian text, with kinsoku
+    // applied so a line cannot begin with `。` or `）`. For Latin input the
+    // units are identical to the whitespace runs this replaced.
+    const units = wrapUnitsOf(paraText);
+    const wordStarts = units.map(u => u.start);
+    const wordEnds = units.map(u => u.visibleEnd);
 
     let lineStart = globalOffset;
     let lineEnd = globalOffset;

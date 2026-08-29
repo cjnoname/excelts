@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import { toolError } from "../errors.js";
 import { assertWritable, outputDisplay, resolveOutputPath } from "../sandbox.js";
+import { prepareMarkdownDiagrams } from "./diagram-markdown.js";
 import { assertNonMacroOutput, requireFormat } from "./document.js";
 import { writeWithPolicy } from "./fs-helpers.js";
 import { formatBytes, textResult } from "./result.js";
@@ -27,7 +28,7 @@ export const docWriteTool = defineTool({
   group: "word",
   title: "Write a Word or PDF document",
   description:
-    "Create a .docx or .pdf from Markdown. Headings, lists, tables, bold/italic, code blocks and links are all converted. Write the content as Markdown — that is the input language for this tool.",
+    "Create a .docx or .pdf from Markdown. Headings, lists, tables, bold/italic, code blocks and links are all converted, and a ```mermaid fence becomes a real embedded diagram. Write the content as Markdown — that is the input language for this tool.",
   inputSchema: {
     path: z
       .string()
@@ -39,6 +40,12 @@ export const docWriteTool = defineTool({
       .string()
       .min(1)
       .describe("Document content as Markdown. Use # for headings, - for lists, | for tables."),
+    diagrams: z
+      .boolean()
+      .optional()
+      .describe(
+        "Render ```mermaid fences as embedded diagrams. Defaults to true when the diagram tool group is enabled; set false to keep them as code blocks."
+      ),
     overwrite: z
       .boolean()
       .optional()
@@ -62,14 +69,28 @@ export const docWriteTool = defineTool({
     if (format !== "docx" && format !== "pdf") {
       throw toolError.invalidInput(
         `doc_write cannot produce a ${format} file`,
-        "Use .docx or .pdf. For spreadsheets use sheet_write; to change an existing document's format use doc_convert."
+        format === "mermaid"
+          ? "A diagram is written, not generated from prose. Use diagram_render with Mermaid source, or put a ```mermaid fence in this tool's Markdown to embed one in the document."
+          : "Use .docx or .pdf. For spreadsheets use sheet_write; to change an existing document's format use doc_convert."
       );
     }
 
     const target = await resolveOutputPath(config, args.path);
+    // Diagrams first: the fences have to become image references before the
+    // Markdown reaches the converter, and the resolver it returns is what embeds
+    // the bytes.
+    const prepared =
+      (args.diagrams ?? config.groups.has("diagram"))
+        ? await prepareMarkdownDiagrams(args.markdown)
+        : { markdown: args.markdown, count: 0, notes: [] as readonly string[] };
+
     // markdownToDocx is async — verified; treating it as synchronous yields an
     // empty object that fails much later inside the packager.
-    const doc = await markdownToDocx(args.markdown).catch((cause: unknown) => {
+    const doc = await markdownToDocx(prepared.markdown, {
+      ...("resolveImage" in prepared && prepared.resolveImage !== undefined
+        ? { resolveImage: prepared.resolveImage }
+        : {})
+    }).catch((cause: unknown) => {
       throw toolError.invalidInput(
         `the Markdown could not be converted: ${cause instanceof Error ? cause.message : String(cause)}`,
         "Check for an unclosed code fence or a malformed table.",
@@ -98,6 +119,7 @@ export const docWriteTool = defineTool({
         format === "pdf"
           ? "- rendered through the Word layout engine, so pagination and line breaking are real"
           : "- Markdown structure preserved as Word styles",
+        ...prepared.notes,
         "",
         "Read the returned @output path with doc_read to verify before reporting success."
       ].join("\n")

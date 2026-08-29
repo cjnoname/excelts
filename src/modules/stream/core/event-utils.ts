@@ -114,10 +114,3 @@ export function createEventWaiter(
   void promise.catch(() => {});
   return { promise, cancel, error: () => capturedError };
 }
-
-/**
- * Resolve when an emitter fires any of `events`, reject on `error`.
- */
-export function onceEventAny(emitter: EventEmitterLike, events: readonly string[]): Promise<void> {
-  return createEventWaiter(emitter, events).promise;
-}

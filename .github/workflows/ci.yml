@@ -23,7 +23,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22.x, 24.x, 25.x, 26.x]
+        # `22.x`, not the `engines.node` floor. This job runs the repository's own
+        # toolchain, and every gate is a `node scripts/*.ts` — which needs Node's type
+        # stripping, unflagged only from 22.18 (22.17.1 still throws
+        # ERR_UNKNOWN_FILE_EXTENSION). Pinning the consumer floor here made the whole
+        # matrix fail for a reason that has nothing to do with the package. The floor is
+        # a promise about the *published artifact*, so it is checked where that can be
+        # checked: `pnpm verify:install`, against a real install of the tarball.
+        #
+        # Odd-numbered lines are deliberately absent. Node 25 never becomes LTS — it is a
+        # six-month staging line for what lands in 26 — so 24 (LTS) and 26 bracket it, and
+        # a failure unique to 25 would be a failure in a runtime no consumer is asked to
+        # use. Three versions across three operating systems is nine jobs; four was twelve.
+        node-version: [22.x, 24.x, 26.x]
         os: [ubuntu-latest, macOS-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 
@@ -100,6 +112,42 @@ jobs:
         env:
           CI: true
 
+  examples:
+    # Examples are the first thing a consumer copies, so a broken one is a broken
+    # public contract. Nothing executed them until this job: the runner carried a
+    # hand-written list covering a sixth of the tree, and CI never invoked it. The
+    # first full run found five examples that could not resolve their imports, one
+    # that hit a real stack-overflow in the PDF exporter, and one that could not
+    # run twice. Discovery is automatic, so a new example is covered the moment it
+    # lands.
+    #
+    # One OS: the failures this catches are API and resolution failures, not
+    # platform ones, and the job spawns one process per example.
+    needs: should-run
+    timeout-minutes: 25
+    name: Examples
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Run every example
+        run: pnpm verify:examples
+        env:
+          CI: true
+
   lint:
     needs: should-run
     timeout-minutes: 10
@@ -129,6 +177,74 @@ jobs:
 
       - name: Run type check
         run: pnpm type
+
+      # The repository's own gates. They were previously reachable only through
+      # `pnpm check` — a command nobody is forced to run — so a violation could
+      # reach `main` while every CI job stayed green. `verify:public-types` and
+      # `verify:doc-examples` need the declarations built by the step above; the
+      # rest are pure source scans.
+      - name: Run repository gates
+        run: |
+          pnpm verify:layers
+          pnpm verify:public-types
+          pnpm verify:types-versions
+          pnpm verify:doc-examples
+          pnpm verify:doc-links
+
+  consumer-floor:
+    # `engines.node` is a promise about the published artifact, so it is checked against
+    # the published artifact — a real `npm install` of the packed tarball in a CommonJS
+    # project, on the exact floor version.
+    #
+    # The `test` matrix cannot do this. It runs the repository's own toolchain, and every
+    # gate is a `node scripts/*.ts`, which needs Node's type stripping — unflagged only
+    # from 22.18. Pinning the floor there failed the whole matrix on
+    # ERR_UNKNOWN_FILE_EXTENSION for a reason that has nothing to do with the package.
+    # Hence the split: the toolchain runs on modern Node, the artifact is verified on the
+    # floor, and `verify-installed-package.cjs` is plain CommonJS so it can run there.
+    #
+    # A symlinked `node_modules` would not do either: resolution has to run against the
+    # installed manifest — `exports` conditions, the `#platform/*` `imports` map, and the
+    # real directory layout.
+    needs: should-run
+    timeout-minutes: 15
+    name: Consumer floor (Node 22.13)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26 to build
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Build and pack
+        run: |
+          pnpm build
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+
+      - name: Use Node.js 22.13.0 — the engines.node floor
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Install the tarball into a CommonJS project and require every subpath
+        run: |
+          node -v
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          # No "type" field: this is a CommonJS project, which is the case under test.
+          echo '{"name":"consumer","version":"1.0.0","private":true}' > package.json
+          npm install --no-fund --no-audit "$RUNNER_TEMP"/documonster-*.tgz
+          node "$GITHUB_WORKSPACE/scripts/verify-installed-package.cjs" .
 
   packages:
     # Workspace satellite packages (packages/*). Separate from the `lint` job

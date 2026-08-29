@@ -11,7 +11,7 @@
  * The pdf module is allowed to reach into @excel via its bridge layer, so
  * this example builds the workbook + chart with @excel directly.
  *
- * Usage:  npx tsx src/modules/pdf/examples/pdf-from-chart.ts
+ * Usage:  pnpm example --filter pdf-from-chart
  * Output: tmp/pdf-examples/from-chart-vector.pdf
  *         tmp/pdf-examples/from-chart-raster.pdf
  */

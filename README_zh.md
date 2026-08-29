@@ -13,8 +13,8 @@ Documonster 是一个零依赖的 TypeScript 电子表格和文档工具包：
 - **AI 友好** — 简洁一致的 API,专为 AI 编程助手设计。每个模块都配有完整的文档和可运行的示例供 AI 学习。另提供 [MCP 服务器](packages/mcp/README.md),供需要操作真实文件的 AI 客户端使用
 - **零运行时依赖** — 纯 TypeScript,无外部包
 - **九大模块** — Excel、Word、Formula、PDF、CSV、Markdown、XML、Archive、Stream
-- **跨平台** — Node.js 22+、Bun、Chrome 89+、Firefox 102+、Safari 14.1+
-- **ESM 优先** — 原生 ES Modules,兼容 CommonJS,完整的 tree-shaking 支持
+- **跨平台** — Node.js 22.13+、Bun、Chrome 89+、Firefox 102+、Safari 14.1+
+- **纯 ESM** — 原生 ES Modules,完整 tree-shaking;CommonJS 消费者在 Node >= 22.13 上写法不变,直接 `require()`
 
 ## 模块
 
@@ -37,7 +37,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Formula — Excel 兼容公式引擎
 
-433 函数计算引擎，包含 tokenizer、parser、依赖图、动态数组 spill，支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 XLSX 或 XLSB 工作簿；用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤，且引擎不会进入只读写工作簿的 bundle。
+448 函数计算引擎，包含 tokenizer、parser、依赖图、动态数组 spill，支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 XLSX 或 XLSB 工作簿；用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤，且引擎不会进入只读写工作簿的 bundle。
 
 - [文档](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [示例](src/modules/formula/examples/)
@@ -72,7 +72,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Archive — 归档创建/读取/编辑
 
-ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工具。
+ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工具，以及 `encodePng` —— PNG 就是带 CRC-32 校验 chunk 的 DEFLATE 流，而这两样原语都在这里。
 
 - [文档](src/modules/archive/README.md) | [中文](src/modules/archive/README_zh.md)
 - [示例](src/modules/archive/examples/)
@@ -83,6 +83,19 @@ ZIP 和 TAR 归档创建、读取、编辑、流式处理、加密和压缩工�
 
 - [文档](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [示例](src/modules/stream/examples/)
+
+### Draw — 共享绘图引擎
+
+一份结构化显示列表,一个遍历器,多个后端。构建 `DrawList`,即可从同一份输出得到 SVG 标记、RGBA 像素或 PDF 页面 —— 任何渲染器都不必重新解析另一个渲染器的 SVG。自带文本测量与换行,生产者在构建列表之前就能确定盒子尺寸。
+
+- [文档](src/modules/draw/README.md) | [中文](src/modules/draw/README_zh.md)
+
+### Mermaid — 图表文本转绘图
+
+21 种 Mermaid 图表类型 —— 流程图、状态图、类图、ER 图、时序图、甘特图、思维导图、Git 图等 —— 无需浏览器或 headless Chrome 即可渲染。本模块产出显示列表且不实现任何后端,因此 SVG、像素和 PDF 页面都是免费附带的。解析、布局、渲染是分离的三个阶段,可在任一阶段停下。
+
+- [文档](src/modules/mermaid/README.md) | [中文](src/modules/mermaid/README_zh.md)
+- [示例](src/modules/mermaid/examples/)
 
 ## MCP 服务器 — 面向 AI 客户端的 Documonster
 
@@ -184,10 +197,35 @@ Workbook.addWorksheet(wb, "S1");
 const buffer = await Workbook.toBuffer(wb);
 ```
 
+<!-- x-release-please-start-version -->
+
 ```html
-<!-- Script 标签（无需打包工具） -->
-<script src="https://unpkg.com/documonster/dist/iife/documonster.excel.iife.min.js"></script>
+<!-- Script 标签（无需打包工具）— 每个模块一个 IIFE，共享同一个 `Documonster` 全局 -->
+<script src="https://unpkg.com/documonster@0.11.0/dist/iife/documonster.excel.iife.min.js"></script>
+<script>
+  const { Workbook, Cell } = Documonster.Excel;
+  const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "S1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
+  Workbook.toBuffer(wb).then(buffer => console.log(buffer.byteLength));
+</script>
 ```
+
+<!-- x-release-please-end -->
+
+URL 中的版本号是刻意锁定的：不锁版本的 `unpkg.com/documonster/…` 会解析到最新版，
+于是一次发布就会改变一个并未要求改变的页面。每个模块都有自己的产物，文件名即模块名：
+
+<!-- iife-bundles:start -->
+
+`excel`、`word`、`pdf`、`csv`、`markdown`、`xml`、`formula`、`archive`、`stream`、
+`draw`、`mermaid`
+
+<!-- iife-bundles:end -->
+
+把 URL 里的名字换掉，再从 `Documonster.Word`、`Documonster.Pdf`、
+`Documonster.Mermaid`…… 上取用即可。同时加载多个也没问题，它们扩展的是同一个全局
+对象。没有全家桶产物，所以页面只为它点名的模块付费。
 
 > IIFE 打包产物不包含公式计算引擎。如果需要重算公式，请改用 ESM + 导入
 > `documonster/excel/formula`。
@@ -196,8 +234,53 @@ const buffer = await Workbook.toBuffer(wb);
 
 ## 系统要求
 
-- **Node.js >= 22.0.0**
+- **Node.js >= 22.13.0**
 - **Bun >= 1.0**
+
+本包是纯 ESM。Node ESM、打包工具、`<script>` 标签一切不变;CommonJS 的 `require()` 写法也
+不变——Node 从 22.12 起支持用 `require()` 加载 ES 模块,从 22.13 起不再为此打印实验特性警告,
+所以下限定在 22.13。
+
+<details>
+<summary>TypeScript 用 <code>module: node16</code> 时</summary>
+
+改用 `nodenext`。TypeScript 的 `node16` 模式早于 `require(esm)`,它会在 Node 看到之前就拒绝:
+
+```
+error TS1479: The current file is a CommonJS module whose imports will produce 'require'
+calls; however, the referenced file is an ECMAScript module and cannot be imported with
+'require'.
+```
+
+`nodenext` 认识 `require(esm)`,可以通过——在 tsc 5.9 上验证过,`bundler` 以及传统的
+`commonjs` + `node10`(通过 `typesVersions` 解析类型)同样可以。编译出来的 JavaScript
+完全一样、运行也一样,只有类型检查器有意见。
+
+</details>
+
+<details>
+<summary>在 Jest 中使用</summary>
+
+Jest 无法 `require()` 一个 ES 模块,需要加一个 transform。这和 `chalk`、`uuid`、`nanoid`、
+`strip-ansi` 等大多数现代包要求的配置完全相同——如果你已经为其中任何一个配过,只要把
+`documonster` 加进已有的 pattern 即可:
+
+```js
+// babel.config.cjs
+module.exports = { presets: [["@babel/preset-env", { targets: { node: "current" } }]] };
+```
+
+```json
+// jest.config.json
+{
+  "transform": { "\\.[jt]sx?$": "babel-jest" },
+  "transformIgnorePatterns": ["/node_modules/(?!documonster)"]
+}
+```
+
+Vitest 无需任何配置。
+
+</details>
 
 | 浏览器  | 最低版本           |
 | ------- | ------------------ |
@@ -213,6 +296,5 @@ const buffer = await Workbook.toBuffer(wb);
 - 🐛 [问题追踪](https://github.com/documonster/documonster/issues)
 - 📋 [更新日志](CHANGELOG.md)
 - 🔄 [迁移指南](MIGRATION.md)
-- 🗺️ [路线图](ROADMAP.md)
 - 📄 [许可证 (Apache-2.0)](LICENSE)
 - 📦 [第三方声明](THIRD_PARTY_NOTICES.md)

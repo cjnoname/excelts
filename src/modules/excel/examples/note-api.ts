@@ -12,7 +12,7 @@
  * is observable.
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/note-api.ts
+ *   pnpm example --filter note-api
  *
  * Output:
  *   tmp/excel-examples/note-api.xlsx

@@ -8,17 +8,26 @@
  * @example
  * ```ts
  * import { markdownToDocx } from "documonster/word/markdown";
- * import { Document, toBuffer } from "documonster/word";
+ * import { Io } from "documonster/word";
  *
  * const doc = markdownToDocx("# Hello\n\nWorld **bold**");
- * const buffer = await toBuffer(doc);
+ * const buffer = await Io.toBuffer(doc);
  * ```
  *
  * @stability experimental
  */
 
+import { mapToStandardFont, measureTextWidth, styledFontVariant } from "@utils/font-metrics";
+import { emuToPt, ptToTwips, twipsToPt } from "@utils/units";
+import { eastAsianDefaultsFor, withEastAsianDefaults } from "@word/core/east-asian-defaults";
 import { sanitizeUrl } from "@word/core/internal-utils";
 import { isRun } from "@word/core/text-utils";
+import {
+  DEFAULT_FONT_SIZE_HALF_PT,
+  DEFAULT_PAGE_MARGIN_TWIPS,
+  DEFAULT_PAGE_WIDTH_TWIPS
+} from "@word/layout/layout-constants";
+import { extractText } from "@word/query/search";
 import type {
   AbstractNumbering,
   Alignment,
@@ -43,7 +52,8 @@ import type {
   TableCellProperties,
   TableProperties,
   TableRow,
-  TableWidth
+  TableWidth,
+  Twips
 } from "@word/types";
 
 // =============================================================================
@@ -63,6 +73,35 @@ export interface MarkdownImportOptions {
    * `code { font-size: 1em }` in VS Code's Markdown preview stylesheet.
    */
   readonly codeFontSize?: number;
+  /**
+   * The measure the body will be laid out in, in twips.
+   *
+   * Table columns are sized against it and a fenced code block is fitted to it,
+   * because both are decisions only the producer can make — a `w:tblGrid` and a
+   * run size are what the DOCX carries, not an instruction to work them out
+   * later. Defaults to the page `markdownToDocx` emits for: US Letter less two
+   * one-inch margins.
+   *
+   * Splicing the body into a host document with a different measure should say
+   * so here. Getting it wrong degrades rather than breaks: a table keeps its
+   * proportions, since the layout rescales a `pct`-width table to whatever
+   * measure it finds, and a code block is set a little small or wraps.
+   */
+  readonly contentWidth?: Twips;
+  /**
+   * What to do with a fenced code block whose longest line is wider than the
+   * measure.
+   *
+   * `"shrink"` (the default) sets the block smaller until the line fits, down to
+   * {@link MIN_CODE_FONT_SCALE} of the code font size. Column alignment is half
+   * of what preformatted text means — an ASCII tree, a table of commands, a
+   * comment column — and wrapping destroys it for the whole block, not just the
+   * line that overflowed. The preview this converter targets never has to
+   * choose, because `pre` there scrolls.
+   *
+   * `"wrap"` keeps the size and breaks the long lines instead.
+   */
+  readonly codeBlockFit?: "shrink" | "wrap";
   /** Custom image resolver — given a URL, return image data or undefined to skip. */
   readonly resolveImage?: (
     url: string,
@@ -138,15 +177,20 @@ export async function markdownToDocx(
   options?: MarkdownImportOptions
 ): Promise<DocxDocument> {
   const { body, state } = await markdownToDocxBodyInternal(markdown, options);
-  return {
+  const doc: DocxDocument = {
     body,
-    docDefaults: defaultMarkdownDocDefaults(),
     styles: defaultMarkdownStyles(),
     abstractNumberings: state.abstractNumberings,
     numberingInstances: state.numberingInstances,
     ...(state.footnotes.length > 0 ? { footnotes: state.footnotes } : {}),
     ...(state.images.length > 0 ? { images: state.images } : {})
   };
+  // Language is read off the *document*, not the Markdown it came from. Source text
+  // includes things the reader never sees: a link's URL, an unreferenced footnote
+  // definition, fence markers. Measured, a single Japanese hostname in a link — text
+  // that appears nowhere in the body — was enough to label a page of Chinese prose
+  // `ja-JP`, so every Chinese word in it was proofed against a Japanese dictionary.
+  return { ...doc, docDefaults: defaultMarkdownDocDefaults(extractText(doc), options) };
 }
 
 /**
@@ -185,7 +229,13 @@ export async function markdownToDocxBody(
     footnotes: state.footnotes,
     images: state.images,
     styles: defaultMarkdownStyles(),
-    docDefaults: defaultMarkdownDocDefaults()
+    // Same reasoning as `markdownToDocx`: the language is read off the converted
+    // content. `body` alone is enough here — footnotes and images are returned
+    // alongside it and carry no language evidence of their own that the body lacks.
+    docDefaults: defaultMarkdownDocDefaults(
+      extractText({ body, footnotes: state.footnotes }),
+      options
+    )
   };
 }
 
@@ -820,13 +870,22 @@ function parseTable(
 // =============================================================================
 
 function parseInlines(text: string): InlineNode[] {
-  const nodes: InlineNode[] = [];
+  // Emphasis is resolved in a second pass over this list, so a delimiter run is
+  // recorded here rather than matched here — see `processEmphasis`.
+  const sentinel: EmphasisItem = {};
+  let tail = sentinel;
+  const append = (item: EmphasisItem): void => {
+    item.prev = tail;
+    tail.next = item;
+    tail = item;
+  };
+  const appendNode = (node: InlineNode): void => append({ node });
   let i = 0;
 
   while (i < text.length) {
     // Escaped character
     if (text[i] === "\\" && i + 1 < text.length && /[\\`*_{}[\]()#+\-.!|~>]/.test(text[i + 1])) {
-      nodes.push({ type: "text", text: text[i + 1] });
+      appendNode({ type: "text", text: text[i + 1] });
       i += 2;
       continue;
     }
@@ -834,19 +893,19 @@ function parseInlines(text: string): InlineNode[] {
     // Line break (two trailing spaces + newline, or backslash + newline)
     if (text[i] === "\n") {
       // Check for hard break (two spaces before \n)
-      const lastNode = nodes[nodes.length - 1];
+      const lastNode = tail.node;
       if (lastNode && lastNode.type === "text" && lastNode.text.endsWith("  ")) {
         lastNode.text = lastNode.text.slice(0, -2);
-        nodes.push({ type: "lineBreak" });
+        appendNode({ type: "lineBreak" });
       } else if (i > 0 && text[i - 1] === "\\") {
         // Backslash line break
         if (lastNode && lastNode.type === "text") {
           lastNode.text = lastNode.text.slice(0, -1);
         }
-        nodes.push({ type: "lineBreak" });
+        appendNode({ type: "lineBreak" });
       } else {
         // Soft line break → space
-        nodes.push({ type: "text", text: " " });
+        appendNode({ type: "text", text: " " });
       }
       i++;
       continue;
@@ -856,7 +915,7 @@ function parseInlines(text: string): InlineNode[] {
     if (text[i] === "`") {
       const result = parseInlineCode(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
@@ -866,7 +925,7 @@ function parseInlines(text: string): InlineNode[] {
     if (text[i] === "!" && text[i + 1] === "[") {
       const result = parseImage(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
@@ -876,7 +935,7 @@ function parseInlines(text: string): InlineNode[] {
     if (text[i] === "[" && text[i + 1] === "^") {
       const result = parseFootnoteRef(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
@@ -886,7 +945,7 @@ function parseInlines(text: string): InlineNode[] {
     if (text[i] === "[") {
       const result = parseLink(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
@@ -896,27 +955,36 @@ function parseInlines(text: string): InlineNode[] {
     if (text[i] === "<") {
       const result = parseAutolink(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
     }
 
-    // Bold/Italic with ** or __
-    if ((text[i] === "*" || text[i] === "_") && i + 1 < text.length) {
-      const result = parseEmphasis(text, i);
-      if (result) {
-        nodes.push(result.node);
-        i = result.end;
-        continue;
-      }
+    // A run of `*` or `_`. Whether it opens emphasis, closes it or stays literal
+    // is not decidable here — it depends on the runs that follow.
+    if (text[i] === "*" || text[i] === "_") {
+      const ch = text[i];
+      const run = delimiterRun(text, i, ch);
+      const count = run.end - run.start;
+      append({
+        run: {
+          ch,
+          count,
+          length: count,
+          canOpen: delimiterCanOpen(text, run.start, run.end, ch),
+          canClose: delimiterCanClose(text, run.start, run.end, ch)
+        }
+      });
+      i = run.end;
+      continue;
     }
 
     // Strikethrough ~~text~~
     if (text[i] === "~" && text[i + 1] === "~") {
       const result = parseStrikethrough(text, i);
       if (result) {
-        nodes.push(result.node);
+        appendNode(result.node);
         i = result.end;
         continue;
       }
@@ -928,16 +996,16 @@ function parseInlines(text: string): InlineNode[] {
       textEnd++;
     }
     if (textEnd > i) {
-      nodes.push({ type: "text", text: text.slice(i, textEnd) });
+      appendNode({ type: "text", text: text.slice(i, textEnd) });
       i = textEnd;
     } else {
       // Single special char that didn't match any pattern — treat as text
-      nodes.push({ type: "text", text: text[i] });
+      appendNode({ type: "text", text: text[i] });
       i++;
     }
   }
 
-  return mergeTextNodes(nodes);
+  return mergeTextNodes(processEmphasis(sentinel));
 }
 
 function isInlineSpecial(text: string, i: number): boolean {
@@ -945,7 +1013,7 @@ function isInlineSpecial(text: string, i: number): boolean {
   if (ch === "\\" || ch === "`" || ch === "[" || ch === "!" || ch === "<" || ch === "\n") {
     return true;
   }
-  if ((ch === "*" || ch === "_") && i + 1 < text.length) {
+  if (ch === "*" || ch === "_") {
     return true;
   }
   if (ch === "~" && text[i + 1] === "~") {
@@ -1176,77 +1244,259 @@ function findClosingBracket(text: string, start: number): number {
   return -1;
 }
 
-function parseEmphasis(
-  text: string,
-  start: number
-): { node: BoldInline | ItalicInline; end: number } | null {
-  const ch = text[start];
-  const double = text[start + 1] === ch;
-  const triple = double && start + 2 < text.length && text[start + 2] === ch;
-
-  if (triple) {
-    // ***bold italic*** or ___bold italic___
-    const closeIdx = findDelimiterClose(text, start + 3, ch.repeat(3));
-    if (closeIdx >= 0) {
-      const inner = text.slice(start + 3, closeIdx);
-      return {
-        node: { type: "bold", children: [{ type: "italic", children: parseInlines(inner) }] },
-        end: closeIdx + 3
-      };
-    }
-  }
-
-  if (double) {
-    // **bold** or __bold__
-    const closeIdx = findDelimiterClose(text, start + 2, ch.repeat(2));
-    if (closeIdx >= 0) {
-      const inner = text.slice(start + 2, closeIdx);
-      return {
-        node: { type: "bold", children: parseInlines(inner) },
-        end: closeIdx + 2
-      };
-    }
-  }
-
-  // *italic* or _italic_
-  // For underscore: must not be in the middle of a word
-  if (ch === "_" && start > 0 && /\w/.test(text[start - 1])) {
-    return null;
-  }
-  const closeIdx = findDelimiterClose(text, start + 1, ch);
-  if (closeIdx >= 0) {
-    if (ch === "_" && closeIdx + 1 < text.length && /\w/.test(text[closeIdx + 1])) {
-      return null;
-    }
-    const inner = text.slice(start + 1, closeIdx);
-    if (inner.trim() === "") {
-      return null;
-    }
-    return {
-      node: { type: "italic", children: parseInlines(inner) },
-      end: closeIdx + 1
-    };
-  }
-
-  return null;
+/**
+ * Unicode whitespace, per CommonMark's definition — with the start and end of
+ * the text counting as whitespace, which is what makes a delimiter at either
+ * edge flanking.
+ */
+function isMarkdownWhitespace(ch: string | undefined): boolean {
+  return (
+    ch === undefined ||
+    /[\t\n\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/.test(ch)
+  );
 }
 
-function findDelimiterClose(text: string, start: number, delimiter: string): number {
-  let i = start;
-  while (i < text.length) {
-    if (text[i] === "\\" && i + 1 < text.length) {
-      i += 2;
+/**
+ * Punctuation, per CommonMark: an ASCII punctuation character, or anything in
+ * the Unicode general categories `Pc Pd Pe Pf Pi Po Ps`. Symbol categories are
+ * deliberately excluded, so an arrow is not punctuation.
+ */
+function isMarkdownPunctuation(ch: string | undefined): boolean {
+  return ch !== undefined && (/[!-/:-@[-`{-~]/.test(ch) || /\p{P}/u.test(ch));
+}
+
+/**
+ * The extent of the delimiter run of `ch` that covers `index`.
+ *
+ * Flanking is a property of the whole run, not of the one, two or three
+ * characters a caller happens to be matching: in `processed__,` the run is both
+ * underscores, and testing only the first would read the second as the character
+ * that follows it.
+ */
+function delimiterRun(text: string, index: number, ch: string): { start: number; end: number } {
+  let start = index;
+  while (start > 0 && text[start - 1] === ch) {
+    start--;
+  }
+  let end = index;
+  while (end < text.length && text[end] === ch) {
+    end++;
+  }
+  return { start, end };
+}
+
+/**
+ * Whether a delimiter run can open, or close, emphasis.
+ *
+ * CommonMark 0.30 §6.2. A run is *left-flanking* when it is not followed by
+ * whitespace and either is not followed by punctuation or is preceded by
+ * whitespace or punctuation; *right-flanking* is the mirror image. `*` may open
+ * when left-flanking and close when right-flanking; `_` carries the extra rule
+ * that keeps it out of the middle of a word, and that rule was only ever applied
+ * to a *single* underscore here. So `processed__, registration__` — where
+ * neither run can open, both being preceded by a letter and followed by
+ * punctuation — came out as bold text with the underscores eaten, where GitHub
+ * renders all four of them literally.
+ */
+function delimiterCanOpen(text: string, start: number, end: number, ch: string): boolean {
+  const before = start > 0 ? text[start - 1] : undefined;
+  const after = end < text.length ? text[end] : undefined;
+  const left = isLeftFlanking(before, after);
+  if (ch !== "_") {
+    return left;
+  }
+  return left && (!isRightFlanking(before, after) || isMarkdownPunctuation(before));
+}
+
+function delimiterCanClose(text: string, start: number, end: number, ch: string): boolean {
+  const before = start > 0 ? text[start - 1] : undefined;
+  const after = end < text.length ? text[end] : undefined;
+  const right = isRightFlanking(before, after);
+  if (ch !== "_") {
+    return right;
+  }
+  return right && (!isLeftFlanking(before, after) || isMarkdownPunctuation(after));
+}
+
+function isLeftFlanking(before: string | undefined, after: string | undefined): boolean {
+  if (isMarkdownWhitespace(after)) {
+    return false;
+  }
+  return (
+    !isMarkdownPunctuation(after) || isMarkdownWhitespace(before) || isMarkdownPunctuation(before)
+  );
+}
+
+function isRightFlanking(before: string | undefined, after: string | undefined): boolean {
+  if (isMarkdownWhitespace(before)) {
+    return false;
+  }
+  return (
+    !isMarkdownPunctuation(before) || isMarkdownWhitespace(after) || isMarkdownPunctuation(after)
+  );
+}
+
+/**
+ * An entry in the inline list emphasis is resolved over: either a finished
+ * inline node, or a run of `*` / `_` whose role is not yet decided.
+ *
+ * A doubly linked list rather than an array because the algorithm below splices
+ * a matched pair's content out of the middle repeatedly, and walks backwards from
+ * a closer to find its opener.
+ */
+interface EmphasisItem {
+  /** A completed inline node. Mutually exclusive with `run`. */
+  node?: InlineNode;
+  /** An unmatched delimiter run. */
+  run?: {
+    readonly ch: string;
+    /** Characters not yet consumed by a match; what is left is literal text. */
+    count: number;
+    /** The run's length as written — the "rule of 3" is stated in those terms. */
+    readonly length: number;
+    readonly canOpen: boolean;
+    readonly canClose: boolean;
+  };
+  prev?: EmphasisItem;
+  next?: EmphasisItem;
+}
+
+/**
+ * Resolve emphasis over a flat list of inline items.
+ *
+ * This is CommonMark 0.30 §6.2's *process emphasis* procedure, delimiter stack
+ * and all. The parser used to scan forward from an opener for a closing
+ * delimiter and recurse on what lay between, which cannot express the cases the
+ * spec is careful about, and cannot be patched into doing so:
+ *
+ * - `*(**foo**)*` closed the outer run on the *first* `*` of the inner one and
+ *   produced `<em>(**foo</em>*)*`.
+ * - `**foo*` came out as `<em>*foo</em>` instead of `*<em>foo</em>`, because the
+ *   opener's length was decided before its partner was known.
+ * - `*foo**bar**baz*` split into three sibling emphases instead of one
+ *   containing a strong.
+ *
+ * Working *backwards from each closer* is what gets those right: a closer takes
+ * the nearest opener, one to two characters are consumed from each end, and
+ * whatever is left of either run stays on the stack for the next round — which
+ * is how `***foo***` becomes an `<em>` wrapping a `<strong>` in two passes over
+ * the same pair.
+ */
+function processEmphasis(sentinel: EmphasisItem): InlineNode[] {
+  /**
+   * How far back a failed search already went, keyed by the closer's delimiter,
+   * its length mod 3 and whether it could also open. Without it a run of
+   * unmatchable delimiters rescans the whole list for each one.
+   */
+  const openersBottom = new Map<string, EmphasisItem | undefined>();
+
+  const isStackedCloser = (item: EmphasisItem): boolean =>
+    item.run !== undefined && item.run.count > 0 && item.run.canClose;
+
+  const nextCloser = (from: EmphasisItem | undefined): EmphasisItem | undefined => {
+    let item = from;
+    while (item !== undefined && !isStackedCloser(item)) {
+      item = item.next;
+    }
+    return item;
+  };
+
+  const unlink = (item: EmphasisItem): void => {
+    if (item.prev !== undefined) {
+      item.prev.next = item.next;
+    }
+    if (item.next !== undefined) {
+      item.next.prev = item.prev;
+    }
+  };
+
+  let closer = nextCloser(sentinel.next);
+  while (closer !== undefined) {
+    const closerRun = closer.run!;
+    const key = `${closerRun.ch}${closerRun.length % 3}${closerRun.canOpen ? "o" : ""}`;
+    const bottom = openersBottom.get(key);
+
+    let opener: EmphasisItem | undefined;
+    for (let candidate = closer.prev; candidate !== undefined; candidate = candidate.prev) {
+      if (candidate === bottom || candidate === sentinel) {
+        break;
+      }
+      const run = candidate.run;
+      if (run === undefined || run.count === 0 || run.ch !== closerRun.ch || !run.canOpen) {
+        continue;
+      }
+      // The "rule of 3": when either run could serve as both ends, a pair whose
+      // original lengths sum to a multiple of three is rejected — unless both
+      // lengths are themselves multiples of three. It is what keeps
+      // `*foo**bar**baz*` from pairing the `*` with the first `**`.
+      const sumIsMultipleOfThree = (run.length + closerRun.length) % 3 === 0;
+      const bothMultiplesOfThree = run.length % 3 === 0 && closerRun.length % 3 === 0;
+      if ((closerRun.canOpen || run.canClose) && sumIsMultipleOfThree && !bothMultiplesOfThree) {
+        continue;
+      }
+      opener = candidate;
+      break;
+    }
+
+    if (opener === undefined) {
+      openersBottom.set(key, closer.prev);
+      const skipped = closer;
+      closer = nextCloser(closer.next);
+      // A run that cannot open either will never match anything, so it leaves
+      // the stack and stays as the literal text it already carries.
+      if (!skipped.run!.canOpen) {
+        skipped.node = { type: "text", text: skipped.run!.ch.repeat(skipped.run!.count) };
+        skipped.run = undefined;
+      }
       continue;
     }
-    if (text.startsWith(delimiter, i)) {
-      // Make sure it's not preceded by whitespace (for closing delimiter)
-      if (i > start && text[i - 1] !== " ") {
-        return i;
+
+    const openerRun = opener.run!;
+    // Two delimiters make strong emphasis, one makes emphasis; a longer run is
+    // consumed two at a time across successive rounds.
+    const used = openerRun.count >= 2 && closerRun.count >= 2 ? 2 : 1;
+
+    // Everything between the pair becomes the content. Delimiters still
+    // unmatched in there had their chance and are literal text.
+    const children: InlineNode[] = [];
+    for (let item = opener.next; item !== undefined && item !== closer; item = item.next) {
+      if (item.node !== undefined) {
+        children.push(item.node);
+      } else if (item.run !== undefined && item.run.count > 0) {
+        children.push({ type: "text", text: item.run.ch.repeat(item.run.count) });
       }
     }
-    i++;
+    const wrapper: EmphasisItem = {
+      node: used === 2 ? { type: "bold", children } : { type: "italic", children },
+      prev: opener,
+      next: closer
+    };
+    opener.next = wrapper;
+    closer.prev = wrapper;
+
+    openerRun.count -= used;
+    closerRun.count -= used;
+    if (openerRun.count === 0) {
+      unlink(opener);
+    }
+    if (closerRun.count === 0) {
+      const following = closer.next;
+      unlink(closer);
+      closer = nextCloser(following);
+    }
+    // Otherwise the same closer goes round again against what is left of the
+    // opener — `***foo***` is one pair matched twice.
   }
-  return -1;
+
+  const out: InlineNode[] = [];
+  for (let item = sentinel.next; item !== undefined; item = item.next) {
+    if (item.node !== undefined) {
+      out.push(item.node);
+    } else if (item.run !== undefined && item.run.count > 0) {
+      out.push({ type: "text", text: item.run.ch.repeat(item.run.count) });
+    }
+  }
+  return out;
 }
 
 function parseStrikethrough(
@@ -1381,10 +1631,11 @@ async function convertBlockquote(
 }
 
 function convertFencedCode(block: FencedCodeBlock, opts: ConvertOpts): Paragraph {
-  const runs: ParagraphChild[] = [];
   const lines = block.code.split("\n");
+  const size = fitCodeFontSize(lines, opts);
+  const runs: ParagraphChild[] = [];
   for (let i = 0; i < lines.length; i++) {
-    runs.push(makeRun(lines[i], { font: opts.codeFont, size: opts.codeFontSize }));
+    runs.push(makeRun(lines[i], { font: opts.codeFont, size }));
     if (i < lines.length - 1) {
       runs.push(makeRun("", undefined, [{ type: "break" }]));
     }
@@ -1396,6 +1647,54 @@ function convertFencedCode(block: FencedCodeBlock, opts: ConvertOpts): Paragraph
     properties: { style: "CodeBlock" },
     children: runs
   };
+}
+
+/**
+ * How small a code block may be set, as a fraction of the code font size.
+ *
+ * At the 11pt default this floors at 6.5pt, which holds about 113 monospace
+ * columns in a Letter measure — past the 80 of tradition and the 100–120 every
+ * formatter in use defaults to, so in practice a block either fits or was never
+ * meant for a page. It is a floor rather than an unbounded shrink because one
+ * 400-character line should not be allowed to render the other twenty lines
+ * unreadable; past it, wrapping is the honest answer.
+ */
+const MIN_CODE_FONT_SCALE = 0.6;
+
+/**
+ * The font size, in half-points, at which a code block's longest line fits.
+ *
+ * Sizing is **per block**, so a block that needs no shrinking gets none. The
+ * alternative — one size for every block in the document — would let a single
+ * pathological listing shrink all the others, which trades a real cost for a
+ * consistency nothing else in the document has either (a heading is not the size
+ * of a paragraph).
+ *
+ * Measurement is linear in the size, so the ratio of the measure to the widest
+ * line gives the answer in one step. Both it and the floor round *down* to the
+ * half-point `w:sz` can express: rounding either up would not fit, which is the
+ * whole point.
+ */
+function fitCodeFontSize(lines: readonly string[], opts: ConvertOpts): number {
+  const size = opts.codeFontSize;
+  if (opts.codeBlockFit === "wrap") {
+    return size;
+  }
+  // `CodeBlock` indents by `pre { padding: 16px }` on both sides.
+  const available = twipsToPt(contentWidthTwips(opts) - 2 * pxTwips(16));
+  if (available <= 0) {
+    return size;
+  }
+  const font = styledFontVariant(mapToStandardFont(opts.codeFont));
+  let widest = 0;
+  for (const line of lines) {
+    widest = Math.max(widest, measureTextWidth(line, font, size / 2));
+  }
+  if (widest <= available) {
+    return size;
+  }
+  const fitted = Math.floor(size * (available / widest));
+  return Math.max(1, Math.floor(size * MIN_CODE_FONT_SCALE), fitted);
 }
 
 function convertThematicBreak(): Paragraph {
@@ -1497,10 +1796,7 @@ async function convertTable(
       verticalAlign: "center",
       borders: { bottom: { style: "single", size: 8, color: COLORS.headerRule } }
     };
-    const paraProps: ParagraphProperties = {
-      alignment: block.alignments[ci]
-    };
-    const para = await convertParagraph(cell, opts, state, paraProps);
+    const para = await convertParagraph(cell, opts, state, cellParagraphProps(block, ci));
     // Bold header text
     const boldPara: Paragraph = {
       ...para,
@@ -1520,10 +1816,7 @@ async function convertTable(
     const cells: TableCell[] = [];
     for (let ci = 0; ci < colCount; ci++) {
       const cellInlines = ci < rowCells.length ? rowCells[ci] : [];
-      const paraProps: ParagraphProperties = {
-        alignment: block.alignments[ci]
-      };
-      const para = await convertParagraph(cellInlines, opts, state, paraProps);
+      const para = await convertParagraph(cellInlines, opts, state, cellParagraphProps(block, ci));
       cells.push({ content: [para] });
     }
     dataRows.push({ cells });
@@ -1549,6 +1842,7 @@ async function convertTable(
 
   const tableWidth: TableWidth = { type: "pct", value: 5000 }; // 100%
 
+  const horizontalPadding = pxTwips(10);
   const tableProps: TableProperties = {
     width: tableWidth,
     borders,
@@ -1556,14 +1850,262 @@ async function convertTable(
     cellMargins: {
       top: { value: pxTwips(5), type: "dxa" },
       bottom: { value: pxTwips(5), type: "dxa" },
-      left: { value: pxTwips(10), type: "dxa" },
-      right: { value: pxTwips(10), type: "dxa" }
+      left: { value: horizontalPadding, type: "dxa" },
+      right: { value: horizontalPadding, type: "dxa" }
     },
     layout: "autofit"
   };
 
-  return { type: "table", properties: tableProps, rows: allRows };
+  return {
+    type: "table",
+    properties: tableProps,
+    columnWidths: sizeTableColumns(allRows, colCount, horizontalPadding, contentWidthTwips(opts)),
+    rows: allRows
+  };
 }
+
+/**
+ * Paragraph properties for a table cell.
+ *
+ * The zeroed `after` is the point. A cell in the preview holds inline content
+ * directly — `<td>text</td>`, with no `<p>` wrapper — so it never picks up
+ * `p { margin-bottom: 16px }`. Letting the cell paragraph inherit the document
+ * default's `after` instead added 12.55pt of dead space inside every cell,
+ * which made a one-line row 37.7pt tall against the 25.2pt the padding and
+ * leading actually call for: a fifteen-row table spilled onto a second page and
+ * every row looked like it had a blank line under it.
+ *
+ * `line` is deliberately left to inherit, so a cell leads at the body's 1.57.
+ */
+function cellParagraphProps(block: TableBlock, columnIndex: number): ParagraphProperties {
+  return {
+    alignment: block.alignments[columnIndex],
+    spacing: { after: 0 }
+  };
+}
+
+// =============================================================================
+// Table Column Sizing
+// =============================================================================
+
+/**
+ * The measure to size against when the caller names none: the US Letter page
+ * `markdownToDocx` emits for, less its one-inch margins.
+ */
+const DEFAULT_CONTENT_WIDTH_TWIPS = DEFAULT_PAGE_WIDTH_TWIPS - 2 * DEFAULT_PAGE_MARGIN_TWIPS;
+
+/** The measure this conversion sizes tables and code blocks against, in twips. */
+function contentWidthTwips(opts: ConvertOpts): Twips {
+  const declared = opts.contentWidth;
+  return declared !== undefined && declared > 0 ? declared : DEFAULT_CONTENT_WIDTH_TWIPS;
+}
+
+/** A column's intrinsic widths, in twips, excluding cell padding. */
+interface IntrinsicWidths {
+  /** Widest run of non-whitespace — the narrowest the column can get. */
+  min: number;
+  /** All of the content on one line — the widest it can usefully get. */
+  max: number;
+}
+
+/**
+ * Size a Markdown table's columns from the width of what they hold.
+ *
+ * Without this the table carries no grid, and both the DOCX writer and the
+ * layout fall back to dividing the measure equally — so a `Layer` / `Runtime`
+ * column got the same 234pt as the prose beside it, wasting half the table
+ * while the other column wrapped every row. Nothing downstream will do this
+ * for us: `w:tblLayout w:type="autofit"` is advisory, Word renders the grid it
+ * is given, and CSS `table-layout: auto` sizing is a decision the *producer*
+ * has to make because only it knows the text.
+ *
+ * The distribution is CSS 2.1 §17.5.2.2's automatic layout, which is what the
+ * Markdown preview this converter targets actually runs: columns get their
+ * minimum, and the slack up to the measure is shared out in proportion to how
+ * much each column could still use.
+ */
+function sizeTableColumns(
+  rows: readonly TableRow[],
+  colCount: number,
+  horizontalPadding: number,
+  measure: Twips
+): Twips[] | undefined {
+  if (colCount <= 0) {
+    return undefined;
+  }
+  const padding = horizontalPadding * 2;
+  const columns: IntrinsicWidths[] = Array.from({ length: colCount }, () => ({ min: 0, max: 0 }));
+  for (const row of rows) {
+    for (let ci = 0; ci < Math.min(row.cells.length, colCount); ci++) {
+      const cell = measureCellIntrinsics(row.cells[ci]);
+      const col = columns[ci];
+      col.min = Math.max(col.min, cell.min);
+      col.max = Math.max(col.max, cell.max);
+    }
+  }
+
+  // Padding is per column and unavoidable, so it comes off the measure before
+  // the content competes for what is left.
+  const available = Math.max(colCount, measure - padding * colCount);
+  const mins = columns.map(c => Math.min(c.min, available));
+  const maxs = columns.map((c, i) => Math.max(c.max, mins[i]));
+  const totalMin = sum(mins);
+  const totalMax = sum(maxs);
+
+  let content: number[];
+  if (totalMax <= available) {
+    // Everything fits on one line. The table is 100% wide, so the slack is
+    // shared in proportion to how much each column holds.
+    content =
+      totalMax > 0
+        ? maxs.map(w => (w / totalMax) * available)
+        : maxs.map(() => available / colCount);
+  } else if (totalMin < available) {
+    // The usual case: start from the minimum and give each column a share of
+    // the slack proportional to how much more it could use.
+    const slack = available - totalMin;
+    const growth = maxs.map((w, i) => w - mins[i]);
+    const totalGrowth = sum(growth);
+    content =
+      totalGrowth > 0
+        ? mins.map((w, i) => w + (growth[i] / totalGrowth) * slack)
+        : mins.map(w => w + slack / colCount);
+  } else {
+    // Even the minima overflow — an unbreakable token wider than its share.
+    // Scale them down together and let the line breaker break inside words,
+    // which is what a browser does too.
+    content =
+      totalMin > 0
+        ? mins.map(w => (w / totalMin) * available)
+        : mins.map(() => available / colCount);
+  }
+
+  const widths = content.map(w => Math.max(1, Math.round(w + padding)));
+  // Absorb the rounding residue into the widest column, so the grid sums to the
+  // measure exactly and the table's right edge lands on the margin.
+  const residue = measure - sum(widths);
+  if (residue !== 0) {
+    let widest = 0;
+    for (let i = 1; i < widths.length; i++) {
+      if (widths[i] > widths[widest]) {
+        widest = i;
+      }
+    }
+    widths[widest] = Math.max(1, widths[widest] + residue);
+  }
+  return widths;
+}
+
+function sum(values: readonly number[]): number {
+  let total = 0;
+  for (const value of values) {
+    total += value;
+  }
+  return total;
+}
+
+/**
+ * Measure one cell's intrinsic widths.
+ *
+ * `min` is the widest run of non-whitespace, and it is tracked *across* run
+ * boundaries on purpose: `` `sybase.ts`, `` is one unbreakable token even
+ * though the code span and the comma are separate runs, and a column narrower
+ * than that will be forced to break between them.
+ */
+function measureCellIntrinsics(cell: TableCell): IntrinsicWidths {
+  let min = 0;
+  let max = 0;
+  for (const block of cell.content) {
+    if (block.type !== "paragraph") {
+      continue;
+    }
+    let lineWidth = 0;
+    let token = 0;
+    for (const segment of cellTextSegments(block.children)) {
+      if (segment.type === "break") {
+        max = Math.max(max, lineWidth);
+        min = Math.max(min, token);
+        lineWidth = 0;
+        token = 0;
+        continue;
+      }
+      if (segment.type === "atom") {
+        lineWidth += segment.width;
+        token += segment.width;
+        continue;
+      }
+      for (const piece of segment.text.split(/(\s+)/)) {
+        if (piece.length === 0) {
+          continue;
+        }
+        const width = ptToTwips(measureTextWidth(piece, segment.font, segment.sizeHalfPt / 2));
+        lineWidth += width;
+        if (/^\s+$/.test(piece)) {
+          min = Math.max(min, token);
+          token = 0;
+        } else {
+          token += width;
+        }
+      }
+    }
+    max = Math.max(max, lineWidth);
+    min = Math.max(min, token);
+  }
+  return { min, max };
+}
+
+/** A measurable piece of a cell: styled text, an inline atom, or a line break. */
+type CellSegment =
+  | {
+      readonly type: "text";
+      readonly text: string;
+      readonly font: string;
+      readonly sizeHalfPt: number;
+    }
+  | { readonly type: "atom"; readonly width: Twips }
+  | { readonly type: "break" };
+
+/** Flatten a cell paragraph's children into measurable segments. */
+function* cellTextSegments(children: readonly ParagraphChild[]): Generator<CellSegment> {
+  for (const child of children) {
+    if ("type" in child && child.type === "hyperlink") {
+      yield* cellTextSegments(child.children);
+      continue;
+    }
+    if (!isRun(child)) {
+      continue;
+    }
+    const props = child.properties;
+    const family = typeof props?.font === "string" ? props.font : props?.font?.ascii;
+    const font = styledFontVariant(
+      mapToStandardFont(family ?? DEFAULT_CELL_FONT),
+      props?.bold,
+      props?.italic
+    );
+    const sizeHalfPt = props?.size ?? DEFAULT_FONT_SIZE_HALF_PT;
+    for (const content of child.content) {
+      switch (content.type) {
+        case "text":
+          yield { type: "text", text: content.text, font, sizeHalfPt };
+          break;
+        case "tab":
+          yield { type: "text", text: " ", font, sizeHalfPt };
+          break;
+        case "break":
+          yield { type: "break" };
+          break;
+        case "image":
+          yield { type: "atom", width: ptToTwips(emuToPt(content.width)) };
+          break;
+        default:
+          break;
+      }
+    }
+  }
+}
+
+/** The family `docDefaults` gives a run that names none. */
+const DEFAULT_CELL_FONT = "Calibri";
 
 // =============================================================================
 // Inline to Run Conversion
@@ -2039,14 +2581,33 @@ const HEADING_SPACING = {
   lineRule: "auto" as const
 };
 
-function defaultMarkdownDocDefaults(): DocDefaults {
+/**
+ * Document defaults for a converted Markdown file.
+ *
+ * `text` is the converted document's own text, not the Markdown source — see the call
+ * site for why that distinction changes the proofing language.
+ *
+ * `defaultFont` and `defaultFontSize` belong here rather than only on individual runs.
+ * They used to be written *only* onto ordinary text runs, which left everything that
+ * inherits instead — list markers, field results, empty runs, table cells that carry
+ * no explicit properties — on the built-in Calibri while the paragraphs beside them
+ * used the requested face. Stating them once as the document default is what makes the
+ * option mean "the default", and the per-run writes then only need to cover what
+ * genuinely differs.
+ */
+function defaultMarkdownDocDefaults(text: string, options?: MarkdownImportOptions): DocDefaults {
+  const derived = eastAsianDefaultsFor(text);
+  const base = {
+    size: options?.defaultFontSize ?? pxHalfPt(BODY_PX),
+    font: options?.defaultFont ?? "Calibri"
+  };
   return {
     // `html, body { font-size: 14px; line-height: 22px }` and
     // `p { margin-bottom: 16px }`.
     paragraphProperties: {
       spacing: { after: pxTwips(16), line: lineHeight(BODY_LINE), lineRule: "auto" }
     },
-    runProperties: { size: pxHalfPt(BODY_PX), font: "Calibri" }
+    runProperties: derived === undefined ? base : withEastAsianDefaults(base, derived)
   };
 }
 

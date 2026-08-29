@@ -91,9 +91,18 @@ export class PdfContentStream {
   /**
    * Append another content stream without serialising it. Deferred fragments
    * stay deferred, so text encoding can still resolve after fonts are frozen.
+   *
+   * Copied with a loop rather than `push(...other.parts)`: a spread becomes an
+   * *argument list*, and V8 throws `RangeError: Maximum call stack size
+   * exceeded` somewhere past ~125k arguments. A content stream's fragment count
+   * grows with the marks on the page and has no ceiling — a vector chart over a
+   * five-figure row count crosses it — so the number of fragments must never
+   * become a number of function arguments.
    */
   append(other: PdfContentStream): this {
-    this.parts.push(...other.parts);
+    for (const part of other.parts) {
+      this.parts.push(part);
+    }
     return this;
   }
 
@@ -421,6 +430,28 @@ export class PdfContentStream {
    */
   showTextHex(hexString: string): this {
     this.parts.push(`${hexString} Tj`);
+    return this;
+  }
+
+  /**
+   * Show pre-encoded hex strings with explicit displacements between them.
+   *
+   * `TJ` numbers are thousandths of a unit of text space and are *subtracted* from
+   * the displacement, so a negative number opens a gap. This exists because `Tw`
+   * cannot: PDF 32000-1 §9.3.3 applies word spacing to a single-byte code 32 only,
+   * and "shall not apply to occurrences of the byte value 32 in multiple-byte
+   * codes" — so with an `Identity-H` CIDFont, where every code is two bytes, `Tw`
+   * is silently a no-op and a justified Latin line came out short of its column.
+   *
+   * Entries are alternating hex strings and numbers, already in the order they
+   * should appear.
+   */
+  showTextHexWithAdjustments(parts: readonly (string | number)[]): this {
+    if (parts.length === 0) {
+      return this;
+    }
+    const body = parts.map(part => (typeof part === "number" ? pdfNumber(part) : part)).join(" ");
+    this.parts.push(`[${body}] TJ`);
     return this;
   }
 

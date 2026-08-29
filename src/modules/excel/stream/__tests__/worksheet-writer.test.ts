@@ -1,8 +1,8 @@
 import { cellGetValue, cellSetValue } from "@excel/core/cell";
-import { rowAddPageBreak, rowCellCount } from "@excel/core/row";
+import { rowCellCount } from "@excel/core/row";
 import { rowCommit, rowGetCell, getCell, getColumn } from "@excel/core/worksheet";
 import { ExcelStreamStateError } from "@excel/errors";
-import { Worksheet } from "@excel/index";
+import { Stream, Worksheet } from "@excel/index";
 import { WorkbookWriter } from "@excel/stream/workbook-writer";
 import { WorksheetWriter } from "@excel/stream/worksheet-writer";
 import { StreamBuf } from "@excel/utils/stream-buf";
@@ -550,16 +550,22 @@ describe("WorksheetWriter", () => {
   // ===========================================================================
 
   describe("page breaks", () => {
-    it("rowBreaks accumulate via addPageBreak", () => {
+    it("rowBreaks accumulate via Stream.addRowPageBreak", () => {
       const { ws } = createRealWriter();
       ws.addRow(["row1"]);
       ws.addRow(["row2"]);
       ws.addRow(["row3"]);
 
-      rowAddPageBreak(ws.getRow(1));
-      rowAddPageBreak(ws.getRow(2));
+      // The streaming writer hands out row *handles*, so the break is added
+      // through the handle-oriented `Stream` surface rather than `Row`, which
+      // addresses rows by number on a random-access worksheet.
+      Stream.addRowPageBreak(ws.getRow(1));
+      Stream.addRowPageBreak(ws.getRow(2));
 
-      expect(ws.rowBreaks.length).toBe(2);
+      expect(ws.rowBreaks).toEqual([
+        { id: 1, max: 16383, man: 1 },
+        { id: 2, max: 16383, man: 1 }
+      ]);
     });
   });
 

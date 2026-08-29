@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Excel 兼容的 tokenizer、parser、compiler、evaluator、依赖图、动态数组 spill 物化器,433 个内置函数。零运行时依赖。
+Excel 兼容的 tokenizer、parser、compiler、evaluator、依赖图、动态数组 spill 物化器,448 个内置函数。零运行时依赖。
 
 ## 使用方式
 
@@ -26,7 +26,7 @@ workbook 重算由 `documonster/excel/formula` 暴露;语法检查由
 - **定义名称** — scoped、公式型、区域并集
 - **跨表引用** — `Sheet2!A1`、3D 范围 `Sheet1:Sheet3!A1`
 - **R1C1 寻址** — 支持 A1 和 R1C1 两种模式(通过 `INDIRECT`)
-- **433 个内置 Excel 函数**,分为 11 大类
+- **448 个内置 Excel 函数**,分为 11 大类
 - **零运行时依赖**
 
 ## 函数覆盖
@@ -132,9 +132,9 @@ const ast = Formula.parse(tokens); // 语法错误时抛异常
 运行任意示例:
 
 ```bash
-npx tsx src/modules/formula/examples/formula-math.ts
-npx tsx src/modules/formula/examples/formula-dynamic-array.ts
-npx tsx src/modules/formula/examples/formula-pdf-integration.ts
+pnpm example --filter formula-math
+pnpm example --filter formula-dynamic-array
+pnpm example --filter formula-pdf-integration
 # 输出: tmp/formula-examples/formula-pdf-integration.pdf
 ```
 
@@ -146,7 +146,7 @@ npx tsx src/modules/formula/examples/formula-pdf-integration.ts
 ┌─ syntax/        tokenizer → parser → AST
 ├─ compile/       binder、依赖分析、编译产物
 ├─ runtime/       evaluator、函数注册表、RuntimeValue
-├─ functions/     433 个函数实现(分 11 个文件)
+├─ functions/     448 个函数实现(分 11 个文件)
 ├─ materialize/   spill 引擎、幽灵单元格跟踪、writeback 计划
 └─ integration/   immutable snapshot、calculate pipeline
 ```

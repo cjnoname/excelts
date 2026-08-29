@@ -12,7 +12,7 @@
  * table, and a nested outline (bookmarks). Then we read it back and print
  * the extracted structures.
  *
- * Usage:  npx tsx src/modules/pdf/examples/pdf-reader-extraction.ts
+ * Usage:  pnpm example --filter pdf-reader-extraction
  * Output: tmp/pdf-examples/extraction-source.pdf
  */
 import fs from "node:fs";

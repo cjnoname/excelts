@@ -767,7 +767,7 @@ isDuplex(stream); // true if duplex stream
 isStream(stream); // true if any stream type
 
 // Usage
-function processStream(input: unknown) {
+async function processStream(input: unknown) {
   if (isReadable(input)) {
     // TypeScript knows input is Readable here
     for await (const chunk of input) {
@@ -798,19 +798,26 @@ isErrored(stream); // true if error occurred
 
 ## 二进制工具
 
+这些辅助函数存在于库内部，但**不属于任何已发布入口** —— `stringToUint8Array`、
+`uint8ArrayToString`、`concatUint8Arrays`、`uint8ArrayEquals` 和 `uint8ArrayIndexOf` 都位于
+内部 `utils/` 层，该层刻意从不导出。它们只是平台内置能力的薄封装，请直接使用后者：
+
 ```typescript
-// 注意：这些二进制辅助函数并非由 documonster/stream 导出。
-// stringToUint8Array / uint8ArrayToString / concatUint8Arrays 可从
-// documonster/archive 获取；uint8ArrayEquals / uint8ArrayIndexOf 不属于
-// 任何公开子路径入口。
-import { stringToUint8Array, uint8ArrayToString, concatUint8Arrays } from "documonster/archive";
+// String <-> Uint8Array 转换（UTF-8）
+const bytes = new TextEncoder().encode("Hello, 世界!");
+const text = new TextDecoder().decode(bytes);
 
-// String <-> Uint8Array conversion (UTF-8)
-const bytes = stringToUint8Array("Hello, 世界!");
-const text = uint8ArrayToString(bytes);
+// 其他编码，取决于运行时是否支持
+const latin1 = new TextDecoder("latin1").decode(bytes);
 
-// Concatenate multiple arrays efficiently
-const combined = concatUint8Arrays([arr1, arr2, arr3]);
+// 拼接多个数组
+const total = arrays.reduce((n, a) => n + a.length, 0);
+const combined = new Uint8Array(total);
+let offset = 0;
+for (const a of arrays) {
+  combined.set(a, offset);
+  offset += a.length;
+}
 ```
 
 ---

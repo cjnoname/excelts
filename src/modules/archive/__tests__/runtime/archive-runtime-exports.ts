@@ -142,6 +142,10 @@ export const ARCHIVE_BROWSER_EXPORTS = [
   "decompressAutoSync",
   "detectCompressionFormat",
 
+  // PNG encoding — a DEFLATE stream plus CRC-32-checked chunks, so it lives
+  // beside the two primitives it is built from.
+  "encodePng",
+
   // Worker Pool (browser-only functionality, stub in Node)
   "WorkerPool",
   "getDefaultWorkerPool",

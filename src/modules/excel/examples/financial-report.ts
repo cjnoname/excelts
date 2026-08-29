@@ -31,7 +31,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
  *   tmp/excel-examples/financial-report-public.pdf    — unencrypted
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/financial-report.ts
+ *   pnpm example --filter financial-report
  */
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

@@ -1431,24 +1431,23 @@ export function fillTemplateEnhanced(
     collectedImages
   );
 
-  // Merge collected images into doc.images (avoid duplicates by fileName)
-  const images = doc.images ? [...doc.images] : [];
-  for (const img of collectedImages) {
-    if (!images.some(existing => existing.fileName === img.fileName)) {
-      images.push(img);
-    }
-  }
-
   // Second pass: standard fillTemplate. Note that `fillTemplate` mutates
   // its input doc in place (it edits `headerDef.content.children` and the
   // body array directly), so we hand it a deep-cloned wrapper to avoid
   // sneaking edits back into the caller's doc through shared references
   // (`modifiedDoc.headers === doc.headers` would otherwise propagate
   // mutations into `doc`).
+  // Built before the images are merged, because the header and footer passes below
+  // append to `collectedImages` while this object literal is being evaluated — so
+  // the merge has to read it afterwards.
   const modifiedDoc: DocxDocument = {
     ...doc,
     body: newBody,
-    images: images.length > 0 ? images : undefined,
+    // Headers and footers get the enhanced pass too, not just the clone. A logo in
+    // a header is the case a template author is most likely to reach for, and
+    // running only the basic fill there left `{{%logo}}` in the document as literal
+    // text — or, under `strict`, failed the whole fill over a placeholder that had
+    // been supplied correctly.
     ...(doc.headers
       ? {
           headers: new Map(
@@ -1456,7 +1455,17 @@ export function fillTemplateEnhanced(
               k,
               {
                 ...h,
-                content: { ...h.content, children: [...h.content.children] }
+                content: {
+                  ...h.content,
+                  children: processEnhancedBody(
+                    h.content.children as BodyContent[],
+                    data,
+                    open,
+                    close,
+                    strict,
+                    collectedImages
+                  ) as readonly (Paragraph | Table)[]
+                }
               }
             ])
           )
@@ -1469,7 +1478,17 @@ export function fillTemplateEnhanced(
               k,
               {
                 ...f,
-                content: { ...f.content, children: [...f.content.children] }
+                content: {
+                  ...f.content,
+                  children: processEnhancedBody(
+                    f.content.children as BodyContent[],
+                    data,
+                    open,
+                    close,
+                    strict,
+                    collectedImages
+                  ) as readonly (Paragraph | Table)[]
+                }
               }
             ])
           )
@@ -1482,7 +1501,23 @@ export function fillTemplateEnhanced(
       ? { endnotes: doc.endnotes.map(en => ({ ...en, content: [...en.content] })) }
       : {})
   };
-  return fillTemplate(modifiedDoc, data, options);
+
+  // Merged now, not while `modifiedDoc` was built: the header and footer passes above
+  // append to `collectedImages`, so reading it any earlier would drop every picture
+  // that came from one. Duplicates are avoided by file name, which is why a caller
+  // supplying two images must give them distinct names.
+  const images = doc.images ? [...doc.images] : [];
+  for (const img of collectedImages) {
+    if (!images.some(existing => existing.fileName === img.fileName)) {
+      images.push(img);
+    }
+  }
+
+  return fillTemplate(
+    { ...modifiedDoc, images: images.length > 0 ? images : undefined },
+    data,
+    options
+  );
 }
 
 function processEnhancedBody(
@@ -1620,9 +1655,13 @@ function processEnhancedBody(
       }
       result.push(block);
     } else if (block.type === "table") {
-      // Process table column loops
+      // Process table column loops, then the enhanced placeholders inside each
+      // cell. A cell holds the same block list a body does, so the same pass
+      // applies — and a picture in a table cell is how a great many templates lay
+      // out a letterhead, so not descending here made the commonest placement the
+      // one that could not be filled.
       const processed = processTableColumnLoop(block, data, open, close, strict);
-      result.push(processed);
+      result.push(processEnhancedTable(processed, data, open, close, strict, collectedImages));
     } else if (block.type === "sdt") {
       // Recursively process SDT content
       const sdt = block as StructuredDocumentTag;
@@ -1643,6 +1682,40 @@ function processEnhancedBody(
     }
   }
   return result;
+}
+
+/**
+ * Run the enhanced pass over every cell of a table.
+ *
+ * Rebuilt rather than mutated because `Table`, `TableRow` and `TableCell` are all
+ * readonly, and a cell's content is the same `Paragraph | Table` list the body holds
+ * — so nested tables are handled by the recursion rather than by a special case.
+ */
+function processEnhancedTable(
+  table: Table,
+  data: Record<string, unknown>,
+  open: string,
+  close: string,
+  strict: boolean,
+  collectedImages: ImageDef[]
+): Table {
+  return {
+    ...table,
+    rows: table.rows.map(row => ({
+      ...row,
+      cells: row.cells.map(cell => ({
+        ...cell,
+        content: processEnhancedBody(
+          cell.content as BodyContent[],
+          data,
+          open,
+          close,
+          strict,
+          collectedImages
+        ) as readonly (Paragraph | Table)[]
+      }))
+    }))
+  };
 }
 
 /** Match a single-placeholder paragraph: {{<prefix><path>}} */

@@ -43,7 +43,7 @@ import {
   DOCUMENT_NAMESPACES,
   STD_DOC_ATTRIBUTES
 } from "@word/constants";
-import { sanitizeMediaFileName, sanitizeUrl, utf8Encoder } from "@word/core/internal-utils";
+import { sanitizeUrl, utf8Encoder } from "@word/core/internal-utils";
 import { getFileExt, getPartRelsPath } from "@word/core/opc-paths";
 import { walkBlocks } from "@word/core/walker";
 import { DocxWriteError } from "@word/errors";
@@ -89,6 +89,7 @@ import {
   renderContentTypes
 } from "@word/writer/content-types";
 import { renderBodyContent } from "@word/writer/document-writer";
+import { uniqueSanitizedName } from "@word/writer/docx-packager";
 import {
   renderHeader,
   renderFooter,
@@ -1767,20 +1768,4 @@ function sanitizeStreamingOptions(options: StreamingDocxOptions): StreamingDocxO
     }
   }
   return next;
-}
-
-function uniqueSanitizedName(raw: string | undefined, used: Set<string>, fallback: string): string {
-  let candidate = sanitizeMediaFileName(raw, fallback);
-  if (used.has(candidate)) {
-    const dot = candidate.lastIndexOf(".");
-    const stem = dot >= 0 ? candidate.slice(0, dot) : candidate;
-    const ext = dot >= 0 ? candidate.slice(dot) : "";
-    let n = 2;
-    while (used.has(`${stem}_${n}${ext}`)) {
-      n++;
-    }
-    candidate = `${stem}_${n}${ext}`;
-  }
-  used.add(candidate);
-  return candidate;
 }

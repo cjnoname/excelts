@@ -25,11 +25,11 @@
  *
  * @example
  * ```typescript
- * import { readDocx } from "documonster/word";
- * import { docxToPdf } from "documonster/pdf";
+ * import { Io } from "documonster/word";
+ * import { Pdf } from "documonster/pdf";
  *
- * const doc = await readDocx(docxBytes);
- * const pdfBytes = await docxToPdf(doc);
+ * const doc = await Io.read(docxBytes);
+ * const pdfBytes = await Pdf.fromDocx(doc);
  * ```
  */
 
@@ -41,6 +41,8 @@ import { FontManager } from "@pdf/font/font-manager";
 import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import type { RenderLayoutOptions } from "@pdf/word-layout-to-pdf";
 import { renderLayoutDocumentToPdf } from "@pdf/word-layout-to-pdf";
+import { addCjkLanguageEvidence, concludeCjkLanguage, createCjkLanguageEvidence } from "@utils/cjk";
+import type { CjkLanguage, CjkLanguageEvidence } from "@utils/cjk";
 import { twipsToPt } from "@utils/units";
 import { walkDocument } from "@word/core/walker";
 import type { FullLayoutOptions, PageGeometryOverride } from "@word/layout/layout-full";
@@ -79,6 +81,27 @@ export interface DocxToPdfOptions {
    */
   readonly fonts?: PdfFontConfig;
   /**
+   * System font families auto-discovery should prefer, in order, when
+   * {@link fonts} is not given.
+   *
+   * @see `PdfExportOptions.preferSystemFonts`
+   */
+  readonly preferSystemFonts?: readonly string[];
+
+  /**
+   * Turn off the host font scan entirely, for byte-stable output across hosts.
+   *
+   * @see `PdfExportOptions.disableFontAutoDiscovery`
+   */
+  readonly disableFontAutoDiscovery?: boolean;
+  /**
+   * The East Asian written language of the document, so auto-discovery picks a
+   * face drawn in that regional hand.
+   *
+   * @see `PdfExportOptions.textLanguage`
+   */
+  readonly textLanguage?: CjkLanguage;
+  /**
    * Receive non-fatal font diagnostics raised while converting.
    *
    * @see `PdfExportOptions.onWarning`
@@ -110,9 +133,9 @@ export interface DocxToPdfOptions {
    * to plug in the Excel chart renderer for publication-quality output:
    *
    * ```typescript
-   * import { createWordChartPdfRenderer } from "documonster/pdf";
-   * const pdfBytes = await docxToPdf(doc, {
-   *   chartRenderer: createWordChartPdfRenderer()
+   * import { Pdf } from "documonster/pdf";
+   * const pdfBytes = await Pdf.fromDocx(doc, {
+   *   chartRenderer: await Pdf.wordChartRenderer()
    * });
    * ```
    *
@@ -203,10 +226,23 @@ export async function docxToPdf(
   //     footnote's number) or already present in the source (a TOC entry).
   // `undefined` when the caller configured families: those are authoritative, so
   // there is nothing to predict and nothing to verify afterwards.
-  const predicted = options?.fonts ? undefined : predictNonWinAnsiCodePoints(doc);
+  //
+  // `disableFontAutoDiscovery` skips the prediction as well as the scan: the
+  // prediction exists only to decide *which* face to look for, and there is no
+  // look-up to steer. Skipping it also skips the verification pass below, so a
+  // deterministic export lays out exactly once.
+  const noDiscovery = options?.disableFontAutoDiscovery === true;
+  const predicted = options?.fonts || noDiscovery ? undefined : predictNonWinAnsiCodePoints(doc);
   let fontManager = options?.fonts
     ? new FontManager(compilePdfFontConfig(options.fonts))
-    : await resolveFallbackFontManager(predicted!);
+    : noDiscovery
+      ? new FontManager()
+      : await resolveFallbackFontManager(
+          predicted!.codePoints,
+          options?.preferSystemFonts,
+          options?.textLanguage,
+          concludeCjkLanguage(predicted!.evidence)
+        );
   let layout = layoutDocumentFull(doc, fontManager ? withFontMetrics(fontManager) : layoutOptions);
 
   // 3a. Verify the prediction against what was actually laid out. Walking the
@@ -216,8 +252,13 @@ export async function docxToPdf(
   //     here twice is impossible: the second prediction *is* the observation.
   if (predicted) {
     const drawn = collectLayoutNonWinAnsiCodePoints(layout);
-    if (!sameCodePoints(drawn, predicted)) {
-      fontManager = await resolveFallbackFontManager(drawn);
+    if (!sameCodePoints(drawn.codePoints, predicted.codePoints)) {
+      fontManager = await resolveFallbackFontManager(
+        drawn.codePoints,
+        options?.preferSystemFonts,
+        options?.textLanguage,
+        concludeCjkLanguage(drawn.evidence)
+      );
       layout = layoutDocumentFull(doc, fontManager ? withFontMetrics(fontManager) : layoutOptions);
     }
   }
@@ -238,6 +279,13 @@ export async function docxToPdf(
     defaultFont: options?.defaultFont ?? "Helvetica",
     defaultFontSize: options?.defaultFontSize ?? 11,
     fonts: options?.fonts,
+    // The engine the layout above was measured with. Handing it over stops
+    // `build()` discovering a font a second time from a different set of code
+    // points and a different language tally.
+    fontManager,
+    preferSystemFonts: options?.preferSystemFonts,
+    textLanguage: options?.textLanguage,
+    disableFontAutoDiscovery: options?.disableFontAutoDiscovery,
     onWarning: options?.onWarning,
     chartRenderer:
       userChartRenderer || builtInLayoutRenderer
@@ -286,19 +334,34 @@ export async function docxToPdf(
  * shapes, math, chart titles — is covered.
  */
 async function resolveFallbackFontManager(
-  codePoints: ReadonlySet<number>
+  codePoints: ReadonlySet<number>,
+  preferredFamilies: readonly string[] | undefined,
+  textLanguage: CjkLanguage | undefined,
+  detectedLanguage: CjkLanguage | undefined
 ): Promise<FontManager | undefined> {
   if (codePoints.size === 0) {
     return undefined;
   }
   const fontManager = new FontManager();
-  const fallback = findSystemFontForCodePoints(codePoints);
+  const fallback = findSystemFontForCodePoints(
+    codePoints,
+    preferredFamilies ?? [],
+    textLanguage ?? detectedLanguage
+  );
   if (fallback) {
     fontManager.registerFallbackFont(fallback);
-    return fontManager;
+    fontManager.noteAutoDiscoveredFont(fallback.familyName, codePoints.size);
   }
-  // No system face covers the document, so `build()` will fall back to Type3
-  // glyphs. Load their real widths before anything wraps a line against them.
+  // Load the real Type3 widths whether or not a face was found, because finding one
+  // does not mean it covers everything. Auto-discovery is no longer required to cover
+  // the symbols Type3 can draw, so a face that lacks some of them is the ordinary
+  // case — and returning early here measured every such character at the 600 default
+  // while the PDF drew it at its real width. `U+2003` EM SPACE is 1000 and `U+200B`
+  // ZERO WIDTH SPACE is 0, which is 40% of an em per character: enough to move a line
+  // break or a page boundary between the layout Word computed and the page produced.
+  //
+  // `prepare()` reads widths only for the code points that still need Type3, so a face
+  // covering the whole document loads nothing.
   for (const cp of codePoints) {
     fontManager.trackText(String.fromCodePoint(cp));
   }
@@ -310,9 +373,15 @@ async function resolveFallbackFontManager(
  * Code points the layout is expected to draw that WinAnsi cannot encode, derived
  * from the source model plus the glyphs the engine injects.
  */
-function predictNonWinAnsiCodePoints(doc: DocxDocument): Set<number> {
+function predictNonWinAnsiCodePoints(doc: DocxDocument): {
+  codePoints: Set<number>;
+  evidence: CjkLanguageEvidence;
+} {
   const out = new Set<number>();
+  const evidence = createCjkLanguageEvidence();
   const addText = (text: string) => {
+    // Counted while the text still has its repetitions; `out` is a Set.
+    addCjkLanguageEvidence(evidence, text);
     for (const ch of text) {
       const cp = ch.codePointAt(0)!;
       if (!isWinAnsiCodePoint(cp)) {
@@ -332,7 +401,7 @@ function predictNonWinAnsiCodePoints(doc: DocxDocument): Set<number> {
   for (const glyph of predictBulletGlyphs(doc)) {
     addText(glyph);
   }
-  return out;
+  return { codePoints: out, evidence };
 }
 
 /** Whether two code-point sets hold exactly the same members. */
@@ -349,9 +418,14 @@ function sameCodePoints(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean
 }
 
 /** Code points in the laid-out text that WinAnsi cannot encode. */
-function collectLayoutNonWinAnsiCodePoints(layout: LayoutDocument): Set<number> {
+function collectLayoutNonWinAnsiCodePoints(layout: LayoutDocument): {
+  codePoints: Set<number>;
+  evidence: CjkLanguageEvidence;
+} {
   const out = new Set<number>();
+  const evidence = createCjkLanguageEvidence();
   const addText = (text: string) => {
+    addCjkLanguageEvidence(evidence, text);
     for (const ch of text) {
       const cp = ch.codePointAt(0)!;
       if (!isWinAnsiCodePoint(cp)) {
@@ -418,7 +492,7 @@ function collectLayoutNonWinAnsiCodePoints(layout: LayoutDocument): Set<number> 
       visit(page.footnoteArea);
     }
   }
-  return out;
+  return { codePoints: out, evidence };
 }
 
 // =============================================================================

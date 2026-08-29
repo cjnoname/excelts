@@ -31,8 +31,9 @@
  * that is the whole point of having one.
  *
  * Pixels rather than a PNG: encoding one needs DEFLATE, which sits a layer above this
- * module. Pair {@link rasterizeToRgba} with any encoder, or use the chart module's
- * `rasterizeDrawList`, which is that pairing and nothing else.
+ * module. Pair {@link rasterizeToRgba} with any encoder. The pairing this repository
+ * uses internally is `excel/chart/render/draw-raster-png.ts`, which is that and nothing
+ * else — it is not currently part of the published surface.
  */
 
 export { cssColour, relativeLuminance, translucent } from "@draw/colour";

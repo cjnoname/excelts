@@ -279,7 +279,7 @@ const bytes = await Pdf.create({
 
 Add text or image watermarks to any PDF generated via `Pdf.create()` or `Pdf.fromExcel()`:
 
-```typescript
+```text
 // Text watermark — centered, semi-transparent, rotated
 const bytes = await Pdf.create(data, {
   watermark: {
@@ -326,10 +326,8 @@ const bytes = await Pdf.create(data, {
 
 Create PDFs with precise control over text, shapes, and layout:
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
-const doc = new Pdf.Builder();
+```text
+const doc: Pdf.Builder;
 doc.setMetadata({ title: "My Report", author: "documonster" });
 
 const page = doc.addPage({ width: 595, height: 842 }); // A4
@@ -852,8 +850,14 @@ await Pdf.fromExcel(workbook, { pageOrder: "overThenDown" });
 ### Manual Page Breaks
 
 ```typescript
-worksheet.rowBreaks.push({ id: 20, max: 16838, man: 1 }); // Break after row 20
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // page 2 starts at row 21
+Column.addPageBreak(worksheet, "F"); // the next page starts at column G
 ```
+
+A break spans the full width or height of the sheet — the only kind Excel can
+author, and the only kind this exporter renders.
 
 ### Print Area
 
@@ -1016,6 +1020,98 @@ await Pdf.fromExcel(workbook, {
 });
 ```
 
+### System font auto-discovery
+
+On Node, a document that contains characters WinAnsi cannot encode — CJK, most
+notably — and that supplies neither `font` nor `fonts` triggers a best-effort
+scan of the host's font directories for a face to borrow glyphs for those
+characters from. Latin text keeps its standard-14 face, so bold and italic
+survive. Nothing is scanned in the browser, or when a font is supplied
+explicitly.
+
+The scan prefers the platform's own CJK faces and treats broad-coverage
+catch-alls such as Arial Unicode MS as a last resort: it covers almost every
+script in one file, but its CJK glyphs sit small on the em and read as visibly
+worse than any system CJK face. Collections are searched face by face, since the
+faces of one `.ttc` differ in both coverage and regional conventions — macOS
+`Songti.ttc` holds 8,535 glyphs in face 0 and 43,033 in face 1.
+
+`preferSystemFonts` names the families you would rather have, in order:
+
+```typescript
+// Simplified Chinese punctuation conventions; the Traditional face of the same
+// .ttc would be "Heiti TC".
+await Pdf.fromExcel(workbook, { preferSystemFonts: ["Heiti SC", "Songti SC"] });
+
+new Pdf.Builder().preferSystemFonts(["Microsoft YaHei", "Noto Sans CJK SC"]);
+```
+
+Names match the font's family name case-insensitively, and are also how a
+specific face inside a collection is reached. A family that is not installed,
+cannot be parsed, or does not cover the document's text is skipped and the
+built-in order applies — this steers a best-effort search rather than
+constraining it. Use `fonts` when a face is a requirement.
+
+### East Asian language and glyph forms
+
+Unicode Han Unification gives Chinese, Japanese and Korean the same code points
+for the characters they share, but not the same shapes — 「者」「骨」「今」「青」
+「每」are each drawn differently by region. A font chosen purely by _coverage_ can
+therefore be correct and still wrong: a Japanese face draws Chinese text that a
+Chinese reader sees as malformed.
+
+Selection is therefore by language first, coverage second:
+
+```typescript
+await Pdf.fromExcel(workbook, { textLanguage: "zh-Hans" }); // or zh-Hant, ja, ko
+new Pdf.Builder().textLanguage("zh-Hant");
+```
+
+Left unset, the language is inferred from the content: a single kana settles
+Japanese, Hangul settles Korean, and characters that exist in only one of
+Simplified or Traditional Chinese settle those. Text made purely of forms common
+to all of CJK carries no evidence, and Simplified Chinese families are preferred
+in that case — a default rather than a detection, and the reason to state the
+language when you know it.
+
+`Pdf.fromChart` accepts both options too, so a standalone chart's labels get the
+same regional control as a workbook or a document.
+
+Where a collection holds several weights of one family — macOS `Songti.ttc` lists
+`Songti SC` at Black before its Regular — the regular weight is chosen rather than
+whichever face the file happens to list first.
+
+The language also picks between the faces of one collection: macOS
+`STHeiti Light.ttc` holds `Heiti TC` at face 0 and `Heiti SC` at face 1, and
+`Songti.ttc` holds eight faces across both scripts. `preferSystemFonts` still
+outranks the language when you name a family yourself.
+
+Two limits are worth knowing. CFF-flavoured fonts (`.otf`, and `.ttc` files
+whose faces are CFF) are rejected because the subsetting embedder needs `glyf`
+outlines — which rules out macOS PingFang and Hiragino, and the official Noto
+Sans CJK `.otf`/`.ttc` releases; use Noto Sans SC's `.ttf` build instead. And
+because results depend on what the host has installed, `disableFontAutoDiscovery`
+turns the scan off entirely when byte-stable output matters more than legibility.
+
+`disableFontAutoDiscovery` is available on every entry point, not just the
+builder — the same export is otherwise reproducible or not depending on which
+function produced it:
+
+```typescript
+import { Pdf } from "documonster/pdf";
+
+// Deterministic: either the supplied font draws the text or nothing does.
+const bytes = await Pdf.fromExcel(workbook, {
+  disableFontAutoDiscovery: true,
+  fonts: { default: { regular: myFontBytes } }
+});
+```
+
+It disables _discovery_, not embedding, so a font you supply is still used. With
+no font supplied the characters keep their Unicode for copy and search and render
+as `.notdef` boxes, and `onWarning` names the blocks that were lost — turning the
+scan off does not turn the diagnostic off with it.
+
 Font fallback is scalar rendering, not complex text layout. OpenType shaping (GSUB/GPOS), bidi reordering, and color emoji are **not supported** — configuring a font does not make shaping-dependent Arabic or Indic text render correctly.
 
 These limits are detectable rather than silent: when the document contains a complex script, right-to-left text, or an embedded font carrying color glyph tables (`COLR`/`CBDT`/`sbix`/`SVG`), `onWarning` reports it once per feature, naming the scripts or font families involved. Pre-shape and pre-order such text (or render it as an image) before drawing it.
@@ -1091,13 +1187,13 @@ Runnable examples are in `src/modules/pdf/examples/`:
 Run any example:
 
 ```bash
-npx tsx src/modules/pdf/examples/pdf-basic.ts
+pnpm example --filter pdf-basic
 # Output: tmp/pdf-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-builder.ts
+pnpm example --filter pdf-builder
 # Output: tmp/pdf-builder-examples/*.pdf
 
-npx tsx src/modules/pdf/examples/pdf-signatures.ts
+pnpm example --filter pdf-signatures
 # Output: tmp/pdf-signature-examples/
 ```
 
@@ -1137,13 +1233,21 @@ Generate a PDF from plain data. Returns `Promise<Uint8Array>`.
 
 ```typescript
 // 2D array
-await Pdf.create([["Name", "Age"], ["Alice", 30]]);
+await Pdf.create([
+  ["Name", "Age"],
+  ["Alice", 30]
+]);
 
 // Single sheet with column widths
 await Pdf.create({ name: "Report", columns: [{ width: 25 }, 15], data: [["A", "B"]] });
 
 // Multiple sheets
-await Pdf.create({ sheets: [{ name: "S1", data: [...] }, { name: "S2", data: [...] }] });
+await Pdf.create({
+  sheets: [
+    { name: "S1", data: [["A"]] },
+    { name: "S2", data: [["B"]] }
+  ]
+});
 
 // With options
 await Pdf.create([["A", 1]], { showGridLines: true, pageSize: "A4" });
@@ -1166,7 +1270,7 @@ const bytes = await Pdf.fromExcel(workbook, { showGridLines: true });
 
 Build free-form PDFs with text, vector graphics, annotations, and form fields.
 
-```typescript
+```text
 import { Pdf } from "documonster/pdf";
 
 const doc = new Pdf.Builder();
@@ -1176,7 +1280,7 @@ doc.setPdfACompliance();       // Enable PDF/A-1b
 doc.embedFont(fontBytes);      // Legacy single-default-font compatibility API
 // Or: doc.embedFonts(fonts);  // Complete PdfFontConfig; the later call replaces earlier config
 
-const page = doc.addPage({ width?, height? }); // Returns PdfPageBuilder
+const page = doc.addPage({ width?, height? }); // Returns Pdf.PageBuilder
 
 // PdfPageBuilder methods:
 page.drawText(text, { x, y, fontSize?, fontFamily?, bold?, italic?, color? });
@@ -1200,9 +1304,7 @@ const bytes = await doc.build(); // Returns Promise<Uint8Array>
 
 Edit existing PDFs — overlay content, fill forms, merge, split, and sign.
 
-```typescript
-import { Pdf } from "documonster/pdf";
-
+```text
 const editor = Pdf.Editor.load(pdfBytes, { password? });
 
 // Page access
@@ -1221,7 +1323,7 @@ page.addAnnotation(options);
 page.addFormField(options);
 
 // Page manipulation
-editor.addPage(options?);              // Returns PdfEditorPage
+editor.addPage(options?);              // Returns Pdf.PageBuilder
 editor.removePage(index);
 editor.rotatePage(index, degrees);     // 90, 180, 270
 editor.copyPagesFrom(otherPdfBytes);
@@ -1259,7 +1361,10 @@ import { Pdf } from "documonster/pdf";
 
 // Step 1: Build placeholder
 const { dictString, placeholder } = Pdf.buildSignatureDictPlaceholder({
-  name?, reason?, location?, contactInfo?
+  name: "Alice",
+  reason: "Approval",
+  location: "London",
+  contactInfo: "alice@example.com"
 });
 
 // Step 2: Sign (certificate = DER X.509, privateKey = DER PKCS#8)

@@ -13,7 +13,7 @@
  * These are demonstrated purely with console.log (input → output); they produce
  * no files.
  *
- * Usage: npx tsx src/modules/csv/examples/csv-utilities.ts
+ * Usage: pnpm example --filter csv-utilities
  */
 import { Csv } from "../index";
 

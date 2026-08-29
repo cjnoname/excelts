@@ -15,8 +15,6 @@
  * This is intentional — the goal is readable chart labels, not DTP.
  */
 
-import { fileExistsSync, readFileBytesSync } from "@utils/fs";
-
 // =============================================================================
 // Types
 // =============================================================================
@@ -89,23 +87,49 @@ function parseTableDirectory(data: Uint8Array): Map<string, TableEntry> {
 function parseCmap(data: Uint8Array, table: TableEntry): Map<number, number> {
   const base = table.offset;
   const numSubtables = u16(data, base + 2);
-  const map = new Map<number, number>();
+
+  let format4Offset = -1;
+  let format12Offset = -1;
 
   for (let i = 0; i < numSubtables; i++) {
     const rec = base + 4 + i * 8;
     const platformID = u16(data, rec);
     const encodingID = u16(data, rec + 2);
     const subtableOffset = base + u32(data, rec + 4);
-    const format = u16(data, subtableOffset);
 
-    // Prefer (3,1) format 4 or (3,10) format 12 — standard Windows Unicode mappings
-    if (platformID === 3 && (encodingID === 1 || encodingID === 10)) {
-      if (format === 4) {
-        parseCmapFormat4(data, subtableOffset, map);
-      } else if (format === 12) {
-        parseCmapFormat12(data, subtableOffset, map);
-      }
+    // The Unicode platform (0, any encoding) or Windows Unicode — BMP (3,1) and
+    // full repertoire (3,10).
+    //
+    // Platform 0 is not a fallback for exotic fonts: macOS ships `STHeiti` and
+    // `STFangsong` with a `(0,4)` format 12 subtable and *nothing* on platform 3,
+    // so a Windows-only scan built an empty map and every glyph resolved to
+    // `undefined`. Chinese text then rasterised as blank — and `Heiti SC` is the
+    // first embeddable `zh-Hans` family on a stock macOS install, so that was the
+    // default path, not a corner. The PDF parser in `@pdf/font/ttf-parser` has
+    // always accepted platform 0, which is why the same font embedded correctly
+    // while drawing nothing; the two now agree.
+    const isUnicode =
+      platformID === 0 || (platformID === 3 && (encodingID === 1 || encodingID === 10));
+    if (!isUnicode) {
+      continue;
     }
+
+    const format = u16(data, subtableOffset);
+    if (format === 12 && format12Offset < 0) {
+      format12Offset = subtableOffset;
+    } else if (format === 4 && format4Offset < 0) {
+      format4Offset = subtableOffset;
+    }
+  }
+
+  // Format 12 reaches the supplementary planes; format 4 stops at the BMP. Pick
+  // one rather than merging both, matching `ttf-parser` so a glyph that embeds in
+  // a PDF rasterises from the same mapping.
+  const map = new Map<number, number>();
+  if (format12Offset >= 0) {
+    parseCmapFormat12(data, format12Offset, map);
+  } else if (format4Offset >= 0) {
+    parseCmapFormat4(data, format4Offset, map);
   }
   return map;
 }
@@ -611,22 +635,34 @@ function subdivideQuadratic(
 
 /**
  * Parse a TTF font file into a RasterFont that can render glyphs to pixels.
+ *
+ * `collectionIndex` selects a face inside a `.ttc`, matching `parseTtf` in
+ * `@pdf/font/ttf-parser`. It is not a detail that can be defaulted away: macOS
+ * keeps `Songti SC` at Black in face 0 of `Songti.ttc`, with Bold, Light and
+ * Regular after it, so always reading face 0 rasterises a heavier weight than the
+ * one that was chosen — and the picture disagrees with the PDF that embeds the
+ * same family.
+ *
+ * An index past the end of the collection falls back to face 0 rather than
+ * throwing, because this module degrades instead of failing: its callers draw
+ * inside a loop and have nowhere to put an exception.
  */
-export function parseRasterFont(data: Uint8Array): RasterFont {
-  // Handle TTC (TrueType Collection) — use first font
+export function parseRasterFont(data: Uint8Array, collectionIndex = 0): RasterFont {
   const sfVersion = u32(data, 0);
-  const fontData = data;
   if (sfVersion === 0x74746366) {
-    // 'ttcf' header
-    const firstOffset = u32(data, 12);
-    // Re-read tables relative to the font offset — but table offsets in TTC
-    // are absolute, so we keep original data and adjust
-    const tables = parseTableDirectoryTTC(data, firstOffset);
+    // 'ttcf' header — a collection, whose face offsets follow the count.
+    const numFonts = u32(data, 8);
+    const inRange =
+      Number.isInteger(collectionIndex) && collectionIndex >= 0 && collectionIndex < numFonts;
+    const index = inRange ? collectionIndex : 0;
+    // Table offsets inside a collection are absolute, so the whole file is kept
+    // and only the directory is read at the face's offset.
+    const tables = parseTableDirectoryTTC(data, u32(data, 12 + index * 4));
     return buildRasterFont(data, tables);
   }
 
-  const tables = parseTableDirectory(fontData);
-  return buildRasterFont(fontData, tables);
+  const tables = parseTableDirectory(data);
+  return buildRasterFont(data, tables);
 }
 
 function parseTableDirectoryTTC(data: Uint8Array, fontOffset: number): Map<string, TableEntry> {
@@ -879,83 +915,4 @@ export function rasterizeGlyph(
     offsetY: Math.floor(minY / SS) - pad,
     pixels
   };
-}
-
-// =============================================================================
-// System font loading (Node.js only)
-// =============================================================================
-
-let _cachedFont: RasterFont | null = null;
-let _fontLoadAttempted = false;
-
-/**
- * Load a system font for text rasterization.
- * Returns null in browser environments or if no font is found.
- * Results are cached — only loads once.
- */
-export function loadSystemFont(): RasterFont | null {
-  if (_fontLoadAttempted) {
-    return _cachedFont;
-  }
-  _fontLoadAttempted = true;
-
-  try {
-    const fontPaths = getSystemFontPaths();
-    for (const fontPath of fontPaths) {
-      try {
-        if (fileExistsSync(fontPath)) {
-          const data = readFileBytesSync(fontPath);
-          _cachedFont = parseRasterFont(data);
-          return _cachedFont;
-        }
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // Not in Node.js or fs not available
-  }
-
-  return null;
-}
-
-function getSystemFontPaths(): string[] {
-  const platform = typeof process !== "undefined" ? process.platform : "";
-  const paths: string[] = [];
-
-  if (platform === "darwin") {
-    // macOS: prefer Arial, then Helvetica, then SF Pro
-    paths.push(
-      "/System/Library/Fonts/Supplemental/Arial.ttf",
-      "/Library/Fonts/Arial.ttf",
-      "/System/Library/Fonts/Helvetica.ttc",
-      "/System/Library/Fonts/SFNSText.ttf",
-      "/System/Library/Fonts/SFNS.ttf"
-    );
-  } else if (platform === "win32") {
-    const windir = process.env.WINDIR || process.env.windir || "C:\\Windows";
-    paths.push(
-      `${windir}\\Fonts\\arial.ttf`,
-      `${windir}\\Fonts\\calibri.ttf`,
-      `${windir}\\Fonts\\segoeui.ttf`,
-      `${windir}\\Fonts\\tahoma.ttf`
-    );
-  } else {
-    // Linux
-    paths.push(
-      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-      "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-      "/usr/share/fonts/TTF/DejaVuSans.ttf",
-      "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-      "/usr/share/fonts/truetype/freefont/FreeSans.ttf"
-    );
-  }
-
-  return paths;
-}
-
-/** Reset cached font (for testing). */
-export function resetCachedFont(): void {
-  _cachedFont = null;
-  _fontLoadAttempted = false;
 }

@@ -9,6 +9,7 @@
  */
 
 import { parseSvgAttributes, parseSvgNumberList } from "@utils/svg-lex";
+import { bytesToBase64 } from "@word/core/internal-utils";
 import { SCRIPT_BASELINE_SHIFT_FACTOR } from "@word/layout/layout-constants";
 import { layoutDocumentFull } from "@word/layout/layout-full";
 import type {
@@ -436,6 +437,15 @@ function renderLayoutParagraphToSvg(
         attrs += ` text-decoration="underline"`;
       } else if (run.strikethrough) {
         attrs += ` text-decoration="line-through"`;
+      }
+      // Justification slack from `w:jc="both"`, distributed by the layout engine
+      // between characters (East Asian, which has no spaces to widen) or between
+      // words (Latin). Without these the SVG drew justified text left-aligned.
+      if (run.charSpacing !== undefined && run.charSpacing > 0) {
+        attrs += ` letter-spacing="${run.charSpacing.toFixed(3)}"`;
+      }
+      if (run.wordSpacing !== undefined && run.wordSpacing > 0) {
+        attrs += ` word-spacing="${run.wordSpacing.toFixed(3)}"`;
       }
       const escapedText = xmlEncode(run.text);
       if (escapedText.length > 0) {
@@ -911,25 +921,4 @@ function renderPageContentList(
       }
     }
   }
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  // Same approach as core/internal-utils.ts to stay browser-friendly.
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  if (typeof globalThis.btoa === "function") {
-    return globalThis.btoa(binary);
-  }
-  // Node fallback
-  const buf = (
-    globalThis as {
-      Buffer?: { from(data: string, enc: string): { toString(enc: string): string } };
-    }
-  ).Buffer;
-  if (buf) {
-    return buf.from(binary, "binary").toString("base64");
-  }
-  throw new Error("btoa / Buffer unavailable; cannot encode image data");
 }

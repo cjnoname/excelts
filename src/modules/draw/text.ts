@@ -19,6 +19,7 @@
 
 import { DEFAULT_TEXT_FAMILY } from "@draw/types";
 import type { DrawTextStyle } from "@draw/types";
+import { segmentForWrap } from "@utils/cjk";
 import { measureTextWidthPx } from "@utils/text-measure";
 
 /**
@@ -53,14 +54,20 @@ export function measureText(text: string, style: DrawTextStyle): number {
 }
 
 /**
- * Break text into lines no wider than `maxWidth`, breaking at spaces where possible.
+ * Break text into lines no wider than `maxWidth`.
  *
- * A word longer than the limit is left on a line of its own rather than split: breaking
- * inside a word needs hyphenation rules to look like anything but a bug, and a caller who
- * wants a hard break can measure and cut for itself.
+ * Latin breaks at spaces and hyphens; East Asian text breaks between characters,
+ * with kinsoku applied so a line cannot begin with `。` or `）` — see
+ * `@utils/cjk`. Without that second rule a Chinese chart label or diagram
+ * caption was one unbreakable token and never wrapped at all, however narrow the
+ * box.
  *
- * Existing newlines are honoured — they are the author's own breaks, and wrapping must
- * not swallow them.
+ * A piece longer than the limit is left on a line of its own rather than split:
+ * breaking inside a Latin word needs hyphenation rules to look like anything but
+ * a bug, and a caller who wants a hard break can measure and cut for itself.
+ *
+ * Existing newlines are honoured — they are the author's own breaks, and wrapping
+ * must not swallow them.
  */
 export function wrapText(text: string, style: DrawTextStyle, maxWidth: number): string[] {
   const paragraphs = text.split(/\r\n|\r|\n/);
@@ -69,7 +76,7 @@ export function wrapText(text: string, style: DrawTextStyle, maxWidth: number): 
   }
   const lines: string[] = [];
   for (const paragraph of paragraphs) {
-    const words = paragraph.split(/(\s+)/).filter(part => part !== "");
+    const words = segmentForWrap(paragraph);
     let current = "";
     for (const word of words) {
       const candidate = current + word;

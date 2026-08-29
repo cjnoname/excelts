@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -69,6 +67,7 @@ Cell.setValue(ws, "I8", { formula: 'DCOUNTA(A1:D7, "Product", F5:F7)' });
 calculateFormulas(wb);
 
 for (const addr of ["I1", "I2", "I3", "I4", "I5", "I7", "I8"]) {
-  const c = getCell(ws, addr);
-  console.log(`${addr}  ${String(cellFormula(c)).padEnd(40)}  = ${JSON.stringify(cellResult(c))}`);
+  console.log(
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(40)}  = ${JSON.stringify(Cell.getResult(ws, addr))}`
+  );
 }

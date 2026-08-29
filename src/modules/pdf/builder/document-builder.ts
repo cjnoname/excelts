@@ -6,9 +6,9 @@
  *
  * @example Basic usage:
  * ```typescript
- * import { PdfDocumentBuilder } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const doc = new PdfDocumentBuilder();
+ * const doc = new Pdf.Builder();
  * const page = doc.addPage({ width: 595, height: 842 }); // A4
  *
  * page.drawText("Hello, World!", { x: 72, y: 750, fontSize: 24 });
@@ -33,6 +33,7 @@ import { findSystemFontForCodePoints } from "@pdf/font/system-fonts";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import { emitTextBlock, alphaGsName } from "@pdf/render/page-renderer";
 import type { PdfColor, PdfExportOptions } from "@pdf/types";
+import type { CjkLanguage } from "@utils/cjk";
 import {
   parseCssColor,
   parseSvgAttributes,
@@ -73,6 +74,16 @@ export interface DrawTextOptions {
   maxWidth?: number;
   /** Line height multiplier. Default: 1.2. */
   lineHeight?: number;
+  /**
+   * Extra advance after every character, in points (PDF `Tc`).
+   *
+   * Justifying East Asian text distributes the slack between characters, because
+   * it has no spaces to widen. Included in measurement, so anchored text stays
+   * anchored.
+   */
+  charSpacing?: number;
+  /** Extra advance on every space, in points (PDF `Tw`) — the Latin equivalent. */
+  wordSpacing?: number;
   /**
    * Rotation in degrees, counter-clockwise in the PDF coordinate system
    * (which has +Y pointing up, so visually clockwise on a page viewer).
@@ -281,6 +292,53 @@ export interface PdfDocumentBuilderOptions {
    * `embedFonts()` before the first text command.
    */
   readonly fonts?: PdfFontConfig;
+
+  /**
+   * System font families auto-discovery should prefer, in order, when `fonts`
+   * is not given. Equivalent to calling `preferSystemFonts()`.
+   *
+   * @see {@link PdfDocumentBuilder.preferSystemFonts}
+   */
+  readonly preferSystemFonts?: readonly string[];
+
+  /**
+   * The East Asian written language of the document, so auto-discovery picks a
+   * face drawn in that regional hand. Equivalent to calling `textLanguage()`.
+   *
+   * @see {@link PdfDocumentBuilder.textLanguage}
+   */
+  readonly textLanguage?: CjkLanguage;
+
+  /**
+   * Turn off the host font scan entirely. Equivalent to calling
+   * `disableFontAutoDiscovery()`.
+   *
+   * Accepted here as well as through the method so a bridge can forward the
+   * caller's `PdfExportOptions` in one object, rather than reaching for a chained
+   * call it might forget — which is how the option came to be honoured on some
+   * entry points and silently ignored on others.
+   *
+   * @see {@link PdfDocumentBuilder.disableFontAutoDiscovery}
+   */
+  readonly disableFontAutoDiscovery?: boolean;
+
+  /**
+   * A font engine to adopt instead of creating one.
+   *
+   * Exists so a pipeline that has already **measured** with a particular set of
+   * faces can hand them over, rather than having `build()` discover fonts a
+   * second time and possibly land on different ones. The Word bridge lays a
+   * document out against the face it discovered; without sharing the engine, the
+   * builder repeated the search from its own code points and its own language
+   * tally, so a document could be measured with one typeface and drawn with
+   * another — and `preferSystemFonts` / `textLanguage`, applied during layout, had
+   * no effect on the embedded font at all.
+   *
+   * Mutually exclusive with `fonts`, which asks for an engine to be built.
+   *
+   * @internal
+   */
+  readonly fontManager?: FontManager;
 }
 
 /** Options for table of contents generation. */
@@ -635,7 +693,9 @@ export class PdfPageBuilder {
         anchor: options.anchor ?? "start",
         maxWidth: options.maxWidth,
         lineHeightFactor,
-        rotation: options.rotation ?? 0
+        rotation: options.rotation ?? 0,
+        charSpacing: options.charSpacing,
+        wordSpacing: options.wordSpacing
       },
       this._fontManager
     );
@@ -1304,6 +1364,8 @@ interface BuilderSnapshot {
   readonly pdfA: boolean;
   readonly signatureOptions: PdfSignatureOptions | null;
   readonly disableFontAutoDiscovery: boolean;
+  readonly preferSystemFonts: readonly string[];
+  readonly textLanguage: CjkLanguage | undefined;
   readonly onWarning: ((message: string) => void) | undefined;
 }
 
@@ -1336,12 +1398,27 @@ export class PdfDocumentBuilder {
    * not another.
    */
   private _disableFontAutoDiscovery = false;
+  /**
+   * Set via {@link preferSystemFonts} — family names auto-discovery should try
+   * before its built-in preference order. Empty means "use the built-in order".
+   */
+  private _preferSystemFonts: readonly string[] = [];
+  /**
+   * Set via {@link textLanguage} — the regional hand to render East Asian text
+   * in. `undefined` means "infer it from the text".
+   */
+  private _textLanguage: CjkLanguage | undefined;
   private _buildQueue: Promise<void> = Promise.resolve();
 
   constructor(options: PdfDocumentBuilderOptions = {}) {
-    this._fontManager = options.fonts
-      ? new FontManager(compilePdfFontConfig(options.fonts))
-      : new FontManager();
+    this._fontManager =
+      options.fontManager ??
+      (options.fonts ? new FontManager(compilePdfFontConfig(options.fonts)) : new FontManager());
+    if (options.preferSystemFonts) {
+      this._preferSystemFonts = [...options.preferSystemFonts];
+    }
+    this._textLanguage = options.textLanguage;
+    this._disableFontAutoDiscovery = options.disableFontAutoDiscovery === true;
   }
 
   /**
@@ -1429,6 +1506,64 @@ export class PdfDocumentBuilder {
    */
   disableFontAutoDiscovery(): this {
     this._disableFontAutoDiscovery = true;
+    return this;
+  }
+
+  /**
+   * Name the system font families auto-discovery should prefer, in order,
+   * ahead of its built-in preference list.
+   *
+   * Use this when the automatic choice is legible but not the typeface you
+   * want — the built-in order has to pick something for every platform, and on
+   * a given machine a different installed face is often the better answer:
+   *
+   * ```typescript
+   * new Pdf.Builder().preferSystemFonts(["Heiti SC", "Songti SC"]);
+   * ```
+   *
+   * Names are matched against the font's family name, case-insensitively, and
+   * are also how you reach a specific face inside a TrueType Collection
+   * (`"Heiti SC"` selects a different face of `STHeiti Light.ttc` than
+   * `"Heiti TC"`). A family that is not installed, cannot be parsed, or does
+   * not cover the document's characters is skipped and the built-in order
+   * applies — this steers a best-effort search, it does not constrain it. Use
+   * {@link embedFonts} when a specific face is a requirement rather than a
+   * preference.
+   *
+   * Node-only, and ignored when a font is embedded explicitly or
+   * {@link disableFontAutoDiscovery} is set.
+   */
+  preferSystemFonts(families: readonly string[]): this {
+    this._preferSystemFonts = [...families];
+    return this;
+  }
+
+  /**
+   * Declare which East Asian written language the document is in, so
+   * auto-discovery picks a face drawn in that regional hand.
+   *
+   * Unicode Han Unification gives Chinese, Japanese and Korean the same code
+   * points for shared characters, but not the same shapes — 「者」「骨」「今」
+   * 「青」「每」are each drawn differently. A font chosen purely by coverage can
+   * therefore be *correct and still wrong*: a Japanese face draws Chinese text
+   * that a Chinese reader sees as malformed.
+   *
+   * ```typescript
+   * new Pdf.Builder().textLanguage("zh-Hans");   // Simplified Chinese
+   * ```
+   *
+   * Left unset, the language is inferred from the document's own characters:
+   * kana settles Japanese, Hangul settles Korean, and characters that exist in
+   * only one of Simplified or Traditional Chinese settle those. Text made purely
+   * of forms common to all of CJK carries no evidence, and Chinese is preferred
+   * in that case — which is a default, not a detection, and the reason to state
+   * the language when you know it.
+   *
+   * Node-only, and ignored when a font is embedded explicitly or
+   * {@link disableFontAutoDiscovery} is set.
+   */
+  textLanguage(language: CjkLanguage): this {
+    this._textLanguage = language;
     return this;
   }
 
@@ -1685,7 +1820,26 @@ export class PdfDocumentBuilder {
       writer.setVersion("1.4");
     }
 
-    if (!this._fontManager.hasEmbeddedFont()) {
+    // Discovery runs when nothing is embedded yet, and *also* when a fallback face
+    // is present but cannot draw everything the document ended up containing.
+    //
+    // The second case arises when a caller shares a font engine it already
+    // configured. The Word bridge measures a document against the face it chose and
+    // then hands the engine over — but a chart paints its own axis and category
+    // labels straight onto the page, and those strings are not in the layout model
+    // the bridge inspected. `hasEmbeddedFont()` answers "is a face registered",
+    // when the question is "can every character be drawn": a document pinned to
+    // Kaiti SC lost `龦` to a `.notdef` box although Heiti SC, equally installed,
+    // has it. Re-running discovery over the complete repertoire finds a face that
+    // covers all of it.
+    //
+    // A face the caller embedded explicitly (`embedFont`) is never reconsidered:
+    // that is a statement about the document, not a best-effort guess.
+    const uncoveredByFallback = this._fontManager.hasFallbackFont()
+      ? this._fontManager.getUncoveredFallbackCodePoints()
+      : null;
+
+    if (!this._fontManager.hasEmbeddedFont() || (uncoveredByFallback?.size ?? 0) > 0) {
       // Auto-discover a system font when the document contains non-WinAnsi
       // characters (CJK, accented code points beyond WinAnsi, etc.) and
       // the caller did not supply one via `embedFont`. Mirrors the
@@ -1705,31 +1859,33 @@ export class PdfDocumentBuilder {
       if (nonWinAnsi.size > 0) {
         // Try auto-discovery unless the caller opted out.
         if (!snapshot.disableFontAutoDiscovery) {
-          const discovered = findSystemFontForCodePoints(nonWinAnsi);
+          const discovered = findSystemFontForCodePoints(
+            nonWinAnsi,
+            snapshot.preferSystemFonts,
+            // Counted as the text was tracked, not derived from `nonWinAnsi`:
+            // that is a Set, and a Set cannot say that `国` outnumbers `國`.
+            snapshot.textLanguage ?? this._fontManager.getTextLanguage()
+          );
           if (discovered) {
-            this._fontManager.registerFallbackFont(discovered);
-            snapshot.onWarning?.(
-              `Auto-embedded system font '${discovered.familyName}' to render ${nonWinAnsi.size} non-WinAnsi character(s). ` +
-                `Call embedFont(bytes) explicitly for deterministic output.`
-            );
+            // `widenFallbackFont` rather than `registerFallbackFont`: this runs after
+            // the caller has drawn (and measured) text, and replacing the face outright
+            // changes the advance of every non-Latin-1 code point the two faces share —
+            // 345 of them between `Kaiti SC` and `Heiti SC`. It refuses the swap when
+            // that would happen and keeps the measured face.
+            if (this._fontManager.widenFallbackFont(discovered)) {
+              // Noted rather than warned here: `reportDiagnostics` below raises it, and
+              // it is the one path every pipeline shares. Raising it at each discovery
+              // site is what left three of the five entry points silent.
+              this._fontManager.noteAutoDiscoveredFont(discovered.familyName, nonWinAnsi.size);
+            }
           }
         }
-        if (!this._fontManager.hasEmbeddedFont()) {
-          // Either discovery was disabled, every candidate failed to
-          // parse, or no candidate covered these code points. Type3
-          // NOTDEF glyphs (tofu boxes) will appear for any cp
-          // `type3-glyphs.ts` does not map. Surface a warning so the
-          // author knows rendering will degrade, and list up to 5
-          // sample code points to help them debug.
-          const sample = [...nonWinAnsi]
-            .slice(0, 5)
-            .map(cp => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
-            .join(", ");
-          snapshot.onWarning?.(
-            `${nonWinAnsi.size} non-WinAnsi character(s) present but no TrueType font is embedded and no system font candidate covered them ` +
-              `(e.g. ${sample}). Call embedFont(bytes) with a font that covers these code points; otherwise Type3 NOTDEF boxes will render.`
-          );
-        }
+        // The "nothing covers these" warning is not raised here. It is the same
+        // condition `PdfExportOptions.onWarning` documents, and the spreadsheet
+        // exporter is a separate pipeline that never reached this block — so
+        // `Pdf.create` and `Pdf.fromExcel` emitted tofu boxes silently. It now
+        // lives in `FontManager.reportDiagnostics`, called below and by every
+        // other pipeline, and is evaluated after the discovery attempt above.
       }
     }
 
@@ -2106,6 +2262,8 @@ export class PdfDocumentBuilder {
       pdfA: this._pdfA,
       signatureOptions: this._signatureOptions ? { ...this._signatureOptions } : null,
       disableFontAutoDiscovery: this._disableFontAutoDiscovery,
+      preferSystemFonts: this._preferSystemFonts,
+      textLanguage: this._textLanguage,
       onWarning: this._onWarning
     };
   }

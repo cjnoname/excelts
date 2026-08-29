@@ -2,7 +2,7 @@
 
 [中文](README_zh.md)
 
-Excel-compatible formula tokenizer, parser, compiler, evaluator, dependency graph, dynamic-array spill materialiser, and 433 built-in functions. Zero runtime dependencies.
+Excel-compatible formula tokenizer, parser, compiler, evaluator, dependency graph, dynamic-array spill materialiser, and 448 built-in functions. Zero runtime dependencies.
 
 ## Usage
 
@@ -27,7 +27,7 @@ inspection is exposed by `documonster/formula`. Both are direct calls with
 - **Defined names** — scoped, formula-based, range unions
 - **Cross-sheet references** — `Sheet2!A1`, 3D ranges `Sheet1:Sheet3!A1`
 - **R1C1 addressing** — both A1 and R1C1 modes via `INDIRECT`
-- **433 built-in Excel functions** across 11 categories
+- **448 built-in Excel functions** across 11 categories
 - **Zero runtime dependencies** — no npm deps, no polyfills
 
 ## Function Coverage
@@ -144,9 +144,9 @@ Runnable examples live in `src/modules/formula/examples/`:
 Run any example:
 
 ```bash
-npx tsx src/modules/formula/examples/formula-math.ts
-npx tsx src/modules/formula/examples/formula-dynamic-array.ts
-npx tsx src/modules/formula/examples/formula-pdf-integration.ts
+pnpm example --filter formula-math
+pnpm example --filter formula-dynamic-array
+pnpm example --filter formula-pdf-integration
 # Output: tmp/formula-examples/formula-pdf-integration.pdf
 ```
 
@@ -159,7 +159,7 @@ it sits in the overall module graph):
 ┌─ syntax/        tokenizer → parser → AST
 ├─ compile/       binder, dependency analysis, compiled form
 ├─ runtime/       evaluator, function registry, RuntimeValue
-├─ functions/     433 function implementations (11 category files)
+├─ functions/     448 function implementations (11 category files)
 ├─ materialize/   spill engine, ghost-cell tracking, writeback plan
 └─ integration/   immutable snapshot, calculate pipeline
 ```

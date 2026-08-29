@@ -363,7 +363,10 @@ af19.addText("Hello from ArchiveFile!", "greeting.txt");
 af19.addBuffer(new Uint8Array([1, 2, 3, 4, 5]), "data.bin");
 
 const outPath19 = path.join(outDir, "archive-file.zip");
-await af19.writeToFile(outPath19);
+// `writeToFile` defaults to `overwrite: "error"` so it can never clobber a file
+// the caller did not mean to replace. An example has to be re-runnable, and the
+// second run always finds its own output from the first, so it opts in.
+await af19.writeToFile(outPath19, { overwrite: "overwrite" });
 console.log("  Written:", outPath19);
 
 // Read back
@@ -380,7 +383,8 @@ console.log(`  greeting.txt: "${greeting}"`);
 
 // Extract to directory
 const extractDir = path.join(outDir, "extracted");
-await af19b.extractTo(extractDir);
+// `extractTo` also defaults to `overwrite: "error"` — same reason, same opt-in.
+await af19b.extractTo(extractDir, { overwrite: "overwrite" });
 console.log("  Extracted to:", extractDir);
 
 // =============================================================================

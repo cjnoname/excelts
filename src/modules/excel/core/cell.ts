@@ -376,10 +376,6 @@ export function setFacet<K extends keyof Style>(
   target[key] = value;
 }
 
-export function cellRow(c: CellData): number {
-  return c.row.number;
-}
-
 export function cellCol(c: CellData): number {
   return c.column.number;
 }

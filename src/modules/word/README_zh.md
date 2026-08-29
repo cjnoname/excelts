@@ -308,6 +308,14 @@ import { markdownToDocx, markdownToDocxBody } from "documonster/word/markdown";
 const doc = markdownToDocx("# Title\n\nHello **world**");
 const bodyItems = markdownToDocxBody("- a\n- b");
 
+// 表格列宽按内容测量，代码块字号收缩到最长行不折行为止 —— 这两件事只能由生产方决定，
+// 因为 .docx 里存的是列网格和字号，而不是"稍后再算"的指令。正文若不是投放到 Letter
+// 页面，就把目标版心宽度说明清楚：
+const wide = markdownToDocx(markdown, {
+  contentWidth: 15840 - 2 * 720, // 横向 Letter，半英寸页边距
+  codeBlockFit: "shrink" // 默认值；"wrap" 保持字号、改为折行
+});
+
 // DOCX → HTML
 import { renderToHtml } from "documonster/word/html";
 const html = renderToHtml(doc);

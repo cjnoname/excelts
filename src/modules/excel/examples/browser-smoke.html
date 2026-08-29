@@ -1,4 +1,20 @@
 <!doctype html>
+<!--
+  Manual browser smoke test for the excel IIFE bundle.
+
+  Unlike the `.ts` files beside it this is not run by `pnpm example` — it is a page
+  you click through, which is the point: it exercises the delivered bundle in a real
+  browser, through the same global a CDN consumer gets.
+
+    pnpm build:browser:bundle          # produces dist/iife/
+    # then serve the repository root over HTTP and open
+    #   /src/modules/excel/examples/browser-smoke.html
+    # (any static server, e.g. `pnpm dlx serve .`; a file:// URL will not load the
+    #  bundle, and resource timing reports nothing without an origin)
+
+  The automated equivalents are `src/modules/excel/__tests__/browser/`, which load
+  the same bundle under Vitest + Playwright.
+-->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -165,57 +181,81 @@
         console.log(msg);
       }
 
-      // Load the bundle
+      // Load the bundle. It installs its namespaces as `Documonster.Excel` — the
+      // shared global carries one member per module, so several bundles can be
+      // loaded side by side.
       const startTime = performance.now();
+      const BUNDLE = "../../../../dist/iife/documonster.excel.iife.min.js";
       const script = document.createElement("script");
-      script.src = "../../../../dist/iife/documonster.excel.iife.min.js";
+      script.src = BUNDLE;
       script.onload = () => {
         const loadTime = (performance.now() - startTime).toFixed(0);
         document.getElementById("loadTime").textContent = loadTime + "ms";
         document.getElementById("testStatus").textContent = "✅";
-        log("Documonster loaded successfully!", "success");
-        log(`Available exports: ${Object.keys(window.Documonster).join(", ")}`);
+        log("Documonster.Excel loaded successfully!", "success");
+        log(`Namespaces: ${Object.keys(Documonster.Excel).sort().join(", ")}`);
 
-        // Fetch bundle size
-        fetch("../../../../dist/iife/documonster.excel.iife.min.js")
-          .then(r => r.blob())
-          .then(b => {
-            document.getElementById("bundleSize").textContent = (b.size / 1024).toFixed(0) + " KB";
-          });
+        // Size comes from the resource timing entry for the script that just ran,
+        // not from a second `fetch` of the same file.
+        const entry = performance.getEntriesByName(script.src).pop();
+        const bytes = entry?.encodedBodySize || entry?.transferSize || 0;
+        document.getElementById("bundleSize").textContent =
+          bytes > 0 ? (bytes / 1024).toFixed(0) + " KB" : "—";
       };
       script.onerror = () => {
         document.getElementById("testStatus").textContent = "❌";
-        log("Failed to load Documonster bundle!", "error");
+        log(`Failed to load ${BUNDLE} — run \`pnpm build:browser:bundle\` first.`, "error");
       };
       document.head.appendChild(script);
+
+      function download(buffer, filename) {
+        const blob = new Blob([buffer], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function fail(result, err) {
+        result.textContent = "❌ " + err.message;
+        result.className = "error";
+        log(`Error: ${err.stack ?? err.message}`, "error");
+      }
 
       // Test 1: Create & Download
       document.getElementById("btnCreate").onclick = async () => {
         const result = document.getElementById("createResult");
         try {
           log("Creating workbook...");
-          const { Workbook } = Documonster;
+          const { Workbook, Worksheet, Row, Column } = Documonster.Excel;
           const wb = Workbook.create();
           wb.creator = "Documonster Browser Test";
           wb.created = new Date();
 
-          const ws = wb.addWorksheet("Sample Data");
+          const ws = Workbook.addWorksheet(wb, "Sample Data");
 
-          // Headers
-          ws.columns = [
+          // Headers, keys and widths in one declaration. `key` is what
+          // `Worksheet.addRow` matches object properties against.
+          Worksheet.setColumns(ws, [
             { header: "ID", key: "id", width: 10 },
             { header: "Name", key: "name", width: 20 },
             { header: "Email", key: "email", width: 30 },
             { header: "Amount", key: "amount", width: 15 },
             { header: "Date", key: "date", width: 15 }
-          ];
+          ]);
 
-          // Style header row
-          ws.getRow(1).font = { bold: true };
-          ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2563EB" } };
-          ws.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+          // Style the header row
+          Row.setFont(ws, 1, { bold: true, color: { argb: "FFFFFFFF" } });
+          Row.setFill(ws, 1, {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FF2563EB" }
+          });
 
-          // Add data
           const data = [
             {
               id: 1,
@@ -253,34 +293,21 @@
               date: new Date("2024-05-01")
             }
           ];
-          data.forEach(row => ws.addRow(row));
+          for (const row of data) Worksheet.addRow(ws, row);
 
-          // Format amount column as currency
-          ws.getColumn("amount").numFmt = "$#,##0.00";
-          ws.getColumn("date").numFmt = "yyyy-mm-dd";
+          // Number formats, addressed by column key
+          Column.setNumFmt(ws, "amount", "$#,##0.00");
+          Column.setNumFmt(ws, "date", "yyyy-mm-dd");
 
           log("Writing to buffer...");
-          const buffer = await wb.xlsx.writeBuffer();
+          const buffer = await Workbook.toBuffer(wb);
+          log(`Buffer size: ${(buffer.byteLength / 1024).toFixed(2)} KB`);
 
-          log(`Buffer size: ${(buffer.length / 1024).toFixed(2)} KB`);
-
-          // Download
-          const blob = new Blob([buffer], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = "documonster-test.xlsx";
-          a.click();
-          URL.revokeObjectURL(url);
-
+          download(buffer, "documonster-test.xlsx");
           result.innerHTML = '<span class="success">✅ Downloaded!</span>';
           log("Excel file created and downloaded!", "success");
         } catch (err) {
-          result.textContent = "❌ " + err.message;
-          result.className = "error";
-          log(`Error: ${err.message}`, "error");
+          fail(result, err);
         }
       };
 
@@ -299,36 +326,38 @@
           log(`Reading file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`);
 
           const arrayBuffer = await file.arrayBuffer();
-          const { Workbook } = Documonster;
+          const { Workbook, Worksheet, Row, Cell } = Documonster.Excel;
           const wb = Workbook.create();
-          await wb.xlsx.load(arrayBuffer);
+          await Workbook.read(wb, arrayBuffer);
 
           let html = "<h4>Worksheets:</h4>";
-          wb.eachSheet((ws, id) => {
-            html += `<strong>${ws.name}</strong> (${ws.rowCount} rows, ${ws.columnCount} cols)<br>`;
-            log(`Sheet "${ws.name}": ${ws.rowCount} rows, ${ws.columnCount} cols`);
+          for (const ws of Workbook.getWorksheets(wb)) {
+            const rows = Worksheet.rowCount(ws);
+            const cols = Worksheet.columnCount(ws);
+            const name = Worksheet.getName(ws);
+            html += `<strong>${name}</strong> (${rows} rows, ${cols} cols)<br>`;
+            log(`Sheet "${name}": ${rows} rows, ${cols} cols`);
 
-            // Show first 5 rows
+            // Show first 6 rows
             html += '<table style="border-collapse:collapse;margin:10px 0;font-size:12px;">';
-            let rowCount = 0;
-            ws.eachRow((row, rowNum) => {
-              if (rowCount++ >= 6) return;
+            let shown = 0;
+            Worksheet.eachRow(ws, (_row, rowNumber) => {
+              if (shown++ >= 6) return;
               html += "<tr>";
-              row.eachCell((cell, colNum) => {
-                const style = rowNum === 1 ? "background:#e5e7eb;font-weight:bold;" : "";
-                html += `<td style="border:1px solid #d1d5db;padding:4px 8px;${style}">${cellGetValue(cell) ?? ""}</td>`;
+              Row.eachCell(ws, rowNumber, (_cell, colNumber) => {
+                const style = rowNumber === 1 ? "background:#e5e7eb;font-weight:bold;" : "";
+                const text = Cell.getText(ws, rowNumber, colNumber);
+                html += `<td style="border:1px solid #d1d5db;padding:4px 8px;${style}">${text}</td>`;
               });
               html += "</tr>";
             });
             html += "</table>";
-          });
+          }
 
           result.innerHTML = html;
           log("File read successfully!", "success");
         } catch (err) {
-          result.textContent = "❌ " + err.message;
-          result.className = "error";
-          log(`Error: ${err.message}`, "error");
+          fail(result, err);
         }
       };
 
@@ -337,41 +366,27 @@
         const result = document.getElementById("protectedResult");
         try {
           log("Creating protected workbook...");
-          const { Workbook } = Documonster;
+          const { Workbook, Worksheet, Cell } = Documonster.Excel;
           const wb = Workbook.create();
-          const ws = wb.addWorksheet("Protected Sheet");
+          const ws = Workbook.addWorksheet(wb, "Protected Sheet");
 
-          ws.getCell("A1").value = "This sheet is protected!";
-          ws.getCell("A2").value = "Password: test123";
-          ws.getCell("A3").value = "Try to edit cells in Excel - it should be locked.";
+          Cell.setValue(ws, "A1", "This sheet is protected!");
+          Cell.setValue(ws, "A2", "Password: test123");
+          Cell.setValue(ws, "A3", "Try to edit cells in Excel - it should be locked.");
 
           log("Applying password protection (SHA-512)...");
-          const startTime = performance.now();
-          await ws.protect("test123", { sheet: true, formatCells: false });
-          const protectTime = (performance.now() - startTime).toFixed(0);
+          const began = performance.now();
+          await Worksheet.protect(ws, "test123", { sheet: true, formatCells: false });
+          const protectTime = (performance.now() - began).toFixed(0);
+          log(`Protection applied in ${protectTime}ms`);
 
-          log(
-            `Protection applied in ${protectTime}ms (spinCount: ${ws.sheetProtection.spinCount})`
-          );
-
-          const buffer = await wb.xlsx.writeBuffer();
-
-          const blob = new Blob([buffer], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = "documonster-protected.xlsx";
-          a.click();
-          URL.revokeObjectURL(url);
+          const buffer = await Workbook.toBuffer(wb);
+          download(buffer, "documonster-protected.xlsx");
 
           result.innerHTML = `<span class="success">✅ Downloaded! (${protectTime}ms)</span>`;
           log("Protected Excel created!", "success");
         } catch (err) {
-          result.textContent = "❌ " + err.message;
-          result.className = "error";
-          log(`Error: ${err.message}`, "error");
+          fail(result, err);
         }
       };
 
@@ -380,42 +395,42 @@
         const result = document.getElementById("roundtripResult");
         try {
           log("Starting roundtrip test...");
-          const { Workbook } = Documonster;
+          const { Workbook, Cell } = Documonster.Excel;
 
           // Create
           const wb1 = Workbook.create();
-          const ws1 = wb1.addWorksheet("Test");
-          ws1.getCell("A1").value = "Hello";
-          ws1.getCell("B1").value = 12345;
-          ws1.getCell("C1").value = new Date("2024-06-15");
-          ws1.getCell("A2").value = "中文测试";
-          ws1.getCell("B2").value = 3.14159;
+          const ws1 = Workbook.addWorksheet(wb1, "Test");
+          Cell.setValue(ws1, "A1", "Hello");
+          Cell.setValue(ws1, "B1", 12345);
+          Cell.setValue(ws1, "C1", new Date("2024-06-15"));
+          Cell.setValue(ws1, "A2", "中文测试");
+          Cell.setValue(ws1, "B2", 3.14159);
 
           // Write to buffer
           log("Writing to buffer...");
-          const buffer = await wb1.xlsx.writeBuffer();
-          log(`Buffer size: ${buffer.length} bytes`);
+          const buffer = await Workbook.toBuffer(wb1);
+          log(`Buffer size: ${buffer.byteLength} bytes`);
 
           // Read back
           log("Reading from buffer...");
           const wb2 = Workbook.create();
-          await wb2.xlsx.load(buffer);
-
-          const ws2 = wb2.getWorksheet("Test");
+          await Workbook.read(wb2, buffer);
+          const ws2 = Workbook.getWorksheet(wb2, "Test");
 
           // Verify
           const checks = [
-            { cell: "A1", expected: "Hello", actual: ws2.getCell("A1").value },
-            { cell: "B1", expected: 12345, actual: ws2.getCell("B1").value },
-            { cell: "A2", expected: "中文测试", actual: ws2.getCell("A2").value },
-            { cell: "B2", expected: 3.14159, actual: ws2.getCell("B2").value }
+            { cell: "A1", expected: "Hello" },
+            { cell: "B1", expected: 12345 },
+            { cell: "A2", expected: "中文测试" },
+            { cell: "B2", expected: 3.14159 }
           ];
 
           let allPassed = true;
           for (const check of checks) {
-            const passed = check.expected === check.actual;
+            const actual = Cell.getValue(ws2, check.cell);
+            const passed = check.expected === actual;
             log(
-              `  ${check.cell}: ${passed ? "✅" : "❌"} expected=${check.expected}, actual=${check.actual}`
+              `  ${check.cell}: ${passed ? "✅" : "❌"} expected=${check.expected}, actual=${actual}`
             );
             if (!passed) allPassed = false;
           }
@@ -428,9 +443,7 @@
             log("Roundtrip test failed!", "error");
           }
         } catch (err) {
-          result.textContent = "❌ " + err.message;
-          result.className = "error";
-          log(`Error: ${err.stack}`, "error");
+          fail(result, err);
         }
       };
     </script>

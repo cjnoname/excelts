@@ -14,9 +14,9 @@
  *
  * @example Edit an existing PDF:
  * ```typescript
- * import { PdfEditor } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const editor = PdfEditor.load(existingPdfBytes);
+ * const editor = Pdf.Editor.load(existingPdfBytes);
  * editor.getPage(0).drawText("APPROVED", { x: 200, y: 400, fontSize: 48, color: { r: 0, g: 0.5, b: 0 } });
  * editor.setFormField("name", "John Doe");
  * const result = await editor.save();

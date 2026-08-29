@@ -222,31 +222,6 @@ export function commentsPathFromName(commentName: string): string {
   return `xl/${commentName}.xml`;
 }
 
-/**
- * Modern Office 365 "threaded comments" — separate from classic VML
- * comments. Each worksheet that uses threaded comments has its own
- * `xl/threadedComments/threadedComment{N}.xml` part alongside the
- * legacy `xl/comments{N}.xml` (classic comments carry a fallback text
- * representation, threaded comments carry the conversation tree).
- */
-export function threadedCommentsPath(sheetId: number | string): string {
-  return `xl/threadedComments/threadedComment${sheetId}.xml`;
-}
-
-export function threadedCommentsPathFromName(name: string): string {
-  return `xl/threadedComments/${name}.xml`;
-}
-
-/**
- * Modern Office 365 "persons" list — the directory of commenters
- * referenced by `threadedComment/@personId`. Workbook-level single
- * part (`xl/persons/person.xml` is the conventional filename for the
- * primary, rarely-duplicated list).
- */
-export function personsPath(): string {
-  return "xl/persons/person.xml";
-}
-
 export function vmlDrawingPath(sheetId: number | string): string {
   return `xl/drawings/vmlDrawing${sheetId}.vml`;
 }
@@ -482,22 +457,6 @@ export function chartExColorsRelTarget(n: number | string): string {
   return `colorsEx${n}.xml`;
 }
 
-export function isChartPath(path: string): boolean {
-  return chartXmlRegex.test(path);
-}
-
-export function isChartStylePath(path: string): boolean {
-  return chartStyleXmlRegex.test(path);
-}
-
-export function isChartColorsPath(path: string): boolean {
-  return chartColorsXmlRegex.test(path);
-}
-
-export function isChartRelsPath(path: string): boolean {
-  return chartRelsXmlRegex.test(path);
-}
-
 // ============================================================================
 // Chart Ex (Office 2016+ extended charts: treemap, sunburst, waterfall, etc.)
 // ============================================================================
@@ -525,14 +484,6 @@ export function chartExRelsPath(n: number | string): string {
 
 export function chartExRelTargetFromDrawing(n: number | string): string {
   return `../charts/chartEx${n}.xml`;
-}
-
-export function isChartExPath(path: string): boolean {
-  return chartExXmlRegex.test(path);
-}
-
-export function isChartExRelsPath(path: string): boolean {
-  return chartExRelsXmlRegex.test(path);
 }
 
 export function ctrlPropRelTargetFromWorksheet(id: number | string): string {
@@ -598,12 +549,4 @@ export function chartsheetPath(n: number | string): string {
 
 export function chartsheetRelsPath(n: number | string): string {
   return `xl/chartsheets/_rels/sheet${n}.xml.rels`;
-}
-
-export function isChartsheetPath(path: string): boolean {
-  return chartsheetXmlRegex.test(path);
-}
-
-export function isChartsheetRelsPath(path: string): boolean {
-  return chartsheetRelsXmlRegex.test(path);
 }

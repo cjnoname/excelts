@@ -81,9 +81,9 @@ function registerFunction(desc: FunctionDescriptor): void {
  * `stripFunctionPrefix` entirely.
  */
 export function lookupFunction(name: string): FunctionDescriptor | undefined {
-  // Lazily assemble the 433 native functions on first lookup. Initialization
+  // Lazily assemble the native function table on first lookup. Initialization
   // is NOT a module-level side effect (which would conflict with the package's
-  // `sideEffects: false` and force the whole 433-function table into any bundle
+  // `sideEffects: false` and force the whole function table into any bundle
   // that merely references `lookupFunction`). Instead it is driven by the
   // evaluator's first call — mirroring the chart renderer's "execute on call,
   // never at import" contract. The `initialized` guard makes repeat calls O(1).
@@ -93,6 +93,28 @@ export function lookupFunction(name: string): FunctionDescriptor | undefined {
     return registryMap.get(name);
   }
   return registryMap.get(stripFunctionPrefix(name));
+}
+
+/**
+ * Every canonical function name the registry holds.
+ *
+ * The registry is the only authority on how many functions exist, and until this
+ * existed there was no way to ask: `lookupFunction` answers about one name, and the
+ * map is private. So the count lived in prose instead — sixteen occurrences across
+ * ten files, including two in this file's own comments — and drifted, stating 433
+ * while the table had grown to 448. A number a reader cannot derive is a number
+ * nobody can maintain.
+ *
+ * Names are canonical and unprefixed; `_XLFN.` variants are resolved on lookup and
+ * are not separate entries.
+ *
+ * Carries the same cost as `lookupFunction`: calling it assembles the table, so it
+ * belongs to consumers that want the catalogue (documentation, tooling), not to a
+ * syntax-only path that must stay free of it.
+ */
+export function listFunctionNames(): readonly string[] {
+  ensureRegistryInitialized();
+  return [...registryMap.keys()];
 }
 
 /**

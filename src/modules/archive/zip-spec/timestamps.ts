@@ -42,38 +42,6 @@ function fileTimeFromDate(date: Date): bigint {
   return unixMs * 10000n + EPOCH_DIFF_100NS;
 }
 
-/**
- * Parse Info-ZIP "Extended Timestamp" extra field (0x5455) and return mtime.
- * Returns Unix seconds (UTC) if present.
- */
-function parseExtendedTimestampMtimeUnixSeconds(extraField: Uint8Array): number | undefined {
-  const view = new DataView(extraField.buffer, extraField.byteOffset, extraField.byteLength);
-  let offset = 0;
-
-  while (offset + 4 <= extraField.length) {
-    const headerId = view.getUint16(offset, true);
-    const dataSize = view.getUint16(offset + 2, true);
-    const dataStart = offset + 4;
-    const dataEnd = dataStart + dataSize;
-
-    if (dataEnd > extraField.length) {
-      break;
-    }
-
-    if (headerId === EXTENDED_TIMESTAMP_ID && dataSize >= 1) {
-      const flags = extraField[dataStart];
-      if ((flags & 0x01) !== 0 && dataSize >= 5) {
-        // mtime is 4 bytes right after flags.
-        return view.getUint32(dataStart + 1, true) >>> 0;
-      }
-    }
-
-    offset = dataEnd;
-  }
-
-  return undefined;
-}
-
 function buildExtendedTimestampExtraField(modTime: Date, extra?: ZipExtraTimestamps): Uint8Array {
   // Data: [flags:1][mtime?:4][atime?:4][ctime?:4]
   const includeAtime = extra?.atime !== undefined;
@@ -207,15 +175,6 @@ export function resolveZipLastModifiedDateFromUnixSeconds(
     return parseDosDateTimeUTC(dosDate, dosTime);
   }
   return new Date(mtimeUnixSeconds * 1000);
-}
-
-export function resolveZipLastModifiedDateFromExtraField(
-  dosDate: number,
-  dosTime: number,
-  extraField: Uint8Array
-): Date {
-  const unixSeconds = parseExtendedTimestampMtimeUnixSeconds(extraField);
-  return resolveZipLastModifiedDateFromUnixSeconds(dosDate, dosTime, unixSeconds);
 }
 
 export function buildZipTimestampExtraField(

@@ -47,14 +47,14 @@ export function isFormattedValue(value: unknown): value is FormattedValue {
  *
  * @example
  * ```ts
- * import { quoted } from 'documonster';
+ * import { Csv } from "documonster/csv";
  *
  * formatCsv(data, {
  *   transform: {
  *     // Force quoting for code-like fields, and quote empty strings
  *     string: (v, ctx) => {
- *       if (ctx.column === 'code') return quoted(v);
- *       if (v === '') return quoted(v);
+ *       if (ctx.column === "code") return Csv.quoted(v);
+ *       if (v === "") return Csv.quoted(v);
  *       return v;
  *     }
  *   }
@@ -79,13 +79,13 @@ export function quoted(value: string): FormattedValue {
  *
  * @example
  * ```ts
- * import { unquoted } from 'documonster';
+ * import { Csv } from "documonster/csv";
  *
  * formatCsv(data, {
  *   transform: {
  *     // Output Excel formula without outer quotes
- *     number: (v, ctx) => ctx.column === 'id'
- *       ? unquoted(`="${v}"`)  // Outputs: ="7"
+ *     number: (v, ctx) => ctx.column === "id"
+ *       ? Csv.unquoted(`="${v}"`)  // Outputs: ="7"
  *       : String(v)
  *   }
  * });

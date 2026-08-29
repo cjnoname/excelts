@@ -13,8 +13,8 @@ Documonster is a zero-dependency TypeScript toolkit for spreadsheets and documen
 - **AI-Friendly** — Clean, consistent API designed for AI coding agents. Every module has comprehensive documentation and runnable examples for AI to learn from. An [MCP server](packages/mcp/README.md) is available for AI clients that need to work on real files
 - **Zero Runtime Dependencies** — Pure TypeScript, no external packages
 - **Nine Modules** — Excel, Word, Formula, PDF, CSV, Markdown, XML, Archive, Stream
-- **Cross-Platform** — Node.js 22+, Bun, Chrome 89+, Firefox 102+, Safari 14.1+
-- **ESM First** — Native ES Modules with CommonJS compatibility and full tree-shaking
+- **Cross-Platform** — Node.js 22.13+, Bun, Chrome 89+, Firefox 102+, Safari 14.1+
+- **ESM only** — Native ES Modules with full tree-shaking; CommonJS consumers `require()` it unchanged on Node >= 22.13
 
 ## Modules
 
@@ -38,7 +38,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate XLSX or XLSB workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write workbooks.
+448-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate XLSX or XLSB workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write workbooks.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -73,7 +73,7 @@ Streaming and buffered XML processing with query engine, namespace support, and 
 
 ### Archive — Create/Read/Edit Archives
 
-ZIP and TAR archive creation, reading, editing, streaming, encryption, and compression utilities.
+ZIP and TAR archive creation, reading, editing, streaming, encryption, and compression utilities — plus `encodePng`, since a PNG is a DEFLATE stream with CRC-32-checked chunks and this is where both primitives live.
 
 - [Documentation](src/modules/archive/README.md) | [中文](src/modules/archive/README_zh.md)
 - [Examples](src/modules/archive/examples/)
@@ -84,6 +84,19 @@ Node.js-compatible Readable/Writable/Transform/Duplex that works identically in 
 
 - [Documentation](src/modules/stream/README.md) | [中文](src/modules/stream/README_zh.md)
 - [Examples](src/modules/stream/examples/)
+
+### Draw — Shared Drawing Engine
+
+One structured display list, one walker, many backends. Build a `DrawList` and get SVG markup, RGBA pixels, or a PDF page from the same output — no renderer ever re-parses another's SVG. Includes text measurement and wrapping, so a producer can size its boxes before it builds a list.
+
+- [Documentation](src/modules/draw/README.md) | [中文](src/modules/draw/README_zh.md)
+
+### Mermaid — Diagram Text to Drawings
+
+Twenty-one Mermaid diagram types — flowchart, state, class, ER, sequence, Gantt, mindmap, git graph and more — rendered without a browser or headless Chrome. The module produces a display list and implements no backend, so SVG, pixels and PDF pages all come for free. Parse, layout and render are separate passes; stop after any of them.
+
+- [Documentation](src/modules/mermaid/README.md) | [中文](src/modules/mermaid/README_zh.md)
+- [Examples](src/modules/mermaid/examples/)
 
 ## MCP Server — Documonster for AI Clients
 
@@ -198,10 +211,37 @@ Workbook.addWorksheet(wb, "S1");
 const buffer = await Workbook.toBuffer(wb);
 ```
 
+<!-- x-release-please-start-version -->
+
 ```html
-<!-- Script tag (no bundler) -->
-<script src="https://unpkg.com/documonster/dist/iife/documonster.excel.iife.min.js"></script>
+<!-- Script tag (no bundler) — one IIFE per module, each under the shared `Documonster` global -->
+<script src="https://unpkg.com/documonster@0.11.0/dist/iife/documonster.excel.iife.min.js"></script>
+<script>
+  const { Workbook, Cell } = Documonster.Excel;
+  const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "S1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
+  Workbook.toBuffer(wb).then(buffer => console.log(buffer.byteLength));
+</script>
 ```
+
+<!-- x-release-please-end -->
+
+The URL is pinned on purpose: an unpinned `unpkg.com/documonster/…` resolves to
+whatever is newest, so a future release would change a page that never asked to
+change. Every module ships its own bundle, and the file name names the module:
+
+<!-- iife-bundles:start -->
+
+`excel`, `word`, `pdf`, `csv`, `markdown`, `xml`, `formula`, `archive`, `stream`,
+`draw`, `mermaid`
+
+<!-- iife-bundles:end -->
+
+Swap the name in the URL and read the namespace back off `Documonster.Word`,
+`Documonster.Pdf`, `Documonster.Mermaid`, … Loading several is fine; they extend
+one shared global. There is no whole-family bundle, so a page pays only for the
+modules it names.
 
 > The IIFE bundle does not include the formula calculation engine. Use
 > ESM + `documonster/excel/formula` if you need to recalculate formulas.
@@ -210,8 +250,57 @@ For older browsers without native `CompressionStream` API, Documonster automatic
 
 ## Requirements
 
-- **Node.js >= 22.0.0**
+- **Node.js >= 22.13.0**
 - **Bun >= 1.0**
+
+The package is ESM-only. Nothing changes for Node ESM, a bundler or a `<script>` tag, and a
+CommonJS `require()` call site is unchanged too — Node loads an ES module through `require()`
+from 22.12, and stops printing an experimental warning about it from 22.13, which is why that
+is the floor.
+
+<details>
+<summary>Using it from TypeScript with <code>module: node16</code></summary>
+
+Set `nodenext` instead. TypeScript's `node16` mode predates `require(esm)` and rejects the
+import before Node ever sees it:
+
+```
+error TS1479: The current file is a CommonJS module whose imports will produce 'require'
+calls; however, the referenced file is an ECMAScript module and cannot be imported with
+'require'.
+```
+
+`nodenext` knows about `require(esm)` and accepts it — verified on tsc 5.9, along with
+`bundler` and the legacy `commonjs` + `node10` pair, which resolves types through
+`typesVersions`. The emitted JavaScript is identical and runs either way; only the type
+checker objects.
+
+</details>
+
+<details>
+<summary>Using it from Jest</summary>
+
+Jest cannot `require()` an ES module, so it needs a transform. This is the same two-file
+change a Jest project already needs for `chalk`, `uuid`, `nanoid`, `strip-ansi` and most
+other modern packages — if you have one of those, add `documonster` to the pattern you
+already have:
+
+```js
+// babel.config.cjs
+module.exports = { presets: [["@babel/preset-env", { targets: { node: "current" } }]] };
+```
+
+```json
+// jest.config.json
+{
+  "transform": { "\\.[jt]sx?$": "babel-jest" },
+  "transformIgnorePatterns": ["/node_modules/(?!documonster)"]
+}
+```
+
+Vitest needs no configuration.
+
+</details>
 
 | Browser | Minimum Version    |
 | ------- | ------------------ |
@@ -227,6 +316,5 @@ For older browsers without native `CompressionStream` API, Documonster automatic
 - 🐛 [Issue Tracker](https://github.com/documonster/documonster/issues)
 - 📋 [Changelog](CHANGELOG.md)
 - 🔄 [Migration Guide](MIGRATION.md)
-- 🗺️ [Roadmap](ROADMAP.md)
 - 📄 [License (Apache-2.0)](LICENSE)
 - 📦 [Third-Party Notices](THIRD_PARTY_NOTICES.md)

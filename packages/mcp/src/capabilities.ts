@@ -50,7 +50,7 @@ export function registerResources(server: McpServer): void {
  * a prompt is the only place to establish them before the model starts.
  */
 export function registerPrompts(server: McpServer, config: ServerConfig): void {
-  const has = (group: "excel" | "word" | "pdf" | "forms" | "archive"): boolean =>
+  const has = (group: "excel" | "word" | "pdf" | "forms" | "archive" | "diagram"): boolean =>
     config.groups.has(group);
 
   if (has("excel")) {
@@ -190,6 +190,39 @@ Work in this order:
 2. Summarise the differences by significance, not in document order.
 3. Flag any change to an amount, date, party name or obligation.
 4. If a paragraph was reworded without changing meaning, say so rather than quoting both versions in full.`
+            }
+          }
+        ]
+      })
+    );
+  }
+
+  if (has("diagram") && !config.readonly) {
+    server.registerPrompt(
+      "draw-diagram",
+      {
+        title: "Draw a diagram",
+        description: "Turn a description of a system or process into a rendered Mermaid diagram.",
+        argsSchema: {
+          subject: z.string().describe("What the diagram should show."),
+          out: z.string().describe("Output path; the extension picks .svg, .png or .pdf.")
+        }
+      },
+      ({ subject, out }) => ({
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: `Draw ${out} showing: ${subject}
+
+Work in this order:
+1. Choose the diagram type that matches the *relationship*, not the one you know best — a flow is a flowchart, an interaction over time is a sequenceDiagram, a lifecycle is a stateDiagram, a data model is an erDiagram, a schedule is a gantt.
+2. Call diagram_inspect with the Mermaid source before rendering. Read the structure it reports back and check every node and edge you intended is there — the parser drops what it does not recognise **silently**, and this is the only place that shows.
+3. Then diagram_render to ${out}.
+4. Tell me the diagram's type and its node/edge counts. You cannot see the picture, so do not claim it "looks good" — report what the parser found.
+
+If a label is long, prefer shortening it over widening the diagram. If ${out} is a page inside an existing PDF instead of a new file, use pdf_edit with op: "diagram".`
             }
           }
         ]

@@ -10,7 +10,7 @@
  * - Csv.createGenerator: reusable preconfigured generator (generate/rows/data/asyncRows)
  * - Error handling: CsvError / isCsvError
  *
- * Usage:   npx tsx src/modules/csv/examples/csv-advanced.ts
+ * Usage:   pnpm example --filter csv-advanced
  * Output:  tmp/csv-examples/advanced-*.csv
  */
 import fs from "node:fs";

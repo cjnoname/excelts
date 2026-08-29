@@ -5,7 +5,7 @@ import {
   cellSetFont,
   cellSetValue
 } from "@excel/core/cell";
-import { rowAddPageBreak, rowSetHidden } from "@excel/core/row";
+import { rowSetHidden } from "@excel/core/row";
 import { addWorkbookImage } from "@excel/core/workbook-core";
 import { addImage, addWatermark, getCell } from "@excel/core/worksheet";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
@@ -1217,7 +1217,7 @@ describe("excelToPdf", () => {
         Cell.setValue(ws, `A${r}`, `Row ${r}`);
       }
       // Break after row 5: rows 1-5 on first page, 6-10 on second
-      rowAddPageBreak(Worksheet.getRow(ws, 5));
+      Row.addPageBreak(ws, 5);
 
       const pdf = await excelToPdf(wb);
       expectValidPdf(pdf);
@@ -1723,6 +1723,39 @@ describe("exportPdf vector chart preparation", () => {
     );
   });
 
+  it("applies fallbackFamilies to text served by the default family", async () => {
+    // A document names the fonts it was authored with, which a caller configuring a
+    // CJK face has no reason to have configured — so `default` is the common case.
+    // The chain used to be skipped entirely for it, leaving every code point
+    // `default` lacked as `.notdef` while a configured fallback held the glyph.
+    const primary = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
+      familyName: "Primary"
+    });
+    const fallback = buildTtfWithCmap([{ start: 0x42, end: 0x42, delta: 1 - 0x42 }], 2, {
+      familyName: "Fallback"
+    });
+    const warnings: string[] = [];
+
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    // "AB" asks for no family at all, so it is served by `default`.
+    Cell.setValue(ws, "A1", "AB");
+
+    const bytes = await excelToPdf(wb, {
+      fonts: {
+        default: { regular: primary },
+        families: [{ name: "Fallback", faces: { regular: fallback } }],
+        fallbackFamilies: ["Fallback"]
+      },
+      onWarning: message => warnings.push(message)
+    });
+
+    expectValidPdf(bytes);
+    const fragments = (await readPdf(bytes)).pages[0].textFragments;
+    expect(fragments.map(fragment => fragment.text).join("")).toContain("B");
+    expect(warnings.join(" ")).not.toContain("not covered");
+  });
+
   it("reports uncovered characters through onWarning", async () => {
     const latin = buildTtfWithCmap([{ start: 0x41, end: 0x41, delta: 1 - 0x41 }], 2, {
       familyName: "LatinOnly"
@@ -1742,6 +1775,27 @@ describe("exportPdf vector chart preparation", () => {
     expect(warnings.some(message => message.includes("U+4E2D"))).toBe(true);
     // The character is still recoverable even though it draws as .notdef.
     expect((await readPdf(bytes)).text).toContain("中");
+  });
+
+  it("reports uncovered characters when no font is embedded at all", async () => {
+    // The case above embeds a font, so the code point is recorded while routing
+    // through that face's cmap. With *no* embedded font there is no cmap to route
+    // through, and this pipeline never ran the builder's separate check — so
+    // `Pdf.create` and `Pdf.fromExcel` wrote a PDF with Type3 NOTDEF boxes in it
+    // and reported nothing, which is precisely the condition
+    // `PdfExportOptions.onWarning` documents.
+    //
+    // U+2FFFE is a permanent Unicode noncharacter: no installed font can cover it,
+    // so auto-discovery cannot rescue this on any host.
+    const warnings: string[] = [];
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "S");
+    Cell.setValue(ws, "A1", "\u{2FFFE}");
+
+    const bytes = await excelToPdf(wb, { onWarning: message => warnings.push(message) });
+
+    expect(new TextDecoder("latin1").decode(bytes)).toMatch(/\/Subtype\s*\/Type3/);
+    expect(warnings.some(m => m.includes("no glyph in any available font"))).toBe(true);
   });
 
   it("stays silent when the configured fonts cover everything", async () => {
@@ -2375,5 +2429,114 @@ describe("auto-discovered fallback font in a workbook", () => {
     const page = (await readPdf(pdf)).pages[0];
     expect(page.text).toContain("\u4e2d\u6587");
     expect(page.text).toContain("Bold");
+  });
+});
+
+describe("widening a discovered face for text reported after layout", () => {
+  // Discovery runs once before layout, from the cell text alone. A header, a
+  // footer, a text watermark and a vector chart's labels report their characters
+  // only afterwards, so a face chosen for the body can turn out not to cover the
+  // finished document — and this pipeline used to return as soon as *some*
+  // fallback existed, leaving the late character as a Type3 NOTDEF box. The
+  // builder already reconsidered an incomplete face, so the same document came out
+  // correct through `Pdf.Builder` and with tofu through `Pdf.create`.
+  const BODY = 0x4e2d; // 中 — in the cell
+  const LATE = 0x9fa6; // 龦 — only in the watermark
+
+  const face = (family: string, codePoints: number[]): Uint8Array =>
+    buildTtfWithCmap(
+      codePoints.map((cp, i) => ({ start: cp, end: cp, delta: 10 + i - cp })),
+      40,
+      { familyName: family, postScriptName: `${family.replace(/\s+/g, "")}-Regular` }
+    );
+
+  beforeEach(() => {
+    _setCandidatesForTest([
+      {
+        data: face("Narrow SC", [BODY]),
+        collectionIndex: 0,
+        preferred: true,
+        path: "/f/narrow.ttf"
+      },
+      {
+        data: face("Heiti SC", [BODY, LATE]),
+        collectionIndex: 0,
+        preferred: true,
+        path: "/f/broad.ttf"
+      }
+    ]);
+  });
+  afterEach(() => {
+    resetFontDiscoveryCache();
+  });
+
+  const cjkWorkbook = (): Workbook.Handle => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Cell.setValue(ws, "A1", String.fromCodePoint(BODY));
+    return wb;
+  };
+
+  it("should widen to a face covering a watermark character", async () => {
+    const pdf = await excelToPdf(cjkWorkbook(), {
+      preferSystemFonts: ["Narrow SC"],
+      watermark: { type: "text", text: String.fromCodePoint(LATE) }
+    });
+    const text = pdfToString(pdf);
+    expect(text).toContain("HeitiSC");
+    expect(text).not.toMatch(/\/Subtype\s*\/Type3/);
+  });
+
+  it("should keep the named family when it covers the whole document", async () => {
+    // The widening path must not fire spuriously: a request the face can satisfy
+    // is still honoured.
+    const pdf = await excelToPdf(cjkWorkbook(), { preferSystemFonts: ["Narrow SC"] });
+    const text = pdfToString(pdf);
+    expect(text).toContain("NarrowSC");
+    expect(text).not.toMatch(/\/Subtype\s*\/Type3/);
+  });
+});
+
+describe("a lone carriage return is a line break", () => {
+  // The line-break vocabulary was not shared: Excel's metrics accept CR, LF and
+  // CRLF, while the renderer split on `/\r?\n/`. A lone `\r` therefore reserved
+  // two lines of row height and drew one, with the CR passed through to the
+  // content stream where it surfaced as U+FFFD — text corruption, not a layout
+  // nudge.
+  const fragmentsOf = async (value: unknown): Promise<string[]> => {
+    const wb = Workbook.create();
+    const ws = Workbook.addWorksheet(wb, "Sheet1");
+    Column.setWidth(ws, 1, 20);
+    Cell.setValue(ws, "A1", value as never);
+    Cell.setStyle(ws, "A1", { alignment: { wrapText: true } });
+    return (await readPdf(await excelToPdf(wb))).pages[0].textFragments.map(f => f.text);
+  };
+
+  it.each([
+    ["LF", "a\nb", ["a", "b"]],
+    ["CRLF", "a\r\nb", ["a", "b"]],
+    ["lone CR", "a\rb", ["a", "b"]],
+    ["lone CR between ideographs", "中\r文", ["中", "文"]],
+    ["all three mixed", "a\rb\nc\r\nd", ["a", "b", "c", "d"]]
+  ])("should break %s into separate lines", async (_label, text, expected) => {
+    expect(await fragmentsOf(text)).toEqual(expected);
+  });
+
+  it.each([
+    ["one run", { richText: [{ text: "中\r文" }] }, ["中", "文"]],
+    [
+      "a break at a run boundary",
+      { richText: [{ text: "甲\r" }, { text: "乙\r丙" }] },
+      ["甲", "乙", "丙"]
+    ]
+  ])("should break rich text with %s", async (_label, value, expected) => {
+    // Rich text is addressed by offset, so the rewrite has to preserve length.
+    expect(await fragmentsOf(value)).toEqual(expected);
+  });
+
+  it("should never emit a replacement character", async () => {
+    for (const value of ["a\rb", "中\r文", { richText: [{ text: "甲\r乙" }] }]) {
+      expect((await fragmentsOf(value)).join("")).not.toContain("\uFFFD");
+    }
   });
 });

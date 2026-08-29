@@ -231,6 +231,20 @@ interface TtfBuildOptions {
    * such as the color glyph tables `COLR` / `CBDT` / `sbix`.
    */
   extraTableTags?: readonly string[];
+  /**
+   * Table tags to leave out. Used to build a font that satisfies the sfnt
+   * wrapper but carries its outlines somewhere the embedder cannot read —
+   * the shape of macOS's private `hvgl` PingFang UI faces.
+   */
+  omitTables?: readonly string[];
+  /**
+   * OS/2 `usWeightClass`. Defaults to 400 (Regular).
+   *
+   * Lets a test build several faces of one family at different weights, which is
+   * how a TrueType Collection is laid out — and how `Songti.ttc` lists its Black
+   * face first.
+   */
+  weightClass?: number;
 }
 
 /**
@@ -296,6 +310,9 @@ export function buildTtfWithCmap(
   os2V.setUint16(74, 800, false);
   os2V.setUint16(76, 200, false);
   os2V.setInt16(88, 700, false);
+  if (options?.weightClass !== undefined) {
+    os2V.setUint16(4, options.weightClass, false); // usWeightClass
+  }
   tables.push({ tag: "OS/2", data: os2 });
 
   // post
@@ -387,7 +404,49 @@ export function buildTtfWithCmap(
     tables.push({ tag, data: new Uint8Array(1) });
   }
 
+  const omit = new Set(options?.omitTables ?? []);
+  if (omit.size > 0) {
+    return assembleTtfFromTables(tables.filter(t => !omit.has(t.tag)));
+  }
+
   return assembleTtfFromTables(tables);
+}
+
+/**
+ * Pack complete `.ttf` images into one TrueType Collection.
+ *
+ * A collection's per-face table directories hold offsets from the start of the
+ * *file*, not from the start of the face, so each face's directory is rewritten
+ * as it is copied in. Without that a reader looking at face 1 follows face 0's
+ * offsets and reads the wrong tables.
+ */
+export function buildTtc(faces: readonly Uint8Array[]): Uint8Array {
+  const offsets: number[] = [];
+  let total = 12 + faces.length * 4;
+  for (const face of faces) {
+    total = (total + 3) & ~3; // faces are 4-byte aligned
+    offsets.push(total);
+    total += face.byteLength;
+  }
+
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x74746366); // 'ttcf'
+  dv.setUint32(4, 0x00010000); // version 1.0
+  dv.setUint32(8, faces.length);
+
+  faces.forEach((face, i) => {
+    const base = offsets[i];
+    dv.setUint32(12 + i * 4, base);
+    out.set(face, base);
+    const numTables = dv.getUint16(base + 4);
+    for (let t = 0; t < numTables; t++) {
+      const offsetField = base + 12 + t * 16 + 8;
+      dv.setUint32(offsetField, dv.getUint32(offsetField) + base);
+    }
+  });
+
+  return out;
 }
 
 /**

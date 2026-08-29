@@ -17,7 +17,7 @@ import { Cell, Workbook } from "@excel/index";
  * return a `FormulaValue` of the same shape. A thrown error is caught at the
  * boundary and surfaces as `#VALUE!`.
  *
- * Usage: npx tsx src/modules/formula/examples/formula-custom-functions.ts
+ * Usage: pnpm example --filter formula-custom-functions
  */
 
 const { Number: NUMBER, String: STRING, Boolean: BOOLEAN, Error: ERROR } = FormulaValueKind;

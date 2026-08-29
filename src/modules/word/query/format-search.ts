@@ -8,16 +8,16 @@
  *
  * @example
  * ```ts
- * import { searchByFormat, type FormatCriteria } from "documonster/word";
+ * import { Query, type FormatCriteria } from "documonster/word";
  *
  * // Find all bold red text
- * const results = searchByFormat(doc, { bold: true, color: "FF0000" });
+ * const results = Query.searchByFormat(doc, { bold: true, color: "FF0000" });
  *
  * // Find all text in "Heading1" style
- * const headings = searchByFormat(doc, { paragraphStyle: "Heading1" });
+ * const headings = Query.searchByFormat(doc, { paragraphStyle: "Heading1" });
  *
  * // Find specific text with specific formatting
- * const results = searchByFormat(doc, { bold: true, textMatch: /TODO/i });
+ * const todos = Query.searchByFormat(doc, { bold: true, textMatch: /TODO/i });
  * ```
  */
 

@@ -15,6 +15,7 @@
  * is a build error, never a silent drop.
  */
 
+import { canBreakBetween, countGlyphAdvances, segmentForWrap, splitByScript } from "@utils/cjk";
 import {
   getFontAscent,
   getFontDescent,
@@ -30,10 +31,15 @@ import {
   DEFAULT_PAGE_HEIGHT_TWIPS,
   DEFAULT_PAGE_MARGIN_TWIPS,
   DEFAULT_PAGE_WIDTH_TWIPS,
+  FIT_EPSILON_PT,
   LINE_HEIGHT_FACTOR,
+  mergeRunProperties,
+  minimumRowHeightPt,
+  resolveColumnWidthsTwips,
   SCRIPT_BASELINE_SHIFT_FACTOR,
   SCRIPT_FONT_SIZE_RATIO,
-  resolveCellMarginsTwips
+  resolveCellMarginsTwips,
+  resolveHeadingScale
 } from "@word/layout/layout-constants";
 import type {
   LayoutAltChunk,
@@ -98,7 +104,7 @@ import type {
   TextBox,
   VerticalCellAlign
 } from "@word/types";
-import { EMU_PER_POINT, twipsToPt } from "@word/units";
+import { EMU_PER_POINT, ptToTwips, twipsToPt } from "@word/units";
 
 // =============================================================================
 // Public API
@@ -644,7 +650,18 @@ function splitLayoutParagraph(
     if (!atPageTop) {
       return { head: null, tail: para };
     }
-    fitCount = 1; // an over-tall line still has to go somewhere
+    // An over-tall line still has to go somewhere: at the top of a page there is
+    // no emptier page to move it to, so it stays and overflows.
+    //
+    // When it is the paragraph's *only* line there is nothing left to continue on
+    // the next page, and asking for a cut after line 1 of 1 produced an empty
+    // tail — whose first line was then read for the shift (`tailLines[0].y`) and
+    // threw `Cannot read properties of undefined`. A page barely taller than one
+    // line of text is enough to reach it.
+    if (lines.length === 1) {
+      return { head: para, tail: null };
+    }
+    fitCount = 1;
   } else {
     const mustSplit = atPageTop || para.rect.height > fullPageHeight;
     const widowSafe = fitCount >= 2 && lines.length - fitCount >= 2;
@@ -738,7 +755,10 @@ function splitLayoutTable(
 
   // First row index (in `rows`) that does not fit in the space left.
   let fitRows = 0;
-  while (fitRows < rows.length && (rowBottom.get(rows[fitRows]) ?? 0) <= availableHeight) {
+  while (
+    fitRows < rows.length &&
+    (rowBottom.get(rows[fitRows]) ?? 0) <= availableHeight + FIT_EPSILON_PT
+  ) {
     fitRows++;
   }
 
@@ -946,14 +966,15 @@ function buildPage(
     // would otherwise fit on this page.
     const forcedBreakLine = laid.pageBreakAfterLines?.[0];
     const hasForcedBreak = forcedBreakLine !== undefined && forcedBreakLine + 1 < laid.lines.length;
-    if (laid.rect.height <= available && !hasForcedBreak) {
+    if (laid.rect.height <= available + FIT_EPSILON_PT && !hasForcedBreak) {
       content.push(laid);
       cursorY = laid.rect.y + laid.rect.height;
       return true;
     }
     if (
       hasForcedBreak &&
-      laid.lines[forcedBreakLine].y + laid.lines[forcedBreakLine].height <= available
+      laid.lines[forcedBreakLine].y + laid.lines[forcedBreakLine].height <=
+        available + FIT_EPSILON_PT
     ) {
       const cut = sliceParagraphAtLine(laid, forcedBreakLine + 1);
       content.push(cut.head);
@@ -981,7 +1002,7 @@ function buildPage(
       return false;
     }
     const available = geometry.contentHeight - laid.rect.y;
-    if (laid.rect.height <= available) {
+    if (laid.rect.height <= available + FIT_EPSILON_PT) {
       content.push(laid);
       cursorY = laid.rect.y + laid.rect.height;
       return true;
@@ -1496,7 +1517,7 @@ function layoutFootnotes(
   for (let i = 0; i < idsLaid.length; i++) {
     const noteHeight = heightPerNote[i];
     const wouldBe = stackHeight + noteHeight;
-    const fitsCleanly = wouldBe <= availableSpace;
+    const fitsCleanly = wouldBe <= availableSpace + FIT_EPSILON_PT;
     const isFirstAndForced = fitNotes.length === 0;
     if (fitsCleanly || isFirstAndForced) {
       fitNotes.push(laidPerNote[i]);
@@ -2237,8 +2258,7 @@ function layoutParagraph(
   // When the style supplies a concrete font size we honour it; only when it
   // does not do we fall back to the heuristic heading scale so headings stay
   // distinct in documents lacking a styles table.
-  const styleHasSize = styleRunProps?.size != null;
-  const headingScale = styleHasSize ? 1 : getHeadingFontScale(getHeadingLevel(effective));
+  const headingScale = resolveHeadingScale(effective, styleRunProps?.size);
 
   // Space before. `w:contextualSpacing` drops it when the paragraph above uses
   // the same style (see `computeContextualSpacing`).
@@ -2279,9 +2299,9 @@ function layoutParagraph(
       }
     }
     segments.unshift({ text: marker.text, properties: firstRunProps });
-    markerWidthPt = measureLayoutText(
+    markerWidthPt = measureRunText(
       marker.text,
-      resolveRunFontName(firstRunProps),
+      firstRunProps,
       getRunFontSizePt(firstRunProps) * headingScale,
       options,
       firstRunProps?.bold,
@@ -2408,18 +2428,17 @@ function layoutParagraph(
         }
       } else {
         const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-        const fontName = resolveRunFontName(seg.properties);
-        lineWidth += measureLayoutText(
+        lineWidth += measureRunText(
           seg.text,
-          fontName,
+          seg.properties,
           fontSize,
           options,
           seg.properties?.bold,
           seg.properties?.italic
         );
-        const metrics = measureLayoutFontMetrics(
+        const metrics = measureRunMetrics(
           seg.text,
-          fontName,
+          seg.properties,
           fontSize,
           options,
           seg.properties?.bold,
@@ -2441,6 +2460,47 @@ function layoutParagraph(
       xPos = (lineAvailableWidth - lineWidth) / 2;
     } else if (alignment === "right" || alignment === "end") {
       xPos = lineAvailableWidth - lineWidth;
+    }
+
+    // `w:jc="both"` stretches every line but the last to the full column width.
+    // It reached the layout model as `"justify"` and no renderer consumed it, so
+    // justified text — the default for Chinese body copy — drew left-aligned.
+    //
+    // Latin widens the spaces between words; East Asian text has none to widen,
+    // so the slack goes between characters instead. Which of the two applies is
+    // decided per line by whether the line actually contains spaces, not by the
+    // paragraph's language: a line of Chinese inside an otherwise English
+    // paragraph still has to be spaced as Chinese.
+    let charSpacing = 0;
+    let wordSpacing = 0;
+    if (alignment === "both" && !isJustifyExemptLine(lines, lineIdx)) {
+      // The width this line actually has, not the paragraph's. A first-line
+      // indent shortens it and a hanging indent lengthens it, and using the
+      // paragraph width regardless pushed an indented first line 36pt past the
+      // right margin while giving it five times the correct spacing.
+      const slack = lineAvailableWidth - xPos - lineWidth;
+      if (slack > 0) {
+        const { spaces, ideographs } = countJustifyOpportunities(lineSegments);
+        // Latin absorbs slack between words; East Asian text absorbs it between
+        // characters. A line with both shares it in proportion to how many
+        // opportunities each offers.
+        //
+        // Latin characters are deliberately *not* an opportunity: widening the
+        // gaps inside a word is letter-spacing, which Western typesetting treats
+        // as a defect outside of display use. Only ideographs are stretched, and
+        // only spaces are widened — so a Latin-only line takes word spacing
+        // alone, and a Latin word inside a Chinese line stays intact.
+        const total = spaces + ideographs;
+        if (total > 0) {
+          const perOpportunity = slack / total;
+          if (spaces > 0) {
+            wordSpacing = perOpportunity;
+          }
+          if (ideographs > 0) {
+            charSpacing = perOpportunity;
+          }
+        }
+      }
     }
 
     xPos += lineLeftIndent;
@@ -2466,34 +2526,65 @@ function layoutParagraph(
         continue;
       }
       const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-      const fontName = resolveRunFontName(seg.properties);
-      const segWidth = measureLayoutText(
-        seg.text,
-        fontName,
-        fontSize,
-        options,
-        seg.properties?.bold,
-        seg.properties?.italic
-      );
+      const fonts = resolveRunFonts(seg.properties);
+      // A `PositionedRun` carries a single typeface name and every renderer
+      // requests a face by it, so a run naming one typeface for Latin and
+      // another for East Asian text has to be emitted as one positioned run per
+      // script stretch. Emitting it whole under the Latin name asked the font
+      // manager for Chinese glyphs from a Latin face — and measured them there
+      // too, so the widths disagreed with what was drawn.
+      //
+      // Uniform runs stay a single run, which is every Latin document and any
+      // run whose typeface covers both scripts — unless justification is active,
+      // because `Tc` applies to every glyph in a run and the only way to stretch
+      // ideographs without also opening up the inside of a Latin word is to put
+      // the two scripts in separate runs.
+      const stretches: readonly { text: string; cjk: boolean }[] =
+        fonts.ascii === fonts.eastAsia && charSpacing === 0
+          ? [{ text: seg.text, cjk: false }]
+          : splitByScript(seg.text);
 
-      runs.push({
-        text: seg.text,
-        x: xPos,
-        width: segWidth,
-        font: fontName,
-        fontSize,
-        bold: seg.properties?.bold || undefined,
-        italic: seg.properties?.italic || undefined,
-        color: resolveColorHex(seg.properties?.color),
-        underline: seg.properties?.underline !== undefined ? true : undefined,
-        strikethrough: seg.properties?.strike || undefined,
-        verticalAlign:
-          seg.properties?.vertAlign === "superscript" || seg.properties?.vertAlign === "subscript"
-            ? seg.properties.vertAlign
-            : undefined
-      });
+      for (const stretch of stretches) {
+        const stretchFont = stretch.cjk ? fonts.eastAsia : fonts.ascii;
+        // Ideographs take the character spacing; a Latin stretch takes only the
+        // word spacing on its spaces. Widening the gaps inside a Latin word is
+        // letter-spacing, which Western typesetting treats as a defect.
+        const stretchCharSpacing = stretch.cjk ? charSpacing : 0;
+        const stretchWordSpacing = stretch.cjk ? 0 : wordSpacing;
+        const measured = measureLayoutText(
+          stretch.text,
+          stretchFont,
+          fontSize,
+          options,
+          seg.properties?.bold,
+          seg.properties?.italic
+        );
+        // `width` carries the justification slack, so anything measuring or
+        // hit-testing the run needs no correction.
+        const stretchWidth =
+          measured + justificationWidth(stretch.text, stretchCharSpacing, stretchWordSpacing);
 
-      xPos += segWidth;
+        runs.push({
+          text: stretch.text,
+          x: xPos,
+          width: stretchWidth,
+          font: stretchFont,
+          fontSize,
+          charSpacing: stretchCharSpacing > 0 ? stretchCharSpacing : undefined,
+          wordSpacing: stretchWordSpacing > 0 ? stretchWordSpacing : undefined,
+          bold: seg.properties?.bold || undefined,
+          italic: seg.properties?.italic || undefined,
+          color: resolveColorHex(seg.properties?.color),
+          underline: seg.properties?.underline !== undefined ? true : undefined,
+          strikethrough: seg.properties?.strike || undefined,
+          verticalAlign:
+            seg.properties?.vertAlign === "superscript" || seg.properties?.vertAlign === "subscript"
+              ? seg.properties.vertAlign
+              : undefined
+        });
+
+        xPos += stretchWidth;
+      }
     }
 
     const mappedAlignment =
@@ -2688,7 +2779,8 @@ function layoutTable(
 
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
-    let maxRowHeight = DEFAULT_FONT_SIZE_PT * 1.5; // minimum row height
+    // Shared with the pagination pass, which had a different answer.
+    let maxRowHeight = minimumRowHeightPt(table.properties, DEFAULT_FONT_SIZE_PT);
     // This row's cells with the `w:vAlign` each asked for. A cell is laid out
     // from its top margin because its final height is not known until every
     // cell in the row has been measured; the alignment is applied once the row
@@ -2976,23 +3068,10 @@ function resolveCellMarginsPt(
  * Otherwise the content width is divided equally among the columns.
  */
 function resolveColumnWidthsPt(table: Table, numCols: number, contentWidth: number): number[] {
-  if (numCols <= 0) {
-    return [];
-  }
-  const declared = table.columnWidths;
-  if (declared && declared.length >= numCols) {
-    const pts = declared.slice(0, numCols).map(twipsToPt);
-    const total = pts.reduce((a, b) => a + b, 0);
-    if (total > 0) {
-      // Scale to fit the content width (shrink overflow, expand
-      // under-wide tables to use the full measure — matching how Word
-      // distributes a table set to a percentage / auto width).
-      const scale = contentWidth / total;
-      return pts.map(w => w * scale);
-    }
-  }
-  const equal = contentWidth / numCols;
-  return new Array(numCols).fill(equal);
+  // The same scaling the pagination pass applies, expressed in points. Shrinks an
+  // overflowing grid and expands an under-wide one, matching how Word distributes a
+  // table set to a percentage or auto width.
+  return resolveColumnWidthsTwips(table, numCols, ptToTwips(contentWidth)).map(twipsToPt);
 }
 
 // =============================================================================
@@ -3118,11 +3197,7 @@ function effectiveRunProps(
   if (activeDoc && run.properties?.style) {
     return resolveRunStyle(activeDoc, run, styleRunProps).runProperties;
   }
-  const own = run.properties;
-  if (!styleRunProps) {
-    return own;
-  }
-  return own ? { ...styleRunProps, ...own } : styleRunProps;
+  return mergeRunProperties(styleRunProps, run.properties);
 }
 
 /**
@@ -3199,6 +3274,292 @@ function noteMarkFor(kind: "footnoteRef" | "endnoteRef", id: number): string {
  * the content area. Callers use the slot to set per-line indent /
  * available width for alignment.
  */
+/**
+ * A unit of wrapping: a word, a run of whitespace, an inline image or a hard
+ * break, carrying its measured width and whether a line may break before it.
+ */
+interface WrapAtom {
+  readonly kind: "word" | "space" | "image" | "break";
+  /** Measured width in points. Zero for a break and for a marker segment. */
+  readonly width: number;
+  /**
+   * There is no break opportunity between this atom and the one before it.
+   *
+   * A line may break at whitespace, and after a hard break — nowhere else. Two
+   * words that meet directly are one unbreakable cluster even when they came
+   * from different runs, which is exactly what an inline code span and the
+   * punctuation beside it are: `` `sybase.ts`, `` is two runs and one word.
+   * Treating every run boundary as a break opportunity instead put that comma
+   * alone at the head of the next line, and split `bridge (` from the code span
+   * it had just opened.
+   */
+  readonly glued: boolean;
+  /** Text of a word or space atom; empty for an image, a break or a marker. */
+  readonly text: string;
+  /**
+   * The segment this atom came from, so reassembly keeps its run properties and
+   * carries its note ids and bookmarks onto the line the atom landed on.
+   */
+  readonly segment: ParagraphSegment;
+  /** Measurer for this atom's formatting, for a mid-word split. */
+  readonly measure: (text: string) => number;
+}
+
+/** Measurer for atoms that carry no text. */
+const MEASURE_NOTHING = (): number => 0;
+
+/**
+ * Split a paragraph's segments into wrap atoms.
+ *
+ * One tokenizer serves both wrappers below. They differ in how a line's width
+ * is chosen — a fixed measure, or a slot between floats — not in what a line is
+ * made of, and while each had its own tokenizer the two could disagree about
+ * where a break was allowed.
+ */
+function tokenizeSegments(
+  segments: readonly ParagraphSegment[],
+  headingScale: number,
+  options: FullLayoutOptions | undefined
+): WrapAtom[] {
+  const atoms: WrapAtom[] = [];
+  // One memoised measurer per distinct formatting rather than per segment: a
+  // paragraph of many short runs shares a handful of faces between them.
+  const measurers = new Map<string, (text: string) => number>();
+  const measurerFor = (properties: Run["properties"]): ((text: string) => number) => {
+    const fontSize = getRunFontSizePt(properties) * headingScale;
+    const fonts = resolveRunFonts(properties);
+    const bold = properties?.bold === true;
+    const italic = properties?.italic === true;
+    const key = `${fonts.ascii}\u0000${fonts.eastAsia}|${fontSize}|${bold ? "b" : ""}${italic ? "i" : ""}`;
+    let measure = measurers.get(key);
+    if (measure === undefined) {
+      const latin = memoizedWordMeasure(fonts.ascii, fontSize, options, bold, italic);
+      if (fonts.eastAsia === fonts.ascii) {
+        measure = latin;
+      } else {
+        // A run may name a different typeface for each script, so a mixed atom
+        // has to be measured in stretches. Atoms are already single-script in
+        // practice — `segmentForWrap` breaks at the Latin/ideograph boundary —
+        // but a marker or an atom assembled elsewhere need not be, so this does
+        // not assume it.
+        const eastAsian = memoizedWordMeasure(fonts.eastAsia, fontSize, options, bold, italic);
+        measure = (text: string): number => {
+          let total = 0;
+          for (const run of splitByScript(text)) {
+            total += run.cjk ? eastAsian(run.text) : latin(run.text);
+          }
+          return total;
+        };
+      }
+      measurers.set(key, measure);
+    }
+    return measure;
+  };
+  /**
+   * Whether an atom pushed now would be glued to the one before it.
+   *
+   * `nextText` is the text about to be pushed. It matters because an East Asian
+   * character opens a break opportunity on both sides regardless of which run it
+   * came from: without consulting it, `中文` and `报表` in two different runs
+   * became one unbreakable cluster, which is the same defect as a whole Chinese
+   * paragraph being one atom, just at a smaller scale. For Latin, `canBreakBetween`
+   * returns false between two letters, so the run-boundary gluing this function
+   * was written for is preserved exactly.
+   */
+  const gluedToPrevious = (nextText?: string): boolean => {
+    const previous = atoms[atoms.length - 1];
+    if (previous === undefined || previous.kind === "space" || previous.kind === "break") {
+      return false;
+    }
+    if (nextText !== undefined && nextText.length > 0 && previous.text.length > 0) {
+      const prevChars = [...previous.text];
+      const prevCp = prevChars[prevChars.length - 1].codePointAt(0)!;
+      if (canBreakBetween(prevCp, nextText.codePointAt(0)!)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  for (const segment of segments) {
+    if ("type" in segment && segment.type === "break") {
+      atoms.push({
+        kind: "break",
+        width: 0,
+        glued: false,
+        text: "",
+        segment,
+        measure: MEASURE_NOTHING
+      });
+      continue;
+    }
+    if ("type" in segment && segment.type === "image") {
+      atoms.push({
+        kind: "image",
+        width: emuToPt(segment.content.width),
+        glued: gluedToPrevious(),
+        text: "",
+        segment,
+        measure: MEASURE_NOTHING
+      });
+      continue;
+    }
+    const measure = measurerFor(segment.properties);
+    if (segment.text.length === 0) {
+      // A marker segment draws nothing, but a bookmark or footnote reference it
+      // carries has a position — so it travels with the word it sits inside
+      // rather than opening a break opportunity of its own.
+      atoms.push({ kind: "word", width: 0, glued: gluedToPrevious(), text: "", segment, measure });
+      continue;
+    }
+    for (const token of segment.text.split(/(\s+)/)) {
+      if (token.length === 0) {
+        continue;
+      }
+      if (/^\s/.test(token)) {
+        atoms.push({
+          kind: "space",
+          width: measure(token),
+          glued: false,
+          text: token,
+          segment,
+          measure
+        });
+        continue;
+      }
+      // Subdivide the word at East Asian break opportunities. Splitting on
+      // whitespace alone made an entire Chinese paragraph one atom, so it could
+      // only be placed whole: a line already holding Latin text flushed early
+      // and left a hole, and the paragraph reached a line of its own before the
+      // mid-word fallback (`splitTextToFit`) cut it at an arbitrary character
+      // with no regard for kinsoku. `segmentForWrap` glues a character that may
+      // not begin a line to the piece before it, so the atoms themselves carry
+      // the prohibition and the wrapper needs no extra rule.
+      let firstPiece = true;
+      for (const piece of segmentForWrap(token)) {
+        atoms.push({
+          kind: "word",
+          width: measure(piece),
+          // Only the first piece can be glued to what came before; the
+          // boundaries between pieces are break opportunities by construction.
+          glued: firstPiece ? gluedToPrevious(piece) : false,
+          text: piece,
+          segment,
+          measure
+        });
+        firstPiece = false;
+      }
+    }
+  }
+  return atoms;
+}
+
+/** Whether an atom is a `w:br w:type="page"` (see `BreakSegment.pageBreak`). */
+function isPageBreakAtom(atom: WrapAtom): boolean {
+  const segment = atom.segment;
+  return "type" in segment && segment.type === "break" && segment.pageBreak === true;
+}
+
+/**
+ * How many atoms at the end of `placed` belong to the same unbreakable cluster
+ * as `next`, and therefore have to move down with it.
+ *
+ * Zero when `next` may legally open a line, and zero when the cluster is the
+ * whole line: a cluster wider than the measure has to break somewhere, and the
+ * boundary already reached is as good a place as any.
+ */
+function gluedTailLength(placed: readonly WrapAtom[], next: WrapAtom): number {
+  if (!next.glued) {
+    return 0;
+  }
+  let count = 0;
+  while (count < placed.length) {
+    const atom = placed[placed.length - 1 - count];
+    count++;
+    if (!atom.glued) {
+      break;
+    }
+  }
+  return count >= placed.length ? 0 : count;
+}
+
+/**
+ * The width `placed` would have left after giving back its last `count` atoms.
+ *
+ * Both wrappers use this as the test for whether a retreat is worth making: a
+ * retreat that empties the line has not moved a cluster down, it has produced a
+ * blank line and left the cluster to be broken anyway. The remaining width is
+ * only ever read as that predicate — the closing line takes its width from the
+ * slot, not from the atoms — so it is computed here rather than written back.
+ */
+function widthWithoutTail(placed: readonly WrapAtom[], count: number, total: number): number {
+  let width = total;
+  for (let i = 0; i < count; i++) {
+    width -= placed[placed.length - 1 - i].width;
+  }
+  return width;
+}
+
+/**
+ * Turn a line's atoms back into paragraph segments.
+ *
+ * Consecutive atoms from the same source segment merge, so a run that arrived
+ * whole leaves whole: one segment per atom would make the renderer emit a
+ * separately positioned string per word, re-adding by hand the spacing the wrap
+ * had just measured.
+ */
+function reassembleLine(atoms: readonly WrapAtom[]): ParagraphSegment[] {
+  const out: ParagraphSegment[] = [];
+  let source: ParagraphSegment | undefined;
+  let text = "";
+  const flushText = (): void => {
+    if (source !== undefined && isTextSegment(source)) {
+      out.push(text === source.text ? source : { ...source, text });
+    }
+    source = undefined;
+    text = "";
+  };
+  for (const atom of atoms) {
+    if (atom.kind === "break" || atom.kind === "image") {
+      flushText();
+      out.push(atom.segment);
+      continue;
+    }
+    if (atom.segment !== source) {
+      flushText();
+      source = atom.segment;
+    }
+    text += atom.text;
+  }
+  flushText();
+
+  // Trailing spaces are invisible in left-aligned text but they widen the line
+  // for centring and right-alignment, and they leave the paragraph's measured
+  // width wrong.
+  while (out.length > 0) {
+    const last = out[out.length - 1];
+    if (!isTextSegment(last)) {
+      break;
+    }
+    const trimmed = last.text.replace(/\s+$/, "");
+    if (trimmed === last.text) {
+      break;
+    }
+    out.pop();
+    if (trimmed.length > 0) {
+      out.push({ ...last, text: trimmed });
+      break;
+    }
+    // The segment drew nothing, but a bookmark or note reference it carries
+    // still has a position on this line.
+    if (last.noteIds !== undefined || last.bookmarks !== undefined) {
+      out.push({ ...last, text: "" });
+      break;
+    }
+  }
+  return out;
+}
+
 function wrapSegmentsToLinesWithExclusions(
   segments: ParagraphSegment[],
   leftIndentPt: number,
@@ -3209,73 +3570,7 @@ function wrapSegmentsToLinesWithExclusions(
   pageContext: PageLayoutContext,
   options: FullLayoutOptions | undefined
 ): { lines: ParagraphSegment[][]; slots: { xOffset: number; width: number }[] } {
-  // Tokenize all segments into a flat sequence of "atoms" (words,
-  // whitespace, and inline images) carrying their measured width.
-  // Inline images are unbreakable atoms with `isImage: true`; they
-  // never split on whitespace.
-  type Atom = {
-    readonly width: number;
-    readonly isSpace: boolean;
-    readonly isImage: boolean;
-    /** A hard break: ends the line it lands on and draws nothing. */
-    readonly isBreak?: boolean;
-    readonly text?: string;
-    readonly properties?: Run["properties"];
-    readonly imageContent?: InlineImageContent;
-    /** Note ids whose reference mark this atom is (see `TextSegment.noteIds`). */
-    readonly noteIds?: readonly number[];
-    /** A `w:br w:type="page"` (see `BreakSegment.pageBreak`). */
-    readonly isPageBreak?: boolean;
-  };
-  const atoms: Atom[] = [];
-  for (const seg of segments) {
-    if ("type" in seg && seg.type === "break") {
-      atoms.push({
-        width: 0,
-        isSpace: false,
-        isImage: false,
-        isBreak: true,
-        properties: seg.properties
-      });
-      continue;
-    }
-    if ("type" in seg && seg.type === "image") {
-      atoms.push({
-        width: emuToPt(seg.content.width),
-        isSpace: false,
-        isImage: true,
-        properties: seg.properties,
-        imageContent: seg.content
-      });
-      continue;
-    }
-    const fontSize = getRunFontSizePt(seg.properties) * headingScale;
-    const fontName = resolveRunFontName(seg.properties);
-    // Split on runs of whitespace, keeping the whitespace tokens so
-    // wrapping can decide whether to drop trailing space at line end.
-    const tokens = seg.text.split(/(\s+)/);
-    for (const tok of tokens) {
-      if (tok.length === 0) {
-        continue;
-      }
-      atoms.push({
-        text: tok,
-        width: measureLayoutText(
-          tok,
-          fontName,
-          fontSize,
-          options,
-          seg.properties?.bold,
-          seg.properties?.italic
-        ),
-        properties: seg.properties,
-        isSpace: /^\s+$/.test(tok),
-        isImage: false,
-        ...(seg.noteIds ? { noteIds: seg.noteIds } : {})
-      });
-    }
-  }
-
+  const atoms = tokenizeSegments(segments, headingScale, options);
   const lines: ParagraphSegment[][] = [];
   const slots: { xOffset: number; width: number }[] = [];
 
@@ -3283,12 +3578,12 @@ function wrapSegmentsToLinesWithExclusions(
     return { lines, slots };
   }
 
-  let cursorAtom = 0;
+  let cursor = 0;
   let lineIdx = 0;
   // The first line of the paragraph is not the result of a wrap, so its leading
   // whitespace is the author's.
   let openedByWrap = false;
-  while (cursorAtom < atoms.length) {
+  while (cursor < atoms.length) {
     const lineY = paragraphTopPageY + lineIdx * lineHeightPt;
     const slot = availableSlotForLine(pageContext, lineY, lineHeightPt);
 
@@ -3327,26 +3622,28 @@ function wrapSegmentsToLinesWithExclusions(
       continue;
     }
 
-    // Greedily pack atoms into the line until the next atom would overflow
-    // `usable`. Whitespace that opens a *wrapped* line is dropped — it is the
-    // separator the break consumed. After a hard break it is the author's
-    // (a code block's indentation), so it stays.
-    if (openedByWrap && atoms[cursorAtom].isSpace) {
-      cursorAtom++;
-      if (cursorAtom >= atoms.length) {
+    // Whitespace that opens a *wrapped* line is dropped — it is the separator
+    // the break consumed. After a hard break it is the author's (a code block's
+    // indentation), so it stays.
+    if (openedByWrap && atoms[cursor].kind === "space") {
+      cursor++;
+      if (cursor >= atoms.length) {
         break;
       }
     }
     openedByWrap = true;
-    const lineAtoms: Atom[] = [];
+
+    const lineAtoms: WrapAtom[] = [];
     let lineWidth = 0;
-    while (cursorAtom < atoms.length) {
-      const atom = atoms[cursorAtom];
-      if (atom.isBreak) {
+    // Every pass consumes an atom, shortens one, or closes a line that already
+    // holds content, so this terminates.
+    while (cursor < atoms.length) {
+      const atom = atoms[cursor];
+      if (atom.kind === "break") {
         // A leading page break is a break-before and leaves no blank line —
         // see the sister case in `wrapSegmentsToLines`.
-        if (atom.isPageBreak && lines.length === 0 && lineAtoms.length === 0) {
-          cursorAtom++;
+        if (isPageBreakAtom(atom) && lines.length === 0 && lineAtoms.length === 0) {
+          cursor++;
           openedByWrap = false;
           continue;
         }
@@ -3354,93 +3651,49 @@ function wrapSegmentsToLinesWithExclusions(
         // whatever follows keeps its leading whitespace. Kept on the line so a
         // page break's position survives (see `BreakSegment.pageBreak`).
         lineAtoms.push(atom);
-        cursorAtom++;
+        cursor++;
         openedByWrap = false;
         break;
       }
-      const next = lineWidth + atom.width;
-      if (next > usable) {
-        if (lineAtoms.length > 0) {
-          // Atom would overflow; commit the line and go to next.
+      if (lineWidth + atom.width <= usable) {
+        lineAtoms.push(atom);
+        lineWidth += atom.width;
+        cursor++;
+        continue;
+      }
+      // The atom overflows. Give back the cluster it belongs to, so the whole
+      // cluster moves down together rather than breaking at a run boundary.
+      const retreat = gluedTailLength(lineAtoms, atom);
+      if (retreat > 0 && widthWithoutTail(lineAtoms, retreat, lineWidth) > 0) {
+        lineAtoms.length -= retreat;
+        cursor -= retreat;
+        break;
+      }
+      if (lineWidth > 0) {
+        // Something is already on the line — try again on a fresh one.
+        break;
+      }
+      // Alone on the line and still too wide: break inside the word, the way
+      // CSS `overflow-wrap: break-word` does. An image is left whole — there is
+      // nothing to break — and overflows as Word lets it.
+      if (atom.kind === "word" && atom.text.length > 0) {
+        const { head, tail } = splitTextToFit(atom.text, atom.measure, usable);
+        if (tail.length > 0) {
+          // Replace the atom with its remainder so the next line continues
+          // from the break point.
+          atoms[cursor] = { ...atom, text: tail, width: atom.measure(tail), glued: true };
+          const headWidth = atom.measure(head);
+          lineAtoms.push({ ...atom, text: head, width: headWidth });
+          lineWidth += headWidth;
           break;
-        }
-        if (!atom.isImage && atom.text !== undefined) {
-          // Alone on the line and still too wide: break inside the token, the
-          // way CSS `overflow-wrap: break-word` does. An image is left whole —
-          // there is nothing to break — and overflows as Word lets it.
-          const measure = memoizedWordMeasure(
-            resolveRunFontName(atom.properties),
-            getRunFontSizePt(atom.properties) * headingScale,
-            options,
-            atom.properties?.bold,
-            atom.properties?.italic
-          );
-          const { head, tail } = splitTextToFit(atom.text, measure, usable);
-          if (tail.length > 0) {
-            // Replace the atom with its remainder so the next line continues
-            // from the break point.
-            atoms[cursorAtom] = { ...atom, text: tail, width: measure(tail) };
-            lineAtoms.push({ ...atom, text: head, width: measure(head) });
-            lineWidth += measure(head);
-            break;
-          }
         }
       }
       lineAtoms.push(atom);
-      lineWidth = next;
-      cursorAtom++;
-    }
-    // Trim trailing whitespace so alignment computation is correct.
-    // Don't trim trailing image atoms (they're not whitespace).
-    while (lineAtoms.length > 0 && lineAtoms[lineAtoms.length - 1].isSpace) {
-      const drop = lineAtoms.pop()!;
-      lineWidth -= drop.width;
+      lineWidth += atom.width;
+      cursor++;
     }
 
-    // Reassemble the line into `ParagraphSegment[]`. Adjacent text
-    // atoms with identical properties merge; image atoms remain
-    // standalone.
-    const merged: ParagraphSegment[] = [];
-    for (const atom of lineAtoms) {
-      if (atom.isBreak) {
-        merged.push({
-          type: "break",
-          properties: atom.properties,
-          ...(atom.isPageBreak ? { pageBreak: true } : {})
-        });
-        continue;
-      }
-      if (atom.isImage) {
-        merged.push({
-          type: "image",
-          content: atom.imageContent!,
-          properties: atom.properties
-        });
-        continue;
-      }
-      const last = merged[merged.length - 1];
-      const lastIsText = last && !("type" in last);
-      if (lastIsText && (last as TextSegment).properties === atom.properties) {
-        const previous = last as TextSegment;
-        const noteIds =
-          previous.noteIds || atom.noteIds
-            ? [...(previous.noteIds ?? []), ...(atom.noteIds ?? [])]
-            : undefined;
-        merged[merged.length - 1] = {
-          text: previous.text + atom.text!,
-          properties: atom.properties,
-          ...(noteIds ? { noteIds } : {})
-        };
-      } else {
-        merged.push({
-          text: atom.text!,
-          properties: atom.properties,
-          ...(atom.noteIds ? { noteIds: atom.noteIds } : {})
-        });
-      }
-    }
-
-    lines.push(merged);
+    lines.push(reassembleLine(lineAtoms));
     slots.push({ xOffset: lineXOffset, width: usable });
     lineIdx++;
 
@@ -3521,207 +3774,123 @@ function wrapSegmentsToLines(
   headingScale: number,
   options: FullLayoutOptions | undefined
 ): ParagraphSegment[][] {
+  const atoms = tokenizeSegments(segments, headingScale, options);
   const lines: ParagraphSegment[][] = [];
-  let currentLine: ParagraphSegment[] = [];
-  let currentLineWidth = 0;
+  let line: WrapAtom[] = [];
+  let lineWidth = 0;
   let isFirstLine = true;
   let effectiveWidth = availableWidth - firstLineIndent;
-
   /**
-   * Commit the current line, trimming the whitespace that ran off its end.
-   *
-   * Trailing spaces are invisible in left-aligned text but they widen the line
-   * for centring and right-alignment, and they leave the paragraph's measured
-   * width wrong.
+   * Whether the line being built was opened by a *wrap*, in which case
+   * whitespace at its head is the separator the break consumed and keeping it
+   * indents the line by a stray space. After a hard break — and at the start of
+   * the paragraph — leading whitespace is the author's, and in a code block it
+   * is the indentation.
    */
+  let openedByWrap = false;
+
   const flushLine = (): void => {
-    while (currentLine.length > 0) {
-      const last = currentLine[currentLine.length - 1];
-      if (!isTextSegment(last)) {
-        break;
-      }
-      const trimmed = last.text.replace(/\s+$/, "");
-      if (trimmed === last.text) {
-        break;
-      }
-      currentLine.pop();
-      if (trimmed.length > 0) {
-        currentLine.push({ ...last, text: trimmed });
-        break;
-      }
-    }
-    lines.push(currentLine);
-    currentLine = [];
-    currentLineWidth = 0;
+    lines.push(reassembleLine(line));
+    line = [];
+    lineWidth = 0;
     if (isFirstLine) {
       isFirstLine = false;
       effectiveWidth = availableWidth;
     }
   };
 
-  /**
-   * Whether whitespace opening the current line should be dropped.
-   *
-   * Only true when the line was opened by *wrapping*: the space is then the
-   * separator the break consumed and keeping it indents the line by a stray
-   * space. After a hard break — and at the start of the paragraph — leading
-   * whitespace is the author's, and in a code block it is the indentation.
-   */
-  let dropLeadingSpace = false;
+  let index = 0;
+  // Every pass consumes an atom, shortens one, or closes a line that already
+  // holds content, so this terminates.
+  while (index < atoms.length) {
+    const atom = atoms[index];
 
-  /** True when nothing has been placed on the line being built yet. */
-  const lineIsEmpty = (): boolean => currentLine.length === 0;
-  /** True when whitespace at this position must be discarded. */
-  const skipOpeningSpace = (): boolean => dropLeadingSpace && lineIsEmpty();
-
-  for (const segment of segments) {
-    if ("type" in segment && segment.type === "break") {
+    if (atom.kind === "break") {
       // A *page* break at the very start of a paragraph is a break-before: the
-      // block-level machinery has already moved the paragraph, and Word leaves no
-      // blank line behind. A leading *line* break does produce an empty line.
-      if (segment.pageBreak === true && lines.length === 0 && currentLine.length === 0) {
-        dropLeadingSpace = false;
+      // block-level machinery has already moved the paragraph, and Word leaves
+      // no blank line behind. A leading *line* break does produce an empty line.
+      if (isPageBreakAtom(atom) && lines.length === 0 && line.length === 0) {
+        openedByWrap = false;
+        index++;
         continue;
       }
       // A hard break closes the current line even though there is room left,
       // and whatever follows keeps its leading whitespace. The marker is kept on
       // the line so a page break's position is recoverable; the line-box builder
       // draws nothing for it.
-      currentLine.push(segment);
+      line.push(atom);
       flushLine();
-      dropLeadingSpace = false;
-      continue;
-    }
-    if ("type" in segment && segment.type === "image") {
-      // Inline images are unbreakable atoms.  Width comes from the
-      // source EMU; if the image alone exceeds the line we still
-      // place it (avoids losing content) — the renderer will overflow
-      // visually on that line, matching Word's behaviour for
-      // oversized inline images.
-      const imageWidth = emuToPt(segment.content.width);
-      const fitsCurrent =
-        currentLineWidth + imageWidth <= effectiveWidth || currentLine.length === 0;
-      if (!fitsCurrent) {
-        flushLine();
-        dropLeadingSpace = true;
-      }
-      currentLine.push(segment);
-      currentLineWidth += imageWidth;
+      openedByWrap = false;
+      index++;
       continue;
     }
 
-    const text = segment.text;
-    const fontSize = getRunFontSizePt(segment.properties) * headingScale;
-    const fontName = resolveRunFontName(segment.properties);
-    const segmentWidth = measureLayoutText(
-      text,
-      fontName,
-      fontSize,
-      options,
-      segment.properties?.bold,
-      segment.properties?.italic
-    );
-
-    if (currentLineWidth + segmentWidth <= effectiveWidth) {
-      // Whole segment fits on the current line — fast path. Whitespace that
-      // would open a line is dropped: it is the separator the wrap consumed,
-      // and keeping it indents the line by a stray space.
-      if (skipOpeningSpace()) {
-        const opened = text.replace(/^\s+/, "");
-        if (opened.length === 0) {
-          continue;
-        }
-        if (opened !== text) {
-          currentLine.push({ ...segment, text: opened });
-          currentLineWidth += measureLayoutText(
-            opened,
-            fontName,
-            fontSize,
-            options,
-            segment.properties?.bold,
-            segment.properties?.italic
-          );
-          continue;
-        }
+    if (atom.kind === "space") {
+      if (openedByWrap && lineWidth === 0) {
+        index++;
+        continue;
       }
-      currentLine.push(segment);
-      currentLineWidth += segmentWidth;
-    } else {
-      // Segment does not fit — break it at word boundaries, and at code-point
-      // boundaries for a token too wide for any line (CSS `overflow-wrap:
-      // break-word`). Without the second rule a long URL, a hex digest or any
-      // space-less script ran straight off the right edge: a CJK paragraph
-      // measured 924pt in a 468pt column.
-      const measureWord = memoizedWordMeasure(
-        fontName,
-        fontSize,
-        options,
-        segment.properties?.bold,
-        segment.properties?.italic
-      );
-      const words = text.split(/(\s+)/);
-      let bufferedText = "";
-      let bufferedWidth = 0;
-
-      /** Commit what is buffered and close the line, as a wrap. */
-      const wrapHere = (): void => {
-        if (bufferedText.length > 0) {
-          currentLine.push({ text: bufferedText, properties: segment.properties });
-        }
-        flushLine();
-        dropLeadingSpace = true;
-        bufferedText = "";
-        bufferedWidth = 0;
-      };
-
-      for (const word of words) {
-        const isSpace = /^\s+$/.test(word);
-
-        let remainder = word;
-        let remainderWidth = measureWord(word);
-        // Each pass either buffers the whole remainder, closes the line, or
-        // takes at least one code point off the front, so this terminates.
-        while (remainder.length > 0) {
-          // Whitespace never opens a wrapped line — see the fast path above.
-          // Re-checked every pass, not once before the loop: a space that fits
-          // the line it was measured against can still be pushed to the next
-          // one by the word that follows it, and it must be dropped then too.
-          if (isSpace && skipOpeningSpace() && bufferedText.length === 0) {
-            break;
-          }
-          const room = effectiveWidth - currentLineWidth - bufferedWidth;
-          if (remainderWidth <= room) {
-            bufferedText += remainder;
-            bufferedWidth += remainderWidth;
-            break;
-          }
-          if (currentLine.length > 0 || bufferedText.length > 0) {
-            // Something is already on the line — try the token again on a
-            // fresh one, intact. Only a token that cannot fit a line *by
-            // itself* is ever broken mid-word.
-            wrapHere();
-            continue;
-          }
-          // Fresh line and still too wide: break inside the token.
-          const { head, tail } = splitTextToFit(remainder, measureWord, room);
-          bufferedText += head;
-          bufferedWidth += measureWord(head);
-          remainder = tail;
-          if (remainder.length === 0) {
-            break;
-          }
-          remainderWidth = measureWord(remainder);
-          wrapHere();
-        }
-      }
-      if (bufferedText.length > 0) {
-        currentLine.push({ ...segment, text: bufferedText });
-        currentLineWidth += bufferedWidth;
-      }
+      // A space that overflows is trailing whitespace, which `reassembleLine`
+      // trims off the line it closes.
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
     }
+
+    // A word or an inline image.
+    if (lineWidth + atom.width <= effectiveWidth) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+
+    // It does not fit. Give back the cluster it belongs to, so the whole
+    // cluster moves down together rather than breaking at a run boundary.
+    const retreat = gluedTailLength(line, atom);
+    if (retreat > 0 && widthWithoutTail(line, retreat, lineWidth) > 0) {
+      line.length -= retreat;
+      index -= retreat;
+      flushLine();
+      openedByWrap = true;
+      continue;
+    }
+
+    if (lineWidth > 0) {
+      // Something is already on the line — try the atom again on a fresh one,
+      // intact. Only a cluster that cannot fit a line *by itself* is broken.
+      flushLine();
+      openedByWrap = true;
+      continue;
+    }
+
+    // Alone on the line and still too wide. An image is left whole — there is
+    // nothing to break — and overflows the way Word lets it. A word breaks
+    // inside, the way CSS `overflow-wrap: break-word` does: without that a long
+    // URL, a hex digest or any space-less script ran off the right edge.
+    if (atom.kind === "image" || atom.text.length === 0) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+    const { head, tail } = splitTextToFit(atom.text, atom.measure, effectiveWidth);
+    if (tail.length === 0) {
+      line.push(atom);
+      lineWidth += atom.width;
+      index++;
+      continue;
+    }
+    const headWidth = atom.measure(head);
+    line.push({ ...atom, text: head, width: headWidth });
+    lineWidth += headWidth;
+    atoms[index] = { ...atom, text: tail, width: atom.measure(tail), glued: true };
+    flushLine();
+    openedByWrap = true;
   }
 
-  if (currentLine.length > 0) {
+  if (line.length > 0) {
     // Through `flushLine`, so the last line has its trailing whitespace trimmed
     // like every other one.
     flushLine();
@@ -3732,41 +3901,6 @@ function wrapSegmentsToLines(
   }
 
   return lines;
-}
-
-function getHeadingLevel(props: ParagraphProperties | undefined): number {
-  if (!props) {
-    return 0;
-  }
-  if (props.outlineLevel !== undefined && props.outlineLevel >= 0 && props.outlineLevel <= 5) {
-    return props.outlineLevel + 1;
-  }
-  if (props.style) {
-    const match = /^[Hh]eading\s*(\d)$/i.exec(props.style);
-    if (match) {
-      return parseInt(match[1], 10);
-    }
-  }
-  return 0;
-}
-
-function getHeadingFontScale(level: number): number {
-  switch (level) {
-    case 1:
-      return 2.0;
-    case 2:
-      return 1.5;
-    case 3:
-      return 1.17;
-    case 4:
-      return 1.0;
-    case 5:
-      return 0.83;
-    case 6:
-      return 0.67;
-    default:
-      return 1.0;
-  }
 }
 
 /**
@@ -3825,14 +3959,29 @@ function naturalParagraphLineHeightPt(
   return maxPt * LINE_HEIGHT_FACTOR;
 }
 
-function resolveRunFontName(props: Run["properties"]): string {
-  if (!props?.font) {
-    return "Calibri";
+/**
+ * The Latin and East Asian typefaces a run draws with.
+ *
+ * `w:rFonts` names them separately, and this used to read `w:ascii` only — so a
+ * run carrying `w:eastAsia="宋体"` was measured with the Latin face, and the
+ * typeface the author asked for never reached the layout. Since the PDF bridge
+ * measures from this, a Chinese document was laid out against Calibri's metrics
+ * and then drawn with whatever face the font manager had discovered.
+ *
+ * `eastAsia` falls back to the Latin name rather than to `"Calibri"`: a caller
+ * that named one typeface for the run meant it for the whole run.
+ */
+function resolveRunFonts(props: Run["properties"]): { ascii: string; eastAsia: string } {
+  const font = props?.font;
+  if (!font) {
+    return { ascii: "Calibri", eastAsia: "Calibri" };
   }
-  if (typeof props.font === "string") {
-    return props.font;
+  if (typeof font === "string") {
+    return { ascii: font, eastAsia: font };
   }
-  return (props.font as { ascii?: string }).ascii ?? "Calibri";
+  const spec = font as { ascii?: string; hAnsi?: string; eastAsia?: string };
+  const ascii = spec.ascii ?? spec.hAnsi ?? "Calibri";
+  return { ascii, eastAsia: spec.eastAsia ?? ascii };
 }
 
 function measureLayoutText(
@@ -3847,6 +3996,190 @@ function measureLayoutText(
     return options.measureText(text, fontName, fontSize, bold, italic);
   }
   return measureTextWidth(text, styledFontVariant(fontName, bold, italic), fontSize);
+}
+
+/**
+ * Whether a line must keep its natural width despite `w:jc="both"`.
+ *
+ * The last line of a paragraph is never stretched — that is what makes justified
+ * text look justified rather than broken. A line ended by a hard break is the
+ * last line of its own visual block for the same reason, so it is exempt too.
+ */
+function isJustifyExemptLine(
+  lines: readonly (readonly ParagraphSegment[])[],
+  index: number
+): boolean {
+  if (index >= lines.length - 1) {
+    return true;
+  }
+  const next = lines[index + 1];
+  // A `w:br` opens the following line, so the *current* one ended a block.
+  const current = lines[index];
+  const endsWithBreak = current.some(seg => "type" in seg && seg.type === "break");
+  return endsWithBreak || next.length === 0;
+}
+
+/**
+ * Count the places a line can absorb justification slack.
+ *
+ * `spaces` counts space characters — the Latin mechanism, and exact, because
+ * PDF's `Tw` and SVG's `word-spacing` both add their amount once per space.
+ *
+ * `ideographs` is the divisor for the East Asian mechanism. Typographically the
+ * slack belongs in the gaps *between* characters, one fewer than the count — but
+ * `Tc` and `letter-spacing` add after every character including the last, so
+ * dividing by the gaps overshoots the column by one unit of spacing. Dividing by
+ * the character count instead keeps the line inside its column and leaves the
+ * final unit as trailing space, which is invisible (0.18pt on a 468pt column of
+ * 100 ideographs) where an overflow would not be.
+ */
+function countJustifyOpportunities(segments: readonly ParagraphSegment[]): JustifyOpportunities {
+  const total: JustifyOpportunities = { spaces: 0, ideographs: 0 };
+  for (const seg of segments) {
+    if (isTextSegment(seg)) {
+      const found = justifyOpportunitiesOf(seg.text);
+      total.spaces += found.spaces;
+      total.ideographs += found.ideographs;
+    }
+  }
+  return total;
+}
+
+/** Places one stretch of text can absorb slack. */
+interface JustifyOpportunities {
+  spaces: number;
+  ideographs: number;
+}
+
+/**
+ * The two counts for one string.
+ *
+ * The single definition of the rule. It was written twice — once to divide the
+ * slack and once to add the resulting width back onto a run — sixteen lines apart,
+ * and the two had to agree exactly or a line's measured width would stop matching
+ * what was drawn. Widening {@link isJustifiableSpace} on one side only would have
+ * done it.
+ */
+function justifyOpportunitiesOf(text: string): JustifyOpportunities {
+  let spaces = 0;
+  let ideographs = 0;
+  for (const run of splitByScript(text)) {
+    if (run.cjk) {
+      // Glyph advances: `Tc` is added after every glyph shown. A combining mark the
+      // face can draw is one of them, while a variation selector is folded into the
+      // character before it and is not.
+      ideographs += countGlyphAdvances(run.text);
+      continue;
+    }
+    for (const char of run.text) {
+      if (isJustifiableSpace(char)) {
+        spaces++;
+      }
+    }
+  }
+  return { spaces, ideographs };
+}
+
+/**
+ * Whether justification may widen this character as a word space.
+ *
+ * Only U+0020. PDF expresses word spacing with `Tw`, which the specification
+ * applies to **byte 32 alone** — so slack assigned to U+3000 was added to the
+ * line's measured width and then never drawn, leaving the layout convinced it had
+ * filled a column it had not. An ideographic space is widened as a character
+ * instead, through `Tc`, which does apply to it.
+ */
+function isJustifiableSpace(char: string): boolean {
+  return char === " ";
+}
+
+/**
+ * The width justification adds to one stretch of text.
+ *
+ * The same opportunities the slack was divided between, priced. Deriving both from
+ * {@link justifyOpportunitiesOf} is what keeps the division and the pricing from
+ * drifting apart.
+ */
+function justificationWidth(text: string, charSpacing: number, wordSpacing: number): number {
+  if (charSpacing === 0 && wordSpacing === 0) {
+    return 0;
+  }
+  const { spaces, ideographs } = justifyOpportunitiesOf(text);
+  return spaces * wordSpacing + ideographs * charSpacing;
+}
+
+/**
+ * Measure text with the run's own pair of typefaces, one stretch per script.
+ *
+ * A run naming `w:ascii="Calibri"` and `w:eastAsia="宋体"` draws `报表 Report`
+ * with both, so measuring the whole string against either one is wrong. Uniform
+ * text takes a single measurement, so Latin-only input costs nothing extra.
+ */
+function measureRunText(
+  text: string,
+  props: Run["properties"],
+  fontSize: number,
+  options: FullLayoutOptions | undefined,
+  bold?: boolean,
+  italic?: boolean
+): number {
+  const fonts = resolveRunFonts(props);
+  if (fonts.ascii === fonts.eastAsia) {
+    return measureLayoutText(text, fonts.ascii, fontSize, options, bold, italic);
+  }
+  let total = 0;
+  for (const run of splitByScript(text)) {
+    total += measureLayoutText(
+      run.text,
+      run.cjk ? fonts.eastAsia : fonts.ascii,
+      fontSize,
+      options,
+      bold,
+      italic
+    );
+  }
+  return total;
+}
+
+/**
+ * The extreme vertical metrics of every face a run draws with.
+ *
+ * Ascent and descent belong to a face, so a mixed run cannot sum them — but it
+ * cannot pick one either. Choosing the East Asian face whenever the text contains
+ * any CJK assumed it is always the taller, which is not true: a Latin face with a
+ * large ascent inside a mostly-Chinese run was then measured against the CJK face
+ * and its glyphs could be clipped by the line box. Each stretch is measured with
+ * its own face and the extremes are taken.
+ */
+function measureRunMetrics(
+  text: string,
+  props: Run["properties"],
+  fontSize: number,
+  options: FullLayoutOptions | undefined,
+  bold?: boolean,
+  italic?: boolean
+): { ascent: number; descent: number } {
+  const fonts = resolveRunFonts(props);
+  if (fonts.ascii === fonts.eastAsia) {
+    return measureLayoutFontMetrics(text, fonts.ascii, fontSize, options, bold, italic);
+  }
+  let ascent = -Infinity;
+  let descent = Infinity;
+  for (const run of splitByScript(text)) {
+    const m = measureLayoutFontMetrics(
+      run.text,
+      run.cjk ? fonts.eastAsia : fonts.ascii,
+      fontSize,
+      options,
+      bold,
+      italic
+    );
+    ascent = Math.max(ascent, m.ascent);
+    descent = Math.min(descent, m.descent);
+  }
+  return ascent === -Infinity
+    ? measureLayoutFontMetrics(text, fonts.ascii, fontSize, options, bold, italic)
+    : { ascent, descent };
 }
 
 function measureLayoutFontMetrics(

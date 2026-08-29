@@ -14,7 +14,7 @@
  *
  * 4. Layout row height consistent with render line count for rich text.
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-rich-text-overflow.ts
+ * Run: pnpm example --filter pdf-rich-text-overflow
  * Output: tmp/pdf-examples/rich-text-overflow.pdf
  */
 import fs from "node:fs";

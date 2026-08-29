@@ -176,6 +176,48 @@ describe("the typesVersions gate", () => {
     expect(output).toContain("must name the same declaration");
   });
 
+  it("reads the current `types` condition, not only the old `import.types`", () => {
+    // The manifest collapsed from `{ browser, import, require }` to
+    // `{ browser, types, default }` when the CommonJS build was dropped. Reading only
+    // `import.types` made every lookup return undefined, so the comparison below was
+    // skipped for all 19 subpaths and the script still printed `✓`. This is the case that
+    // would have caught it.
+    const { code, output } = run(
+      {
+        exports: { "./excel": { types: "./dist/types/modules/excel/index.d.ts" } },
+        typesVersions: { "*": { excel: ["dist/types/modules/xml/index.d.ts"] } }
+      },
+      ["dist/types/modules/excel/index.d.ts", "dist/types/modules/xml/index.d.ts"]
+    );
+    expect(code).toBe(1);
+    expect(output).toContain("must name the same declaration");
+  });
+
+  it("agrees when the current shape names the same declaration", () => {
+    const { code } = run(
+      {
+        exports: { "./excel": { types: "./dist/types/modules/excel/index.d.ts" } },
+        typesVersions: { "*": { excel: ["dist/types/modules/excel/index.d.ts"] } }
+      },
+      ["dist/types/modules/excel/index.d.ts"]
+    );
+    expect(code).toBe(0);
+  });
+
+  it("reports an exports entry whose declaration it cannot locate", () => {
+    // Rather than silently having nothing to compare. A condition shape this script does
+    // not understand is a reason to fail, not a reason to pass.
+    const { code, output } = run(
+      {
+        exports: { "./excel": { node: { types: "./dist/types/modules/excel/index.d.ts" } } },
+        typesVersions: { "*": { excel: ["dist/types/modules/excel/index.d.ts"] } }
+      },
+      ["dist/types/modules/excel/index.d.ts"]
+    );
+    expect(code).toBe(1);
+    expect(output).toContain('names no "types" declaration');
+  });
+
   it("guards this repository's own manifest", () => {
     // The gate is wired into `pnpm check`; this is the assertion that it is green here
     // and not merely that the logic works on fixtures.

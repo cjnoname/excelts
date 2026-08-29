@@ -8,6 +8,7 @@ import {
   isStandardFont,
   getStandardFontNames
 } from "@pdf/font/metrics";
+import { isFullWidthCodePoint } from "@utils/font-metrics";
 /**
  * Tests for PDF font metrics and font manager.
  */
@@ -255,11 +256,16 @@ describe("emoji and zero-width metrics", () => {
     }
   });
 
-  it("keeps arrows, dashes and symbols narrow", () => {
-    // Widening whole blocks would have caught these, which are not emoji.
+  it("does not treat arrows, dashes and symbols as full-width", () => {
+    // Widening whole blocks would have caught these, which are not emoji. They
+    // take their own width from the table (an em dash really is one em wide in
+    // Helvetica) rather than the full-em rule that covers substituted faces.
     for (const cp of [0x2192, 0x2014, 0x00a9, 0x2264]) {
-      expect(getCharWidth(cp, "Helvetica")).toBeLessThan(1000);
+      expect(isFullWidthCodePoint(cp)).toBe(false);
     }
+    expect(getCharWidth(0x2192, "Helvetica")).toBe(513); // no glyph: average
+    expect(getCharWidth(0x2264, "Helvetica")).toBe(513); // no glyph: average
+    expect(getCharWidth(0x00a9, "Helvetica")).toBe(737); // copyright, from AFM
   });
 
   it("charges nothing for joiners and variation selectors", () => {
@@ -271,5 +277,94 @@ describe("emoji and zero-width metrics", () => {
     const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}";
     // Four glyphs at 10pt, and nothing for the three joiners between them.
     expect(measureText(family, "Helvetica", 10)).toBeCloseTo(40, 5);
+  });
+});
+
+describe("WinAnsi repertoire metrics", () => {
+  /**
+   * Every code point `WinAnsiEncoding` can name: the twenty-seven cp1252
+   * specials at 0x80–0x9F, then Latin-1 0xA0–0xFF.
+   */
+  const WIN_ANSI_NON_ASCII = [
+    0x20ac,
+    0x201a,
+    0x0192,
+    0x201e,
+    0x2026,
+    0x2020,
+    0x2021,
+    0x02c6,
+    0x2030,
+    0x0160,
+    0x2039,
+    0x0152,
+    0x017d,
+    0x2018,
+    0x2019,
+    0x201c,
+    0x201d,
+    0x2022,
+    0x2013,
+    0x2014,
+    0x02dc,
+    0x2122,
+    0x0161,
+    0x203a,
+    0x0153,
+    0x017e,
+    0x0178,
+    ...Array.from({ length: 0x60 }, (_, i) => 0xa0 + i)
+  ];
+
+  /** `avgWidth` per face — the value a table miss falls back to. */
+  const AVERAGES: ReadonlyArray<readonly [string, number]> = [
+    ["Helvetica", 513],
+    ["Helvetica-Bold", 535],
+    ["Times-Roman", 478],
+    ["Times-Bold", 505]
+  ];
+
+  it("has a real width for every code point WinAnsi can encode", () => {
+    // A standard-14 face reaches the PDF as `/BaseFont /Helvetica` with
+    // `/Encoding /WinAnsiEncoding` and no embedded file, so the viewer advances
+    // these bytes by their AFM width. Any that still fall through to `avgWidth`
+    // are measured wrong at draw time, and because a run is placed at the x the
+    // layout computed the error accumulates along the line.
+    for (const [face, average] of AVERAGES) {
+      const missing = WIN_ANSI_NON_ASCII.filter(cp => getCharWidth(cp, face) === average);
+      expect(missing.map(cp => cp.toString(16))).toEqual([]);
+    }
+  });
+
+  it("matches the AFM widths that the drawing side uses", () => {
+    // The em dash is the one that showed: it reserved 513 and drew 1000, so
+    // `— \`Admin\`` lost the space between them and rendered as `—Admin`.
+    expect(getCharWidth(0x2014, "Helvetica")).toBe(1000); // emdash
+    expect(getCharWidth(0x2013, "Helvetica")).toBe(556); // endash
+    expect(getCharWidth(0x2019, "Helvetica")).toBe(222); // quoteright
+    expect(getCharWidth(0x201d, "Helvetica")).toBe(333); // quotedblright
+    expect(getCharWidth(0x2022, "Helvetica")).toBe(350); // bullet
+    expect(getCharWidth(0x2026, "Helvetica")).toBe(1000); // ellipsis
+    expect(getCharWidth(0x00a0, "Helvetica")).toBe(278); // nbsp advances like a space
+    expect(getCharWidth(0x00e9, "Helvetica")).toBe(556); // eacute, like 'e'
+    // Times-Roman is its own face, not Helvetica with different ASCII.
+    expect(getCharWidth(0x2122, "Times-Roman")).toBe(980); // trademark
+    expect(getCharWidth(0x00a9, "Times-Roman")).toBe(760); // copyright
+    // Courier stays monospaced across the whole repertoire.
+    for (const cp of WIN_ANSI_NON_ASCII) {
+      expect(getCharWidth(cp, "Courier")).toBe(600);
+    }
+  });
+
+  it("keeps avgWidth for code points a standard face has no glyph for", () => {
+    // U+0450 (Cyrillic ѐ) and U+2192 (→) are outside WinAnsi entirely: the
+    // renderer substitutes for them, so an average is the honest answer.
+    expect(getCharWidth(0x0450, "Helvetica")).toBe(513);
+    expect(getCharWidth(0x2192, "Helvetica")).toBe(513);
+  });
+
+  it("measures a run containing an em dash at its drawn width", () => {
+    // The string from the report, at the size it was rendered.
+    expect(measureText(") — global tier: ", "Helvetica", 11)).toBeCloseTo(74.58, 2);
   });
 });

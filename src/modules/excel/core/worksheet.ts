@@ -703,7 +703,7 @@ export function mergeCellsWithoutStyle(ws: WorksheetData, ...cells: RangeInput[]
   _mergeCellsInternal(ws, dimensions, true);
 }
 
-export function _mergeCellsInternal(
+function _mergeCellsInternal(
   ws: WorksheetData,
   dimensions: RangeData,
   ignoreStyle?: boolean
@@ -745,7 +745,7 @@ export function _mergeCellsInternal(
   ws._merges[master.address] = dimensions;
 }
 
-export function _unMergeMaster(ws: WorksheetData, master: CellData): void {
+function _unMergeMaster(ws: WorksheetData, master: CellData): void {
   // master is always top left of a rectangle
   const merge = ws._merges[master.address];
   if (merge) {
@@ -758,7 +758,7 @@ export function _unMergeMaster(ws: WorksheetData, master: CellData): void {
   }
 }
 
-export function _shiftChartAnchors(
+function _shiftChartAnchors(
   ws: WorksheetData,
   axis: "row" | "col",
   threshold: number,
@@ -796,7 +796,7 @@ export function _shiftChartAnchors(
   }
 }
 
-export function _spliceMerges(
+function _spliceMerges(
   ws: WorksheetData,
   axis: "row" | "col",
   start: number,
@@ -1013,7 +1013,7 @@ export function getShapes(ws: WorksheetData): ShapeModel[] {
   return ws._shapes.slice();
 }
 
-export function _resolveShapeModel(ws: WorksheetData, shape: ShapeModel): ShapeModel {
+function _resolveShapeModel(ws: WorksheetData, shape: ShapeModel): ShapeModel {
   let range: Extract<ImageModel, { type: "image" }>["range"] | undefined;
   try {
     const probe = imageCreate(ws, { type: "image", imageId: "", range: shape.range });
@@ -1890,7 +1890,7 @@ export function autoFitRows(ws: WorksheetData, startRow?: number, endRow?: numbe
   return ws;
 }
 
-export function _autoFitColumnImpl(ws: WorksheetData, colNum: number): void {
+function _autoFitColumnImpl(ws: WorksheetData, colNum: number): void {
   const mdw = getMaxDigitWidth(); // default font MDW
 
   // Check if this column is under an autofilter
@@ -1954,7 +1954,7 @@ export function _autoFitColumnImpl(ws: WorksheetData, colNum: number): void {
   }
 }
 
-export function _autoFitRowImpl(ws: WorksheetData, rowNumber: number): void {
+function _autoFitRowImpl(ws: WorksheetData, rowNumber: number): void {
   const row = ws._rows[rowNumber - 1];
   if (!row) {
     return;
@@ -1994,7 +1994,7 @@ export function _autoFitRowImpl(ws: WorksheetData, rowNumber: number): void {
   }
 }
 
-export function _getColumnContentWidthForCell(
+function _getColumnContentWidthForCell(
   ws: WorksheetData,
   cell: CellData,
   mdw: number
@@ -2008,7 +2008,7 @@ export function _getColumnContentWidthForCell(
   return getColumnContentWidthPx(colWidth, mdw);
 }
 
-export function _isColumnInAutoFilter(ws: WorksheetData, colNum: number): boolean {
+function _isColumnInAutoFilter(ws: WorksheetData, colNum: number): boolean {
   if (!ws.autoFilter) {
     return false;
   }
@@ -2023,7 +2023,7 @@ export function _isColumnInAutoFilter(ws: WorksheetData, colNum: number): boolea
   return colNum >= fromCol && colNum <= toCol;
 }
 
-export function _parseRows(ws: WorksheetData, model: WorksheetModel): void {
+function _parseRows(ws: WorksheetData, model: WorksheetModel): void {
   ws._rows = [];
   if (model.rows) {
     model.rows.forEach(rowModel => {
@@ -2034,7 +2034,7 @@ export function _parseRows(ws: WorksheetData, model: WorksheetModel): void {
   }
 }
 
-export function _parseMergeCells(ws: WorksheetData, model: WorksheetModel): void {
+function _parseMergeCells(ws: WorksheetData, model: WorksheetModel): void {
   if (model.mergeCells) {
     model.mergeCells.forEach((merge: string) => {
       // Do not merge styles when importing an Excel file

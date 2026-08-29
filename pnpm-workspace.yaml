@@ -5,6 +5,14 @@
 packages:
   - "packages/*"
 
+# `@oxc-node/core`'s own `register.mjs` calls the deprecated `module.register()`,
+# which emits DEP0205 on Node >= 25.9 and runs the hooks on a worker thread. The
+# patch switches to the synchronous in-thread `module.registerHooks()` when the
+# runtime has it, falling back otherwise. Taken verbatim from the same patch used
+# in apra-amcos-api-library.
+patchedDependencies:
+  "@oxc-node/core@0.1.0": "patches/@oxc-node__core.patch"
+
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

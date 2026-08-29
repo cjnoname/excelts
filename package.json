@@ -1,6 +1,6 @@
 {
   "name": "documonster",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Zero-dependency TypeScript toolkit for Excel, Word, PDF, CSV, Markdown, XML & ZIP — one API across Node.js, Bun & browsers.",
   "keywords": [
     "archive",
@@ -30,7 +30,10 @@
     "url": "https://github.com/documonster/documonster/issues"
   },
   "license": "Apache-2.0",
-  "author": "cjnoname <powerfulj87@gmail.com>",
+  "author": {
+    "name": "cjnoname",
+    "email": "powerfulj87@gmail.com"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/documonster/documonster.git"
@@ -47,7 +50,6 @@
   ],
   "type": "module",
   "sideEffects": false,
-  "main": "index.js",
   "typesVersions": {
     "*": {
       "excel": [
@@ -109,272 +111,170 @@
       ]
     }
   },
+  "imports": {
+    "#platform/*": {
+      "browser": {
+        "types": "./dist/types/*.browser.d.ts",
+        "default": "./dist/esm/*.browser.js"
+      },
+      "default": {
+        "types": "./dist/types/*.d.ts",
+        "default": "./dist/esm/*.js"
+      }
+    }
+  },
   "exports": {
     "./excel": {
       "browser": {
-        "types": "./dist/browser/modules/excel/index.browser.d.ts",
-        "default": "./dist/browser/modules/excel/index.browser.js"
+        "types": "./dist/types/modules/excel/index.browser.d.ts",
+        "default": "./dist/esm/modules/excel/index.browser.js"
       },
-      "import": {
-        "types": "./dist/types/modules/excel/index.d.ts",
-        "default": "./dist/esm/modules/excel/index.js"
-      },
-      "require": {
-        "types": "./dist/types/modules/excel/index.d.ts",
-        "default": "./dist/cjs/modules/excel/index.js"
-      }
+      "types": "./dist/types/modules/excel/index.d.ts",
+      "default": "./dist/esm/modules/excel/index.js"
     },
     "./archive": {
       "browser": {
-        "types": "./dist/browser/modules/archive/index.browser.d.ts",
-        "default": "./dist/browser/modules/archive/index.browser.js"
+        "types": "./dist/types/modules/archive/index.browser.d.ts",
+        "default": "./dist/esm/modules/archive/index.browser.js"
       },
-      "import": {
-        "types": "./dist/types/modules/archive/index.d.ts",
-        "default": "./dist/esm/modules/archive/index.js"
-      },
-      "require": {
-        "types": "./dist/types/modules/archive/index.d.ts",
-        "default": "./dist/cjs/modules/archive/index.js"
-      }
+      "types": "./dist/types/modules/archive/index.d.ts",
+      "default": "./dist/esm/modules/archive/index.js"
     },
     "./csv": {
       "browser": {
-        "types": "./dist/browser/modules/csv/index.d.ts",
-        "default": "./dist/browser/modules/csv/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/csv/index.d.ts",
         "default": "./dist/esm/modules/csv/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/csv/index.d.ts",
-        "default": "./dist/cjs/modules/csv/index.js"
-      }
+      "types": "./dist/types/modules/csv/index.d.ts",
+      "default": "./dist/esm/modules/csv/index.js"
     },
     "./markdown": {
       "browser": {
-        "types": "./dist/browser/modules/markdown/index.d.ts",
-        "default": "./dist/browser/modules/markdown/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/markdown/index.d.ts",
         "default": "./dist/esm/modules/markdown/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/markdown/index.d.ts",
-        "default": "./dist/cjs/modules/markdown/index.js"
-      }
+      "types": "./dist/types/modules/markdown/index.d.ts",
+      "default": "./dist/esm/modules/markdown/index.js"
     },
     "./mermaid": {
       "browser": {
-        "types": "./dist/browser/modules/mermaid/index.d.ts",
-        "default": "./dist/browser/modules/mermaid/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/mermaid/index.d.ts",
         "default": "./dist/esm/modules/mermaid/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/mermaid/index.d.ts",
-        "default": "./dist/cjs/modules/mermaid/index.js"
-      }
+      "types": "./dist/types/modules/mermaid/index.d.ts",
+      "default": "./dist/esm/modules/mermaid/index.js"
     },
     "./stream": {
       "browser": {
-        "types": "./dist/browser/modules/stream/index.browser.d.ts",
-        "default": "./dist/browser/modules/stream/index.browser.js"
+        "types": "./dist/types/modules/stream/index.browser.d.ts",
+        "default": "./dist/esm/modules/stream/index.browser.js"
       },
-      "import": {
-        "types": "./dist/types/modules/stream/index.d.ts",
-        "default": "./dist/esm/modules/stream/index.js"
-      },
-      "require": {
-        "types": "./dist/types/modules/stream/index.d.ts",
-        "default": "./dist/cjs/modules/stream/index.js"
-      }
+      "types": "./dist/types/modules/stream/index.d.ts",
+      "default": "./dist/esm/modules/stream/index.js"
     },
     "./pdf": {
       "browser": {
-        "types": "./dist/browser/modules/pdf/index.d.ts",
-        "default": "./dist/browser/modules/pdf/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/pdf/index.d.ts",
         "default": "./dist/esm/modules/pdf/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/pdf/index.d.ts",
-        "default": "./dist/cjs/modules/pdf/index.js"
-      }
+      "types": "./dist/types/modules/pdf/index.d.ts",
+      "default": "./dist/esm/modules/pdf/index.js"
     },
     "./formula": {
       "browser": {
-        "types": "./dist/browser/modules/formula/index.d.ts",
-        "default": "./dist/browser/modules/formula/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/formula/index.d.ts",
         "default": "./dist/esm/modules/formula/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/formula/index.d.ts",
-        "default": "./dist/cjs/modules/formula/index.js"
-      }
+      "types": "./dist/types/modules/formula/index.d.ts",
+      "default": "./dist/esm/modules/formula/index.js"
     },
     "./draw": {
       "browser": {
-        "types": "./dist/browser/modules/draw/index.d.ts",
-        "default": "./dist/browser/modules/draw/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/draw/index.d.ts",
         "default": "./dist/esm/modules/draw/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/draw/index.d.ts",
-        "default": "./dist/cjs/modules/draw/index.js"
-      }
+      "types": "./dist/types/modules/draw/index.d.ts",
+      "default": "./dist/esm/modules/draw/index.js"
     },
     "./chart": {
       "browser": {
-        "types": "./dist/browser/modules/excel/chart/index.d.ts",
-        "default": "./dist/browser/modules/excel/chart/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/excel/chart/index.d.ts",
         "default": "./dist/esm/modules/excel/chart/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/excel/chart/index.d.ts",
-        "default": "./dist/cjs/modules/excel/chart/index.js"
-      }
+      "types": "./dist/types/modules/excel/chart/index.d.ts",
+      "default": "./dist/esm/modules/excel/chart/index.js"
     },
     "./excel/csv": {
       "browser": {
-        "types": "./dist/browser/modules/excel/bridge/csv.d.ts",
-        "default": "./dist/browser/modules/excel/bridge/csv.js"
+        "types": "./dist/types/modules/excel/bridge/csv.d.ts",
+        "default": "./dist/esm/modules/excel/bridge/csv.js"
       },
-      "import": {
-        "types": "./dist/types/modules/excel/bridge/csv.node.d.ts",
-        "default": "./dist/esm/modules/excel/bridge/csv.node.js"
-      },
-      "require": {
-        "types": "./dist/types/modules/excel/bridge/csv.node.d.ts",
-        "default": "./dist/cjs/modules/excel/bridge/csv.node.js"
-      }
+      "types": "./dist/types/modules/excel/bridge/csv.node.d.ts",
+      "default": "./dist/esm/modules/excel/bridge/csv.node.js"
     },
     "./excel/markdown": {
       "browser": {
-        "types": "./dist/browser/modules/excel/bridge/markdown.d.ts",
-        "default": "./dist/browser/modules/excel/bridge/markdown.js"
+        "types": "./dist/types/modules/excel/bridge/markdown.d.ts",
+        "default": "./dist/esm/modules/excel/bridge/markdown.js"
       },
-      "import": {
-        "types": "./dist/types/modules/excel/bridge/markdown.node.d.ts",
-        "default": "./dist/esm/modules/excel/bridge/markdown.node.js"
-      },
-      "require": {
-        "types": "./dist/types/modules/excel/bridge/markdown.node.d.ts",
-        "default": "./dist/cjs/modules/excel/bridge/markdown.node.js"
-      }
+      "types": "./dist/types/modules/excel/bridge/markdown.node.d.ts",
+      "default": "./dist/esm/modules/excel/bridge/markdown.node.js"
     },
     "./excel/formula": {
       "browser": {
-        "types": "./dist/browser/modules/excel/bridge/formula.d.ts",
-        "default": "./dist/browser/modules/excel/bridge/formula.js"
-      },
-      "import": {
         "types": "./dist/types/modules/excel/bridge/formula.d.ts",
         "default": "./dist/esm/modules/excel/bridge/formula.js"
       },
-      "require": {
-        "types": "./dist/types/modules/excel/bridge/formula.d.ts",
-        "default": "./dist/cjs/modules/excel/bridge/formula.js"
-      }
+      "types": "./dist/types/modules/excel/bridge/formula.d.ts",
+      "default": "./dist/esm/modules/excel/bridge/formula.js"
     },
     "./xml": {
       "browser": {
-        "types": "./dist/browser/modules/xml/index.d.ts",
-        "default": "./dist/browser/modules/xml/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/xml/index.d.ts",
         "default": "./dist/esm/modules/xml/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/xml/index.d.ts",
-        "default": "./dist/cjs/modules/xml/index.js"
-      }
+      "types": "./dist/types/modules/xml/index.d.ts",
+      "default": "./dist/esm/modules/xml/index.js"
     },
     "./word": {
       "browser": {
-        "types": "./dist/browser/modules/word/index.d.ts",
-        "default": "./dist/browser/modules/word/index.js"
-      },
-      "import": {
         "types": "./dist/types/modules/word/index.d.ts",
         "default": "./dist/esm/modules/word/index.js"
       },
-      "require": {
-        "types": "./dist/types/modules/word/index.d.ts",
-        "default": "./dist/cjs/modules/word/index.js"
-      }
+      "types": "./dist/types/modules/word/index.d.ts",
+      "default": "./dist/esm/modules/word/index.js"
     },
     "./word/html": {
       "browser": {
-        "types": "./dist/browser/modules/word/html.d.ts",
-        "default": "./dist/browser/modules/word/html.js"
-      },
-      "import": {
         "types": "./dist/types/modules/word/html.d.ts",
         "default": "./dist/esm/modules/word/html.js"
       },
-      "require": {
-        "types": "./dist/types/modules/word/html.d.ts",
-        "default": "./dist/cjs/modules/word/html.js"
-      }
+      "types": "./dist/types/modules/word/html.d.ts",
+      "default": "./dist/esm/modules/word/html.js"
     },
     "./word/crypto": {
       "browser": {
-        "types": "./dist/browser/modules/word/crypto.d.ts",
-        "default": "./dist/browser/modules/word/crypto.js"
-      },
-      "import": {
         "types": "./dist/types/modules/word/crypto.d.ts",
         "default": "./dist/esm/modules/word/crypto.js"
       },
-      "require": {
-        "types": "./dist/types/modules/word/crypto.d.ts",
-        "default": "./dist/cjs/modules/word/crypto.js"
-      }
+      "types": "./dist/types/modules/word/crypto.d.ts",
+      "default": "./dist/esm/modules/word/crypto.js"
     },
     "./word/markdown": {
       "browser": {
-        "types": "./dist/browser/modules/word/markdown.d.ts",
-        "default": "./dist/browser/modules/word/markdown.js"
-      },
-      "import": {
         "types": "./dist/types/modules/word/markdown.d.ts",
         "default": "./dist/esm/modules/word/markdown.js"
       },
-      "require": {
-        "types": "./dist/types/modules/word/markdown.d.ts",
-        "default": "./dist/cjs/modules/word/markdown.js"
-      }
+      "types": "./dist/types/modules/word/markdown.d.ts",
+      "default": "./dist/esm/modules/word/markdown.js"
     },
     "./word/excel": {
       "browser": {
-        "types": "./dist/browser/modules/word/excel.d.ts",
-        "default": "./dist/browser/modules/word/excel.js"
-      },
-      "import": {
         "types": "./dist/types/modules/word/excel.d.ts",
         "default": "./dist/esm/modules/word/excel.js"
       },
-      "require": {
-        "types": "./dist/types/modules/word/excel.d.ts",
-        "default": "./dist/cjs/modules/word/excel.js"
-      }
+      "types": "./dist/types/modules/word/excel.d.ts",
+      "default": "./dist/esm/modules/word/excel.js"
     },
     "./package.json": "./package.json"
   },
@@ -383,20 +283,26 @@
   },
   "scripts": {
     "example": "node scripts/run-examples.ts",
+    "verify:examples": "node scripts/run-examples.ts",
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
-    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\"",
+    "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\" \"pnpm verify:doc-examples\" \"pnpm verify:doc-links\"",
     "test": "vitest run && pnpm build:esm && pnpm test:packages && pnpm test:browser --",
     "test:all": "pnpm test",
-    "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:browser && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
+    "test:browser": "pnpm generate:csv-worker && rimraf dist && pnpm build:esm && pnpm build:browser:bundle && vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
-    "build": "pnpm generate:csv-worker && rimraf dist && concurrently \"pnpm build:esm\" \"pnpm build:cjs\" \"pnpm build:browser\" \"pnpm build:browser:bundle\" && pnpm build:verify && pnpm verify:treeshake",
-    "build:verify": "pnpm build:verify:node && pnpm build:verify:browser",
+    "build": "pnpm generate:csv-worker && rimraf dist && concurrently \"pnpm build:esm\" \"pnpm build:browser:bundle\" && pnpm build:verify && pnpm verify:treeshake",
+    "build:verify": "pnpm build:verify:node && pnpm build:verify:browser && pnpm verify:cjs && pnpm verify:browser-stubs",
     "build:verify:node": "tsc --noEmit --ignoreConfig --module NodeNext --moduleResolution NodeNext --lib ESNext --types node dist/types/modules/archive/index.d.ts dist/types/modules/csv/index.d.ts dist/types/modules/excel/index.d.ts dist/types/modules/excel/chart/index.d.ts dist/types/modules/excel/bridge/formula.d.ts dist/types/modules/excel/bridge/csv.node.d.ts dist/types/modules/excel/bridge/markdown.node.d.ts dist/types/modules/formula/index.d.ts dist/types/modules/markdown/index.d.ts dist/types/modules/pdf/index.d.ts dist/types/modules/stream/index.d.ts dist/types/modules/xml/index.d.ts dist/types/modules/word/index.d.ts dist/types/modules/word/html.d.ts dist/types/modules/word/crypto.d.ts dist/types/modules/word/markdown.d.ts dist/types/modules/word/excel.d.ts",
-    "build:verify:browser": "tsc --noEmit --ignoreConfig --module NodeNext --moduleResolution NodeNext --lib ESNext,DOM dist/browser/modules/excel/index.browser.d.ts dist/browser/modules/excel/chart/index.d.ts dist/browser/modules/excel/bridge/csv.d.ts dist/browser/modules/excel/bridge/markdown.d.ts dist/browser/modules/excel/bridge/formula.d.ts dist/browser/modules/archive/index.browser.d.ts dist/browser/modules/csv/index.d.ts dist/browser/modules/markdown/index.d.ts dist/browser/modules/stream/index.browser.d.ts dist/browser/modules/pdf/index.d.ts dist/browser/modules/formula/index.d.ts dist/browser/modules/xml/index.d.ts dist/browser/modules/word/index.d.ts dist/browser/modules/word/html.d.ts dist/browser/modules/word/crypto.d.ts dist/browser/modules/word/markdown.d.ts dist/browser/modules/word/excel.d.ts",
+    "build:verify:browser": "tsc --noEmit --ignoreConfig --module NodeNext --moduleResolution NodeNext --customConditions browser --lib ESNext,DOM dist/types/modules/excel/index.browser.d.ts dist/types/modules/excel/chart/index.d.ts dist/types/modules/excel/bridge/csv.d.ts dist/types/modules/excel/bridge/markdown.d.ts dist/types/modules/excel/bridge/formula.d.ts dist/types/modules/archive/index.browser.d.ts dist/types/modules/csv/index.d.ts dist/types/modules/markdown/index.d.ts dist/types/modules/stream/index.browser.d.ts dist/types/modules/pdf/index.d.ts dist/types/modules/formula/index.d.ts dist/types/modules/xml/index.d.ts dist/types/modules/word/index.d.ts dist/types/modules/word/html.d.ts dist/types/modules/word/crypto.d.ts dist/types/modules/word/markdown.d.ts dist/types/modules/word/excel.d.ts",
+    "verify:cjs": "node scripts/verify-cjs-entrypoints.ts",
+    "verify:install": "node scripts/verify-installed-package.cjs",
+    "verify:browser-stubs": "node scripts/verify-browser-stubs.ts",
     "verify:treeshake": "node scripts/treeshake-verify.ts",
     "verify:xlsb-corpus": "pnpm build:esm && node scripts/verify-xlsb-corpus.ts",
     "verify:layers": "node scripts/verify-layers.ts",
     "verify:public-types": "node scripts/verify-public-types.ts",
+    "verify:doc-examples": "node scripts/verify-doc-examples.ts",
+    "verify:doc-links": "node scripts/verify-doc-links.ts",
     "verify:packages": "node scripts/verify-package-imports.ts",
     "build:packages": "pnpm --filter \"./packages/*\" build",
     "type:packages": "pnpm --filter \"./packages/*\" type",
@@ -410,9 +316,7 @@
     "benchmark": "rimraf dist && pnpm build && node --expose-gc scripts/benchmark.ts",
     "benchmark:formula": "pnpm build && node --expose-gc benchmark/formula-benchmark.mjs",
     "benchmark:xlsb": "pnpm build:esm && node --expose-gc scripts/benchmark-xlsb.ts",
-    "build:esm": "tsc --project tsconfig.esm.json && node scripts/fix-esm-imports.ts",
-    "build:cjs": "tsc --project tsconfig.cjs.json && node scripts/fix-cjs-imports.ts",
-    "build:browser": "tsc --project tsconfig.browser.json && node scripts/fix-esm-imports.ts --dist dist/browser --types dist/browser && node scripts/fix-browser-imports.ts --dir dist/browser",
+    "build:esm": "tsc --project tsconfig.esm.json && node scripts/fix-esm-imports.ts && node scripts/link-platform-variants.ts",
     "build:browser:bundle": "rolldown -c rolldown.config.ts",
     "prepublishOnly": "pnpm build",
     "preversion": "pnpm check && pnpm build && pnpm test",
@@ -420,6 +324,7 @@
     "verify:types-versions": "node scripts/verify-types-versions.ts"
   },
   "devDependencies": {
+    "@oxc-node/core": "0.1.0",
     "@rspack/core": "^2.1.10",
     "@types/node": "^26.2.0",
     "@vitest/browser": "^4.1.11",
@@ -448,7 +353,7 @@
     "opera >= 75"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "packageManager": "pnpm@11.22.0"
 }

@@ -50,7 +50,7 @@ export interface FormulaCalculationResult {
  * **Supported formula features:**
  * - Cell references: `A1`, `$B$2`, `Sheet1!A1`, `'Sheet Name'!A1:B10`
  * - Operators: `+ - * / ^`, `& (concat)`, `= <> < > <= >=`, `%`
- * - 433 built-in functions across math, text, logical, date, lookup,
+ * - 448 built-in functions across math, text, logical, date, lookup,
  *   statistical, financial, dynamic-array, database and engineering
  *   categories.
  * - Shared formulas, array constants, nested expressions

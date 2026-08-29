@@ -6,7 +6,7 @@
 
 - Zero runtime dependencies — never add packages to `dependencies`
 - Cross-platform: Node.js 22+ and modern browsers
-- ESM-first with CommonJS compatibility
+- ESM-only; CommonJS consumers load it through `require(esm)` (Node >= 22.13)
 
 ## Hard Rules
 
@@ -44,10 +44,17 @@ pnpm type:packages
 pnpm test:packages
 pnpm build:packages
 
+pnpm verify:doc-examples  # documented imports & members must exist — see "Documentation" below
+pnpm verify:doc-links     # local Markdown targets & headings must exist
+pnpm verify:examples      # every example must actually run — see "Examples" below
+
 # Single test file
 pnpm exec vitest run src/modules/excel/core/__tests__/cell.test.ts
 # Pattern match
 pnpm exec vitest run -t "should handle empty cells"
+
+# Run examples (same runner as the gate; --filter narrows by path substring)
+pnpm example --filter pdf-page-setup
 ```
 
 ## Project Structure
@@ -57,7 +64,7 @@ src/
 ├── modules/
 │   ├── excel/          # core/ (Workbook, Worksheet, Cell, …) surface/ stream/ xlsx/
 │   ├── word/           # DocxDocument, DocumentBuilder, readDocx, packageDocx
-│   ├── formula/        # Tokenizer, parser, evaluator, 433 functions, spill engine
+│   ├── formula/        # Tokenizer, parser, evaluator, 448 functions, spill engine
 │   ├── pdf/            # core/ builder/ font/ render/ reader/ + excel-bridge.ts + word-bridge.ts + word-chart-bridge.ts + word-layout-to-pdf.ts
 │   ├── csv/            # Parsing/formatting + streaming
 │   ├── markdown/       # GFM table parsing/formatting
@@ -93,7 +100,7 @@ in one PR instead of drifting across two repositories.
    makes every satellite an honest consumer of the public API — and a real check
    on whether that API is sufficient.
 2. A satellite is node-only and ESM-only. It does not participate in the core's
-   CJS / browser / IIFE build matrix.
+   IIFE build matrix.
 3. Satellites are excluded from the root `tsconfig.json` and the root
    `vitest.config.ts`; each carries its own.
 
@@ -204,9 +211,21 @@ rasteriser and the stroke font it needs, and `documonster/draw` exports it.
 **It yields pixels, not a PNG.** Encoding one needs DEFLATE, which lives at Layer 2 in
 `archive/`, and dragging that down into Layer 1 to return a file format would make
 every consumer of the drawing engine pay for a compression library. The seam is
-therefore at the image: `rasterizeToRgba` is the backend, and
-`excel/chart/render/draw-raster-png.ts` is the ten-line adapter that pairs it with the
-library's own encoder. A caller with a different encoder pairs it with that instead.
+therefore at the image: `rasterizeToRgba` is the backend, and the encoder lives with
+DEFLATE and CRC-32 in `archive/png.ts`, published as `encodePng` from
+`documonster/archive` — a PNG is a DEFLATE stream plus CRC-32-checked chunks, so that is
+where it belongs rather than in whichever module first wanted a picture. Pairing the two
+is two lines, and a caller with a different encoder (a browser canvas, say) pairs the
+pixels with that instead.
+
+That placement was arrived at the second time. The encoder sat in `excel/utils/png.ts`
+while both its callers were in `excel/`, with a note to move it down rather than copy it
+a third time. What triggered the move was not a second internal caller but a public
+entry: a consumer of `documonster/draw` or `documonster/mermaid` could obtain pixels and
+had no way to encode them, while a chart consumer could — and publishing the encoder from
+`documonster/excel` to close that gap would have been the wrong answer to the right
+question. `excel/chart/render/draw-raster-png.ts` remains as the internal eight-line
+`DrawList` → PNG convenience the chart and sparkline renderers use.
 
 `createPdfDrawSurface` takes a `PdfDrawPage` — a structural interface naming the six
 marks it puts down — rather than a `PdfPageBuilder`. The concrete builder also carries
@@ -373,11 +392,240 @@ These rules are **machine-enforced** by `scripts/verify-layers.ts` (run via `pnp
 
 Use aliases for **all** module imports — both cross-module (`@archive/...` from excel) and same-module (`@excel/cell` from within excel). This matches the IDE auto-import setting (`importModuleSpecifier: "non-relative"`) and keeps imports stable when files move. The only exception is `src/utils/` (Layer 0), whose internal files use relative paths (`./errors`, `./glob`).
 
+## Platform Variants (`*.browser.ts`)
+
+A module gets a `*.browser.ts` sibling when its Node form cannot work in a browser, or
+must not ship there. **Write the Node name at the import site and nothing else** —
+`import { readFileIfExists } from "@utils/fs"`. Selecting the variant is not your job and
+not the compiler's; it is resolution.
+
+`scripts/link-platform-variants.ts` runs after `fix-esm-imports.ts` and rewrites every
+emitted import of a variant-having module to `#platform/<path>`. One wildcard entry in the
+manifest expresses the choice:
+
+```json
+"imports": {
+  "#platform/*": {
+    "browser": { "types": "./dist/types/*.browser.d.ts", "default": "./dist/esm/*.browser.js" },
+    "default": { "types": "./dist/types/*.d.ts",         "default": "./dist/esm/*.js" }
+  }
+}
+```
+
+So **adding a variant needs no manifest edit, no build-target edit and no source edit
+beyond the file itself.** The wildcard is deliberate: an explicit list of 27 entries is a
+list that drifts from the tree it describes.
+
+**This replaced a second build of the whole tree.** `tsconfig.browser.json` used to compile
+`src` again into `dist/browser`, and `fix-browser-imports.ts` walked that copy rewriting
+relative specifiers to prefer the `.browser` sibling — its own log line was
+`modified 112 files; rewrote 158 specifiers`. Comparing the trees file by file, 705 of 784
+`.js` were byte-identical to `dist/esm` and 751 of 784 `.d.ts` to `dist/types`, and nothing
+existed in `dist/browser` that was not already in `dist/esm`: `tsc` compiles the
+`.browser.ts` files into both. It was 12.6 MB of published artifact to change 158 strings.
+The files that genuinely differed were mostly not platform code but _importers_ whose
+specifier had been rewritten — and an importer of `#platform/utils/fs` is byte-identical in
+both worlds, which is why the difference collapses to the 27 variant files.
+
+Two invariants keep it honest, and both fail loudly rather than degrade:
+
+- `pnpm verify:browser-stubs` scans `dist/esm` and `dist/types` for a _relative_ import of
+  a module that has a variant. Any hit means the browser condition cannot fire for it, so a
+  browser consumer silently receives the Node module. Without the linker it reports all 158.
+  It also holds a short policy list of modules that must keep a variant, because a deleted
+  variant leaves nothing for a structural check to call a violation.
+- `pnpm build:verify:browser` type-checks the browser declarations with
+  `--customConditions browser --lib ESNext,DOM` and no Node types available. Drop the
+  condition and it fails on `Buffer` and `node:stream`, which is how you know the check is
+  doing work rather than passing vacuously.
+
+**One capability was deliberately given up:** `dist/esm` is no longer loadable in a browser
+straight from a URL, because `#platform/*` is a bare specifier and a browser needs an import
+map to resolve one. Bundlers resolve it (verified against esbuild, rolldown and rspack), and
+the no-bundler case is what `dist/iife` is for. Deep paths were never part of the contract —
+`exports` has only ever published the 19 subpaths.
+
+**A second consumer is affected, and it is worth naming rather than discovering:** Jest
+cannot resolve `imports` (`#`) specifiers under its experimental ESM mode. Measured on
+jest 30.4.2 / Node 26.8.1, `await import("documonster/excel")` with
+`--experimental-vm-modules` fails with `does not provide an export named …`, and a minimal
+package with a single non-wildcard `#plat` entry fails identically — so this is the
+`imports` field in general, not the wildcard and not this mapping. 14 of the 19 subpaths
+reach a platform variant and are therefore affected; the other five (`markdown`, `mermaid`,
+`formula`, `xml`, `word/markdown`) are not.
+
+This is moot for the route a Jest user actually takes, because that route no longer goes
+through Jest's ESM loader at all: the package is ESM-only, so a Jest consumer transpiles it
+with `babel-jest` (see "CommonJS"), and Babel lowers `import "#platform/…"` to
+`require("#platform/…")`, which Node's CommonJS resolver handles. The `imports` field is only
+unresolvable in Jest's _own_ ESM implementation.
+
+The alternative was to express the internal seam as a public `./internal/*` subpath in
+`exports`, which Jest does resolve natively. It was rejected: it would publish 27 internal
+modules as importable paths to work around one runner's experimental mode, and this
+package's position is that the `dist/` layout is not a contract.
+
+Note that TypeScript does **not** apply the `browser` condition by default under either
+`bundler` or `nodenext` resolution: a consumer who wants the browser surface's types sets
+`customConditions: ["browser"]`. That was equally true of the two-tree layout, so nothing
+changed for them.
+
+`src/utils/browser.ts` (`preferBrowserFilesPlugin`) is a separate mechanism for a separate
+job: it swaps variants while bundling **from source**, which is what `rolldown.config.ts`
+and `vitest.browser.config.ts` do. Source has no `#platform/*` specifiers to resolve.
+
+## CommonJS
+
+**The package is ESM-only.** Every `exports` subpath is `{ browser, types, default }` and
+`default` names a file in `dist/esm`; there is no `require` condition and no transpiled tree.
+A CommonJS consumer reaches it through `require(esm)`, and their call site does not change:
+
+```js
+const { Workbook } = require("documonster/excel"); // works verbatim
+```
+
+`dist/cjs` used to be a full second transpile — 10.7 MB unpacked, 2.4 MB of the packed
+tarball, a third of everything an `npm install` downloaded — and it existed for a runtime
+capability Node has since absorbed.
+
+### Why `>=22.13.0` and not `>=22.12.0`
+
+`require(esm)` was unflagged in 22.12, so 22.12 is where it starts _working_. But measured on
+a real 22.12.0 binary, every `require()` of an ES module also prints:
+
+```
+ExperimentalWarning: CommonJS module … is loading ES Module … using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+```
+
+That is stderr noise on every process start, in every consumer's CI log. Verified across
+22.12.0 / 22.13.0 / 22.22.1 / 24.16.0 / 26.8.1: the warning is present on 22.12.0 and gone
+from 22.13.0 onward, while `require()` of all 19 subpaths succeeds on every one of them. So
+the floor is the first version where the feature is both available and quiet.
+
+### What this costs a consumer, and what it does not
+
+Nothing changes for Node ESM, for a bundler, or for a `<script>` tag. Two populations are
+affected:
+
+- **Node 22.0 – 22.12.** 22.0–22.11 need `--experimental-require-module`; 22.12 works but
+  warns. Upgrade.
+- **TypeScript consumers on `moduleResolution: node16`.** That mode predates `require(esm)`
+  and reports `TS1479` before Node is involved; `nodenext` accepts it. Measured on tsc 5.9:
+  `nodenext`, `bundler` and the legacy `commonjs` + `node10` pair all compile, `node16` does
+  not, and the emitted JavaScript runs in every case. It is a one-word change in their
+  tsconfig, and `nodenext` is what TypeScript recommends for Node projects anyway.
+- **Jest users.** Jest cannot `require()` an ES module at all — measured on jest 30.4.2 with
+  transforms disabled, on Node 26.8.1, and against a local `.mjs` as a control, so this is
+  Jest and not this package. Its own error text points at "Node v24.9+ where Jest supports
+  require(esm) natively"; that did not hold. The fix is two files, verified working against
+  the published shape:
+
+  ```js
+  // babel.config.cjs
+  module.exports = { presets: [["@babel/preset-env", { targets: { node: "current" } }]] };
+  ```
+
+  ```json
+  // jest.config.json
+  {
+    "transform": { "\\.[jt]sx?$": "babel-jest" },
+    "transformIgnorePatterns": ["/node_modules/(?!documonster)"]
+  }
+  ```
+
+That second cost is real but it is not unusual, and that is the calibration that decided
+this. Requiring six of the eight most-depended-on packages tested — `strip-ansi` (527 M
+weekly), `chalk` (507 M), `p-limit` (333 M), `uuid` (295 M), `nanoid` (243 M), `node-fetch`
+(194 M) — fails in Jest with the identical message; only `axios` and `zod` still ship
+CommonJS. Any Jest project whose dependency tree reaches one of those already carries that
+`transformIgnorePatterns` line, so adding a name to it is a one-line change rather than a
+new configuration. And all six switched at a _major_ version; this package is pre-1.0 with
+`bump-minor-pre-major`, so now is the cheapest moment it will ever have.
+
+### The standing rule this creates
+
+`require(esm)` throws `ERR_REQUIRE_ASYNC_MODULE` on a module graph containing top-level
+await. With no transpiled tree to fall back on, **top-level await would make the package
+unrequirable from CommonJS.** So: do not introduce one. A zero-dependency document toolkit
+has no need for it.
+
+The whole matrix was measured against a real `npm install` of the packed tarball, not a
+symlinked `node_modules`: all 19 subpaths `require()`d, destructured and executed on
+22.12.0 / 22.13.0 / 22.22.1 / 24.16.0 / 26.8.1 and on Bun 1.4, plus ESM `import` on each.
+`pnpm verify:install` is that check, and the `Consumer floor` CI job runs it on 22.13.0.
+
+**Two floors, and conflating them breaks CI.** `engines.node` (>=22.13) is what a _consumer_
+needs; the _toolchain_ needs >=22.18, because every gate is a `node scripts/*.ts` and Node's
+type stripping is unflagged only from 22.18 — 22.17.1 still throws
+`ERR_UNKNOWN_FILE_EXTENSION`. Pinning the consumer floor in the `test` matrix therefore failed
+all nine jobs for a reason unrelated to the package. So the `test` matrix runs `22.x`, and the
+floor is verified where it can be: against the installed artifact, by the one script here
+written in plain CommonJS (`scripts/verify-installed-package.cjs`) so that it runs there at all.
+
+One methodological trap is worth recording, because it produced a wrong "verified" reading
+first time round: the `ExperimentalWarning` goes through `process.emitWarning`, which defers
+to the next tick, so a harness ending in `process.exit()` never sees it and 22.12 looks
+clean. `verify:cjs` waits for the child to exit for that reason.
+
+That is a gate, not a hope. `pnpm verify:cjs` and
+`src/test/__tests__/cjs-entrypoints.node.test.ts` `require()` all 19 entry points, and the
+test first pins the mechanism against a fixture — one case proves `require(esm)` works on a
+plain module, another proves it throws on top-level await — so the suite cannot pass because
+Node stopped caring. Verified by appending an `await` to `markdown/index.ts`:
+`✗ verify:cjs — 1 of 19 entry point(s) failed to require()`.
+
+Deleting the CommonJS transpile also removed a whole class of bug with it. `tsc`'s CommonJS
+emit preserved statement order where ESM hoists its bindings, so an import written at the end
+of a file landed below its consumer and threw
+`ReferenceError: Cannot access 'grapheme_1' before initialization` at load. That shipped once,
+breaking 12 of the 19 CJS entries while the entire test suite stayed green — because the tests
+run against source, through ESM. There is now one emit, so source and artifact cannot disagree
+that way.
+
+## Documentation
+
+Examples are the first thing a consumer copies, and until recently they were the only artefact
+here that nothing in the toolchain read — so they drifted, silently and with the authority of
+sitting next to the implementation. `scripts/verify-doc-examples.ts` (`pnpm verify:doc-examples`,
+included in `pnpm check`) closes that: it resolves every documented import **and** every
+`Namespace.member` reference against the built public surface by handing them to `tsc`.
+
+What it found on its first two runs is the reason it exists: seventeen `@example` blocks in
+`pdf/` and `word/` still naming the flat exports those modules replaced with namespace surfaces
+(`readPdf` → `Pdf.read`, `toBuffer` → `Io.toBuffer`, …); eleven more of the same in the READMEs,
+which carry five times as many imports; a `Document.addBodyContent` that has never existed; and
+a comment instructing readers to call four members on `StyleMap`, which resolves — to a _type_
+of that name, while the namespace is published as `Styles`.
+
+Rules when writing documentation:
+
+- **Name the public form**, not the internal function it forwards to. `Pdf.read`, not `readPdf`;
+  `Worksheet.Handle`, not `WorksheetData`.
+- **Put runnable code in a fence.** Markdown is checked inside fenced blocks only; inline code
+  in a sentence is treated as a reference to a symbol, which is what lets a document _discuss_
+  a broken import. TSDoc comments are read in full, prose included, because their prose
+  instructs.
+- **Use braced imports** (`import { A, B } from "documonster/x"`). A namespace or default import
+  is reported rather than skipped — a gate with a silent hole is worse than no gate.
+- **Keep local links real.** `scripts/verify-doc-links.ts` checks relative files, directories,
+  images and Markdown heading fragments. External URLs are deliberately not fetched. Heading
+  anchors follow GitHub's rule, including the two details that surprise people: a dropped
+  character between spaces leaves _two_ hyphens (`Excel — XLSX` → `excel--xlsx`), and a
+  leading emoji leaves a leading hyphen (`⚠ BREAKING` → `-breaking`).
+- **Do not restate counts.** A number only a human keeps in sync is eventually wrong: the
+  function count said 433 in sixteen places while the registry held 448.
+  `src/modules/formula/__tests__/function-count.node.test.ts` pins the twelve that remain against
+  `listFunctionNames()`. It carries the `.node` suffix because it reads Markdown off disk: the
+  browser config excludes `*.node.test.ts` by glob, which is a rule rather than a hand-kept list.
+- A member a comment names _in order to say it is absent_ goes in that script's
+  `DELIBERATELY_ABSENT` map, keyed by file, and is documented there.
+
 ## Code Style
 
 - **Type-only imports**: `import type { Foo } from "..."`
 - **Error handling**: Extend `BaseError` from `@utils/errors`, use `{ cause }` for chaining.
-- **Files**: kebab-case. **Browser variants**: `*.browser.ts`.
+- **Files**: kebab-case. **Browser variants**: `*.browser.ts` — see below.
 - **Formatting**: Handled entirely by Prettier — just run `pnpm format`.
 - **Tests**: Vitest, in `__tests__/*.test.ts`. Timeout: 30s.
   - **Co-locate tests next to the code they cover.** A test lives in the `__tests__/` directory of the module subfolder it exercises — e.g. `core/__tests__/`, `surface/__tests__/`, `stream/__tests__/`, `chart/__tests__/`, `bridge/__tests__/`, `utils/__tests__/`, `xlsx/__tests__/`. The `xlsx/__tests__/` tree mirrors the `xlsx/xform/` source layout. Do not pile module tests into a single top-level `__tests__/`.
@@ -400,6 +648,54 @@ Choose the form by purpose, not by preference. Do **not** make everything an arr
 - **Use a `class` only when you genuinely need** instance identity with mutable state, inheritance/polymorphism, lifecycle (`implements`/`extends`), or a public API where `new`/methods read more naturally than free functions.
 - **Avoid classes that are just namespaces** — a class with only static members (or a single method) should be plain exported functions instead.
 
-## Example Output
+## Examples
 
 All runnable examples write output to `tmp/` under the project root. This directory is gitignored.
+
+`scripts/run-examples.ts` (`pnpm verify:examples`, and the `Examples` CI job) **discovers and
+runs every one of them**. Until it did, examples were the only artefact here that nothing
+executed: the runner carried a hand-written list covering a sixth of the tree, and no CI job
+invoked it. The first full run found six failures — five examples that could not resolve their
+imports and one that hit a genuine `RangeError: Maximum call stack size exceeded` in the PDF
+exporter (`push(...parts)` turning an unbounded array into an argument list). A seventh surfaced
+on the second run: an example that could not run twice.
+
+It runs at two levels, because the two ways an example breaks are different. The pre-commit hook
+runs `--changed`: the examples the commit edits, plus every example beside a `utils/` helper it
+edits, which is seconds. The `Examples` CI job runs **all** of them, catching an example broken
+by a change to the library it calls; that is over a minute, too slow for a hook. It is
+deliberately absent from `pnpm test`, which CI runs across every supported Node version and
+three operating systems: the failures this catches are neither version- nor platform-specific,
+so repeating them once per matrix cell would buy nothing.
+
+Both the discovery rules and `--changed` are covered by
+`src/test/__tests__/run-examples.test.ts`, against fixture trees built to break each one — the
+runner takes `--root` for that, like the other gates. The hook used to carry its own shell
+pattern for the same job, and it had drifted three ways: renames were skipped, nested example
+directories were invisible, and a path containing a space was split in two.
+
+Rules when writing an example:
+
+- **Use the public API.** An example that has to import from `@excel/core/...`, `@pdf/reader/...`
+  or `__tests__/` is either the wrong file or evidence of a missing public member — treat it as
+  the latter until proven otherwise. That is how `Row.addPageBreak`, `Column.setNumFmt` and
+  `Cell.find` came to exist.
+- **Be re-runnable.** The gate runs an example against the `tmp/` output of its own previous
+  run. Anything that defaults to `overwrite: "error"` needs the opt-in.
+- **Write only to `tmp/`.** Accept an optional output path as `process.argv[2]` and default it
+  under `tmp/`; never write into the source tree.
+- **Run it with `pnpm example`, not `npx tsx`.** `tsx` hands the resolved path to Node's ESM
+  resolver, which treats a dot-suffix as a complete filename — so a specifier ending `.node` or
+  `.browser` never gets `.ts` appended, and this repository's platform-variant convention breaks.
+  `pnpm example` runs `node --import @oxc-node/core/register`, which resolves both tsconfig
+  `paths` and an extensionless TypeScript target. Node's own `--experimental-strip-types` is not
+  enough either: it is strip-only and this tree uses parameter properties. Fifty-three
+  `Run: npx tsx …` comments said otherwise; five of them were instructions that could not work.
+- **A benchmark is not an example.** Something that measures internal machinery against the
+  platform's belongs in `benchmark/`, where reaching into internals is legitimate. Two stream
+  benchmarks sat in `examples/` and were the sole reason anything wanted `@utils/event-emitter`
+  published.
+- **Fixtures live in `examples/data/`,** not in `__tests__/data/`. The test tree is excluded from
+  every build and absent from the published package, so an example reading from it cannot be
+  copied — and its output would be coupled to an asset free to change for unrelated reasons.
+  A file needed by both is duplicated on purpose.

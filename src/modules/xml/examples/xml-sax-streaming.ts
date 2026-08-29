@@ -8,7 +8,7 @@
  *   pre-configured SaxParser (no per-event object allocation)
  * - Xml.validateCommentText: validate text is legal inside an XML comment
  *
- * Usage:   npx tsx src/modules/xml/examples/xml-sax-streaming.ts
+ * Usage:   pnpm example --filter xml-sax-streaming
  */
 import { Xml, isXmlError } from "../index";
 

@@ -1,4 +1,3 @@
-import { indexOfUint8ArrayPattern } from "@archive/core/bytes";
 import type { ZipStringEncoding } from "@archive/core/text";
 import {
   parseFormattedTyped as parseBuffer,
@@ -329,116 +328,11 @@ function parseDataDescriptorVarsFast(data: Uint8Array): DataDescriptorVars {
   };
 }
 
-function indexOf4BytesPattern(buffer: Uint8Array, pattern: Uint8Array, startIndex: number): number {
-  if (pattern.length !== 4) {
-    return indexOfUint8ArrayPattern(buffer, pattern, startIndex);
-  }
-
-  const b0 = pattern[0];
-  const b1 = pattern[1];
-  const b2 = pattern[2];
-  const b3 = pattern[3];
-
-  const bufLen = buffer.length;
-  let start = startIndex | 0;
-  if (start < 0) {
-    start = 0;
-  }
-  if (start > bufLen - 4) {
-    return -1;
-  }
-
-  const last = bufLen - 4;
-  let i = buffer.indexOf(b0, start);
-  while (i !== -1 && i <= last) {
-    if (buffer[i + 1] === b1 && buffer[i + 2] === b2 && buffer[i + 3] === b3) {
-      return i;
-    }
-    i = buffer.indexOf(b0, i + 1);
-  }
-
-  return -1;
-}
-
 export interface ValidatedDataDescriptorScanResult {
   /** Start index of the descriptor within `view`, or -1 when not found yet. */
   foundIndex: number;
   /** Where the caller should resume searching on the next scan of (a mostly unchanged) view. */
   nextSearchFrom: number;
-}
-
-function initScanResult(
-  out?: ValidatedDataDescriptorScanResult
-): ValidatedDataDescriptorScanResult {
-  if (out) {
-    return out;
-  }
-  return { foundIndex: -1, nextSearchFrom: 0 };
-}
-
-export function scanValidatedDataDescriptor(
-  view: Uint8Array,
-  dataDescriptorSignature: Uint8Array,
-  bytesEmitted: number,
-  startIndex = 0,
-  out?: ValidatedDataDescriptorScanResult
-): ValidatedDataDescriptorScanResult {
-  const result = initScanResult(out);
-
-  const viewLen = view.length;
-
-  let searchFrom = startIndex | 0;
-  if (searchFrom < 0) {
-    searchFrom = 0;
-  }
-  if (searchFrom > viewLen) {
-    searchFrom = viewLen;
-  }
-
-  const sigLen = dataDescriptorSignature.length | 0;
-  const overlap = sigLen > 0 ? sigLen - 1 : 0;
-
-  const viewLimit = Math.max(0, viewLen - overlap);
-
-  while (searchFrom < viewLen) {
-    const match = indexOf4BytesPattern(view, dataDescriptorSignature, searchFrom);
-    if (match === -1) {
-      result.foundIndex = -1;
-      result.nextSearchFrom = Math.max(searchFrom, viewLimit);
-      return result;
-    }
-
-    const idx = match;
-
-    // Need 16 bytes for descriptor + 4 bytes for next record signature.
-    const nextSigOffset = idx + 16;
-    if (nextSigOffset + 4 <= viewLen) {
-      const nextSig = readUint32LEFromBytes(view, nextSigOffset);
-
-      const descriptorCompressedSize = readUint32LEFromBytes(view, idx + 8);
-      const expectedCompressedSize = (bytesEmitted + idx) >>> 0;
-
-      if (
-        isValidZipRecordSignature(nextSig) &&
-        descriptorCompressedSize === expectedCompressedSize
-      ) {
-        result.foundIndex = idx;
-        result.nextSearchFrom = idx;
-        return result;
-      }
-
-      searchFrom = idx + 1;
-      continue;
-    }
-
-    result.foundIndex = -1;
-    result.nextSearchFrom = idx;
-    return result;
-  }
-
-  result.foundIndex = -1;
-  result.nextSearchFrom = Math.max(searchFrom, viewLimit);
-  return result;
 }
 
 // =============================================================================

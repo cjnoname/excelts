@@ -396,45 +396,6 @@ export function tableStore(t: TableData): void {
   }
 }
 
-export function tableLoad(t: TableData, worksheet: Worksheet): void {
-  // where the table will read necessary features from a loaded sheet
-  const { table } = t;
-  const { row, col } = table.tl!;
-  let count = 0;
-  if (table.headerRow) {
-    const r = getRow(worksheet, row + count++);
-    table.columns.forEach((column, j) => {
-      const cell = rowGetCell(r, col + j);
-      cellSetValue(cell, column.name);
-    });
-  }
-  table.rows.forEach(data => {
-    const r = getRow(worksheet, row + count++);
-    data.forEach((value, j) => {
-      const cell = rowGetCell(r, col + j);
-      cellSetValue(cell, value);
-    });
-  });
-
-  if (table.totalsRow) {
-    const r = getRow(worksheet, row + count++);
-    table.columns.forEach((column, j) => {
-      const cell = rowGetCell(r, col + j);
-      if (j === 0) {
-        cellSetValue(cell, column.totalsRowLabel);
-      } else {
-        const formula = tableGetFormula(t, column);
-        if (formula) {
-          cellSetValue(cell, {
-            formula,
-            result: column.totalsRowResult
-          });
-        }
-      }
-    });
-  }
-}
-
 /** The underlying serialized {@link TableModel}. */
 export function tableModel(t: TableData): TableModel {
   return t.table;

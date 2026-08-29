@@ -32,13 +32,6 @@ export class ArchiveError extends BaseError {
   }
 }
 
-/**
- * Check if an error is an archive error.
- */
-export function isArchiveError(err: unknown): err is ArchiveError {
-  return err instanceof ArchiveError;
-}
-
 // -----------------------------------------------------------------------------
 // ZIP Parsing Errors
 // -----------------------------------------------------------------------------

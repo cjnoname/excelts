@@ -40,6 +40,7 @@ import {
   hasDescendantLocal,
   matchesLocal
 } from "@excel/utils/ooxml-validator/xml-utils";
+import { textContent } from "@xml/dom";
 import type { XmlElement } from "@xml/types";
 
 const DRAWING_PATH_RE = /^xl\/drawings\/drawing\d+\.xml$/;
@@ -263,7 +264,7 @@ function checkCellAnchor(
     if (!el) {
       continue; // some producers elide zero offsets — tolerate.
     }
-    const text = collectText(el).trim();
+    const text = textContent(el).trim();
     const n = parseInt(text, 10);
     if (!Number.isFinite(n)) {
       ctx.reporter.warning(
@@ -301,18 +302,6 @@ function checkExtOrPos(
       );
     }
   }
-}
-
-function collectText(el: XmlElement): string {
-  let out = "";
-  for (const child of el.children) {
-    if (child.type === "text" || child.type === "cdata") {
-      out += child.value;
-    } else if (child.type === "element") {
-      out += collectText(child);
-    }
-  }
-  return out;
 }
 
 /**

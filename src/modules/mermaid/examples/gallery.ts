@@ -1,7 +1,7 @@
 /**
  * Every diagram type, to every backend.
  *
- * Run with `npx tsx src/modules/mermaid/examples/gallery.ts`; output lands in `tmp/mermaid`.
+ * Run with `pnpm example --filter gallery`; output lands in `tmp/mermaid`.
  *
  * The point of the example is the middle of it: each diagram is converted to a display
  * list *once*, and the SVG, the PNG and the PDF are three readings of that one list. A
@@ -12,12 +12,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { rasterizeToRgba, renderDrawList } from "@draw/index";
-import { toSvg } from "@draw/svg";
-import { encodePng } from "@excel/utils/png";
+import { encodePng } from "@archive/png";
+import { rasterizeToRgba, renderDrawList, toSvg } from "@draw/index";
 import { mermaidToDrawList } from "@mermaid/index";
-import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
-import { createPdfDrawSurface } from "@pdf/render/draw-surface";
+import { createPdfDrawSurface, Pdf } from "@pdf/index";
 
 const OUT = path.join(process.cwd(), "tmp", "mermaid");
 
@@ -361,7 +359,7 @@ async function main(): Promise<void> {
     const image = rasterizeToRgba(list, { scale: 2 });
     writeFileSync(path.join(OUT, `${name}.png`), encodePng(image.data, image.width, image.height));
 
-    const builder = new PdfDocumentBuilder();
+    const builder = new Pdf.Builder();
     const page = builder.addPage({ width: list.width + 40, height: list.height + 40 });
     renderDrawList(
       list,

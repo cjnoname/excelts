@@ -7,7 +7,7 @@
  * - finishedAll()   — await completion of multiple streams at once
  * - addAbortSignal() — wire an AbortSignal to destroy a stream on abort
  *
- * Usage: npx tsx src/modules/stream/examples/06-compose-filter-abort.ts
+ * Usage: pnpm example --filter 06-compose-filter-abort
  */
 
 import {

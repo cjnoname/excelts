@@ -83,7 +83,7 @@ Csv.format(data, {
 
 Synchronous CSV parser with type-safe overloads.
 
-```typescript
+```text
 // No options -> string[][]
 Csv.parse(csvString): string[][];
 

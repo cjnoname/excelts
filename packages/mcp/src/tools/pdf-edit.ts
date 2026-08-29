@@ -2,18 +2,25 @@
  * `pdf_edit` — structural and overlay edits to an existing PDF.
  *
  * The operations here are the ones that need no understanding of the content:
- * stamp a watermark, add page numbers, drop or keep pages, rotate, append
- * another PDF. That is exactly the set a model can drive safely, because
- * getting them wrong is visible rather than subtle.
+ * stamp a watermark, add page numbers, draw a Mermaid diagram, drop or keep
+ * pages, rotate, append another PDF. That is exactly the set a model can drive
+ * safely, because getting them wrong is visible rather than subtle.
+ *
+ * The diagram operation is the reason `createPdfDrawSurface` is published from
+ * `documonster/pdf`: a `PdfEditorPage` already puts down the six marks a
+ * `PdfDrawPage` names, so a display list draws onto an existing page as **vectors**
+ * with no rasterising step. A diagram stamped this way stays sharp at any zoom,
+ * which a PNG overlay would not.
  *
  * Overlays are drawn on a separate content stream layered over the original, so
  * existing page content is never redrawn.
  *
  * How the file is saved depends on what was asked for, and it matters:
  *
- * - **Overlay-only** edits (watermark, page numbers, stamp) are saved as an
- *   incremental update where the format allows it, which appends to the original
- *   bytes and therefore keeps bookmarks, form fields and any signature intact.
+ * - **Overlay-only** edits (watermark, page numbers, stamp, diagram) are saved as
+ *   an incremental update where the format allows it, which appends to the
+ *   original bytes and therefore keeps bookmarks, form fields and any signature
+ *   intact.
  * - **Structural** edits (delete/keep pages, rotate, append) require a full
  *   rebuild. That renumbers objects, invalidates signatures and may drop
  *   document-level structures the rebuilder does not carry over. The result says
@@ -25,12 +32,20 @@
 
 import { readFile } from "node:fs/promises";
 
-import { Pdf } from "documonster/pdf";
+import { renderDrawList } from "documonster/draw";
+import { Pdf, createPdfDrawSurface } from "documonster/pdf";
 import { z } from "zod";
 
 import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, resolveEditTarget, resolveInRoot } from "../sandbox.js";
+import {
+  buildDrawList,
+  parseDiagram,
+  resolveDiagramSource,
+  summariseDiagram,
+  toRenderOptions
+} from "./diagram.js";
 import { parsePages, supportsIncrementalUpdate } from "./document.js";
 import {
   assertReadableSize,
@@ -50,6 +65,9 @@ const STRUCTURAL_OPS = new Set(["delete_pages", "keep_pages", "rotate", "append"
 
 /** Pages a single call may touch. */
 const MAX_PAGES = 2_000;
+
+/** Breathing room left around a diagram that was given no explicit box. */
+const DIAGRAM_MARGIN = 36;
 
 const opSchema = z.discriminatedUnion("op", [
   z.object({
@@ -94,6 +112,49 @@ const opSchema = z.discriminatedUnion("op", [
     color: z.string().optional().describe('Hex RGB without "#". Defaults to "000000".')
   }),
   z.object({
+    op: z.literal("diagram"),
+    source: z.string().optional().describe("Mermaid diagram text. Use this or `from`, not both."),
+    from: z
+      .string()
+      .optional()
+      .describe("Read the diagram from a .mmd file, or a ```mermaid fence in a .md file."),
+    index: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Which fence, when `from` is a Markdown file with several. Defaults to 1."),
+    pages: z
+      .union([z.array(z.number().int().positive()), z.string()])
+      .optional()
+      .describe("Pages to draw it on. Omit for every page."),
+    x: z.number().optional().describe("Points from the left edge. Defaults to centred."),
+    y: z
+      .number()
+      .optional()
+      .describe(
+        "Points from the BOTTOM edge — PDF coordinates start bottom-left. Defaults to centred."
+      ),
+    width: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "Box width in points; the diagram is fitted into it uniformly. Omit to use its natural size, shrunk if needed to fit the page."
+      ),
+    height: z.number().positive().optional().describe("Box height in points."),
+    theme: z
+      .enum(["default", "dark", "neutral"])
+      .optional()
+      .describe("Colour set. Defaults to `default`."),
+    background: z
+      .string()
+      .optional()
+      .describe(
+        'Defaults to "transparent" here, unlike diagram_render: this draws over existing page content, and a white panel would hide it. Pass a colour to get an opaque plate.'
+      )
+  }),
+  z.object({
     op: z.literal("delete_pages"),
     pages: z
       .union([z.array(z.number().int().positive()), z.string()])
@@ -130,7 +191,7 @@ export const pdfEditTool = defineTool({
   group: "pdf",
   title: "Edit an existing PDF",
   description:
-    "Apply operations to a PDF: watermark, page numbers, a positioned stamp, delete or keep pages, rotate, or append another PDF. Overlays are drawn over the original content, which is never rewritten. Use dryRun to see the effect described before writing. There is no text extraction into a new PDF and no PDF→Word.",
+    "Apply operations to a PDF: watermark, page numbers, a positioned stamp, a Mermaid diagram drawn as vectors, delete or keep pages, rotate, or append another PDF. Overlays are drawn over the original content, which is never rewritten. Use dryRun to see the effect described before writing. There is no text extraction into a new PDF and no PDF→Word.",
   inputSchema: {
     path: z.string().min(1).describe("PDF to edit, relative to the server root."),
     ops: z.array(opSchema).min(1).describe("Operations, applied in order."),
@@ -335,6 +396,49 @@ async function applyOp(
         });
       }
       return { description: `stamped ${pages.length} page(s) at (${op.x}, ${op.y})` };
+    }
+
+    case "diagram": {
+      const pages = resolvePages(op.pages, pageCount);
+      const resolved = await resolveDiagramSource(config, op);
+      const diagram = parseDiagram(resolved.source);
+      // Built once and drawn onto every page: the layout does not depend on
+      // where it lands, and re-running it per page would be pure waste.
+      const style = toRenderOptions({
+        ...(op.theme === undefined ? {} : { theme: op.theme }),
+        // Transparent by default, because this draws over content that is
+        // already there. `diagram_render` defaults to white for the opposite
+        // reason: a standalone transparent file is invisible.
+        background: op.background ?? "transparent"
+      });
+      const list = buildDrawList(resolved.source, style);
+
+      let placement = "";
+      for (const page of pages) {
+        const target = editor.getPage(requireOriginalPage(pageMap, page));
+        const boxWidth = op.width ?? Math.max(1, target.width - DIAGRAM_MARGIN * 2);
+        const boxHeight = op.height ?? Math.max(1, target.height - DIAGRAM_MARGIN * 2);
+        const room = Math.min(boxWidth / list.width, boxHeight / list.height);
+        // An explicit box may enlarge the diagram; an implicit one only shrinks
+        // it, so a small diagram is not blown up to fill the paper.
+        const fit = op.width === undefined && op.height === undefined ? Math.min(1, room) : room;
+        const drawnWidth = list.width * fit;
+        const drawnHeight = list.height * fit;
+        const x = op.x ?? (target.width - drawnWidth) / 2;
+        const y = op.y ?? (target.height - drawnHeight) / 2;
+        // Vectors, not a raster: `PdfEditorPage` puts down exactly the six marks
+        // `PdfDrawPage` names, so the shared walker draws straight onto the
+        // existing page and the diagram stays sharp at any zoom.
+        renderDrawList(
+          list,
+          createPdfDrawSurface(target, { x, y, width: drawnWidth, height: drawnHeight }, fit)
+        );
+        placement = `${Math.round(drawnWidth)}×${Math.round(drawnHeight)} pt at (${Math.round(x)}, ${Math.round(y)})`;
+      }
+
+      return {
+        description: `drew a diagram on ${pages.length} page(s) as vectors, ${placement} — ${summariseDiagram(diagram)}`
+      };
     }
 
     case "delete_pages": {

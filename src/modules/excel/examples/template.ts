@@ -14,7 +14,7 @@ import { Workbook } from "@excel/index";
  *   tmp/excel-examples/template-out.xlsx
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/template.ts
+ *   pnpm example --filter template
  */
 const exampleDir = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.resolve(exampleDir, "../../../../tmp/excel-examples");

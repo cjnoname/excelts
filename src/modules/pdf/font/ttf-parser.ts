@@ -58,6 +58,16 @@ export interface TtfFont {
   /** PostScript name (from name table, nameID 6) */
   readonly postScriptName: string;
 
+  /**
+   * OS/2 `usWeightClass`, or 400 when the table is absent.
+   *
+   * Auto-discovery needs it to choose between the faces of a collection that
+   * share a family name: macOS `Songti.ttc` holds `Songti SC` at Black (face 0),
+   * Bold, Light and Regular, so taking the first match set an entire document in
+   * the heaviest weight available.
+   */
+  readonly weightClass: number;
+
   /** Units per em (from head table) */
   readonly unitsPerEm: number;
 
@@ -232,10 +242,6 @@ class BEReader {
   u32At(offset: number): number {
     return this.view.getUint32(this.claim(offset, 4), false);
   }
-
-  i16At(offset: number): number {
-    return this.view.getInt16(this.claim(offset, 2), false);
-  }
 }
 
 // =============================================================================
@@ -310,6 +316,47 @@ export function parseTtf(data: Uint8Array, collectionIndex = 0): TtfFont {
 
   // Not TTC — parse as regular TTF starting from the magic we already read
   return parseTtfFromMagic(data, r, magic);
+}
+
+/**
+ * Count the faces inside a font file: the number of fonts in a TrueType
+ * Collection, or `1` for a single-face `.ttf`.
+ *
+ * System-font discovery needs this to enumerate a `.ttc` rather than assume
+ * face 0 is the one worth having. It frequently is not — macOS ships
+ * `Songti.ttc` with 8,535 glyphs in face 0 and 43,033 in face 1, so a scan
+ * that only ever reads face 0 rejects the collection for text the font can
+ * in fact draw.
+ *
+ * @param data - Raw font file bytes
+ * @returns Face count (at least 1)
+ * @throws {PdfFontError} If the collection header is invalid or truncated
+ */
+export function countTtfFaces(data: Uint8Array): number {
+  if (data.byteLength < 4) {
+    return 1;
+  }
+  const r = new BEReader(data);
+  if (r.u32() !== 0x74746366) {
+    return 1; // not a collection
+  }
+  if (data.byteLength < 12) {
+    throw new PdfFontError("Invalid TrueType Collection: header is truncated");
+  }
+  const version = r.u32();
+  if (version !== 0x00010000 && version !== 0x00020000) {
+    throw new PdfFontError(
+      `Invalid TrueType Collection: unsupported version 0x${version.toString(16)}`
+    );
+  }
+  const numFonts = r.u32();
+  if (numFonts === 0) {
+    throw new PdfFontError("TrueType Collection is empty (0 fonts)");
+  }
+  if (numFonts > Math.floor((data.byteLength - 12) / 4)) {
+    throw new PdfFontError("Invalid TrueType Collection: font offset table is truncated");
+  }
+  return numFonts;
 }
 
 /**
@@ -399,6 +446,31 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     }
   }
 
+  // The subsetting embedder reads outlines from `glyf`/`loca`, so a font that
+  // keeps them anywhere else is unusable — and has to be rejected *here*,
+  // because everything above this point can succeed without them.
+  //
+  // A TrueType wrapper is not a promise of TrueType outlines. macOS ships the
+  // faces CoreText actually renders Chinese with
+  // (`FontServices.framework/.../PingFangUI.ttc`) as sfntVersion 0x00010000
+  // with a 58 MB private `hvgl` table and no `glyf` at all: it parses, reports
+  // 47,098 glyphs and full CJK coverage, then subsets to nothing. Embedding it
+  // produced a 2 KB PDF whose every glyph was blank, with no error raised —
+  // silent data loss, and the likeliest font for someone chasing the system
+  // Chinese face to reach for. `.otf` is caught earlier by its OTTO signature
+  // and bitmap-only faces by their missing `head`; this closes the third case.
+  for (const t of ["glyf", "loca"]) {
+    if (!tables.has(t)) {
+      throw new PdfFontError(
+        `TrueType font has no '${t}' table, so it carries no usable outlines ` +
+          `(tables present: ${[...tables.keys()].sort().join(", ")}). ` +
+          "Fonts that store outlines in another format — CFF, a bitmap table, or Apple's " +
+          "private 'hvgl' used by the system PingFang UI faces — cannot be embedded. " +
+          "Use a font with 'glyf' outlines."
+      );
+    }
+  }
+
   // --- head table ---
   const head = readHead(r, tables.get("head")!);
 
@@ -470,6 +542,7 @@ function parseTtfFromMagic(data: Uint8Array, r: BEReader, sfVersion: number): Tt
     data,
     familyName,
     postScriptName,
+    weightClass: weight,
     unitsPerEm: head.unitsPerEm,
     ascent,
     descent,

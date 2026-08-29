@@ -10,11 +10,15 @@ byte literals.
 
 ```bash
 # Run a single example
-npx tsx src/modules/word/examples/01-basics.ts
+pnpm example --filter 01-basics
 
-# Run all examples (writes everything into tmp/word-examples/)
-npx tsx src/modules/word/examples/index.ts
+# Run every Word example (writes everything into tmp/word-examples/)
+pnpm example --filter word/examples
 ```
+
+`pnpm example` runs the whole tree; `--filter` narrows it by path substring. It
+resolves imports the way the test suite does, which a bare `tsx` invocation does
+not — see `scripts/run-examples.ts`.
 
 Output is written to `tmp/word-examples/`.
 
@@ -41,18 +45,18 @@ Output is written to `tmp/word-examples/`.
 
 ### 15–24 Editing, querying & document features
 
-| File                          | Topic                                                                    |
-| ----------------------------- | ------------------------------------------------------------------------ |
-| `15-track-changes.ts`         | Insertion / deletion / move + accept/reject helpers                      |
-| `16-templates.ts`             | `fillTemplate` + JSON / XML / CSV data sources, custom delim             |
-| `17-forms-sdt.ts`             | Legacy form fields + SDT (content controls) + data binding               |
-| `18-read-modify.ts`           | `readDocx`, `extractText`, `searchText`, `replaceText` (in 9 containers) |
-| `19-merge-split-diff.ts`      | `mergeDocuments` / `splitDocument` / `diffDocuments`                     |
-| `20-protection-encryption.ts` | `protectDocument` + `encryptDocx`                                        |
-| `21-validation.ts`            | `validateDocument` (clean / malformed / strict / compat)                 |
-| `22-streaming.ts`             | `createDocxStream` for huge documents                                    |
-| `23-fonts.ts`                 | `embedFont` (with subsetting & ODTTF obfuscation)                        |
-| `24-watermark-bg.ts`          | Text & image watermark, page background, custom theme                    |
+| File                          | Topic                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| `15-track-changes.ts`         | Insertion / deletion / move + accept/reject helpers                                       |
+| `16-templates.ts`             | `fillTemplate` + JSON / XML / CSV data sources, custom delim                              |
+| `17-forms-sdt.ts`             | Legacy form fields + SDT (content controls) + data binding                                |
+| `18-read-modify.ts`           | `Io.read`, `Query.extractText`, `Query.searchText`, `Query.replaceText` (in 9 containers) |
+| `19-merge-split-diff.ts`      | `Io.merge` / `Io.split` / `Diff.documents`                                                |
+| `20-protection-encryption.ts` | `protectDocument` + `encryptDocx`                                                         |
+| `21-validation.ts`            | `validateDocument` (clean / malformed / strict / compat)                                  |
+| `22-streaming.ts`             | `createDocxStream` for huge documents                                                     |
+| `23-fonts.ts`                 | `embedFont` (with subsetting & ODTTF obfuscation)                                         |
+| `24-watermark-bg.ts`          | Text & image watermark, page background, custom theme                                     |
 
 ### 25–30 Conversions & edge cases
 
@@ -61,7 +65,7 @@ Output is written to `tmp/word-examples/`.
 | `25-html-conversion.ts`     | `htmlToDocxBody` / `renderToHtml`                                                       |
 | `26-markdown-conversion.ts` | `markdownToDocx` / `renderToMarkdown`                                                   |
 | `27-excel-conversion.ts`    | `excelToDocx` / `extractTablesToExcel`                                                  |
-| `28-pdf-conversion.ts`      | `docxToPdf` (custom page size, custom chart renderer)                                   |
+| `28-pdf-conversion.ts`      | `Pdf.fromDocx` (custom page size, custom chart renderer)                                |
 | `29-flat-opc-odt.ts`        | `toFlatOpcFromDoc` / `parseFlatOpc` / `readOdt` / `writeOdt`                            |
 | `30-edge-cases.ts`          | Encryption rejection, empty / large / nested-table docs, corrupted ZIP, 1 000 bookmarks |
 
@@ -72,7 +76,7 @@ Output is written to `tmp/word-examples/`.
 | `31-walker-mapper.ts`            | `walkDocument` / `walkBlocks` / `mapDocument` / collectors                                                                    |
 | `32-style-resolve-themes.ts`     | `resolveStyle` / `resolveRunStyle` / `resolveTableStyle` / `resolveThemeColor` / `parseStyleMap`                              |
 | `33-incremental-edit.ts`         | `editDocxIncremental` / `listDocxParts` / `readDocxPart`                                                                      |
-| `34-decrypt-roundtrip.ts`        | `isEncryptedDocx` / `decryptDocx` / readDocx with password                                                                    |
+| `34-decrypt-roundtrip.ts`        | `isEncryptedDocx` / `decryptDocx` / `Io.read` with password                                                                   |
 | `35-mathml-conversion.ts`        | `ommlToMathML` / `mathMLToOmml` + `ruby` + `mathPhantom`                                                                      |
 | `36-text-shaping-hyphenation.ts` | `shapeText` / `detectScript` / `detectDirection` / `hyphenateText`                                                            |
 | `37-svg-render.ts`               | `layoutDocument` / `layoutDocumentFull` / `renderPageToSvg` / `renderDocumentToSvg`                                           |
@@ -82,7 +86,7 @@ Output is written to `tmp/word-examples/`.
 | `41-fields-engine.ts`            | `updateFields` / `updateTableOfContents` / `tcField` / `indexEntryField` / `indexField` / `noteRefField`                      |
 | `42-conversion-ir.ts`            | `docxToSemantic` / `createConversionContext`                                                                                  |
 | `43-compat-modes.ts`             | `getCompatibilityMode` / `setCompatibilityMode` for Word 2003-2013+                                                           |
-| `44-queries-deep.ts`             | `findBookmark` / `findComment` / `searchByFormat` / `getUsedFormats`                                                          |
+| `44-queries-deep.ts`             | `Query.findBookmark` / `Query.findComment` / `Query.searchByFormat` / `Query.getUsedFormats`                                  |
 | `45-digital-signatures.ts`       | `extractSignatures` / `parseSignatureXml` / `isWellFormedSignature` / `hasDigitalSignatures`                                  |
 | `46-security-policy.ts`          | `DEFAULT_SECURITY_POLICY` / `STRICT_SECURITY_POLICY` / `resolveSecurityPolicy` / `createRenderContext` / `createIdGenerators` |
 | `47-low-level-crypto.ts`         | `readCfb` / `writeCfb` / `parseEncryptionInfoXml` / `verifyPassword` / `AGILE_BLOCK_KEYS`                                     |

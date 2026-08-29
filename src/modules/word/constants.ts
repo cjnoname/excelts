@@ -31,24 +31,6 @@ export const NS_MC = "http://schemas.openxmlformats.org/markup-compatibility/200
 // XML Namespaces (Strict — ISO 29500 Part 1)
 // =============================================================================
 
-/** Strict WordprocessingML main namespace. */
-export const NS_W_STRICT = "http://purl.oclc.org/ooxml/wordprocessingml/main";
-
-/** Strict Relationships namespace. */
-export const NS_R_STRICT = "http://purl.oclc.org/ooxml/officeDocument/relationships";
-
-/** Strict DrawingML Word Processing Drawing namespace. */
-export const NS_WP_STRICT = "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing";
-
-/** Strict DrawingML main namespace. */
-export const NS_A_STRICT = "http://purl.oclc.org/ooxml/drawingml/main";
-
-/** Strict DrawingML picture namespace. */
-export const NS_PIC_STRICT = "http://purl.oclc.org/ooxml/drawingml/picture";
-
-/** Strict Markup compatibility namespace. */
-export const NS_MC_STRICT = "http://purl.oclc.org/ooxml/markup-compatibility/2006";
-
 // =============================================================================
 // Strict → Transitional Namespace Mapping
 // =============================================================================

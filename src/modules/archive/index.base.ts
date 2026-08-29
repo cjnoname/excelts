@@ -100,6 +100,24 @@ export type {
 } from "@archive/crypto";
 
 // =============================================================================
+// PNG encoding
+//
+// A PNG is a DEFLATE stream plus CRC-32-checked chunks — the two primitives this
+// module owns and already publishes as `zlibSync` and `crc32`. It is exported
+// here because the drawing engine deliberately stops at pixels:
+// `rasterizeToRgba` from `documonster/draw` hands back RGBA, and encoding needs
+// DEFLATE, which sits a layer above `draw`. Pairing the two is two lines, and
+// without this export a consumer of `documonster/draw` or `documonster/mermaid`
+// had to reimplement chunk framing this library already contains.
+//
+// Platform-identical source: the build rewrites its compression imports to the
+// `.browser` variants, so both entries get the same encoder.
+// =============================================================================
+
+export { encodePng } from "@archive/png";
+export type { EncodePngOptions } from "@archive/png";
+
+// =============================================================================
 // Errors
 // =============================================================================
 

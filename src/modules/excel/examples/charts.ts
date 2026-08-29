@@ -110,6 +110,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { encodePng } from "@archive/png";
 import type {
   AddChartSeriesOptions,
   AddChartOptions,
@@ -163,10 +164,10 @@ import {
   buildChartScene,
   buildEffectFilter,
   applyAxisTransform,
+  drawChartPdf,
+  drawChartExPdf,
   VECTOR_PDF_CHART_EX_LAYOUT_IDS
 } from "@excel/chart/index";
-import { drawChartExPdf } from "@excel/chart/render/chart-ex-renderer";
-import { drawChartPdf } from "@excel/chart/render/chart-renderer";
 import {
   Cell,
   Chart,
@@ -181,9 +182,8 @@ import {
   Workbook,
   Worksheet
 } from "@excel/index";
-import { encodePng } from "@excel/utils/png";
-import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import { chartToPdf } from "@pdf/excel-bridge";
+import { Pdf } from "@pdf/index";
 
 const OUT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../tmp/excel-examples");
 const XLSX_PATH = resolve(OUT_DIR, "charts-example.xlsx");
@@ -5138,7 +5138,7 @@ async function main(): Promise<void> {
   console.log("Rendering previews …");
   const previewWorksheets = [gallery, combo, ex, features, advanced];
   let previewCounter = 0;
-  const pdfDoc = new PdfDocumentBuilder();
+  const pdfDoc = new Pdf.Builder();
   pdfDoc.setMetadata({ title: "Documonster chart previews", author: "charts example" });
   for (const ws of previewWorksheets) {
     for (const chart of Chart.get(ws)) {

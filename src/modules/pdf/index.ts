@@ -5,9 +5,9 @@
  *
  * @example Standalone PDF generation:
  * ```typescript
- * import { pdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const bytes = await pdf([
+ * const bytes = await Pdf.create([
  *   ["Product", "Revenue"],
  *   ["Widget", 1000],
  *   ["Gadget", 2500]
@@ -27,9 +27,9 @@
  *
  * @example Read PDF — extract text, images, and metadata:
  * ```typescript
- * import { readPdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const result = await readPdf(pdfBytes);
+ * const result = await Pdf.read(pdfBytes);
  * console.log(result.text);               // All text
  * console.log(result.pages[0].text);      // Page 1 text
  * console.log(result.pages[0].images);    // Page 1 images
@@ -56,6 +56,12 @@ export type { DocxToPdfOptions } from "@pdf/word-bridge";
 // =============================================================================
 
 export type { PdfCell, PdfRow, PdfColumn, PdfSheet, PdfBook, PdfImage, PdfInput } from "@pdf/pdf";
+
+// `textLanguage` appears in five public option types and on the builder, so the
+// type naming its values has to be nameable too: a caller could pass the literal
+// but not store it in a variable, write a wrapper signature, or build a config
+// object.
+export type { CjkLanguage } from "@utils/cjk";
 
 export type {
   PdfExportOptions,

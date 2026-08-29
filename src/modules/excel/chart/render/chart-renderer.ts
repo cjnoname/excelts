@@ -1,3 +1,4 @@
+import { encodePng, withPngDpi } from "@archive/png";
 import { BasicRasterCanvas } from "@draw/raster/canvas";
 import { renderDrawList } from "@draw/render";
 import { toSvg } from "@draw/svg";
@@ -56,7 +57,6 @@ import {
   getSpPrLine,
   getTxPrFontSize
 } from "@excel/chart/shared/shape-properties";
-import { encodePng, withPngDpi } from "@excel/utils/png";
 import {
   parseCssColor,
   parseSvgAttributes,

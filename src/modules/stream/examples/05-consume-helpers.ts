@@ -9,7 +9,7 @@
  * - drainStream()    — consume and discard everything (run side effects to end)
  * - copyStream()     — pipe a readable into a writable (alias of pipeline)
  *
- * Usage: npx tsx src/modules/stream/examples/05-consume-helpers.ts
+ * Usage: pnpm example --filter 05-consume-helpers
  */
 
 import {

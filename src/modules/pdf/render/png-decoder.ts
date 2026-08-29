@@ -11,6 +11,7 @@
  */
 
 import { decompressSync } from "@archive/compression/compress";
+import { undoPngFilters } from "@pdf/core/png-filters";
 import { concatUint8Arrays } from "@utils/binary";
 
 // =============================================================================
@@ -166,58 +167,7 @@ function applyFilters(
   scanlineLen: number,
   bytesPerPixel: number
 ): Uint8Array {
-  const result = new Uint8Array(height * scanlineLen);
-  const bpp = Math.max(1, Math.floor(bytesPerPixel));
-  let srcOffset = 0;
-
-  for (let y = 0; y < height; y++) {
-    const filterType = data[srcOffset++];
-    const dstOffset = y * scanlineLen;
-    const prevRow = y > 0 ? (y - 1) * scanlineLen : -1;
-
-    for (let x = 0; x < scanlineLen; x++) {
-      const raw = data[srcOffset++] ?? 0;
-      const a = x >= bpp ? result[dstOffset + x - bpp] : 0; // left
-      const b = prevRow >= 0 ? result[prevRow + x] : 0; // up
-      const c = prevRow >= 0 && x >= bpp ? result[prevRow + x - bpp] : 0; // upper-left
-
-      switch (filterType) {
-        case 0: // None
-          result[dstOffset + x] = raw;
-          break;
-        case 1: // Sub
-          result[dstOffset + x] = (raw + a) & 0xff;
-          break;
-        case 2: // Up
-          result[dstOffset + x] = (raw + b) & 0xff;
-          break;
-        case 3: // Average
-          result[dstOffset + x] = (raw + Math.floor((a + b) / 2)) & 0xff;
-          break;
-        case 4: // Paeth
-          result[dstOffset + x] = (raw + paethPredictor(a, b, c)) & 0xff;
-          break;
-        default:
-          result[dstOffset + x] = raw;
-      }
-    }
-  }
-
-  return result;
-}
-
-function paethPredictor(a: number, b: number, c: number): number {
-  const p = a + b - c;
-  const pa = Math.abs(p - a);
-  const pb = Math.abs(p - b);
-  const pc = Math.abs(p - c);
-  if (pa <= pb && pa <= pc) {
-    return a;
-  }
-  if (pb <= pc) {
-    return b;
-  }
-  return c;
+  return undoPngFilters(data, height, scanlineLen, bytesPerPixel);
 }
 
 // =============================================================================

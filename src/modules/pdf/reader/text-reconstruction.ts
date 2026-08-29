@@ -170,6 +170,22 @@ function detectColumns(fragments: TextFragment[]): TextFragment[][] {
     return [fragments];
   }
 
+  // A column starts somewhere. Wrapped prose does not: every line of a paragraph
+  // begins at the same left edge, and only the *last* line of each paragraph is
+  // short. Grouping on midpoints alone read that short line as a left-hand column
+  // and the full-width lines as a right-hand one, so a paragraph came back with its
+  // closing line hoisted above its opening line — the text was all there, in the
+  // wrong order.
+  //
+  // Requiring two distinct left edges is what a genuine multi-column layout always
+  // has and wrapped prose never does. The table heuristic below cannot stand in for
+  // it: that only inspects lines carrying two or more fragments, and single-column
+  // prose has exactly one per line, so it had nothing to look at and abstained.
+  const leftEdges = new Set(fragments.map(f => Math.round(f.x)));
+  if (leftEdges.size < 2) {
+    return [fragments];
+  }
+
   // Collect the X midpoints for each fragment
   const xMidpoints: number[] = [];
   for (const f of fragments) {

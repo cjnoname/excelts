@@ -823,6 +823,31 @@ describe("formatMarkdown", () => {
       expect(lines).toHaveLength(3);
       expect(lines[0]).toContain("Normal");
     });
+
+    it("should measure display width from the shared full-width table", () => {
+      // Column padding used to come from a private range list here, a near-copy of
+      // `isFullWidthCodePoint` that was wrong in both directions. Compared per
+      // character against a Latin baseline of the same length, so the assertion is
+      // about column width and not about byte counts.
+      const columns = (cell: string): number => {
+        const repeated = cell.repeat(8);
+        const width = (value: string): number =>
+          formatMarkdown(["h"], [[value]]).split("\n")[0].length;
+        return (width(repeated) - width("a".repeat(8))) / 8 + 1;
+      };
+
+      // Two columns: BMP emoji and a CJK compatibility square were counted as one.
+      for (const wide of ["\u231a", "\u2614", "\u2b50", "\u33c0", "\u4e2d", "\uff01"]) {
+        expect(columns(wide)).toBe(2);
+      }
+      // One column: every surrogate pair was counted as two, but a supplementary
+      // plane character is not automatically wide — these are East Asian Width N.
+      for (const narrow of ["\u{1d400}", "\u{10000}", "A"]) {
+        expect(columns(narrow)).toBe(1);
+      }
+      // Still two columns, from the plane that genuinely is wide.
+      expect(columns("\u{1f600}")).toBe(2);
+    });
   });
 
   describe("compact mode separator alignment", () => {

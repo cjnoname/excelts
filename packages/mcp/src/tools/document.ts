@@ -18,7 +18,17 @@ import { toolError } from "../errors.js";
  * this file really", while this answers "what has the caller asked for", which
  * for a write target is a question about the extension alone.
  */
-export type DocFormat = "docx" | "pdf" | "md" | "html" | "txt" | "xlsx" | "xlsb" | "csv" | "odt";
+export type DocFormat =
+  | "docx"
+  | "pdf"
+  | "md"
+  | "html"
+  | "txt"
+  | "xlsx"
+  | "xlsb"
+  | "csv"
+  | "odt"
+  | "mermaid";
 
 /** Spreadsheet package formats handled by the workbook tools. */
 export type SpreadsheetFormat = Extract<DocFormat, "xlsx" | "xlsb">;
@@ -36,7 +46,12 @@ const EXTENSION_FORMATS: Readonly<Record<string, DocFormat>> = {
   ".xlsm": "xlsx",
   ".xlsb": "xlsb",
   ".csv": "csv",
-  ".odt": "odt"
+  ".odt": "odt",
+  // Recognised so the document tools can *route* a diagram source rather than
+  // reject it as an unknown extension. `doc_read` shows its text; nothing
+  // converts to or from it, and the errors that say so name `diagram_render`.
+  ".mmd": "mermaid",
+  ".mermaid": "mermaid"
 };
 
 /** Format implied by a path's extension, or `undefined` when unrecognised. */
@@ -149,6 +164,16 @@ export function parsePages(pages: readonly number[] | string | undefined): numbe
     if (pages.length > MAX_SELECTABLE_PAGES) {
       throw toolError.invalidInput(
         `page selection lists ${pages.length} pages, over the ${MAX_SELECTABLE_PAGES} limit`
+      );
+    }
+    // An empty array is rejected rather than read as "no pages": every caller
+    // treats `undefined` as "all pages", so `[]` can only be a mistake, and
+    // silently selecting nothing makes a tool report that it stamped 0 pages
+    // and call that success.
+    if (pages.length === 0) {
+      throw toolError.invalidInput(
+        "the page selection is empty",
+        "Omit `pages` entirely to mean every page."
       );
     }
     return pages.map(page => assertPage(page));

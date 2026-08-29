@@ -61,6 +61,8 @@ describe("MCP server", () => {
       expect(names).toEqual([
         "archive_read",
         "archive_write",
+        "diagram_inspect",
+        "diagram_render",
         "doc_convert",
         "doc_edit",
         "doc_inspect",

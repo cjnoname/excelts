@@ -16,18 +16,14 @@
  * on "it didn't throw" — then writes the PDF to `tmp/pdf-examples/` so the
  * output can also be inspected by eye.
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-page-setup.ts
+ * Run: pnpm example --filter pdf-page-setup
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 
-import { cellSetAlignment, cellSetFill, cellSetFont, cellSetNote } from "@excel/core/cell";
-import { rowAddPageBreak } from "@excel/core/row";
-import { addWorkbookImage } from "@excel/core/workbook-core";
-import { addImage, getCell, mergeCells } from "@excel/core/worksheet";
-import { Cell, Column, Workbook, Worksheet } from "@excel/index";
+import { Cell, Column, Image, Row, Workbook, Worksheet } from "@excel/index";
 
 import { Pdf } from "../index";
 import { extractTextFromPage } from "../reader/content-interpreter";
@@ -237,7 +233,7 @@ Column.setWidth(wrapWs, 1, 18);
 const long = "The quick brown fox jumps over the lazy dog and keeps running far away";
 for (let r = 1; r <= 60; r++) {
   Cell.setValue(wrapWs, r, 1, `${r} ${long}`);
-  cellSetAlignment(getCell(wrapWs, `A${r}`), { wrapText: true });
+  Cell.setAlignment(wrapWs, `A${r}`, { wrapText: true });
 }
 const wrapPlain = await Pdf.fromExcel(wrapWb);
 const wrapFit = await Pdf.fromExcel(wrapWb, { fitToHeight: 1 });
@@ -324,7 +320,7 @@ check(
 // Repeated titles combined with a manual page break used to hang the export.
 const { wb: breakWb, ws: breakWs } = gridWorkbook(2, 40);
 breakWs.pageSetup.printTitlesRow = "1";
-rowAddPageBreak(Worksheet.getRow(breakWs, 10));
+Row.addPageBreak(breakWs, 10);
 const breakPdf = await Pdf.fromExcel(breakWb);
 await emit("print-titles-with-manual-break.pdf", breakPdf);
 check(
@@ -378,12 +374,11 @@ const TINY_PNG = new Uint8Array([
 function colourWorkbook() {
   const wb = Workbook.create();
   const ws = Workbook.addWorksheet(wb, "Colours");
-  const cell = getCell(ws, "A1");
   Cell.setValue(ws, "A1", "Red on green");
-  cellSetFont(cell, { color: { argb: "FFFF0000" } });
-  cellSetFill(cell, { type: "pattern", pattern: "solid", fgColor: { argb: "FF00FF00" } });
-  const id = addWorkbookImage(wb, { buffer: TINY_PNG, extension: "png" });
-  addImage(ws, id, { tl: { col: 1, row: 1 }, br: { col: 4, row: 6 } });
+  Cell.setFont(ws, "A1", { color: { argb: "FFFF0000" } });
+  Cell.setFill(ws, "A1", { type: "pattern", pattern: "solid", fgColor: { argb: "FF00FF00" } });
+  const id = Image.add(wb, { buffer: TINY_PNG, extension: "png" });
+  Image.place(ws, id, { tl: { col: 1, row: 1 }, br: { col: 4, row: 6 } });
   return wb;
 }
 
@@ -493,8 +488,8 @@ function commentWorkbook() {
       Cell.setValue(ws, r, c, `r${r}c${c}`);
     }
   }
-  cellSetNote(getCell(ws, "B6"), "Check this number");
-  cellSetNote(getCell(ws, "D9"), "Second remark");
+  Cell.setNote(ws, "B6", "Check this number");
+  Cell.setNote(ws, "D9", "Second remark");
   return wb;
 }
 
@@ -554,7 +549,7 @@ for (let c = 1; c <= 8; c++) {
   Cell.setValue(mergeWs, 1, c, `H${c}`);
 }
 Cell.setValue(mergeWs, 2, 2, "MERGED B..F");
-mergeCells(mergeWs, "B2:F2");
+Worksheet.merge(mergeWs, "B2:F2");
 mergeWs.pageSetup.printArea = "E1:G3";
 mergeWs.pageSetup.printTitlesColumn = "A:B";
 const mergePdf = await Pdf.fromExcel(mergeWb, { fitToPage: false });
@@ -585,12 +580,12 @@ for (let c = 1; c <= 10; c++) {
     Cell.setValue(comboWs, r, c, r * c);
   }
 }
-cellSetFill(getCell(comboWs, "A1"), {
+Cell.setFill(comboWs, "A1", {
   type: "pattern",
   pattern: "solid",
   fgColor: { argb: "FF4472C4" }
 });
-cellSetNote(getCell(comboWs, "C5"), "Reviewed by finance");
+Cell.setNote(comboWs, "C5", "Reviewed by finance");
 comboWs.pageSetup.printTitlesRow = "1";
 comboWs.headerFooter.oddHeader = "&LCombined&R&P/&N";
 

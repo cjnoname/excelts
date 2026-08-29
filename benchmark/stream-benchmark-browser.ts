@@ -1,3 +1,18 @@
+/**
+ * Stream performance benchmark — the browser-variant primitives vs Node's own.
+ *
+ * Runs under Node despite the name: it imports `node:stream` on purpose, to time
+ * the browser implementations against the platform ones. A benchmark, not an
+ * example — see `stream-benchmark.ts`.
+ *
+ * Imports `index.browser` explicitly rather than `index`. The alias `@stream` and
+ * the bare `index` both resolve to the *Node* entry outside a browser-conditioned
+ * build, so this file previously compared the Node implementation against Node's
+ * own streams and reported the "browser" numbers as ~16% faster than native — a
+ * measurement of nothing.
+ *
+ * Run: node --import @oxc-node/core/register benchmark/stream-benchmark-browser.ts
+ */
 import { Readable, Writable, Transform, pipeline } from "stream";
 import { promisify } from "util";
 
@@ -6,8 +21,8 @@ import {
   createTransform as browserCreateTransform,
   createCollector as browserCreateCollector,
   pipeline as browserPipeline
-} from "@stream";
-import { EventEmitter as BrowserEmitter } from "@utils/event-emitter";
+} from "../src/modules/stream/index.browser";
+import { EventEmitter as BrowserEmitter } from "../src/utils/event-emitter";
 
 const pipelineAsync = promisify(pipeline);
 

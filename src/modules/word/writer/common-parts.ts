@@ -24,6 +24,7 @@ import type {
   NumberingInstance,
   StyleDef
 } from "@word/types";
+import { renderXml } from "@word/writer/docx-packager";
 import { renderFootnotes, renderEndnotes } from "@word/writer/footnote-writer";
 import { renderNumbering } from "@word/writer/numbering-writer";
 import {
@@ -36,7 +37,6 @@ import {
 } from "@word/writer/parts-writer";
 import type { RenderHelpers } from "@word/writer/render-context";
 import { renderStyles } from "@word/writer/styles-writer";
-import { XmlWriter } from "@xml/writer";
 
 // =============================================================================
 // Types
@@ -181,10 +181,3 @@ export function buildCommonAuxiliaryParts(input: AuxiliaryPartsInput): RenderedP
 // =============================================================================
 // Internal
 // =============================================================================
-
-/** Render XML to string using XmlWriter. */
-function renderXml(renderFn: (xml: XmlWriter) => void): string {
-  const writer = new XmlWriter();
-  renderFn(writer);
-  return writer.xml;
-}

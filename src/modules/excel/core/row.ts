@@ -56,7 +56,17 @@ export interface RowData {
   dyDescent?: number;
 }
 
-function applyStyle<K extends keyof Style>(r: RowData, name: K, value: Style[K]): void {
+/**
+ * Assign one style facet to the row and to every cell it already holds.
+ *
+ * `undefined` is a value here, not a no-op: it clears the facet, which is what
+ * the `| undefined` in every `rowSet*` signature promises and what the matching
+ * `Cell.set*` calls already did. Each setter used to guard with
+ * `if (value !== undefined)`, so `Row.setFont(ws, 1, undefined)` silently kept
+ * the old font — the signature said one thing and the body did another, and no
+ * test covered it.
+ */
+function applyStyle<K extends keyof Style>(r: RowData, name: K, value: Style[K] | undefined): void {
   r.style[name] = value;
   r.cells.forEach(cell => {
     if (cell) {
@@ -73,25 +83,34 @@ export function rowCreate(worksheet: Worksheet, number: number): RowData {
   return { worksheet, number, cells: [], style: {}, outlineLevel: 0 };
 }
 
-export function rowDestroy(r: RowData): void {
-  r.worksheet = undefined!;
-  r.cells = undefined!;
-  r.style = undefined!;
-}
-
 export function rowFindCell(r: RowData, colNumber: number): CellData | undefined {
   return r.cells[colNumber - 1];
 }
 
-export function rowAddPageBreak(r: RowData, lft?: number, rght?: number): void {
-  const ws = r.worksheet;
-  const left = Math.max(0, (lft ?? 0) - 1) || 0;
-  const right = Math.max(0, (rght ?? 0) - 1) || 16838;
-  const pb: RowBreak = { id: r.number, max: right, man: 1 };
-  if (left) {
-    pb.min = left;
-  }
-  ws.rowBreaks.push(pb);
+/**
+ * The last column index a row break spans, **0-based** — `brk/@max` in
+ * `SpreadsheetML` counts from zero, so Excel's last column XFD (1-based 16384)
+ * is 16383 here. Mirrors `LAST_ROW_INDEX` in `core/column.ts`.
+ *
+ * This was 16838 for a long time, a value past XFD that only looked plausible
+ * because nothing asserted it; a file Excel itself wrote carries
+ * `<brk id="106" max="16383" man="1"/>`.
+ */
+const LAST_COLUMN_INDEX = 16383;
+
+/**
+ * Add a manual horizontal page break **below** this row, spanning the full sheet
+ * width.
+ *
+ * `CT_Break` has `min`/`max` attributes that could in principle narrow a break to
+ * a band of columns, and they are deliberately not exposed: Excel's UI cannot
+ * create such a break, every file Excel writes spans the full width
+ * (`max="16383"`, no `min`), and this library's own PDF export reads only
+ * `brk/@id`. A band would therefore be a value nothing on either side of the
+ * format can observe.
+ */
+export function rowAddPageBreak(r: RowData): void {
+  r.worksheet.rowBreaks.push({ id: r.number, max: LAST_COLUMN_INDEX, man: 1 } satisfies RowBreak);
 }
 
 export function rowValues(r: RowData): CellValue[] {
@@ -157,9 +176,7 @@ export function rowNumFmt(r: RowData): string | NumFmt | undefined {
 }
 
 export function rowSetNumFmt(r: RowData, value: string | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "numFmt", value);
-  }
+  applyStyle(r, "numFmt", value);
 }
 
 export function rowFont(r: RowData): Partial<Font> | undefined {
@@ -167,49 +184,23 @@ export function rowFont(r: RowData): Partial<Font> | undefined {
 }
 
 export function rowSetFont(r: RowData, value: Partial<Font> | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "font", value);
-  }
-}
-
-export function rowAlignment(r: RowData): Partial<Alignment> | undefined {
-  return r.style.alignment;
+  applyStyle(r, "font", value);
 }
 
 export function rowSetAlignment(r: RowData, value: Partial<Alignment> | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "alignment", value);
-  }
-}
-
-export function rowProtection(r: RowData): Partial<Protection> | undefined {
-  return r.style.protection;
+  applyStyle(r, "alignment", value);
 }
 
 export function rowSetProtection(r: RowData, value: Partial<Protection> | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "protection", value);
-  }
-}
-
-export function rowBorder(r: RowData): Partial<Borders> | undefined {
-  return r.style.border;
+  applyStyle(r, "protection", value);
 }
 
 export function rowSetBorder(r: RowData, value: Partial<Borders> | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "border", value);
-  }
-}
-
-export function rowFill(r: RowData): Fill | undefined {
-  return r.style.fill;
+  applyStyle(r, "border", value);
 }
 
 export function rowSetFill(r: RowData, value: Fill | undefined): void {
-  if (value !== undefined) {
-    applyStyle(r, "fill", value);
-  }
+  applyStyle(r, "fill", value);
 }
 
 /** Read the row's style record. */

@@ -341,7 +341,12 @@ export function renderFontTable(xml: XmlSink, fonts?: readonly FontDef[]): void 
   xml.openXml(STD_DOC_ATTRIBUTES);
   xml.openNode("w:fonts", { "xmlns:w": NS_W, "xmlns:r": NS_R });
 
-  const allFonts = fonts ?? DEFAULT_FONTS;
+  // Merged, not replaced. `fonts ?? DEFAULT_FONTS` meant a single `addFont()`
+  // call dropped every default — including the SimSun that docDefaults names, so
+  // the document referenced a typeface its own font table no longer declared.
+  // The caller's entry wins on a name collision, since it is the more specific
+  // statement.
+  const allFonts = mergeFontDefs(DEFAULT_FONTS, fonts);
   for (const font of allFonts) {
     xml.openNode("w:font", { "w:name": font.name });
     if (font.panose1) {
@@ -416,6 +421,26 @@ export function renderFontTable(xml: XmlSink, fonts?: readonly FontDef[]): void 
   xml.closeNode();
 }
 
+/**
+ * Combine the built-in declarations with a caller's, keyed by name.
+ *
+ * Later entries win, and order is preserved so the defaults keep their
+ * conventional position at the head of the table.
+ */
+function mergeFontDefs(
+  defaults: readonly FontDef[],
+  extra: readonly FontDef[] | undefined
+): FontDef[] {
+  if (!extra || extra.length === 0) {
+    return [...defaults];
+  }
+  const byName = new Map<string, FontDef>();
+  for (const font of [...defaults, ...extra]) {
+    byName.set(font.name.toLowerCase(), font);
+  }
+  return [...byName.values()];
+}
+
 const DEFAULT_FONTS: readonly FontDef[] = [
   {
     name: "Calibri",
@@ -440,7 +465,68 @@ const DEFAULT_FONTS: readonly FontDef[] = [
     pitch: "fixed"
   },
   { name: "Wingdings", charset: "02", family: "auto", pitch: "variable" },
-  { name: "MS Gothic", charset: "80", family: "modern", pitch: "fixed" }
+  { name: "MS Gothic", charset: "80", family: "modern", pitch: "fixed" },
+  // `useDefaultStyles` sets docDefaults' `w:eastAsia` to SimSun, and a font a
+  // document uses belongs in its font table — this listed the Japanese
+  // `MS Gothic` (charset 80) but no Chinese face at all, so the one East Asian
+  // typeface the defaults actually name went undeclared. Charset 86 is GB2312,
+  // 136 is Big5.
+  {
+    name: "SimSun",
+    panose1: "02010600030101010101",
+    charset: "86",
+    family: "auto",
+    pitch: "variable"
+  },
+  // The other faces `@word/core/east-asian-defaults` can name in `docDefaults`. A
+  // Japanese or Korean document referenced `Yu Gothic` or `Malgun Gothic` while its own
+  // font table declared neither, which is the same inconsistency the `SimSun` note above
+  // describes — a typeface the document asks for and never introduces, leaving
+  // substitution and charset hints to the reader.
+  //
+  // Charsets are the Windows values behind `@utils/cjk-typefaces`: `80` is
+  // SHIFT_JIS (128) for Japanese, `81` is HANGUL (129) for Korean, and `88` is
+  // CHINESEBIG5 (136) for Traditional Chinese. `fontTable.xml` writes them in hex
+  // where `styles.xml` uses decimal.
+  {
+    name: "Yu Gothic",
+    charset: "80",
+    family: "swiss",
+    pitch: "variable"
+  },
+  {
+    name: "Malgun Gothic",
+    charset: "81",
+    family: "swiss",
+    pitch: "variable"
+  },
+  {
+    name: "PMingLiU",
+    charset: "88",
+    family: "auto",
+    pitch: "variable"
+  },
+  {
+    name: "Microsoft YaHei",
+    panose1: "020B0503020204020204",
+    charset: "86",
+    family: "swiss",
+    pitch: "variable"
+  },
+  {
+    name: "DengXian",
+    panose1: "02010600030101010101",
+    charset: "86",
+    family: "auto",
+    pitch: "variable"
+  },
+  {
+    name: "PMingLiU",
+    panose1: "02020500000000000000",
+    charset: "88",
+    family: "auto",
+    pitch: "variable"
+  }
 ];
 
 // =============================================================================
@@ -622,6 +708,9 @@ export function renderTheme(
   rawXmlPolicy?: "preserve" | "strip" | "reject"
 ): void {
   const NS_A_LOCAL = "http://schemas.openxmlformats.org/drawingml/2006/main";
+  // No theme supplied means we are generating one, and only then may defaults be
+  // filled in — serialising a caller's theme must reproduce it, not improve it.
+  const generated = theme?.fontScheme === undefined;
 
   xml.openXml(STD_DOC_ATTRIBUTES);
   xml.openNode("a:theme", { "xmlns:a": NS_A_LOCAL, name: theme?.name ?? "Office Theme" });
@@ -661,12 +750,12 @@ export function renderTheme(
 
   // Major font
   xml.openNode("a:majorFont");
-  renderThemeFont(xml, fontScheme?.major, fontScheme?.majorFont ?? "Calibri Light");
+  renderThemeFont(xml, fontScheme?.major, fontScheme?.majorFont ?? "Calibri Light", generated);
   xml.closeNode();
 
   // Minor font
   xml.openNode("a:minorFont");
-  renderThemeFont(xml, fontScheme?.minor, fontScheme?.minorFont ?? "Calibri");
+  renderThemeFont(xml, fontScheme?.minor, fontScheme?.minorFont ?? "Calibri", generated);
   xml.closeNode();
 
   xml.closeNode(); // a:fontScheme
@@ -705,7 +794,12 @@ export function renderTheme(
 }
 
 /** Render a single theme font (major or minor). */
-function renderThemeFont(xml: XmlSink, font: ThemeFont | undefined, fallbackLatin: string): void {
+function renderThemeFont(
+  xml: XmlSink,
+  font: ThemeFont | undefined,
+  fallbackLatin: string,
+  isGeneratedTheme: boolean
+): void {
   xml.leafNode("a:latin", { typeface: font?.latin ?? fallbackLatin });
   xml.leafNode("a:ea", { typeface: font?.eastAsia ?? "" });
   xml.leafNode("a:cs", { typeface: font?.complexScript ?? "" });
@@ -713,8 +807,38 @@ function renderThemeFont(xml: XmlSink, font: ThemeFont | undefined, fallbackLati
     for (const [script, typeface] of Object.entries(font.supplementalFonts)) {
       xml.leafNode("a:font", { script, typeface });
     }
+    return;
+  }
+  // Per-script fonts are supplied only when *generating* a theme, never when
+  // serialising one the caller gave us.
+  //
+  // A theme with none leaves Word to resolve `minorEastAsia` against nothing,
+  // which is how a document whose docDefaults name SimSun still rendered Chinese
+  // in whatever the host chose — Excel's own theme has carried these four entries
+  // all along while the Word writer emitted `<a:ea typeface=""/>` and stopped.
+  // But filling them in unconditionally broke round-tripping: the reader
+  // represents "no `a:font` elements" as `undefined`, so reading a valid theme
+  // without them and writing it back silently added four.
+  if (!isGeneratedTheme) {
+    return;
+  }
+  for (const [script, typeface] of DEFAULT_SUPPLEMENTAL_FONTS) {
+    xml.leafNode("a:font", { script, typeface });
   }
 }
+
+/**
+ * Per-script theme fonts written when a theme names none of its own.
+ *
+ * Matches what Word and Excel write for a Chinese, Traditional Chinese, Japanese
+ * and Korean locale respectively.
+ */
+const DEFAULT_SUPPLEMENTAL_FONTS: readonly (readonly [string, string])[] = [
+  ["Hans", "\u5b8b\u4f53"], // 宋体
+  ["Hant", "\u65b0\u7d30\u660e\u9ad4"], // 新細明體
+  ["Jpan", "\uff2d\uff33 \uff30\u30b4\u30b7\u30c3\u30af"], // ＭＳ Ｐゴシック
+  ["Hang", "\ub9d1\uc740 \uace0\ub515"] // 맑은 고딕
+];
 
 /** Render the minimal default format scheme. */
 function renderDefaultFormatScheme(xml: XmlSink): void {

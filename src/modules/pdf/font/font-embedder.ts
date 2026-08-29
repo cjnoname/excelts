@@ -24,6 +24,12 @@ import type { PdfWriter } from "@pdf/core/pdf-writer";
 import { PdfFontError } from "@pdf/errors";
 import type { TtfFont } from "@pdf/font/ttf-parser";
 import { concatUint8Arrays } from "@utils/binary";
+import { isGlyphlessControl } from "@utils/cjk";
+// Subsetting maps a whole cluster — a base character together with the variation
+// selectors and joiners after it — to a single CID, so anything choosing a *face*
+// per character has to agree on these boundaries. Splitting mid-cluster leaves the
+// tail looking up a sequence that was never registered, which encodes as `.notdef`.
+import { graphemeClusters } from "@utils/grapheme";
 
 // =============================================================================
 // Types
@@ -191,33 +197,6 @@ export interface EmbeddedGlyphUse {
   readonly sequence: string;
 }
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-/**
- * Split text into grapheme clusters.
- *
- * Subsetting maps a whole cluster — a base character together with the variation
- * selectors and joiners that follow it — to a single CID, so anything that
- * chooses a *face* per character has to agree on the same boundaries. Splitting
- * mid-cluster leaves the tail looking up a sequence that was never registered,
- * which encodes as `.notdef`.
- */
-export function graphemeClusters(text: string): string[] {
-  const out: string[] = [];
-  for (const part of graphemeSegmenter.segment(text)) {
-    out.push(part.segment);
-  }
-  return out;
-}
-
-/**
- * Whether a code point shapes its neighbours rather than drawing a glyph:
- * joiners, variation selectors and the like.
- */
-export function isGlyphShapingControl(codePoint: number): boolean {
-  return isSemanticControl(codePoint);
-}
-
 function buildSubsetMapping(
   font: TtfFont,
   usedText: Set<number> | Iterable<string> | Iterable<EmbeddedGlyphUse>
@@ -256,7 +235,7 @@ function buildSubsetMapping(
       ? (entries as string[]).flatMap(text => collectEmbeddedGlyphUses(text))
       : (entries as EmbeddedGlyphUse[]);
   for (const use of uses) {
-    const gid = isSemanticControl(use.codePoint)
+    const gid = isGlyphlessControl(use.codePoint)
       ? (font.cmap.get(0x20) ?? 0)
       : (font.cmap.get(use.codePoint) ?? 0);
     if (!sequenceToOrigGid.has(use.sequence)) {
@@ -315,7 +294,7 @@ function buildSubsetMapping(
       unicodeToCid.set(codePoints[0], cid);
     }
     cidToGid.push(oldToNewGid.get(origGid)!);
-    cidWidths.push(isSemanticControl(codePoints[0]) ? 0 : (font.advanceWidths[origGid] ?? 0));
+    cidWidths.push(isGlyphlessControl(codePoints[0]) ? 0 : (font.advanceWidths[origGid] ?? 0));
   }
 
   return {
@@ -331,11 +310,11 @@ function buildSubsetMapping(
 export function collectEmbeddedGlyphUses(text: string): EmbeddedGlyphUse[] {
   const result: Array<{ codePoint: number; sequence: string }> = [];
   let leadingControls = "";
-  for (const part of graphemeSegmenter.segment(text)) {
+  for (const cluster of graphemeClusters(text)) {
     let clusterHasVisibleGlyph = false;
-    for (const char of part.segment) {
+    for (const char of cluster) {
       const codePoint = char.codePointAt(0)!;
-      if (isSemanticControl(codePoint)) {
+      if (isGlyphlessControl(codePoint)) {
         if (clusterHasVisibleGlyph) {
           result[result.length - 1].sequence += char;
         } else {
@@ -359,15 +338,6 @@ function encodeUnicodeSequences(
   sequenceToCid: ReadonlyMap<string, number>
 ): number[] {
   return collectEmbeddedGlyphUses(text).map(use => sequenceToCid.get(use.sequence) ?? 0);
-}
-
-function isSemanticControl(codePoint: number): boolean {
-  return (
-    codePoint === 0x200c ||
-    codePoint === 0x200d ||
-    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
-    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
-  );
 }
 
 /** Build the big-endian, two-byte-per-CID map required by CIDFontType2. */

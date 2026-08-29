@@ -99,10 +99,10 @@ export function resolveStyle(
   // Document defaults
   if (doc.docDefaults) {
     if (doc.docDefaults.paragraphProperties) {
-      mergedPProps = { ...doc.docDefaults.paragraphProperties };
+      mergedPProps = mergeProperties({}, doc.docDefaults.paragraphProperties);
     }
     if (doc.docDefaults.runProperties) {
-      mergedRProps = { ...doc.docDefaults.runProperties };
+      mergedRProps = mergeProperties({}, doc.docDefaults.runProperties);
     }
   }
 
@@ -113,10 +113,10 @@ export function resolveStyle(
       continue;
     }
     if (def.paragraphProperties) {
-      mergedPProps = { ...mergedPProps, ...stripUndefined(def.paragraphProperties) };
+      mergedPProps = mergeProperties(mergedPProps, def.paragraphProperties);
     }
     if (def.runProperties) {
-      mergedRProps = { ...mergedRProps, ...stripUndefined(def.runProperties) };
+      mergedRProps = mergeProperties(mergedRProps, def.runProperties);
     }
     // Linked styles: if a paragraph style links to a character style, merge its runProperties.
     // The linked character style's runProperties layer on top of the paragraph style's own
@@ -124,7 +124,7 @@ export function resolveStyle(
     if (def.type === "paragraph" && def.link) {
       const linkedDef = styleMap.get(def.link);
       if (linkedDef?.type === "character" && linkedDef.runProperties) {
-        mergedRProps = { ...mergedRProps, ...stripUndefined(linkedDef.runProperties) };
+        mergedRProps = mergeProperties(mergedRProps, linkedDef.runProperties);
       }
     }
   }
@@ -150,10 +150,10 @@ export function resolveStyle(
       );
       for (const cond of matchingConditions) {
         if (cond.paragraphProperties) {
-          mergedPProps = { ...mergedPProps, ...stripUndefined(cond.paragraphProperties) };
+          mergedPProps = mergeProperties(mergedPProps, cond.paragraphProperties);
         }
         if (cond.runProperties) {
-          mergedRProps = { ...mergedRProps, ...stripUndefined(cond.runProperties) };
+          mergedRProps = mergeProperties(mergedRProps, cond.runProperties);
         }
       }
     }
@@ -162,7 +162,7 @@ export function resolveStyle(
   // Apply paragraph's own properties (most specific)
   if (para.properties) {
     const { style: _s, sectionProperties: _sp, ...ownPProps } = para.properties;
-    mergedPProps = { ...mergedPProps, ...stripUndefined(ownPProps) };
+    mergedPProps = mergeProperties(mergedPProps, ownPProps);
   }
 
   return {
@@ -176,13 +176,70 @@ export function resolveStyle(
 // Internal helpers
 // =============================================================================
 
-/** Remove undefined values from an object (so spreading doesn't override with undefined). */
-function stripUndefined<T extends object>(obj: T): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) {
-      result[k] = v;
+/**
+ * Property keys whose value OOXML expresses as a bag of independently
+ * inherited attributes — or, for `borders` and `cellMargins`, as a container of
+ * independently inherited child elements.
+ *
+ * Word merges these one attribute at a time down the style hierarchy: a style
+ * declaring `<w:spacing w:after="154"/>` does **not** reset the `w:line` it
+ * inherited, and `<w:ind w:left="720"/>` does not reset `w:firstLine`.
+ * Replacing the whole value instead silently dropped whatever a lower level had
+ * set, which is how `ListParagraph` — declaring only `after` — lost the
+ * document default's 1.31 line spacing and rendered every list item at single
+ * spacing while the paragraphs around it stayed 24% looser.
+ *
+ * A key is listed only when the merge can actually change something. A `Border`
+ * or a `TableWidth` has a required member, so no level can declare half of one
+ * and replacing it whole is already the correct answer.
+ */
+const MERGEABLE_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  "spacing", // w:spacing — before / after / line / lineRule
+  "indent", // w:ind — left / right / firstLine / hanging / start / end
+  "borders", // w:pBdr / w:tblBorders / w:tcBorders — per side
+  "cellMargins", // w:tblCellMar — per side
+  "shading", // w:shd — val / color / fill
+  "font", // w:rFonts — ascii / hAnsi / eastAsia / cs and their themes
+  "language", // w:lang — val / eastAsia / bidi
+  "color", // w:color — val / themeColor / themeTint / themeShade
+  "underline", // w:u — val / color
+  "look", // w:tblLook
+  "float", // w:tblpPr
+  "frame", // w:framePr
+  "markRunProperties" // the paragraph mark's w:rPr — merges like any other rPr
+]);
+
+/** Whether a value is a mergeable object rather than a scalar or an array. */
+function isPropertyBag(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Layer one style-hierarchy level onto the levels below it.
+ *
+ * An absent member means "inherit", not "reset", so `undefined` never erases
+ * what a lower level set. The attribute-bag keys above are merged rather than
+ * replaced, and recursively: `markRunProperties` therefore gets the same
+ * treatment as a top-level run-properties bag, and a `borders` container merges
+ * per side while each side is still replaced whole.
+ *
+ * The `isPropertyBag` guard on both sides is what lets a single key set serve
+ * paragraph, run and table properties even where a name is reused for different
+ * shapes — `RunProperties.spacing` is a `Twips` and `TableProperties.indent` a
+ * number, and a scalar never takes the merge branch.
+ */
+function mergeProperties(base: Record<string, unknown>, override: object): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined) {
+      continue;
     }
+    const existing = result[key];
+    if (MERGEABLE_PROPERTY_KEYS.has(key) && isPropertyBag(existing) && isPropertyBag(value)) {
+      result[key] = mergeProperties(existing, value);
+      continue;
+    }
+    result[key] = value;
   }
   return result;
 }
@@ -599,26 +656,26 @@ export function resolveRunStyle(
 
   // 1. Document defaults
   if (doc.docDefaults?.runProperties) {
-    merged = { ...doc.docDefaults.runProperties };
+    merged = mergeProperties({}, doc.docDefaults.runProperties);
   }
 
   // 2. Inherited from paragraph's resolved style
   if (paragraphRunProperties) {
-    merged = { ...merged, ...stripUndefined(paragraphRunProperties) };
+    merged = mergeProperties(merged, paragraphRunProperties);
   }
 
   // 3. Run's character style chain (base → specific)
   for (let i = chain.length - 1; i >= 0; i--) {
     const def = styleMap.get(chain[i]);
     if (def?.runProperties) {
-      merged = { ...merged, ...stripUndefined(def.runProperties) };
+      merged = mergeProperties(merged, def.runProperties);
     }
   }
 
   // 4. Run's own direct properties (highest priority)
   if (run.properties) {
     const { style: _s, ...own } = run.properties;
-    merged = { ...merged, ...stripUndefined(own) };
+    merged = mergeProperties(merged, own);
   }
 
   return {
@@ -734,10 +791,10 @@ export function resolveTableStyle(
 
   // Apply doc defaults first
   if (doc.docDefaults?.paragraphProperties) {
-    pProps = { ...doc.docDefaults.paragraphProperties };
+    pProps = mergeProperties({}, doc.docDefaults.paragraphProperties);
   }
   if (doc.docDefaults?.runProperties) {
-    rProps = { ...doc.docDefaults.runProperties };
+    rProps = mergeProperties({}, doc.docDefaults.runProperties);
   }
 
   // Apply chain (base → specific)
@@ -747,13 +804,13 @@ export function resolveTableStyle(
       continue;
     }
     if (def.paragraphProperties) {
-      pProps = { ...pProps, ...stripUndefined(def.paragraphProperties) };
+      pProps = mergeProperties(pProps, def.paragraphProperties);
     }
     if (def.runProperties) {
-      rProps = { ...rProps, ...stripUndefined(def.runProperties) };
+      rProps = mergeProperties(rProps, def.runProperties);
     }
     if (def.tableProperties) {
-      tProps = { ...tProps, ...stripUndefined(def.tableProperties) };
+      tProps = mergeProperties(tProps, def.tableProperties);
     }
   }
 

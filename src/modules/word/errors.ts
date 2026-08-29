@@ -69,8 +69,8 @@ export class DocxUnsupportedFeatureError extends DocxError {
 
 /**
  * Error thrown when a DOCX file is encrypted (CFB format) and no password
- * was provided. Pass `{ password }` in the second argument of `readDocx()`
- * to decrypt automatically, or call `decryptDocx()` from "documonster/word/crypto"
+ * was provided. Pass `{ password }` in the second argument of `Io.read()`
+ * to decrypt automatically, or call `decryptDocx()` from `documonster/word/crypto`
  * directly if you need lower-level access to the decrypted ZIP bytes.
  */
 export class DocxEncryptedError extends DocxError {

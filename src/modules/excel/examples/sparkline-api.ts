@@ -8,7 +8,7 @@
  * - Sparkline.remove — remove a group (by handle or index)
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/sparkline-api.ts
+ *   pnpm example --filter sparkline-api
  *
  * Output:
  *   tmp/excel-examples/sparkline-api.xlsx

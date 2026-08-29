@@ -1070,12 +1070,6 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
   }
 }
 
-export const WorkbookWriterOptionsSchema = {
-  useSharedStrings: ["boolean"],
-  useStyles: ["boolean"],
-  trueStreaming: ["boolean"]
-} as const;
-
 // ============================================================================
 // Browser-compatible WorkbookWriter
 // ============================================================================

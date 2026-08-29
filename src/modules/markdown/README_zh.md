@@ -19,8 +19,8 @@ import { Markdown } from "documonster/markdown";
 - **管道符转义** — 在解析与格式化两个方向均处理 `\|` 与 `\\`
 - **CJK/Emoji 宽度** — 内置显示宽度计算,实现正确的列对齐
 - **多行单元格** — 支持 `<br>` 标签以在单元格内换行
-- **多表格** — 使用 `parseMarkdownAll` 从一篇 Markdown 文档中提取所有表格
-- **Workbook 集成** — 通过 `Workbook.readMarkdown()` / `writeMarkdown()` 实现 Excel↔Markdown
+- **多表格** — 使用 `Markdown.parseAll` 从一篇 Markdown 文档中提取所有表格
+- **Workbook 集成** — 使用 `documonster/excel/markdown` 的 `readMarkdown(workbook, input)` / `writeMarkdown(workbook)` 实现 Excel↔Markdown
 
 ---
 
@@ -113,7 +113,7 @@ await writeMarkdownFile(workbook, "output.md");
 
 解析输入字符串中找到的第一个 Markdown 表格。
 
-```typescript
+```text
 Markdown.parse(input: string, options?: MarkdownParseOptions): MarkdownParseResult
 ```
 
@@ -123,7 +123,7 @@ Markdown.parse(input: string, options?: MarkdownParseOptions): MarkdownParseResu
 
 解析文档中的所有 Markdown 表格。
 
-```typescript
+```text
 Markdown.parseAll(input: string, options?: MarkdownParseOptions): MarkdownParseResult[]
 ```
 
@@ -157,7 +157,7 @@ interface MarkdownParseResult {
 
 将数据格式化为 Markdown 表格字符串。
 
-```typescript
+```text
 Markdown.format(headers: string[], rows: unknown[][], options?: MarkdownFormatOptions): string
 ```
 

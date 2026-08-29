@@ -10,7 +10,14 @@
  *   - Margins:   1 in on all sides (1440 twips)
  */
 
-import type { TableCellProperties, TableProperties, TableWidth } from "@word/types";
+import type {
+  ParagraphProperties,
+  RunProperties,
+  Table,
+  TableCellProperties,
+  TableProperties,
+  TableWidth
+} from "@word/types";
 
 /** Default page width in twips (US Letter, 8.5 in). */
 export const DEFAULT_PAGE_WIDTH_TWIPS = 12240;
@@ -134,4 +141,177 @@ export function resolveCellMarginsTwips(
       DEFAULT_CELL_MARGINS_TWIPS.right
     )
   };
+}
+
+// =============================================================================
+// Heading heuristics
+// =============================================================================
+
+/**
+ * The heading level a paragraph presents as, or 0 for body text.
+ *
+ * `w:outlineLvl` is authoritative; a `w:pStyle` named `Heading N` is the fallback
+ * for a document whose styles table is absent or incomplete.
+ */
+export function getHeadingLevel(props: ParagraphProperties | undefined): number {
+  if (!props) {
+    return 0;
+  }
+  if (props.outlineLevel !== undefined && props.outlineLevel >= 0 && props.outlineLevel <= 5) {
+    return props.outlineLevel + 1;
+  }
+  if (props.style) {
+    const match = /^[Hh]eading\s*(\d)$/i.exec(props.style);
+    if (match) {
+      return parseInt(match[1], 10);
+    }
+  }
+  return 0;
+}
+
+/**
+ * How much larger than body text a heading of this level is drawn.
+ *
+ * Applied **only** when the style supplies no concrete `w:sz` — a document with a
+ * styles table gets its declared sizes and this heuristic stays out of the way.
+ *
+ * Shared because both layout passes must agree on it. The positioned pass applied
+ * it and the pagination pass did not, so a run of `Heading 1` paragraphs was
+ * estimated at body height: 40 of them reported one page and paginated to two, and
+ * `pageCount` is what `NUMPAGES`, `PAGE`, TOC entries and `PAGEREF` are resolved
+ * from — so the page numbers written into the document were a quarter of the truth.
+ */
+export function getHeadingFontScale(level: number): number {
+  switch (level) {
+    case 1:
+      return 2.0;
+    case 2:
+      return 1.5;
+    case 3:
+      return 1.17;
+    case 4:
+      return 1.0;
+    case 5:
+      return 0.83;
+    case 6:
+      return 0.67;
+    default:
+      return 1.0;
+  }
+}
+
+/**
+ * The heading scale in force for a paragraph, given its resolved style run props.
+ *
+ * The single expression both passes use, so neither can forget the `w:sz` opt-out.
+ */
+export function resolveHeadingScale(
+  paragraphProps: ParagraphProperties | undefined,
+  styleRunSize: number | null | undefined
+): number {
+  return styleRunSize != null ? 1 : getHeadingFontScale(getHeadingLevel(paragraphProps));
+}
+
+/**
+ * Slack allowed when asking whether a block still fits on the page.
+ *
+ * Heights accumulate by repeated addition, so a page that should be filled exactly
+ * comes up a few ulps short: fourteen 43.2pt paragraphs sum to 604.80000000000007,
+ * leaving 43.199999999999932 for a fifteenth that measures 43.2 — and the block was
+ * pushed to the next page over 7e-14pt. That is invisible on the page and visible in
+ * `pageCount`, which `NUMPAGES`, `PAGE`, TOC entries and `PAGEREF` are resolved from.
+ *
+ * A hundredth of a point is far below anything a document can express (a twip, the
+ * finest OOXML unit, is 0.05pt) and far above the accumulated error.
+ */
+export const FIT_EPSILON_PT = 0.01;
+
+// =============================================================================
+// Run property inheritance
+// =============================================================================
+
+/**
+ * Merge a run's own properties over the ones it inherits.
+ *
+ * `w:rFonts` is merged **per slot**, not replaced whole. A spread — `{...inherited,
+ * ...own}` — throws away the inherited `w:ascii` the moment a run names only
+ * `w:eastAsia`, which is how a Chinese run overriding just its East Asian face is
+ * written. Word resolves each attribute of `w:rFonts` independently, so the Latin
+ * face from the style chain has to survive.
+ *
+ * The pagination pass papered over this by threading the inherited Latin name
+ * through a separate parameter; the positioned pass had nothing and fell back to
+ * Calibri, measuring the Latin half of every such run against the wrong face —
+ * narrower than the truth, so the two passes disagreed about page count in the
+ * direction that writes a wrong `NUMPAGES` into the document.
+ */
+export function mergeRunProperties(
+  inherited: RunProperties | undefined,
+  own: RunProperties | undefined
+): RunProperties | undefined {
+  if (!inherited) {
+    return own;
+  }
+  if (!own) {
+    return inherited;
+  }
+  const merged: RunProperties = { ...inherited, ...own };
+  if (inherited.font !== undefined && own.font !== undefined) {
+    const a = typeof inherited.font === "string" ? { ascii: inherited.font } : inherited.font;
+    const b = typeof own.font === "string" ? { ascii: own.font } : own.font;
+    return { ...merged, font: { ...a, ...b } };
+  }
+  return merged;
+}
+
+// =============================================================================
+// Table geometry
+// =============================================================================
+
+/**
+ * Column widths in twips, scaled to the measure the table is laid into.
+ *
+ * `w:tblGrid` is advisory: Word fits the grid to the available width, shrinking a
+ * table whose columns overflow and expanding one that under-fills. The pagination
+ * pass used the declared twips as-is, so a table arriving from the Excel or HTML
+ * bridge with a grid twice the page width was estimated with columns twice as wide
+ * as they are drawn — half the wrapped lines, and a page count short of the truth.
+ *
+ * Returns equal columns when no usable grid is declared.
+ */
+export function resolveColumnWidthsTwips(
+  table: Table,
+  numCols: number,
+  availableWidthTwips: number
+): number[] {
+  if (numCols <= 0) {
+    return [];
+  }
+  const declared = table.columnWidths;
+  if (declared && declared.length >= numCols) {
+    const widths = declared.slice(0, numCols);
+    const total = widths.reduce((a, b) => a + b, 0);
+    if (total > 0) {
+      const scale = availableWidthTwips / total;
+      return widths.map(w => w * scale);
+    }
+  }
+  return new Array<number>(numCols).fill(availableWidthTwips / numCols);
+}
+
+/**
+ * The shortest a table row can be, in points.
+ *
+ * One line of body text plus the row's own cell margins. The two passes had
+ * different answers — the pagination pass used a line height plus the margins while
+ * the positioned pass hardcoded `11 × 1.5 = 16.5pt` and ignored the margins — so a
+ * compact table of single-line cells was estimated 3.3pt per row short. Forty rows
+ * of that is a page.
+ */
+export function minimumRowHeightPt(
+  tableProperties: TableProperties | undefined,
+  defaultFontSizePt: number
+): number {
+  const margins = resolveCellMarginsTwips(tableProperties, undefined);
+  return defaultFontSizePt * LINE_HEIGHT_FACTOR + (margins.top + margins.bottom) / 20;
 }

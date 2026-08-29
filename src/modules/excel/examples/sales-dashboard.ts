@@ -29,7 +29,7 @@
  *   tmp/excel-examples/sales-dashboard.pdf
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/sales-dashboard.ts
+ *   pnpm example --filter sales-dashboard
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";

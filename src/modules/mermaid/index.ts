@@ -6,14 +6,14 @@
  * serve every output — `documonster/draw` renders the list to markup or pixels, and
  * `documonster/pdf` renders it onto a page.
  *
- * @example
- * ```ts
- * import { mermaidToSvg } from "documonster/mermaid";
- *
  * Twenty-one diagram types are drawn: `flowchart`, `stateDiagram`, `classDiagram`,
  * `erDiagram`, `sequenceDiagram`, `requirementDiagram`, `C4`, `architecture`, `gantt`,
  * `timeline`, `journey`, `kanban`, `mindmap`, `gitGraph`, `quadrantChart`, `xychart`,
  * `radar`, `sankey`, `packet`, `block` and `pie`.
+ *
+ * @example
+ * ```ts
+ * import { mermaidToSvg } from "documonster/mermaid";
  *
  * const svg = mermaidToSvg(`flowchart TD
  *   A[Start] --> B{Ready?}

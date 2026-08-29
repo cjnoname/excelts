@@ -16,9 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { rowSetFill, rowSetFont } from "@excel/core/row";
-import { columnSetNumFmt, getColumn } from "@excel/core/worksheet";
-import { Cell, Workbook, Worksheet } from "@excel/index";
+import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 
 import {
   excelToDocx,
@@ -53,8 +51,8 @@ Worksheet.setColumns(ws1, [
   { header: "Q4", key: "q4", width: 10 }
 ]);
 // Style header row
-rowSetFont(Worksheet.getRow(ws1, 1), { bold: true, color: { argb: "FFFFFFFF" } });
-rowSetFill(Worksheet.getRow(ws1, 1), {
+Row.setFont(ws1, 1, { bold: true, color: { argb: "FFFFFFFF" } });
+Row.setFill(ws1, 1, {
   type: "pattern",
   pattern: "solid",
   fgColor: { argb: "FF1F4E79" }
@@ -68,10 +66,10 @@ const data = [
 for (const r of data) {
   Worksheet.addRow(ws1, r);
 }
-columnSetNumFmt(getColumn(ws1, "q1"), "$#,##0");
-columnSetNumFmt(getColumn(ws1, "q2"), "$#,##0");
-columnSetNumFmt(getColumn(ws1, "q3"), "$#,##0");
-columnSetNumFmt(getColumn(ws1, "q4"), "$#,##0");
+Column.setNumFmt(ws1, "q1", "$#,##0");
+Column.setNumFmt(ws1, "q2", "$#,##0");
+Column.setNumFmt(ws1, "q3", "$#,##0");
+Column.setNumFmt(ws1, "q4", "$#,##0");
 
 const ws2 = Workbook.addWorksheet(wb, "Inventory");
 Worksheet.addRow(ws2, ["Item", "Qty", "Note"]);

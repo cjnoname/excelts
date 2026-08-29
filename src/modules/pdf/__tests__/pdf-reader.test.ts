@@ -8,7 +8,9 @@
 import { cellSetValue } from "@excel/core/cell";
 import { rowGetCell } from "@excel/core/worksheet";
 import { Cell, Workbook, Worksheet } from "@excel/index";
+import { docxToPdf } from "@pdf/word-bridge";
 import { aesCbcDecrypt, sha256 } from "@utils/crypto";
+import type { BodyContent } from "@word/types";
 import { describe, it, expect, beforeAll } from "vitest";
 
 import { PdfDocumentBuilder } from "../builder/document-builder";
@@ -2804,5 +2806,64 @@ describe("PDF Reader - Table Extraction", () => {
 
     const result = await readPdf(pdfBytes, { extractTables: true });
     expect(result.pages[0].tables.length).toBe(0);
+  });
+});
+
+describe("wrapped prose is not read as two columns", () => {
+  // `detectColumns` grouped fragments by their X *midpoint*. Every line of a
+  // paragraph starts at the same left edge but only the last one is short, so its
+  // midpoint sits far to the left of the full-width lines — further than the
+  // four-em gap the detector treats as a column divider. A paragraph therefore came
+  // back with its closing line hoisted above its opening line: every character
+  // present, in an order nobody wrote.
+  //
+  // The table heuristic could not catch it. That inspects only lines carrying two or
+  // more fragments, and single-column prose has exactly one per line, so it had
+  // nothing to measure and abstained.
+  const LONG =
+    "简体中文销售报表：二零二四年度各区域营业额与毛利率统计汇总，" +
+    "其中华东地区同比增长百分之十二，华南地区受季节性因素影响略有回落，" +
+    "西部市场在新渠道拉动下表现突出，全年整体毛利率维持在百分之三十四以上。";
+
+  const paragraph = (text: string): BodyContent =>
+    ({ type: "paragraph", children: [{ content: [{ type: "text", text }] }] }) as BodyContent;
+
+  it("should report the lines in the order they were written", async () => {
+    const bytes = await docxToPdf({ body: [paragraph("标题"), paragraph(LONG), paragraph(LONG)] });
+    const page = (await readPdf(bytes)).pages[0];
+
+    // Reading order must be visual order: top-down.
+    const ys = page.textLines.map(l => l.y);
+    for (let i = 1; i < ys.length; i++) {
+      expect(ys[i], `line ${i} sits above line ${i - 1}`).toBeLessThan(ys[i - 1]);
+    }
+
+    // And nothing is lost or reordered within the text.
+    const flat = page.textLines
+      .map(l => l.text)
+      .join("")
+      .replace(/[\s\u3000]+/gu, "");
+    expect(flat).toBe(`标题${LONG}${LONG}`.replace(/[\s\u3000]+/gu, ""));
+  });
+
+  it("should still separate genuine columns", async () => {
+    // A real two-column layout: each column has its own left edge *and* its own
+    // lines, so no row spans the gap. The two are read one column after the other,
+    // not interleaved into rows — which is what the table case above does instead.
+    const builder = new PdfDocumentBuilder();
+    const page = builder.addPage();
+    for (let i = 0; i < 5; i++) {
+      page.drawText(`left column line ${i}`, { x: 60, y: 700 - i * 20, fontSize: 11 });
+    }
+    for (let i = 0; i < 5; i++) {
+      // Offset vertically so no line shares a baseline with the left column.
+      page.drawText(`right column line ${i}`, { x: 340, y: 690 - i * 20, fontSize: 11 });
+    }
+    const read = await readPdf(await builder.build());
+    const texts = read.pages[0].textLines.map(l => l.text);
+    // Every line belongs to exactly one column — none was merged across the gap.
+    expect(texts.every(t => !(t.includes("left") && t.includes("right")))).toBe(true);
+    expect(texts.filter(t => t.includes("left"))).toHaveLength(5);
+    expect(texts.filter(t => t.includes("right"))).toHaveLength(5);
   });
 });

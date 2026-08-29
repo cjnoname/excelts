@@ -59,33 +59,6 @@ export interface RenderHelpers {
 }
 
 /**
- * Apply the `rawXmlPolicy` to a single `xml.writeRaw(...)` operation.
- *
- * - `"preserve"` (or undefined): write the fragment verbatim.
- * - `"strip"`: skip writing — the surrounding wrapper element (if any) is
- *   left empty. This is intentionally conservative: it preserves ZIP/relationship
- *   integrity even though it may produce a structurally-incomplete element.
- * - `"reject"`: throw `DocxRawXmlPolicyError` so the caller learns about the
- *   opaque content instead of silently producing degraded output.
- *
- * Importing the error class lazily would create an import cycle; callers that
- * need to throw should do so themselves. This helper just resolves the action.
- */
-export type RawXmlAction = "write" | "skip" | "throw";
-export function resolveRawXmlAction(
-  policy: "preserve" | "strip" | "reject" | undefined
-): RawXmlAction {
-  switch (policy) {
-    case "strip":
-      return "skip";
-    case "reject":
-      return "throw";
-    default:
-      return "write";
-  }
-}
-
-/**
  * Read-only WeakMap projection.
  * (TS lib doesn't ship one; we mirror the readonly subset of WeakMap.)
  */

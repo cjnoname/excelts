@@ -13,10 +13,9 @@ import {
   cellSetNote
 } from "@excel/core/cell";
 import { chartsheetPageSetup, chartsheetSetPageSetup } from "@excel/core/chartsheet";
-import { rowAddPageBreak } from "@excel/core/row";
 import { addWorkbookImage } from "@excel/core/workbook-core";
 import { addColumnChart, addImage, getCell, mergeCells } from "@excel/core/worksheet";
-import { Cell, Column, Workbook, Worksheet } from "@excel/index";
+import { Cell, Column, Row, Workbook } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { extractTextFromPage } from "@pdf/reader/content-interpreter";
 import { PdfDocument } from "@pdf/reader/pdf-document";
@@ -271,7 +270,7 @@ describe("pageSetup.printTitlesColumn", () => {
     Column.setHidden(ws, 3, true); // hide C, inside the title band
     ws.pageSetup.printTitlesColumn = "B:D";
     ws.pageSetup.printTitlesRow = "2:3";
-    rowAddPageBreak(Worksheet.getRow(ws, 10));
+    Row.addPageBreak(ws, 10);
 
     const pages = textPerPage(await excelToPdf(wb, { fitToPage: false }));
     expect(pages.length).toBeGreaterThan(1);

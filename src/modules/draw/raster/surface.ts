@@ -177,7 +177,7 @@ const MAX_OUTPUT_PIXELS = 64_000_000;
  * antialiasing from the first or blow up on the second.
  *
  * Exported so the decision can be asserted directly. Testing it through
- * {@link rasterizeDrawList} does not work: a machine with the memory to spare
+ * {@link rasterizeToRgba} does not work: a machine with the memory to spare
  * completes the 2.2 GB render, slowly, and reports success either way.
  */
 export function normalizeSamples(

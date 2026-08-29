@@ -32,7 +32,9 @@
  *   `addBackgroundImage` / `addWatermark({ mode: "header" })` throw if given a
  *   linked image (Excel drops such backgrounds on open). Use an embedded image.
  *
- * Run: `npx tsx src/modules/excel/examples/images-external.ts [outFile.xlsx]`
+ * Run: `pnpm example --filter images-external` (writes into `tmp/excel-examples/`).
+ * To choose the output path, invoke the file directly and pass it:
+ * `node --import @oxc-node/core/register src/modules/excel/examples/images-external.ts out.xlsx`
  */
 import fs from "node:fs";
 import path from "node:path";

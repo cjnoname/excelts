@@ -32,7 +32,7 @@
  *   tmp/excel-examples/scientific-analysis.pdf
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/scientific-analysis.ts
+ *   pnpm example --filter scientific-analysis
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";

@@ -25,9 +25,7 @@ import {
   readMarkdownFile,
   writeMarkdownFile
 } from "@excel/bridge/markdown-bridge.node";
-import { cellGetValue } from "@excel/core/cell";
-import { getSheetName, rowGetCell } from "@excel/core/worksheet";
-import { Workbook, Worksheet } from "@excel/index";
+import { Cell, Workbook, Worksheet } from "@excel/index";
 
 import { Markdown, MarkdownParseError } from "../index";
 
@@ -88,11 +86,10 @@ const markdownInput = `
 const wb1 = Workbook.create();
 const ws = readMarkdown(wb1, markdownInput, { sheetName: "Employees" });
 
-console.log("Sheet:", getSheetName(ws), "| Rows:", Worksheet.rowCount(ws));
+console.log("Sheet:", Worksheet.getName(ws), "| Rows:", Worksheet.rowCount(ws));
 for (let r = 1; r <= Worksheet.rowCount(ws); r++) {
-  const row = Worksheet.getRow(ws, r);
   console.log(
-    `  Row ${r}: ${cellGetValue(rowGetCell(row, 1))} | ${cellGetValue(rowGetCell(row, 2))} | ${cellGetValue(rowGetCell(row, 3))}`
+    `  Row ${r}: ${Cell.getValue(ws, r, 1)} | ${Cell.getValue(ws, r, 2)} | ${Cell.getValue(ws, r, 3)}`
   );
 }
 
@@ -132,10 +129,10 @@ const sheets = readMarkdownAll(wb2, multiDoc, { sheetName: "Q1" });
 console.log(`Created ${sheets.length} worksheets:`);
 const allMarkdown: string[] = [];
 for (const s of sheets) {
-  const markdown = writeMarkdown(wb2, { sheetName: getSheetName(s) });
-  console.log(`\n--- ${getSheetName(s)} ---`);
+  const markdown = writeMarkdown(wb2, { sheetName: Worksheet.getName(s) });
+  console.log(`\n--- ${Worksheet.getName(s)} ---`);
   console.log(markdown);
-  allMarkdown.push(`## ${getSheetName(s)}\n\n${markdown}`);
+  allMarkdown.push(`## ${Worksheet.getName(s)}\n\n${markdown}`);
 }
 fs.writeFileSync(
   path.join(outDir, "workbook-multi.md"),
@@ -167,8 +164,8 @@ const ws3 = readMarkdown(wb3, markdownInput, {
     return Number.isNaN(n) ? value : n;
   }
 });
-console.log("Age type:", typeof cellGetValue(rowGetCell(Worksheet.getRow(ws3, 2), 2)));
-console.log("Age value:", cellGetValue(rowGetCell(Worksheet.getRow(ws3, 2), 2)));
+console.log("Age type:", typeof Cell.getValue(ws3, 2, 2));
+console.log("Age value:", Cell.getValue(ws3, 2, 2));
 console.log();
 
 // =============================================================================
@@ -189,10 +186,7 @@ console.log(markdownMultiline);
 
 const wb5 = Workbook.create();
 const ws5 = readMarkdown(wb5, markdownMultiline, { sheetName: "Notes", convertBr: true });
-console.log(
-  "Parsed back (address):",
-  JSON.stringify(cellGetValue(rowGetCell(Worksheet.getRow(ws5, 2), 2)))
-);
+console.log("Parsed back (address):", JSON.stringify(Cell.getValue(ws5, 2, 2)));
 fs.writeFileSync(path.join(outDir, "multiline-workbook.md"), markdownMultiline, "utf8");
 console.log();
 
@@ -229,7 +223,7 @@ const wb7 = Workbook.create();
 await readMarkdownFile(wb7, outFile, { sheetName: "FromFile" });
 const fromFileSheet = Workbook.getWorksheet(wb7, "FromFile")!;
 if (fromFileSheet) {
-  console.log("Read back:", cellGetValue(rowGetCell(Worksheet.getRow(fromFileSheet, 2), 1)));
+  console.log("Read back:", Cell.getValue(fromFileSheet, 2, 1));
 }
 
 // readMarkdownAllFile
@@ -238,7 +232,7 @@ fs.writeFileSync(multiFile, multiDoc, "utf8");
 const wb8 = Workbook.create();
 const allSheets = await readMarkdownAllFile(wb8, multiFile, { sheetName: "Sheet" });
 console.log(
-  `readMarkdownAllFile: ${allSheets.length} worksheets → ${allSheets.map(s => getSheetName(s)).join(", ")}`
+  `readMarkdownAllFile: ${allSheets.length} worksheets → ${allSheets.map(s => Worksheet.getName(s)).join(", ")}`
 );
 
 console.log("\nAll output files written to:", outDir);

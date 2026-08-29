@@ -15,6 +15,7 @@ import { resolveInRoot } from "../sandbox.js";
 import { requireSpreadsheetFormat } from "./document.js";
 import { assertReadableSize } from "./fs-helpers.js";
 import { textResult } from "./result.js";
+import { describeSheetImages } from "./sheet-image.js";
 import {
   describeWindow,
   parseRange,
@@ -92,9 +93,22 @@ export const sheetReadTool = defineTool({
     const used = usedWindow(ws);
 
     if (used === undefined) {
+      // "Empty" is about cells. A picture occupies none, so a sheet holding
+      // nothing but an image used to report itself as empty — which made the
+      // placement unverifiable by the very call every write tool tells you to make.
+      const pictures = describeSheetImages(ws);
       return textResult(
         config,
-        `# ${args.path} — ${sheetName(ws)}\n\nThe sheet is empty.\n\nSheets in this workbook: ${sheetNames(wb).join(", ")}`
+        [
+          `# ${args.path} — sheet ${JSON.stringify(sheetName(ws))}`,
+          "",
+          pictures.length === 0
+            ? "The sheet is empty."
+            : "The sheet has no cell data, but it does hold pictures:",
+          ...pictures,
+          "",
+          `Sheets in this workbook: ${sheetNames(wb).join(", ")}`
+        ].join("\n")
       );
     }
 
@@ -147,6 +161,10 @@ export const sheetReadTool = defineTool({
         `- **${remaining} row(s) not shown.** Continue with \`startRow: ${window.bottom + 1}\`.`
       );
     }
+
+    // A picture occupies no cell, so the grid below cannot show one. Saying so is
+    // what makes "read it back to verify" possible after placing an image.
+    lines.push(...describeSheetImages(ws));
 
     const otherSheets = sheetNames(wb).filter(name => name !== sheetName(ws));
     if (otherSheets.length > 0) {

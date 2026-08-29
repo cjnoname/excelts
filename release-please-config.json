@@ -9,7 +9,11 @@
           "type": "json",
           "path": "packages/mcp/package.json",
           "jsonpath": "$.version"
-        }
+        },
+        "README.md",
+        "README_zh.md",
+        "src/modules/excel/README.md",
+        "src/modules/excel/README_zh.md"
       ]
     }
   },

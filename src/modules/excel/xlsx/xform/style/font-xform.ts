@@ -1,4 +1,5 @@
 import type { Color } from "@excel/types";
+import { inferFontCharset } from "@excel/utils/font-charset";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { BooleanXform } from "@excel/xlsx/xform/simple/boolean-xform";
 import { IntegerXform } from "@excel/xlsx/xform/simple/integer-xform";
@@ -86,9 +87,41 @@ class FontXform extends BaseXform {
   render(xmlStream: XmlSink, model: FontModel): void {
     const { map, renderOrder } = this;
 
+    // `<charset>` declares that a `<font>` is an East Asian face, and a consumer
+    // uses it to substitute another East Asian face rather than a Latin one. Excel
+    // always writes it — a Chinese Windows Excel stores
+    // `name="等线" charset="134"` — while documonster only ever emitted one that
+    // had been read back from a file, so a workbook authored from scratch
+    // described 宋体 exactly as it described Calibri.
+    //
+    // This is applied to every font, including one that arrived without a charset
+    // in a file someone else wrote. Two attempts to exempt those failed, and the
+    // second failure is the more interesting one:
+    //
+    //  - An instance flag set by `parseOpen` could not work, because a workbook is
+    //    parsed by one `StylesXform` and serialised by another.
+    //  - Marking the parsed *model* could not work either: `StylesXform._addFont`
+    //    re-serialises from the cell's own `font` object, which the style resolver
+    //    built afresh, so nothing attached to the parsed model survives to the
+    //    write. Carrying provenance through would mean threading it along the whole
+    //    parse → style → cell → write chain.
+    //
+    // That work is not worth doing, because the exemption was protecting the wrong
+    // thing. `charset="134"` on SimSun is not damage — it is the same value Excel
+    // itself writes for that face, so supplying it makes the output *more*
+    // faithful to the format, not less. Byte-identical round-tripping is already
+    // not a property of this writer (it also adds `x14ac:knownFonts` and
+    // normalises element order), and a charset that contradicted the font would be
+    // a real bug, which is why `inferFontCharset` returns nothing for pan-CJK
+    // families rather than guessing a region.
+    const effective =
+      model.charset === undefined && model.name !== undefined
+        ? { ...model, charset: inferFontCharset(model.name) }
+        : model;
+
     xmlStream.openNode(this.options.tagName);
     renderOrder.forEach(tag => {
-      map![tag].xform.render(xmlStream, model[map![tag].prop as keyof FontModel]);
+      map![tag].xform.render(xmlStream, effective[map![tag].prop as keyof FontModel]);
     });
     xmlStream.closeNode();
   }

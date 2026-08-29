@@ -14,9 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getWorksheets } from "@excel/core/workbook";
-import { columnSetNumFmt, getColumn } from "@excel/core/worksheet";
-import { Workbook, Worksheet } from "@excel/index";
+import { Column, Workbook, Worksheet } from "@excel/index";
 
 import { Pdf } from "../index";
 
@@ -25,13 +23,15 @@ const outDir = path.resolve(
   "../../../../tmp/pdf-examples"
 );
 fs.mkdirSync(outDir, { recursive: true });
+// Every input this example reads lives in the *examples* fixture directory. Two
+// of them (`gold-standard`, `merged-cell-borders`) are also test fixtures, and
+// this file used to read those straight out of `excel/__tests__/data`. That made
+// the example uncopyable — `__tests__/` is excluded from every build and is not
+// in the published package — and coupled its output to a test asset that is free
+// to change for reasons that have nothing to do with PDF export.
 const excelDataDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../excel/examples/data"
-);
-const testDataDir = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../excel/__tests__/data"
 );
 
 async function convertFile(
@@ -43,7 +43,7 @@ async function convertFile(
   await Workbook.readFile(wb, xlsxPath);
   const pdf = await Pdf.fromExcel(wb, options);
   fs.writeFileSync(path.join(outDir, pdfName), pdf);
-  const sheets = getWorksheets(wb).length;
+  const sheets = Workbook.getWorksheets(wb).length;
   console.log(`  ${pdfName} — ${sheets} sheet(s), ${pdf.length} bytes`);
 }
 
@@ -124,7 +124,7 @@ await convertFile(path.join(excelDataDir, "test-newline.xlsx"), "excel-to-pdf-ne
 // =============================================================================
 
 console.log("8. Gold standard (complex workbook):");
-await convertFile(path.join(testDataDir, "gold-standard.xlsx"), "excel-to-pdf-gold.pdf", {
+await convertFile(path.join(excelDataDir, "gold-standard.xlsx"), "excel-to-pdf-gold.pdf", {
   showGridLines: true,
   showSheetNames: true,
   showPageNumbers: true,
@@ -137,7 +137,7 @@ await convertFile(path.join(testDataDir, "gold-standard.xlsx"), "excel-to-pdf-go
 
 console.log("9. Merged cell borders:");
 await convertFile(
-  path.join(testDataDir, "merged-cell-borders.xlsx"),
+  path.join(excelDataDir, "merged-cell-borders.xlsx"),
   "excel-to-pdf-merge-borders.pdf",
   {
     showGridLines: true,
@@ -172,7 +172,7 @@ Worksheet.addRows(wsA5, [
   { item: "Bananas", qty: 6, price: 1.2 },
   { item: "Oranges", qty: 8, price: 2.8 }
 ]);
-columnSetNumFmt(getColumn(wsA5, "price"), "$#,##0.00");
+Column.setNumFmt(wsA5, "price", "$#,##0.00");
 const pdfB = await Pdf.fromExcel(wb10b, { pageSize: "A5", fitToPage: true, showGridLines: true });
 fs.writeFileSync(path.join(outDir, "excel-to-pdf-a5.pdf"), pdfB);
 console.log("  excel-to-pdf-a5.pdf — A5, fit to page");

@@ -18,17 +18,17 @@
  *
  * @example Text extraction:
  * ```typescript
- * import { readPdf } from "documonster/pdf";
+ * import { Pdf } from "documonster/pdf";
  *
- * const pdf = await readPdf(pdfBytes);
- * console.log(pdf.text);           // All text from all pages
- * console.log(pdf.pages[0].text);  // Text from page 1
+ * const doc = await Pdf.read(pdfBytes);
+ * console.log(doc.text);           // All text from all pages
+ * console.log(doc.pages[0].text);  // Text from page 1
  * ```
  *
  * @example Image extraction:
  * ```typescript
- * const pdf = await readPdf(pdfBytes);
- * for (const image of pdf.pages[0].images) {
+ * const doc = await Pdf.read(pdfBytes);
+ * for (const image of doc.pages[0].images) {
  *   console.log(image.format, image.width, image.height);
  *   fs.writeFileSync(`image.${image.format}`, image.data);
  * }
@@ -36,15 +36,15 @@
  *
  * @example Metadata:
  * ```typescript
- * const pdf = await readPdf(pdfBytes);
- * console.log(pdf.metadata.title);
- * console.log(pdf.metadata.author);
- * console.log(pdf.metadata.pageCount);
+ * const doc = await Pdf.read(pdfBytes);
+ * console.log(doc.metadata.title);
+ * console.log(doc.metadata.author);
+ * console.log(doc.metadata.pageCount);
  * ```
  *
  * @example Encrypted PDF:
  * ```typescript
- * const pdf = await readPdf(pdfBytes, { password: "secret" });
+ * const doc = await Pdf.read(pdfBytes, { password: "secret" });
  * ```
  */
 

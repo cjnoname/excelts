@@ -33,7 +33,7 @@ import {
   PAGE_NUMBER_BAND_HEIGHT,
   FIT_MIN_SCALE
 } from "@pdf/render/constants";
-import { wrapTextLines } from "@pdf/render/page-renderer";
+import { wrapRichTextLines, wrapTextLines } from "@pdf/render/page-renderer";
 import {
   extractFontProperties,
   excelFillToPdfColor,
@@ -1402,7 +1402,7 @@ function countWrapLines(
     if (value && typeof value === "object" && "richText" in value) {
       const runs = (value as { richText: PdfRichTextRunData[] }).richText;
       if (runs.length > 0) {
-        const wrappedCount = countRichTextWrapLines(
+        const wrappedCount = _countRichTextWrapLines(
           text,
           runs,
           effectiveWidth,
@@ -1436,7 +1436,16 @@ function countWrapLines(
  * This mirrors the logic in wrapRichTextLines (page-renderer) so that
  * the row height calculation matches the actual rendering.
  */
-function countRichTextWrapLines(
+/**
+ * The number of lines a rich-text cell wraps to.
+ *
+ * Exported so the reserve-equals-draw invariant can be asserted directly: this must
+ * equal `wrapRichTextLines(...).length` for the same inputs, and it used to be a
+ * second transcription of that function rather than a call to it.
+ *
+ * @internal
+ */
+export function _countRichTextWrapLines(
   text: string,
   runs: PdfRichTextRunData[],
   effectiveWidth: number,
@@ -1487,100 +1496,18 @@ function countRichTextWrapLines(
     return fontProps.fontSize;
   });
 
-  // Measure a range of fullText using per-character run font sizes
-  const measureRange = (start: number, end: number): number => {
-    let width = 0;
-    let segStart = start;
-    let currentRi = runForChar[start] ?? 0;
-    for (let i = start + 1; i <= end; i++) {
-      const ri = i < end ? (runForChar[i] ?? currentRi) : -1;
-      if (ri !== currentRi) {
-        const seg = text.slice(segStart, i);
-        width += fontManager.measureText(seg, runResources[currentRi], runFontSizes[currentRi]);
-        segStart = i;
-        currentRi = ri;
-      }
-    }
-    return width;
-  };
-
-  // Word-wrap using per-run measurements — mirrors wrapRichTextLines in
-  // page-renderer exactly (paragraph split on \n, word boundaries by
-  // scanning space/tab characters) to ensure line count matches rendering.
-  let totalLines = 0;
-  let globalOffset = 0;
-  const len = text.length;
-
-  while (globalOffset <= len) {
-    // Find end of current paragraph (handles both \n and \r\n)
-    let paraEnd = text.indexOf("\n", globalOffset);
-    if (paraEnd === -1) {
-      paraEnd = len;
-    }
-    // Skip \r before \n
-    const paraContentEnd =
-      paraEnd > globalOffset && text[paraEnd - 1] === "\r" ? paraEnd - 1 : paraEnd;
-
-    if (paraContentEnd === globalOffset) {
-      // Empty paragraph
-      totalLines++;
-      globalOffset = paraEnd + 1;
-      if (paraEnd === len) {
-        break;
-      }
-      continue;
-    }
-
-    // Find word boundaries within this paragraph (space/tab are separators)
-    const paraText = text.slice(globalOffset, paraContentEnd);
-    const wordStarts: number[] = [];
-    const wordEnds: number[] = [];
-    let inWord = false;
-    for (let i = 0; i < paraText.length; i++) {
-      const isSpace = paraText[i] === " " || paraText[i] === "\t";
-      if (!isSpace && !inWord) {
-        wordStarts.push(i);
-        inWord = true;
-      } else if (isSpace && inWord) {
-        wordEnds.push(i);
-        inWord = false;
-      }
-    }
-    if (inWord) {
-      wordEnds.push(paraText.length);
-    }
-
-    let lineStart = globalOffset;
-    let lineEnd = globalOffset;
-    let linesInParagraph = 0;
-
-    for (let wi = 0; wi < wordStarts.length; wi++) {
-      const wordEnd = globalOffset + wordEnds[wi];
-      if (lineEnd === lineStart) {
-        lineEnd = wordEnd;
-        continue;
-      }
-      if (measureRange(lineStart, wordEnd) <= effectiveWidth) {
-        lineEnd = wordEnd;
-      } else {
-        linesInParagraph++;
-        lineStart = globalOffset + wordStarts[wi];
-        lineEnd = wordEnd;
-      }
-    }
-
-    if (lineEnd > lineStart || wordStarts.length === 0) {
-      linesInParagraph++;
-    }
-    totalLines += linesInParagraph;
-
-    globalOffset = paraEnd + 1;
-    if (paraEnd === len) {
-      break;
-    }
-  }
-
-  return Math.max(1, totalLines);
+  // The renderer's own wrapping, so the reserved line count *is* the drawn line
+  // count. This was a second transcription of it, and the two disagreed: the copy
+  // here compared `measureRange(lineStart, wordEnd)` against the width while the
+  // renderer accumulated per appended word, which charged a paragraph's leading
+  // whitespace to the first line in one and not the other. Before that, only the
+  // renderer had been updated for East Asian breaking, so a Chinese cell reserved
+  // one line and drew six.
+  return Math.max(
+    1,
+    wrapRichTextLines(text, runForChar, runFontSizes, runResources, fontManager, effectiveWidth)
+      .length
+  );
 }
 
 // =============================================================================

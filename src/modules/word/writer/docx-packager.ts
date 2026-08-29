@@ -85,7 +85,7 @@ import { renderStyles } from "@word/writer/styles-writer";
 import { XmlWriter } from "@xml/writer";
 
 /** Render XML to string using XmlWriter. */
-function renderXml(renderFn: (xml: XmlWriter) => void): string {
+export function renderXml(renderFn: (xml: XmlWriter) => void): string {
   const writer = new XmlWriter();
   renderFn(writer);
   return writer.xml;
@@ -330,7 +330,11 @@ function shallowCopyDocForPackaging(doc: DocxDocument): DocxDocument {
  * with an entry already in `used`, a numeric suffix is appended until
  * unique. The chosen name is added to `used`.
  */
-function uniqueSanitizedName(raw: string | undefined, used: Set<string>, fallback: string): string {
+export function uniqueSanitizedName(
+  raw: string | undefined,
+  used: Set<string>,
+  fallback: string
+): string {
   let candidate = sanitizeMediaFileName(raw, fallback);
   if (used.has(candidate)) {
     const dot = candidate.lastIndexOf(".");

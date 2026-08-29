@@ -85,9 +85,11 @@ describe("resources", () => {
     try {
       const { resources } = await harness.client.listResources();
       expect(resources.map(resource => resource.uri).toSorted()).toEqual([
+        "documonster://help/diagrams",
         "documonster://help/documents",
         "documonster://help/editing",
         "documonster://help/formulas",
+        "documonster://help/images",
         "documonster://help/overview",
         "documonster://help/roadmap",
         "documonster://help/sandbox"
@@ -155,6 +157,7 @@ describe("prompts", () => {
       expect(prompts.map(prompt => prompt.name).toSorted()).toEqual([
         "build-report",
         "convert-document",
+        "draw-diagram",
         "fill-document",
         "review-changes",
         "summarise-spreadsheet"

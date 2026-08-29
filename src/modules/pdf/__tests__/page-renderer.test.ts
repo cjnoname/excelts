@@ -115,6 +115,35 @@ describe("page-renderer helpers", () => {
   describe("wrapTextLines", () => {
     const measure = (s: string) => s.length;
 
+    // East Asian text has no spaces, so `split(/\s+/)` produced a single word
+    // that was placed unconditionally and overflowed the cell however narrow it
+    // was. Break opportunities now come from `@utils/cjk`.
+    it("should wrap East Asian text between characters", () => {
+      expect(wrapTextLines("中文报表二零二四年度", measure, 8)).toEqual([
+        "中文报表二零二四",
+        "年度"
+      ]);
+    });
+
+    it("should not start a wrapped line with sentence-final punctuation", () => {
+      // Naive per-character wrapping would put 。 at the head of line 2.
+      expect(wrapTextLines("甲乙丙丁戊己庚辛。壬癸", measure, 8)).toEqual([
+        "甲乙丙丁戊己庚",
+        "辛。壬癸"
+      ]);
+    });
+
+    it("should move a bracketed group whole rather than orphan the bracket", () => {
+      expect(wrapTextLines("甲乙丙丁戊己庚（辛壬）癸", measure, 8)).toEqual([
+        "甲乙丙丁戊己庚",
+        "（辛壬）癸"
+      ]);
+    });
+
+    it("should wrap at the boundary between Latin and ideographs", () => {
+      expect(wrapTextLines("PDF导出", measure, 3)).toEqual(["PDF", "导出"]);
+    });
+
     it("should wrap greedily by words", () => {
       expect(wrapTextLines("aa bb ccc", measure, 5)).toEqual(["aa bb", "ccc"]);
     });

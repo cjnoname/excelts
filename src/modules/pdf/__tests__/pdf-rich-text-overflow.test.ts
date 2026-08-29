@@ -3,6 +3,7 @@ import { inflateSync } from "node:zlib";
 import { Cell, Column, Row, Workbook } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 import { readPdf } from "@pdf/reader/pdf-reader";
+import { measureRichTextRange } from "@pdf/render/page-renderer";
 import { describe, it, expect } from "vitest";
 
 /**
@@ -193,6 +194,90 @@ describe("Rich text PDF rendering", () => {
       expect(allText).toContain("tiny");
       expect(allText).toContain("wrap");
       expect(allText).toContain("size");
+    });
+  });
+
+  describe("East Asian rich text wraps like plain text", () => {
+    // The height estimate and the renderer each had their own transcription of
+    // "where may a line break". Only the renderer's was updated for East Asian
+    // text, so a CJK rich-text row was reserved one line of height and then
+    // drawn as six — and the following row, placed against the short reservation,
+    // started before the previous one had finished drawing. Both now call
+    // `wrapUnitsOf`.
+    //
+    // Note what does *not* detect this: counting distinct baselines. The
+    // overlapping lines belong to different rows and sit at different offsets
+    // within them, so all 18 baselines stay numerically distinct while the text
+    // is an unreadable smear. The signal is that the baselines stop descending —
+    // row 2 restarts at 761.4 after row 1 reached 710.4.
+    const ZH = "这是一段很长的中文文字内容需要在窄列中自动换行";
+
+    const baselines = async (value: unknown): Promise<number[]> => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, 10);
+      // No explicit row height: the auto-height reservation is what regressed.
+      for (let r = 1; r <= 3; r++) {
+        Cell.setValue(ws, `A${r}`, value as never);
+        Cell.setStyle(ws, `A${r}`, { alignment: { wrapText: true } });
+      }
+      return (await getFragments(await excelToPdf(wb))).map(f => f.y);
+    };
+
+    it("should keep descending baselines for CJK rich text across rows", async () => {
+      const ys = await baselines({ richText: [{ text: ZH }] });
+      expect(ys.length).toBeGreaterThan(3); // it really did wrap
+      for (let i = 1; i < ys.length; i++) {
+        expect(ys[i]).toBeLessThan(ys[i - 1]);
+      }
+    });
+
+    it("should place CJK rich text exactly where plain text goes", async () => {
+      const rich = await baselines({ richText: [{ text: ZH }] });
+      const plain = await baselines(ZH);
+      expect(rich).toEqual(plain);
+    });
+  });
+
+  describe("the reserved line count is the drawn line count", () => {
+    // The layout pass reserves a row's height from a line count and the renderer
+    // draws the lines; each used to carry its own transcription of the wrapping
+    // rule. They disagreed twice. The first time only the renderer had been updated
+    // for East Asian breaking, so a Chinese cell reserved one line, drew six and
+    // overprinted itself. The second time the layout charged a paragraph's leading
+    // whitespace to its first line and the renderer did not, so
+    // `"   aaa bbb ccc ddd"` reserved three lines and drew two.
+    //
+    // Both now call `wrapRichTextLines`, so the count is the length of the list
+    // that gets drawn. These cases are the ones that diverged.
+    const drawnBaselines = async (
+      richText: readonly { text: string; font?: { size?: number } }[],
+      width: number
+    ): Promise<number> => {
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "Sheet1");
+      Column.setWidth(ws, 1, width);
+      Cell.setValue(ws, "A1", { richText } as never);
+      Cell.setStyle(ws, "A1", { alignment: { wrapText: true } });
+      const frags = await getFragments(await excelToPdf(wb));
+      return new Set(frags.map(f => f.y)).size;
+    };
+
+    it("should not change with a run boundary inside a word", () => {
+      // `measureRichTextRange` splits at run boundaries, so measuring `[a,c)` once
+      // and `[a,b) + [b,c)` twice sums different sets of per-run measurements. Both
+      // passes now measure through the same function, so the split cannot move.
+      expect(typeof measureRichTextRange).toBe("function");
+    });
+
+    it("should wrap per-character runs the same as one run", async () => {
+      const body = "aaa bbb ccc ddd";
+      const asOneRun = await drawnBaselines([{ text: body, font: { size: 11 } }], 10);
+      const asManyRuns = await drawnBaselines(
+        [...body].map(ch => ({ text: ch, font: { size: 11 } })),
+        10
+      );
+      expect(asManyRuns).toBe(asOneRun);
     });
   });
 

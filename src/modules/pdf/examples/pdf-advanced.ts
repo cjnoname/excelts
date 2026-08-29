@@ -20,15 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  rowAddPageBreak,
-  rowSetAlignment,
-  rowSetFill,
-  rowSetFont,
-  rowSetHidden
-} from "@excel/core/row";
-import { columnSetNumFmt, getColumn } from "@excel/core/worksheet";
-import { Cell, Column, Workbook, Worksheet } from "@excel/index";
+import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 
 import { Pdf } from "../index";
 
@@ -53,13 +45,13 @@ Worksheet.setColumns(ws1, [
 ]);
 
 // Style the header row
-rowSetFont(Worksheet.getRow(ws1, 1), { bold: true, color: { argb: "FFFFFFFF" } });
-rowSetFill(Worksheet.getRow(ws1, 1), {
+Row.setFont(ws1, 1, { bold: true, color: { argb: "FFFFFFFF" } });
+Row.setFill(ws1, 1, {
   type: "pattern",
   pattern: "solid",
   fgColor: { argb: "FF2F5496" }
 });
-rowSetAlignment(Worksheet.getRow(ws1, 1), { horizontal: "center" });
+Row.setAlignment(ws1, 1, { horizontal: "center" });
 
 // Add 100 rows to force pagination
 const categories = ["Electronics", "Clothing", "Food", "Tools", "Books"];
@@ -74,7 +66,7 @@ for (let i = 1; i <= 100; i++) {
 }
 
 // Format the price column
-columnSetNumFmt(getColumn(ws1, "price"), "$#,##0.00");
+Column.setNumFmt(ws1, "price", "$#,##0.00");
 
 // Repeat row 1 on every page
 ws1.pageSetup.printTitlesRow = "1:1";
@@ -105,8 +97,8 @@ Column.setWidth(ws2, 2, 20);
 Column.setWidth(ws2, 3, 10);
 
 // Break after row 10 and row 20
-rowAddPageBreak(Worksheet.getRow(ws2, 10));
-rowAddPageBreak(Worksheet.getRow(ws2, 20));
+Row.addPageBreak(ws2, 10);
+Row.addPageBreak(ws2, 20);
 
 // Print area: only columns A-C, rows 1-30
 ws2.pageSetup.printArea = "A1:C30";
@@ -157,8 +149,8 @@ for (let r = 1; r <= 10; r++) {
   Cell.setValue(ws4, `C${r}`, `Visible C${r}`);
 }
 Column.setHidden(ws4, 2, true);
-rowSetHidden(Worksheet.getRow(ws4, 3), true);
-rowSetHidden(Worksheet.getRow(ws4, 7), true);
+Row.setHidden(ws4, 3, true);
+Row.setHidden(ws4, 7, true);
 
 const pdf4 = await Pdf.fromExcel(wb4, { showGridLines: true });
 fs.writeFileSync(path.join(outDir, "advanced-hidden.pdf"), pdf4);

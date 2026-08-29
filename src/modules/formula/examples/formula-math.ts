@@ -1,6 +1,4 @@
 import { calculateFormulas } from "@excel/bridge/formula";
-import { cellFormula, cellResult } from "@excel/core/cell";
-import { getCell } from "@excel/core/worksheet";
 import { Cell, Workbook } from "@excel/index";
 
 /**
@@ -77,6 +75,7 @@ const cells = [
   "J1"
 ];
 for (const addr of cells) {
-  const cell = getCell(ws, addr);
-  console.log(`${addr}  ${String(cellFormula(cell)).padEnd(28)}  = ${cellResult(cell)}`);
+  console.log(
+    `${addr}  ${String(Cell.getFormula(ws, addr)).padEnd(28)}  = ${Cell.getResult(ws, addr)}`
+  );
 }

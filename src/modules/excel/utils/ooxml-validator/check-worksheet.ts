@@ -33,6 +33,7 @@ import {
   findChildrenLocal,
   matchesLocal
 } from "@excel/utils/ooxml-validator/xml-utils";
+import { textContent } from "@xml/dom";
 import type { XmlElement } from "@xml/types";
 
 // -----------------------------------------------------------------------------
@@ -464,7 +465,7 @@ function checkCell(
   if (typeAttr === "s" && counts.sstSize !== undefined) {
     const v = findChildLocal(cell, "v");
     if (v) {
-      const text = collectText(v).trim();
+      const text = textContent(v).trim();
       const n = parseInt(text, 10);
       if (!Number.isFinite(n) || n < 0 || n >= counts.sstSize) {
         ctx.reporter.error(
@@ -495,7 +496,7 @@ function checkSharedFormula(
     return;
   }
   const hasRef = attrByLocalName(f, "ref") !== undefined;
-  const hasBody = collectText(f).trim().length > 0;
+  const hasBody = textContent(f).trim().length > 0;
   // A master is identified by having a `ref` attribute (range); a follower
   // has just `si` with an empty body. Some producers also emit a body on
   // masters, which is fine.
@@ -504,18 +505,6 @@ function checkSharedFormula(
   } else {
     followerSi.add(si);
   }
-}
-
-function collectText(el: XmlElement): string {
-  let out = "";
-  for (const child of el.children) {
-    if (child.type === "text" || child.type === "cdata") {
-      out += child.value;
-    } else if (child.type === "element") {
-      out += collectText(child);
-    }
-  }
-  return out;
 }
 
 // -----------------------------------------------------------------------------

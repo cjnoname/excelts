@@ -7,15 +7,15 @@
  *   3. Verify a signature with Pdf.verifySignature()
  *   4. Tamper detection — modified PDF fails verification
  *
- * Run: npx tsx src/modules/pdf/examples/pdf-signatures.ts
+ * Run: pnpm example --filter pdf-signatures
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { generateTestCertificate } from "../__tests__/test-certificate";
 import { Pdf } from "../index";
+import { generateSelfSignedCertificate } from "./utils/self-signed-certificate";
 
 const outDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -23,8 +23,11 @@ const outDir = path.resolve(
 );
 fs.mkdirSync(outDir, { recursive: true });
 
-// Generate a test certificate (for development/testing only)
-const { certificate, privateKey } = await generateTestCertificate("Example Signer");
+// A signing identity is an *input* to this example, not something the library
+// produces. This generates a throwaway self-signed one so the example runs
+// unattended; in production the certificate and key come from a CA, a keystore
+// or an HSM. See `./utils/self-signed-certificate.ts` for the openssl equivalent.
+const { certificate, privateKey } = await generateSelfSignedCertificate("Example Signer");
 
 // =============================================================================
 // 1. Sign a New PDF (PdfDocumentBuilder)

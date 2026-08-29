@@ -224,6 +224,26 @@ Cell.setAlignment(worksheet, "A1", { vertical: "middle", horizontal: "center", w
 Cell.setNumFmt(worksheet, "A1", "$#,##0.00");
 ```
 
+A number format is often owned by the column rather than by each cell, so
+`setNumFmt` exists at all three levels:
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Column.setNumFmt(worksheet, "revenue", "$#,##0.00"); // by key, letter or number
+Row.setNumFmt(worksheet, 2, "0.00%");
+```
+
+Setting a facet on a row or column applies it to the row/column **and** to the
+cells already in it. `Row` also has `setFont` / `setFill` / `setBorder` /
+`setAlignment`; every other combination goes through `setStyle`, which is also
+the better call for several facets at once — it makes a single pass for all of
+them:
+
+```typescript
+Column.setStyle(worksheet, "revenue", { numFmt: "$#,##0.00", alignment: { horizontal: "right" } });
+```
+
 ### Number Formats
 
 ```typescript
@@ -281,7 +301,7 @@ calculateFormulas(workbook); // results written back in place
 console.log(Cell.getResult(worksheet, "A4"));
 ```
 
-See the [formula module docs](../formula/README.md) for the 433 supported
+See the [formula module docs](../formula/README.md) for the 448 supported
 functions and for driving the engine against a non-excel host.
 
 ### Data Validation
@@ -484,6 +504,33 @@ worksheet.pageSetup.printArea = "A1:G20";
 worksheet.pageSetup.printTitlesRow = "1:2";
 ```
 
+### Page Breaks
+
+Manual page breaks, the equivalent of Excel's **Page Layout → Breaks → Insert
+Page Break**. They affect printing and `Pdf.fromExcel`, not the on-screen grid.
+
+```typescript
+import { Column, Row } from "documonster/excel";
+
+Row.addPageBreak(worksheet, 20); // page 2 starts at row 21
+Column.addPageBreak(worksheet, "F"); // the next page starts at column G
+```
+
+A break always spans the full width or height of the sheet. `CT_Break` has
+`min`/`max` attributes that could narrow one to a band of columns or rows, and
+they are deliberately not exposed: Excel's UI cannot author such a break, every
+file Excel writes spans the full extent, and `Pdf.fromExcel` reads only the break
+position — so a band would be a value nothing on either side can observe.
+
+When writing with the streaming writer you hold a row _handle_ rather than a row
+number, so the break goes through the `Stream` surface:
+
+```typescript
+import { Stream } from "documonster/excel";
+
+Stream.addRowPageBreak(sheet.getRow(20));
+```
+
 ### Sheet Protection
 
 ```typescript
@@ -534,7 +581,7 @@ Documonster includes a structured chart API, raw XML preservation for templates,
 
 ### Rendering scope
 
-The built-in `chart.toSVG()` / `chart.toPNG()` / `chartToPdf(chart)` helpers produce a **zero-dependency deterministic preview** — not an Excel-pixel-perfect compositor. Classic charts are driven by a `ChartScene` intermediate representation shared across SVG, PNG, and PDF; ChartEx charts use dedicated geometry collectors that keep the SVG and vector-PDF paths equivalent by construction. The preview is well-suited to:
+The built-in `Chart.toSVG(chart)` / `Chart.toPNG(chart)` / `Pdf.fromChart(chart)` helpers produce a **zero-dependency deterministic preview** — not an Excel-pixel-perfect compositor. Classic charts are driven by a `ChartScene` intermediate representation shared across SVG, PNG, and PDF; ChartEx charts use dedicated geometry collectors that keep the SVG and vector-PDF paths equivalent by construction. The preview is well-suited to:
 
 - Server-side thumbnails, email attachments, and README images
 - CI sanity checks ("does this chart render without crashing")
@@ -596,34 +643,29 @@ import {
 
 // 99 classic presets + 10 ChartEx presets (Excel UI aliases)
 Chart.addPreset(ws, "col3DConeStacked100", { series: [{ values: "Sales!$B$2:$B$4" }] }, "E1:M16");
-Chart.addPresetEx(
-  ws,
-  "boxAndWhisker",
-  { series: [{ values: "Samples!$A$2:$A$50" }] },
-  "N1:V16"
-);
+Chart.addPresetEx(ws, "boxAndWhisker", { series: [{ values: "Samples!$A$2:$A$50" }] }, "N1:V16");
 
 // Per-type shortcut methods — the `type` field is implied.
-Chart.addColumn(ws, { series: [...] }, "E18:M32");
-Chart.addBar(ws, { series: [...] }, "E34:M48");
-Chart.addLine(ws, { series: [...] }, "E50:M64");
-Chart.addArea(ws, { series: [...] }, "E66:M80");
-Chart.addPie(ws, { series: [...] }, "P1:X16");
-Chart.addDoughnut(ws, { series: [...] }, "P18:X32");
-Chart.addScatter(ws, { series: [...] }, "P34:X48");
-Chart.addBubble(ws, { series: [...] }, "P50:X64");
-Chart.addRadar(ws, { series: [...] }, "P66:X80");
-Chart.addStock(ws, { series: [...] }, "AA1:AI16");
-Chart.addSurface(ws, { series: [...] }, "AA18:AI32");
+Chart.addColumn(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E18:M32");
+Chart.addBar(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E34:M48");
+Chart.addLine(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E50:M64");
+Chart.addArea(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "E66:M80");
+Chart.addPie(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P1:X16");
+Chart.addDoughnut(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P18:X32");
+Chart.addScatter(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P34:X48");
+Chart.addBubble(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P50:X64");
+Chart.addRadar(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "P66:X80");
+Chart.addStock(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA1:AI16");
+Chart.addSurface(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA18:AI32");
 // ChartEx shortcuts
-Chart.addHistogram(ws, { series: [...] }, "AA34:AI48");
-Chart.addPareto(ws, { series: [...] }, "AA50:AI64");
-Chart.addWaterfall(ws, { series: [...] }, "AA66:AI80");
-Chart.addFunnel(ws, { series: [...] }, "AK1:AS16");
-Chart.addTreemap(ws, { series: [...] }, "AK18:AS32");
-Chart.addSunburst(ws, { series: [...] }, "AK34:AS48");
-Chart.addBoxWhisker(ws, { series: [...] }, "AK50:AS64");
-Chart.addRegionMap(ws, { series: [...] }, "AK66:AS80");
+Chart.addHistogram(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA34:AI48");
+Chart.addPareto(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA50:AI64");
+Chart.addWaterfall(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AA66:AI80");
+Chart.addFunnel(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK1:AS16");
+Chart.addTreemap(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK18:AS32");
+Chart.addSunburst(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK34:AS48");
+Chart.addBoxWhisker(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK50:AS64");
+Chart.addRegionMap(ws, { series: [{ values: "Sales!$B$2:$B$4" }] }, "AK66:AS80");
 
 console.log(EXCEL_CHART_PRESETS.length, EXCEL_CHART_EX_PRESETS.length); // 99, 10
 ```
@@ -649,7 +691,13 @@ Chart.addColumnFromRows(ws, rows, { x: "quarter", y: "revenue", startCell: "A1" 
 
 // Excel Table → chart. Series references are structured (`Table1[Col]`)
 // so the chart expands automatically when the table grows.
-const table = Table.add(ws, { name: "Kpi", ref: "A1", headerRow: true, columns: [...], rows: [...] });
+const table = Table.add(ws, {
+  name: "Kpi",
+  ref: "A1",
+  headerRow: true,
+  columns: [{ name: "Month" }, { name: "Revenue" }, { name: "Profit" }],
+  rows: [["Jan", 1000, 250]]
+});
 Chart.addFromTable(
   ws,
   table,
@@ -756,18 +804,18 @@ Chart.addPivot(
   },
   "F1:N20"
 );
-Chart.addPivotCombo(ws, pivot, { groups: [...] }, "F22:N40");
+Chart.addPivotCombo(ws, pivot, { groups: [] }, "F22:N40");
 
 // Chartsheet — a full-page chart on its own tab. Works with any of
 // `AddChartOptions`, `AddComboChartOptions`, or `AddChartExOptions`.
 Workbook.addChartsheet(workbook, "Revenue Chart", {
   tabSelected: true,
   zoomToFit: true,
-  chart: { type: "bar", series: [...] }
+  chart: { type: "bar", series: [{ values: "Sales!$B$2:$B$4" }] }
 });
 
 Workbook.addPivotChartsheet(workbook, "Pivot Dashboard", pivot, {
-  chart: { type: "line", showMarker: true, series: [...] }
+  chart: { type: "line", showMarker: true, series: [{ values: "Sales!$B$2:$B$4" }] }
 });
 ```
 
@@ -775,7 +823,7 @@ Workbook.addPivotChartsheet(workbook, "Pivot Dashboard", pivot, {
 
 ```typescript
 // String A1 range (two-cell anchor, the most common form).
-Chart.add(ws, { type: "bar", series: [...] }, "A1:H15");
+Chart.add(ws, { type: "bar", series: [{ values: "Sales!$B$2:$B$4" }] }, "A1:H15");
 
 // Two-cell anchor with row/col coordinates.
 Chart.add(ws, options, { tl: { col: 1, row: 2 }, br: { col: 8, row: 17 } });
@@ -892,7 +940,7 @@ Chart.add(
   ws,
   {
     type: "bar",
-    series: [...],
+    series: [{ values: "Sales!$B$2:$B$4" }],
     chartStyle: {
       id: 201,
       elements: {
@@ -1100,7 +1148,7 @@ Legend: ✅ direct type-specific test · ⬛ exercised via generic / preset-scan
 | boxWhisker |   ✅   |  ✅  |  ✅  |     ✅     |      ✅      | ✅  | ⬛  | ✅  |     ⬛      |
 | regionMap  |   ✅   |  ✅  |  ✅  |     ✅     |      ✅      | ✅  | ⬛  | ✅  |     ⬛      |
 
-🟨 = (no longer used in this table) — as of the regionMap vector port every ChartEx layout takes the vector path through `drawChartExPdf`. Callers can still opt into raster per call with `chartToPdf(chart, { forceRaster: true })` when pixel-identity with the SVG preview matters more than selectable text. See the "ChartEx PDF note" below.
+🟨 = (no longer used in this table) — as of the regionMap vector port every ChartEx layout takes the vector path through `drawChartExPdf`. Callers can still opt into raster per call with `Pdf.fromChart(chart, { forceRaster: true })` when pixel-identity with the SVG preview matters more than selectable text. See the "ChartEx PDF note" below.
 
 ##### Capability gaps that are known but intentional
 
@@ -1111,11 +1159,11 @@ Legend: ✅ direct type-specific test · ⬛ exercised via generic / preset-scan
 
 **3D note:** `bar3D` renders as a **true extruded box** whose axonometric projection is driven by `view3D.rotX` / `view3D.rotY` / `view3D.rAngAx` — three shaded faces (top + front + right) per bar, with depth scaled to bar width so the 3D effect stays readable across chart sizes. The default fallback (`rotX=15°, rotY=20°, rAngAx=true`) matches Excel's new-chart defaults. `line3D`, `pie3D`, `area3D`, `surface3D` and the richer `view3D` / `Scene3D` / `ShapeProperties3D` metadata are **preserved in XML** so clean round-trips and Excel re-opens survive intact, but the preview still renders those types as their 2D equivalents — there is no projection matrix, no light rig, no depth sort for non-bar 3D. This is a preview-grade renderer, not a 3D engine; use Excel or LibreOffice for commercial-grade 3D output.
 
-**Fonts & CJK:** `PdfDocumentBuilder` auto-discovers a system font (same mechanism as `excelToPdf`) whenever a page contains non-WinAnsi characters and no font was explicitly embedded. Pass `disableFontAutoDiscovery()` for byte-stable output across hosts, or `embedFont(ttfBytes)` for a deterministic typeface. Register `onWarning(handler)` to receive one diagnostic per distinct unknown `fontFamily` (e.g. non-standard names that fall back to Helvetica metrics) and one diagnostic per build when non-WinAnsi characters land on a page with no covering font (Type3 NOTDEF boxes render).
+**Fonts & CJK:** `Pdf.Builder` auto-discovers a system font (the same mechanism used by `Pdf.fromExcel`) whenever a page contains non-WinAnsi characters and no font was explicitly embedded. Call `builder.disableFontAutoDiscovery()` for byte-stable output across hosts, or `builder.embedFont(ttfBytes)` for a deterministic typeface. Register `builder.onWarning(handler)` to receive one diagnostic per distinct unknown `fontFamily` (e.g. non-standard names that fall back to Helvetica metrics) and one diagnostic per build when non-WinAnsi characters land on a page with no covering font (Type3 NOTDEF boxes render).
 
 **Minimal PDF surfaces:** `ChartPdfDrawingSurface.drawPath?` and `drawCircle?` are optional. When a surface lacks `drawPath`, pie/doughnut/ofPie slice outlines degrade to `drawLine` polyline strokes (shape preserved, fill lost); area and radar-filled fills are dropped but the surrounding strokes are still emitted; markers fall back to circle→rect→line chains. `PdfPageBuilder` / `PdfEditorPage` both provide the full interface, so this only matters for custom surfaces.
 
-**regionMap note:** ChartEx `regionMap` previews ship a ~180-entry country centroid table and four real projection formulas (`mercator`, `miller`, `albers` Equal-Area Conic, `robinson`). This is a centroid-dot geographic preview by default; unmatched labels fall back to a deterministic hexagonal tile layout. For real country polygons, pass a TopoJSON topology via the render option `regionMap: { topology, objectName, match, projection }` — the renderer will decode features, match labels to `feature.id` or `feature.properties.<key>`, and draw choropleth paths. This keeps the library zero-data-bundle: the caller loads their own `world-atlas`/`natural-earth` file. The same three-mode pipeline (TopoJSON → centroid preview → hex-tile fallback) is implemented for **both** SVG and vector PDF — `chartToPdf` will pass the same `regionMap` option through to `drawChartExPdf`. See `src/modules/excel/chart/topojson.ts` and the exported `RegionMapDataOptions` / `TopologyLike` types.
+**regionMap note:** ChartEx `regionMap` previews ship a ~180-entry country centroid table and four real projection formulas (`mercator`, `miller`, `albers` Equal-Area Conic, `robinson`). This is a centroid-dot geographic preview by default; unmatched labels fall back to a deterministic hexagonal tile layout. For real country polygons, pass a TopoJSON topology via the render option `regionMap: { topology, objectName, match, projection }` — the renderer will decode features, match labels to `feature.id` or `feature.properties.<key>`, and draw choropleth paths. This keeps the library zero-data-bundle: the caller loads their own `world-atlas`/`natural-earth` file. The same three-mode pipeline (TopoJSON → centroid preview → hex-tile fallback) is implemented for **both** SVG and vector PDF — `Pdf.fromChart` passes the same `regionMap` option through to `drawChartExPdf`. See `src/modules/excel/chart/topojson.ts` and the exported `RegionMapDataOptions` / `TopologyLike` types.
 
 **Built-in chart styles:** `Chart.setStyle(chart, 1..48)` (alias `Chart.setBuiltInStyle(chart, 1..48)`) writes `<c:style val="N"/>` on a classic chart, selecting one of the built-in style indices. This is the lightweight knob that maps to the 2007/2010 style catalogue. For modern Office-2013-era styling with full `styleN.xml` / `colorsN.xml` sidecars, use `Chart.add(ws, { …, chartStyle: ChartStyleModel })`.
 
@@ -1129,9 +1177,9 @@ These features would require multi-week investments with a low payoff for a prev
 **ChartEx PDF note:** Classic charts render as vector PDF content via `drawChartPdf` (text stays selectable, shapes stay resolution-independent). ChartEx charts now all render as vector PDF content via `drawChartExPdf`:
 
 - **Vector path (default)** — `sunburst`, `treemap`, `waterfall`, `funnel`, `histogram`, `pareto`, `boxWhisker`, `regionMap` all go through `drawChartExPdf`, which shares its geometry collectors with the SVG renderer so the two backends stay pixel-equivalent modulo rasterisation. Sunburst arcs are emitted as cubic-Bézier approximations (≤ 0.03 % max error); everything else is straight `drawRect` / `drawLine` / `drawPath` primitives that PDF understands natively. `regionMap` reuses the same TopoJSON decoder + projection math + centroid table as the SVG renderer; the only intentional visual divergence is that the rounded-corner frame (`rx="14"`) becomes a sharp-corner frame in PDF (`drawRect` does not expose a corner radius).
-- **Raster opt-in** — any ChartEx type can be rasterised on demand with `chartToPdf(chart, { forceRaster: true })` when pixel-identity with the SVG preview matters more than selectable text or vector scalability.
+- **Raster opt-in** — any ChartEx type can be rasterised on demand with `Pdf.fromChart(chart, { forceRaster: true })` when pixel-identity with the SVG preview matters more than selectable text or vector scalability.
 
-Use `chartToPdf(chart, options)` from `documonster/pdf` — it picks the path automatically, honours `forceRaster: true` when you need the raster route on purpose, and exposes `canRenderChartExAsVectorPdf(model)` if you want to inspect the decision from outside the helper.
+Use `Pdf.fromChart(chart, options)` from `documonster/pdf` — it picks the path automatically and honours `forceRaster: true` when you need the raster route on purpose. Import `canRenderChartExAsVectorPdf(model)` separately from `documonster/chart` if you want to inspect the decision before rendering.
 
 **Pivot chart note:** Documonster supports **metadata-only** pivot charts — the `pivotSource`, field buttons, drop-zone options, `refreshOnOpen` and `c16:showExpandCollapseFieldButtons` extensions all round-trip through XML, and `addPivotChart` / `addPivotChartsheet` create the references Excel needs to reconstruct the chart. There is **no** runtime pivot-chart engine: the preview renderer treats pivot charts like regular charts and does not paint field buttons, drop-zone hints, or apply pivot filtering to the data. Once the file is opened in Excel / LibreOffice / WPS, the host application drives the real rendering from the pivot table. For programmatic manipulation of pivot cache data, use the `pivotTable` module directly; the chart side intentionally stays thin.
 
@@ -1139,7 +1187,7 @@ Use `chartToPdf(chart, options)` from `documonster/pdf` — it picks the path au
 
 **Testing scope boundaries (what this library does _not_ test):**
 
-- **No pixel-level visual diff.** Preview output is tested through SVG-structure assertions and PNG header/signature hashes — a true RMS/SSIM pixel diff would require bundling a PNG decoder and a diff algorithm, and the preview is explicitly not pixel-perfect anyway (see the rendering notes above). If your workflow needs pixel parity with Excel, run `chartToPdf(chart)` through LibreOffice's headless PDF export and compare there.
+- **No pixel-level visual diff.** Preview output is tested through SVG-structure assertions and PNG header/signature hashes — a true RMS/SSIM pixel diff would require bundling a PNG decoder and a diff algorithm, and the preview is explicitly not pixel-perfect anyway (see the rendering notes above). If your workflow needs pixel parity with Excel, save the workbook and convert it with LibreOffice's headless PDF export, then compare that output.
 - **No in-tree Office-generated fixtures.** Every real-file fixture in this repo (`src/modules/excel/__tests__/data/`) was either generated by Documonster itself or minimally hand-authored for regression testing. For host-application compatibility coverage, use the opt-in `DOCUMONSTER_ENTERPRISE_CORPUS_DIR` mechanism: point it at a directory of files the three vendors produced, and `chart-oracle.integration.test.ts` will audit each one. See `docs/enterprise-corpus-manifest.example.json` for the manifest shape.
 - **No automated Excel / WPS runtime.** CI gates open-validation on LibreOffice only. Excel and WPS binaries are not shipped in any CI runner, and GUI-driven validation of those apps is out of scope. The `DOCUMONSTER_OFFICE_OPEN_VALIDATION` + `DOCUMONSTER_OFFICE_OPEN_ARGS` hook lets a self-hosted runner with Office installed participate in the same check pattern.
 
@@ -1380,13 +1428,23 @@ const url = URL.createObjectURL(blob);
 
 ### Using with Script Tags
 
+The excel module ships its own IIFE bundle, exposed as `Documonster.Excel` — the
+same namespaces as the ESM entry, one level down from the shared global. There is
+no whole-family bundle, so the file name names the module.
+
+<!-- x-release-please-start-version -->
+
 ```html
-<script src="https://unpkg.com/documonster/dist/iife/documonster.iife.min.js"></script>
+<script src="https://unpkg.com/documonster@0.11.0/dist/iife/documonster.excel.iife.min.js"></script>
 <script>
-  const { Workbook } = Documonster;
+  const { Workbook, Cell } = Documonster.Excel;
   const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "Sheet1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
 </script>
 ```
+
+<!-- x-release-please-end -->
 
 ### Browser Notes
 
@@ -1466,6 +1524,29 @@ Row.eachCell(ws, 1, cell => {
 });
 ```
 
+`Cell.find` is the fourth source of a handle, and the only reader that does not
+create what it looks at:
+
+```typescript
+const cell = Cell.find(ws, "B7"); // CellData | undefined
+const value = cell ? Cell.view(cell).value : null;
+```
+
+Every other reader — `Cell.getValue`, `Cell.getFont`, … — resolves its address
+through `getCell`, which **materialises** the row and the cell when they do not
+exist. That is what you want when writing, but it means reading a cell far out in
+a sparse sheet leaves rows behind and moves `Worksheet.rowCount`:
+
+```typescript
+Cell.getValue(ws, "A1000"); // creates 1000 rows
+Worksheet.rowCount(ws); // 1000
+
+Cell.find(ws, "A1000"); // undefined; sheet untouched
+```
+
+Use `find` when the question is whether a cell is there at all. To read a whole
+region without materialising anything, use `Range.getValues` / `Worksheet.toAoa`.
+
 Every type the public API speaks is exported from `documonster/excel` under its
 **declared** name — the same name TypeScript prints in errors and hovers. There
 are no aliases to learn, and no `import type` gymnastics: annotate a value, build
@@ -1520,17 +1601,16 @@ export const REPORT_COLUMNS: ColumnDefn[] = [
 ];
 ```
 
-Handles (the opaque objects the API hands out) are available both under their
-declared names and as `Handle` on the namespace that owns them — use whichever
-reads better:
+Handles (the opaque objects the API hands out) are named by the `Handle` alias on the
+namespace that owns them:
 
 ```typescript
-import type { Workbook, Worksheet, WorkbookData, WorksheetData } from "documonster/excel";
+import type { Workbook, Worksheet } from "documonster/excel";
 
 const render = (ws: Worksheet.Handle) => {
   /* … */
 };
-const save = (wb: WorkbookData) => {
+const save = (wb: Workbook.Handle) => {
   /* … */
 };
 ```

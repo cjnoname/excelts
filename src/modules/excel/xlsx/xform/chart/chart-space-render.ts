@@ -84,7 +84,12 @@ import type {
   PictureOptions,
   SeriesBase
 } from "@excel/chart/model/types";
-import { escapeXml, themeIndexToName } from "@excel/chart/shared/chart-utils";
+import {
+  escapeXml,
+  needsXmlSpacePreserve,
+  themeIndexToName,
+  tickMarkToOoxml
+} from "@excel/chart/shared/chart-utils";
 import { isRawXmlShape, isRawXmlTxPr } from "@excel/chart/shared/shape-properties";
 import {
   C14_PIVOT_OPTIONS_EXT_URI,
@@ -114,40 +119,6 @@ const CHART_SPACE_ATTRIBUTES = {
   "xmlns:a": "http://schemas.openxmlformats.org/drawingml/2006/main",
   "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 };
-
-/**
- * Does the string require `xml:space="preserve"` to survive XML
- * whitespace normalisation?
- */
-function needsXmlSpacePreserve(text: string): boolean {
-  if (text === "") {
-    return false;
-  }
-  if (/^\s|\s$/.test(text)) {
-    return true;
-  }
-  if (/[\t\n\r]/.test(text)) {
-    return true;
-  }
-  if (/\s{2,}/.test(text)) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Map the public API's friendly tick-mark vocabulary (`inside` /
- * `outside`) back to the OOXML `ST_TickMark` tokens (`in` / `out`).
- */
-function tickMarkToOoxml(value: "none" | "inside" | "outside" | "cross"): string {
-  if (value === "inside") {
-    return "in";
-  }
-  if (value === "outside") {
-    return "out";
-  }
-  return value;
-}
 
 /**
  * Flags that tune per-chart-type quirks in the shared data-label writers.

@@ -124,6 +124,7 @@ describe("ALL_TOOLS", () => {
         .toSorted()
     ).toEqual([
       "archive_write",
+      "diagram_render",
       "doc_convert",
       "doc_edit",
       "doc_write",

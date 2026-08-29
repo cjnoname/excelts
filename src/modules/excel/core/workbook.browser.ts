@@ -713,7 +713,7 @@ export function removeChartsheet(wb: WorkbookData, nameOrIndex: string | number)
   return true;
 }
 
-export function _getChartsheetModel(
+function _getChartsheetModel(
   wb: WorkbookData,
   nameOrIndex: string | number
 ): ChartsheetModel | undefined {
@@ -948,7 +948,7 @@ export function clearThemes(wb: WorkbookData): void {
   wb._themes = undefined;
 }
 
-export function _applyChartsheetSidecars(
+function _applyChartsheetSidecars(
   wb: WorkbookData,
   chartNumber: number,
   chartOptions: AddChartsheetOptions["chart"]
@@ -975,12 +975,12 @@ export function _applyChartsheetSidecars(
   }
 }
 
-export function _nextChartsheetNo(wb: WorkbookData): number {
+function _nextChartsheetNo(wb: WorkbookData): number {
   const existing = wb._chartsheets.map(cs => cs.sheetNo).filter(Number.isFinite);
   return existing.length > 0 ? Math.max(...existing) + 1 : 1;
 }
 
-export function _nextSheetOrderNo(wb: WorkbookData): number {
+function _nextSheetOrderNo(wb: WorkbookData): number {
   let max = -1;
   for (const ws of wb._worksheets) {
     if (ws && typeof ws.orderNo === "number" && ws.orderNo > max) {

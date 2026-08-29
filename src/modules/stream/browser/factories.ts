@@ -83,7 +83,11 @@ export function createReadableFromArray<T>(
     read() {
       // Push data when read is called
       while (index < data.length) {
-        if (!this.push(data[index++])) {
+        const chunk = data[index++];
+        if (chunk === undefined) {
+          continue; // see the note on the Node factory: not a value a stream carries
+        }
+        if (!this.push(chunk)) {
           // Backpressure - wait for next read
           return;
         }

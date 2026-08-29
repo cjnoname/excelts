@@ -206,30 +206,3 @@ export interface ParsedCacheRecords {
   /** Extra root attributes beyond xmlns/xmlns:r/count (for roundtrip preservation) */
   extraRootAttrs?: Record<string, string>;
 }
-
-/**
- * Minimal structural view of a pivot data source as needed by the xlsx
- * serialization layer. The domain {@link PivotTableSource} (in
- * `@excel/pivot-table`) structurally satisfies this interface, but the
- * serialization layer only requires this narrow, domain-free shape so it can
- * avoid importing the domain module.
- */
-export interface PivotCacheSource {
-  /** Name of the worksheet containing the source data (used in pivotCacheDefinition). */
-  name: string;
-  /**
-   * Name of the source Table (e.g., "SalesData"). When present,
-   * pivotCacheDefinition uses `<worksheetSource name="..."/>` instead of ref+sheet.
-   */
-  tableName?: string;
-  /** Get all sheet values as a sparse 2D array. */
-  getSheetValues(): unknown[][];
-  /** Dimensions of the source data (plain range record). */
-  dimensions: {
-    top: number;
-    left: number;
-    bottom: number;
-    right: number;
-    sheetName?: string;
-  };
-}

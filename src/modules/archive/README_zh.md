@@ -19,6 +19,7 @@ import { Archive } from "documonster/archive";
 - **加密** — ZIP 传统加密和 AES-256 加密/解密
 - **ZIP64** — 大文件支持（> 4GB 文件、> 65535 条目）
 - **压缩** — DEFLATE、GZIP 和 Zlib，支持同步/异步/流式 API
+- **PNG 编码** — `encodePng`，因为 PNG 就是带 CRC-32 校验 chunk 的 DEFLATE 流
 - **进度和中止** — 内置进度回调和 AbortSignal 支持
 - **文件系统集成** — Node.js 磁盘 I/O 便捷层
 
@@ -128,7 +129,9 @@ const op = archive.operation({
   onProgress: p => console.log(`${p.entriesDone}/${p.entriesTotal}`),
   signal: abortController.signal
 });
-for await (const chunk of op.iterable) { ... }
+for await (const chunk of op.iterable) {
+  /* process chunk */
+}
 ```
 
 **`ZipOptions`：**
@@ -171,7 +174,9 @@ for await (const entry of reader.entries()) {
   const data = await entry.bytes();
   const text = await entry.text();
   // 或流式读取条目
-  for await (const chunk of entry.stream()) { ... }
+  for await (const chunk of entry.stream()) {
+    /* process chunk */
+  }
   // 或管道
   await entry.pipeTo(writableStream);
 }
@@ -192,18 +197,20 @@ const op = reader.operation({
 表示归档中的单个条目。
 
 ```typescript
-entry.path;          // "path/to/file.txt"
-entry.type;          // "file" | "directory" | "symlink"
-entry.mode;          // Unix 模式（如 0o644）
-entry.linkTarget;    // 符号链接目标（在 bytes() 之后可用）
+entry.path; // "path/to/file.txt"
+entry.type; // "file" | "directory" | "symlink"
+entry.mode; // Unix 模式（如 0o644）
+entry.linkTarget; // 符号链接目标（在 bytes() 之后可用）
 
-await entry.bytes();              // Uint8Array
-await entry.text();               // 字符串（UTF-8）
-await entry.text("latin1");       // 字符串（自定义编码）
-for await (const chunk of entry.stream()) { ... }
+await entry.bytes(); // Uint8Array
+await entry.text(); // 字符串（UTF-8）
+await entry.text("latin1"); // 字符串（自定义编码）
+for await (const chunk of entry.stream()) {
+  /* process chunk */
+}
 await entry.pipeTo(writable);
-entry.readableStream();           // WHATWG ReadableStream
-entry.discard();                  // 跳过不读取
+entry.readableStream(); // WHATWG ReadableStream
+entry.discard(); // 跳过不读取
 ```
 
 **`UnzipOptions`：**
@@ -235,11 +242,11 @@ const editor = await Archive.editZip(zipBytes, {
 const editor = await Archive.editZipUrl("https://example.com/archive.zip");
 
 // 操作
-editor.has("file.txt");               // 检查存在
-editor.set("new.txt", "content");     // 添加或替换
-editor.delete("old.txt");             // 删除条目
-editor.deleteDirectory("old-dir/");   // 递归删除目录
-editor.rename("a.txt", "b.txt");      // 重命名条目
+editor.has("file.txt"); // 检查存在
+editor.set("new.txt", "content"); // 添加或替换
+editor.delete("old.txt"); // 删除条目
+editor.deleteDirectory("old-dir/"); // 递归删除目录
+editor.rename("a.txt", "b.txt"); // 重命名条目
 editor.setComment("Updated archive"); // 设置归档注释
 
 // 可复用的编辑计划
@@ -253,7 +260,9 @@ editor.apply(plan);
 // 输出
 const output = await editor.bytes();
 await editor.pipeTo(writable);
-for await (const chunk of editor.stream()) { ... }
+for await (const chunk of editor.stream()) {
+  /* process chunk */
+}
 ```
 
 ---
@@ -387,6 +396,26 @@ state = crc32Update(state, chunk2);
 const checksum = crc32Finalize(state);
 ```
 
+### PNG 编码
+
+PNG 就是一个 DEFLATE 流加上带 CRC-32 校验的 chunk —— 正是上面这两样原语 —— 所以编码器住在这里，
+而不是住在某个"恰好需要图片"的模块里。它之所以存在，是因为绘图引擎刻意在像素处停下：
+`documonster/draw` 的 `rasterizeToRgba` 交回 RGBA，而编码需要 DEFLATE，后者位于 `draw` 之上一层。
+
+```typescript
+import { encodePng } from "documonster/archive";
+import { rasterizeToRgba } from "documonster/draw";
+
+// 来自任意显示列表 —— 图表、Mermaid 图、你自己的生产者
+const image = rasterizeToRgba(list, { scale: 2 });
+const png = encodePng(image.data, image.width, image.height, { dpi: 192 });
+
+// 或者来自你手上已有的像素（8 位 RGBA，行优先）
+const bytes = encodePng(rgba, width, height);
+```
+
+输入 8 位 RGBA，filter 0，单个 `IDAT`。给了 `dpi` 会写入 `pHYs` chunk；不给则不写。
+
 ---
 
 ## TAR 支持
@@ -400,7 +429,10 @@ import { Archive } from "documonster/archive";
 
 // 便捷函数
 const tarBytes = await Archive.tar(
-  new Map([["file.txt", "content"], ["data.bin", uint8Array]]),
+  new Map([
+    ["file.txt", "content"],
+    ["data.bin", uint8Array]
+  ]),
   { modTime: new Date() }
 );
 
@@ -412,7 +444,9 @@ archive
   .addSymlink("link", "file.txt");
 
 const bytes = await archive.bytes();
-for await (const chunk of archive.stream()) { ... }
+for await (const chunk of archive.stream()) {
+  /* process chunk */
+}
 ```
 
 ### 读取 TAR 归档
@@ -441,16 +475,15 @@ const paths = await reader.list();
 import { targz, TarGzArchive, parseTarGz, untargz } from "documonster/archive";
 
 // 创建 .tar.gz
-const tgzBytes = await targz(
-  new Map([["file.txt", "content"]]),
-  { level: 9 }
-);
+const tgzBytes = await targz(new Map([["file.txt", "content"]]), { level: 9 });
 
 // 构建器 API，使用流式 gzip
 const archive = new TarGzArchive({ level: 6 });
 archive.add("file.txt", "content");
 const bytes = await archive.bytes();
-for await (const chunk of archive.stream()) { ... }
+for await (const chunk of archive.stream()) {
+  /* process chunk */
+}
 
 // 解析 .tar.gz
 const entries = await parseTarGz(tgzBytes);
@@ -499,7 +532,9 @@ af.rename("a.txt", "b.txt");
 await af.writeToFile("modified.zip");
 
 // 流式输出
-for await (const chunk of af.stream()) { ... }
+for await (const chunk of af.stream()) {
+  /* process chunk */
+}
 await af.streamToFile("output.zip");
 
 // TAR 格式
@@ -585,17 +620,18 @@ import {
 
 ### 压缩
 
-| 函数                          | 描述                |
-| ----------------------------- | ------------------- |
-| `compress / compressSync`     | DEFLATE-RAW 压缩    |
-| `decompress / decompressSync` | DEFLATE-RAW 解压    |
-| `gzip / gzipSync`             | GZIP 压缩           |
-| `gunzip / gunzipSync`         | GZIP 解压           |
-| `zlib / zlibSync`             | Zlib 压缩           |
-| `unzlib / unzlibSync`         | Zlib 解压           |
-| `decompressAuto`              | 自动检测并解压      |
-| `createDeflateStream`         | 流式 DEFLATE 压缩器 |
-| `createInflateStream`         | 流式 DEFLATE 解压器 |
-| `createGzipStream`            | 流式 GZIP 压缩器    |
-| `createGunzipStream`          | 流式 GZIP 解压器    |
-| `crc32`                       | CRC32 校验和        |
+| 函数                          | 描述                 |
+| ----------------------------- | -------------------- |
+| `compress / compressSync`     | DEFLATE-RAW 压缩     |
+| `decompress / decompressSync` | DEFLATE-RAW 解压     |
+| `gzip / gzipSync`             | GZIP 压缩            |
+| `gunzip / gunzipSync`         | GZIP 解压            |
+| `zlib / zlibSync`             | Zlib 压缩            |
+| `unzlib / unzlibSync`         | Zlib 解压            |
+| `decompressAuto`              | 自动检测并解压       |
+| `createDeflateStream`         | 流式 DEFLATE 压缩器  |
+| `createInflateStream`         | 流式 DEFLATE 解压器  |
+| `createGzipStream`            | 流式 GZIP 压缩器     |
+| `createGunzipStream`          | 流式 GZIP 解压器     |
+| `crc32`                       | CRC32 校验和         |
+| `encodePng`                   | RGBA 像素转 PNG 字节 |

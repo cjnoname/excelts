@@ -28,7 +28,7 @@
  *   tmp/excel-examples/mega-dashboard.pdf
  *
  * Usage:
- *   npx tsx src/modules/excel/examples/mega-dashboard.ts
+ *   pnpm example --filter mega-dashboard
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";

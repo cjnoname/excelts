@@ -23,7 +23,9 @@
 import type { PdfPageBuilder } from "@pdf/builder/document-builder";
 import { PdfDocumentBuilder } from "@pdf/builder/document-builder";
 import type { PdfFontConfig } from "@pdf/font/font-config";
+import type { FontManager } from "@pdf/font/font-manager";
 import type { PdfColor } from "@pdf/types";
+import type { CjkLanguage } from "@utils/cjk";
 import { hexToRgb01 } from "@utils/theme-colors";
 import { SCRIPT_BASELINE_SHIFT_FACTOR } from "@word/layout/layout-constants";
 import type {
@@ -67,6 +69,26 @@ export interface RenderLayoutOptions {
   /** Font families compiled before the first PDF page is created. */
   readonly fonts?: PdfFontConfig;
   /**
+   * The font engine the layout was measured with, adopted rather than rebuilt.
+   *
+   * Sharing it is what keeps measurement and drawing on the same faces: the
+   * builder would otherwise run its own font discovery and could pick a different
+   * one, which also silently discarded the caller's `preferSystemFonts` and
+   * `textLanguage`.
+   *
+   * @internal
+   */
+  readonly fontManager?: FontManager;
+  /**
+   * System font families auto-discovery should prefer, forwarded so that a face
+   * widened during `build()` still honours the caller's request.
+   */
+  readonly preferSystemFonts?: readonly string[];
+  /** The East Asian written language, forwarded for the same reason. */
+  readonly textLanguage?: CjkLanguage;
+  /** @see `PdfExportOptions.disableFontAutoDiscovery` */
+  readonly disableFontAutoDiscovery?: boolean;
+  /**
    * Receive non-fatal font diagnostics raised while building the PDF.
    *
    * @see `PdfExportOptions.onWarning`
@@ -107,7 +129,25 @@ export function renderLayoutDocumentToPdf(
   layout: LayoutDocument,
   options: RenderLayoutOptions = {}
 ): PdfDocumentBuilder {
-  const builder = new PdfDocumentBuilder({ fonts: options.fonts });
+  // The font preferences travel with the engine. `build()` may still need to widen
+  // the face — a chart's own labels are not in the layout model, so they can need a
+  // character the measured face lacks — and that re-selection has to honour the
+  // caller's request rather than falling back to the built-in order.
+  const builder = new PdfDocumentBuilder(
+    options.fontManager
+      ? {
+          fontManager: options.fontManager,
+          preferSystemFonts: options.preferSystemFonts,
+          textLanguage: options.textLanguage,
+          disableFontAutoDiscovery: options.disableFontAutoDiscovery
+        }
+      : {
+          fonts: options.fonts,
+          preferSystemFonts: options.preferSystemFonts,
+          textLanguage: options.textLanguage,
+          disableFontAutoDiscovery: options.disableFontAutoDiscovery
+        }
+  );
   if (options.onWarning) {
     builder.onWarning(options.onWarning);
   }
@@ -468,7 +508,12 @@ function renderRun(
       fontSize,
       bold: run.bold,
       italic: run.italic,
-      color
+      color,
+      // Justification slack from `w:jc="both"`. The layout engine decided how to
+      // distribute it — between characters for East Asian text, between words
+      // for Latin — and already folded the total into `run.width`.
+      charSpacing: run.charSpacing,
+      wordSpacing: run.wordSpacing
     });
   }
 

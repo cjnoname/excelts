@@ -14,12 +14,6 @@
  * added here and a layout function is wired up.
  */
 
-/** A point in page coordinates (origin: top-left of page content area). */
-export interface LayoutPoint {
-  readonly x: number; // points
-  readonly y: number; // points
-}
-
 /** A rectangle in page coordinates. */
 export interface LayoutRect {
   readonly x: number;
@@ -49,6 +43,29 @@ export interface PositionedRun {
    * below the surrounding text in the conventional way.
    */
   readonly verticalAlign?: "superscript" | "subscript";
+  /**
+   * Extra advance to add after every character, in points, for a justified line.
+   *
+   * `w:jc="both"` stretches a line to the full column width. Latin does that by
+   * widening the spaces between words ({@link wordSpacing}), but East Asian text
+   * has no spaces to widen — the convention there is to distribute the slack
+   * between characters instead, which is what this expresses. A line of Chinese
+   * could not be justified at all without it, and `w:jc="both"` rendered as
+   * left-aligned.
+   *
+   * `width` already includes the total this adds, so a caller measuring or
+   * hit-testing the run needs no correction. Renderers apply it with PDF's `Tc`
+   * operator or SVG's `letter-spacing`.
+   */
+  readonly charSpacing?: number;
+  /**
+   * Extra advance to add to every space character, in points, for a justified
+   * line.
+   *
+   * The Latin half of the same mechanism. `width` already includes it.
+   * Renderers apply it with PDF's `Tw` operator or SVG's `word-spacing`.
+   */
+  readonly wordSpacing?: number;
 }
 
 /**

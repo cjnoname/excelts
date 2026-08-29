@@ -4,6 +4,7 @@
  * Renders w:rPr and run-level content (w:t, w:br, w:tab, w:drawing, etc.)
  */
 
+import { isEastAsianTypeface } from "@utils/cjk-typefaces";
 import { NS_A, NS_PIC, URI_PIC, NS_ASVG, GUID_SVG } from "@word/constants";
 import { DocxRawXmlPolicyError } from "@word/errors";
 import type {
@@ -85,7 +86,30 @@ export function renderRunPropertiesContents(
   // 2. rFonts
   if (rPr.font) {
     if (typeof rPr.font === "string") {
-      xml.leafNode("w:rFonts", { "w:ascii": rPr.font, "w:hAnsi": rPr.font });
+      // A bare string names the East Asian slot only when the typeface can
+      // actually draw East Asian text.
+      //
+      // `w:ascii`/`w:hAnsi` cover only ASCII and High ANSI, so `{ font: "宋体" }`
+      // used to leave ideographs resolving through docDefaults and the requested
+      // typeface never reached a single Chinese character. Setting the slot
+      // unconditionally fixed that but broke the opposite case: the built-in
+      // heading styles pass `"Calibri Light"` and HTML import passes
+      // `"Courier New"`, neither of which has CJK glyphs, so Chinese headings and
+      // Chinese code spans were pointed at a face that cannot draw them and fell
+      // back to whatever the host chose — worse than the inherited East Asian
+      // face they had before.
+      //
+      // A Latin-only name therefore leaves `w:eastAsia` alone, preserving
+      // inheritance. Callers needing exact control over each slot pass the object
+      // form.
+      const attrs: Record<string, string> = {
+        "w:ascii": rPr.font,
+        "w:hAnsi": rPr.font
+      };
+      if (isEastAsianTypeface(rPr.font)) {
+        attrs["w:eastAsia"] = rPr.font;
+      }
+      xml.leafNode("w:rFonts", attrs);
     } else {
       const f: FontSpec = rPr.font;
       const attrs: Record<string, string> = {};
