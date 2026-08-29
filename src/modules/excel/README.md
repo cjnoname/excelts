@@ -2,11 +2,12 @@
 
 [中文](README_zh.md)
 
-Modern TypeScript Excel Workbook Manager — read, manipulate, and write XLSX and JSON spreadsheets with zero runtime dependencies.
+Modern TypeScript Excel Workbook Manager — read, manipulate, and write XLSX, XLSB, and JSON spreadsheets with zero runtime dependencies.
 
 ## Features
 
 - **Create, read, and modify XLSX files** — full Open XML support
+- **Read and write XLSB files** — cross-platform BIFF12 cells, formulas, styles, tables, filters, notes, protection, and page setup
 - **Multiple worksheet support** — add, remove, reorder, copy
 - **Cell styling** — fonts, colors, borders, fills, alignment, number formats
 - **Cell merging and formatting** — merge ranges, rich text, hyperlinks
@@ -85,6 +86,46 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
   console.log("Row " + rowNumber + " = " + JSON.stringify(Row.values(worksheet, rowNumber)));
 });
 ```
+
+### XLSB files
+
+XLSB uses the same workbook, worksheet, row, column, cell, and canonical
+`Workbook` IO surface as XLSX. Buffer reads autodetect the package; Node path
+methods select XLSB from the `.xlsb` extension, and buffer/stream writes accept
+`format: "xlsb"`. The explicit `Xlsb` namespace remains available:
+
+```typescript
+import { Cell, Workbook, Xlsb } from "documonster/excel";
+
+const workbook = Workbook.create();
+const sheet = Workbook.addWorksheet(workbook, "Data");
+Cell.setValue(sheet, "A1", "binary workbook");
+
+// Node.js file paths
+await Workbook.writeFile(workbook, "report.xlsb");
+await Workbook.readFile(Workbook.create(), "report.xlsb");
+
+// Node.js and browsers
+const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+const parsed = Workbook.create();
+await Workbook.read(parsed, bytes); // autodetects XLSB
+
+// Pull- and push-based streaming use the same contracts as Workbook XLSX IO.
+for await (const chunk of Xlsb.toStream(workbook)) {
+  // upload or persist chunk
+}
+```
+
+The XLSB implementation covers scalar and rich values, errors, dates, full cell
+styles, rows and columns, workbook and sheet views, merges, hyperlinks, legacy
+notes, data validation, protection, page setup, defined names, tables,
+structured references, AutoFilter criteria, and classic BIFF12 formulas,
+including shared and legacy array formulas. Formula expressions are preserved
+by default; use `formulas: "cached"` for an explicitly lossy read or
+`formulas: "error"` to reject formula cells. Drawings, charts, pivots, external
+links, conditional formatting, and dynamic arrays still fail edited strict
+writes instead of being silently discarded. An unchanged loaded workbook is
+returned byte-for-byte, including macros and opaque package parts.
 
 ### Reading a Range
 

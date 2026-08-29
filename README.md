@@ -20,9 +20,11 @@ Documonster is a zero-dependency TypeScript toolkit for spreadsheets and documen
 
 Documonster is organized into nine standalone modules. Each module has its own documentation and runnable examples.
 
-### Excel — XLSX/JSON Workbook Manager
+### Excel — XLSX/XLSB/JSON Workbook Manager
 
-Create, read, and modify Excel spreadsheets with full styling, formulas, images, and streaming support.
+Create, read, and modify Excel spreadsheets with full XLSX styling, formulas,
+images, and streaming support, plus zero-dependency XLSB cells, styles,
+formulas, streaming, autodetection, and strict fidelity safeguards.
 
 - [Documentation](src/modules/excel/README.md) | [中文](src/modules/excel/README_zh.md)
 - [Examples](src/modules/excel/examples/)
