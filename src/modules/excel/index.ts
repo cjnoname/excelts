@@ -10,3 +10,4 @@ export * from "@excel/index.base";
 
 export * as Workbook from "@excel/surface/workbook";
 export * as Stream from "@excel/surface/stream";
+export * as Xlsb from "@excel/surface/xlsb";

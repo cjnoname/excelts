@@ -8,12 +8,37 @@ import type { Readable } from "node:stream";
  * and layers the Node-only file-path free functions on top. Selected over the
  * browser variant via the `.browser` same-name swap at build/test time.
  */
+import { ZipParser } from "@archive/unzip/zip-parser";
 import type { WorkbookData } from "@excel/core/workbook-core";
+import {
+  read as readXlsb,
+  readFile as readXlsbFile,
+  readStream as readXlsbStream,
+  toBuffer as toXlsbBuffer,
+  toStream as toXlsbStream,
+  writeFile as writeXlsbFile,
+  writeStream as writeXlsbStream
+} from "@excel/core/xlsb-io";
+import type {
+  XlsbInputStream,
+  XlsbReadOptions,
+  XlsbStreamOptions,
+  XlsbWriteOptions
+} from "@excel/core/xlsb-io";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
-import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
 import { XLSX } from "@excel/xlsx/xlsx";
 import type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser";
+import { base64ToUint8Array } from "@utils/utils";
+
+export type WorkbookFormat = "xlsx" | "xlsb";
+export type WorkbookReadOptions = XlsxReadOptions & XlsbReadOptions & { format?: WorkbookFormat };
+export type WorkbookWriteOptions = XlsxWriteOptions &
+  Omit<XlsbWriteOptions, "zip"> & {
+    format?: WorkbookFormat;
+    zip?: XlsxWriteOptions["zip"] & XlsbWriteOptions["zip"];
+  };
+export type WorkbookStreamOptions = WorkbookWriteOptions & XlsbStreamOptions;
 
 /** Get (or lazily create) the Node xlsx IO handle bound to a workbook. */
 export function getXlsxIo(wb: WorkbookData): XLSX {
@@ -42,7 +67,10 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
  * byteLength)` is a view, never a copy). Either way no bytes are duplicated, and
  * the declared type cannot silently drift from the runtime one.
  */
-export async function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Buffer> {
+export async function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions): Promise<Buffer> {
+  if (options?.format === "xlsb") {
+    return toXlsbBuffer(wb, xlsbWriteOptions(options));
+  }
   const bytes = await getXlsxIo(wb).writeBuffer(options);
   return Buffer.isBuffer(bytes)
     ? bytes
@@ -50,11 +78,14 @@ export async function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Pr
 }
 
 /** Read xlsx bytes into a workbook (mutates and returns `wb`). */
-export function read(
+export async function read(
   wb: WorkbookData,
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbInput(data, options))) {
+    return readXlsb(wb, data, options);
+  }
   return getXlsxIo(wb).load(data, options);
 }
 
@@ -62,8 +93,11 @@ export function read(
 export function readStream(
   wb: WorkbookData,
   stream: unknown,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb") {
+    return readXlsbStream(wb, stream as XlsbInputStream, options);
+  }
   return getXlsxIo(wb).read(stream as never, options);
 }
 
@@ -109,8 +143,11 @@ export function readStream(
 export function writeStream(
   wb: WorkbookData,
   stream: XlsxWritable,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
+  if (options?.format === "xlsb") {
+    return writeXlsbStream(wb, stream as never, xlsbWriteOptions(options));
+  }
   return getXlsxIo(wb)
     .write(stream, options)
     .then(() => undefined);
@@ -198,7 +235,13 @@ export function writeStream(
  * a portable way to tell "the consumer stopped" from "serialization failed" —
  * track that yourself if the same code runs on both platforms.
  */
-export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable & Readable {
+export function toStream(
+  wb: WorkbookData,
+  options?: WorkbookStreamOptions
+): XlsxReadable & Readable {
+  if (options?.format === "xlsb") {
+    return toXlsbStream(wb, options) as XlsxReadable & Readable;
+  }
   const io = getXlsxIo(wb);
   // `createXlsxByteStream` is shared with the browser build, so it is typed as
   // the portable `XlsxReadable`. On Node the stream it builds is a real
@@ -224,8 +267,11 @@ export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 export function readFile(
   wb: WorkbookData,
   filename: string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbFilename(filename))) {
+    return readXlsbFile(wb, filename, options);
+  }
   return getXlsxIo(wb).readFile(filename, options);
 }
 
@@ -233,7 +279,44 @@ export function readFile(
 export function writeFile(
   wb: WorkbookData,
   filename: string,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbFilename(filename))) {
+    return writeXlsbFile(wb, filename, xlsbWriteOptions(options ?? {}));
+  }
   return getXlsxIo(wb).writeFile(filename, options);
+}
+
+function isXlsbInput(
+  data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
+  options: WorkbookReadOptions | undefined
+): boolean {
+  try {
+    const bytes =
+      typeof data === "string"
+        ? options?.base64
+          ? base64ToUint8Array(data)
+          : undefined
+        : data instanceof Uint8Array
+          ? data
+          : data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return bytes
+      ? new ZipParser(bytes)
+          .getEntries()
+          .some(entry => entry.path.toLowerCase() === "xl/workbook.bin")
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+function isXlsbFilename(filename: string): boolean {
+  return filename.toLowerCase().endsWith(".xlsb");
+}
+
+function xlsbWriteOptions(options: WorkbookWriteOptions): XlsbWriteOptions {
+  const { format: _format, ...writeOptions } = options;
+  return writeOptions;
 }

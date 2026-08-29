@@ -6,12 +6,35 @@
  * workbook ↔ xlsx import cycle). Selected over `xlsx-io.ts` (Node) via the
  * `.browser` same-name swap at build/test time.
  */
+import { ZipParser } from "@archive/unzip/zip-parser";
 import type { WorkbookData } from "@excel/core/workbook-core";
+import {
+  read as readXlsb,
+  readStream as readXlsbStream,
+  toBuffer as toXlsbBuffer,
+  toStream as toXlsbStream,
+  writeStream as writeXlsbStream
+} from "@excel/core/xlsb-io.browser";
+import type {
+  XlsbInputStream,
+  XlsbReadOptions,
+  XlsbStreamOptions,
+  XlsbWriteOptions
+} from "@excel/core/xlsb-io.browser";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
-import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
 import type { XlsxReadOptions, XlsxWriteOptions, IParseStream } from "@excel/xlsx/xlsx.browser";
 import { XLSX } from "@excel/xlsx/xlsx.browser";
+import { base64ToUint8Array } from "@utils/utils";
+
+export type WorkbookFormat = "xlsx" | "xlsb";
+export type WorkbookReadOptions = XlsxReadOptions & XlsbReadOptions & { format?: WorkbookFormat };
+export type WorkbookWriteOptions = XlsxWriteOptions &
+  Omit<XlsbWriteOptions, "zip"> & {
+    format?: WorkbookFormat;
+    zip?: XlsxWriteOptions["zip"] & XlsbWriteOptions["zip"];
+  };
+export type WorkbookStreamOptions = WorkbookWriteOptions & XlsbStreamOptions;
 
 /** Get (or lazily create) the xlsx IO handle bound to a workbook. */
 export function getXlsxIo(wb: WorkbookData): XLSX {
@@ -26,26 +49,34 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // =============================================================================
 
 /** Serialize a workbook to xlsx bytes. */
-export function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Uint8Array> {
-  return getXlsxIo(wb).writeBuffer(options);
+export function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions): Promise<Uint8Array> {
+  return options?.format === "xlsb"
+    ? toXlsbBuffer(wb, xlsbWriteOptions(options))
+    : getXlsxIo(wb).writeBuffer(options);
 }
 
-/** Read xlsx bytes into a workbook (mutates and returns `wb`). */
-export function read(
+/** Read XLSX or XLSB bytes into a workbook (mutates and returns `wb`). */
+export async function read(
   wb: WorkbookData,
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbInput(data, options))) {
+    return readXlsb(wb, data, options);
+  }
   return getXlsxIo(wb).load(data, options);
 }
 
 /** Read a workbook from a parse stream (mutates and returns `wb`). */
 export function readStream(
   wb: WorkbookData,
-  stream: IParseStream,
-  options?: XlsxReadOptions
+  stream: IParseStream | XlsbInputStream,
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
-  return getXlsxIo(wb).read(stream, options);
+  if (options?.format === "xlsb") {
+    return readXlsbStream(wb, stream as XlsbInputStream, options);
+  }
+  return getXlsxIo(wb).read(stream as IParseStream, options);
 }
 
 /**
@@ -90,8 +121,11 @@ export function readStream(
 export function writeStream(
   wb: WorkbookData,
   stream: XlsxWritable,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
+  if (options?.format === "xlsb") {
+    return writeXlsbStream(wb, stream, xlsbWriteOptions(options));
+  }
   return getXlsxIo(wb)
     .write(stream, options)
     .then(() => undefined);
@@ -137,9 +171,43 @@ export function writeStream(
  * therefore not a portable way to distinguish "the consumer stopped" from
  * "serialization failed"; track that yourself if the same code runs on both.
  */
-export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable {
+export function toStream(wb: WorkbookData, options?: WorkbookStreamOptions): XlsxReadable {
+  if (options?.format === "xlsb") {
+    return toXlsbStream(wb, options) as XlsxReadable;
+  }
   const io = getXlsxIo(wb);
   return createXlsxByteStream((sink, writeOptions) => io.write(sink, writeOptions), options);
+}
+
+function isXlsbInput(
+  data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
+  options: WorkbookReadOptions | undefined
+): boolean {
+  let bytes: Uint8Array;
+  if (typeof data === "string") {
+    if (!options?.base64) {
+      return false;
+    }
+    bytes = base64ToUint8Array(data);
+  } else if (data instanceof Uint8Array) {
+    bytes = data;
+  } else if (data instanceof ArrayBuffer) {
+    bytes = new Uint8Array(data);
+  } else {
+    bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  try {
+    return new ZipParser(bytes)
+      .getEntries()
+      .some(entry => entry.path.toLowerCase() === "xl/workbook.bin");
+  } catch {
+    return false;
+  }
+}
+
+function xlsbWriteOptions(options: WorkbookWriteOptions): XlsbWriteOptions {
+  const { format: _format, ...writeOptions } = options;
+  return writeOptions;
 }
 
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";

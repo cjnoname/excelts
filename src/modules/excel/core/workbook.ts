@@ -28,7 +28,15 @@ export {
   writeStream,
   getXlsxIo
 } from "@excel/core/xlsx-io";
-export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
+export type {
+  XlsxReadable,
+  XlsxWritable,
+  XlsxStreamOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions
+} from "@excel/core/xlsx-io";
 
 /**
  * Node streaming workbook writer factory (accepts `{ filename }`).
