@@ -3,44 +3,48 @@ import fs from "node:fs";
 import { defineConfig } from "rolldown";
 import { visualizer } from "rollup-plugin-visualizer";
 
+import { IIFE_BUNDLES } from "./scripts/lib/iife-bundles";
 import { preferBrowserFilesPlugin } from "./src/utils/browser";
 
 const pkg = JSON.parse(fs.readFileSync("./package.json", "utf-8"));
+
+/**
+ * Repository inception year. Deliberately a constant, not `new Date()`: the
+ * banner is part of every bundle's bytes, and a live year would make an
+ * otherwise byte-reproducible build differ across a new year's eve.
+ */
+const COPYRIGHT_YEAR = 2025;
+
+/**
+ * `banner` opens an outer function and `footer` closes it with `.call(globalThis)`.
+ *
+ * The generated IIFE prelude installs the shared namespace as `this.Documonster`,
+ * and `this` at the top level of a file is only the global object in a classic
+ * `<script>` — it is `undefined` in an ES module and in any strict-mode host
+ * (`import`ing the bundle through a tool, `new Function("'use strict'", …)`,
+ * a module worker), where the bundle would throw before exporting anything.
+ * Binding the wrapper's `this` makes the target explicit instead of ambient.
+ * `globalThis` needs no fallback: every browser in the support matrix has it.
+ */
 const banner = `/*!
  * ${pkg.name} v${pkg.version}
  * ${pkg.description}
- * (c) ${new Date().getFullYear()} ${pkg.author.name}
+ * (c) ${COPYRIGHT_YEAR} ${pkg.author.name}
  * Released under the ${pkg.license} License
- */`;
+ */
+(function () {`;
+const footer = `}).call(globalThis);`;
 
 // One IIFE bundle per public module. Each exposes its module namespace under
 // a shared `Documonster` global (e.g. `Documonster.Excel.Workbook.create()`),
 // so CDN consumers load only the script(s) they need — there is no
 // whole-family bundle. Browser version has NO Node.js polyfills.
 //
-// `input` points at each module's browser entry when it has one, else its
-// Node entry (pure modules resolve identically in the browser). The
-// `preferBrowserFilesPlugin` swaps `*.browser.ts` variants at bundle time.
-interface ModuleBundle {
-  /** Global namespace member under `Documonster`. */
-  global: string;
-  /** Bundle file basename (without extension). */
-  file: string;
-  /** Entry module. */
-  input: string;
-}
-
-const MODULES: ModuleBundle[] = [
-  { global: "Excel", file: "excel", input: "./src/modules/excel/index.browser.ts" },
-  { global: "Word", file: "word", input: "./src/modules/word/index.ts" },
-  { global: "Pdf", file: "pdf", input: "./src/modules/pdf/index.ts" },
-  { global: "Csv", file: "csv", input: "./src/modules/csv/index.ts" },
-  { global: "Markdown", file: "markdown", input: "./src/modules/markdown/index.ts" },
-  { global: "Xml", file: "xml", input: "./src/modules/xml/index.ts" },
-  { global: "Formula", file: "formula", input: "./src/modules/formula/index.ts" },
-  { global: "Archive", file: "archive", input: "./src/modules/archive/index.browser.ts" },
-  { global: "Stream", file: "stream", input: "./src/modules/stream/index.browser.ts" }
-];
+// The table itself lives in `scripts/lib/iife-bundles.ts` so the documentation
+// gate can read it without loading the bundler; `input` points at each module's
+// browser entry when it has one, else its Node entry (pure modules resolve
+// identically in the browser). The `preferBrowserFilesPlugin` swaps
+// `*.browser.ts` variants at bundle time.
 
 const copyLicensePlugin = {
   name: "copy-license",
@@ -66,7 +70,7 @@ const common = (input: string) => ({
 });
 
 export default defineConfig(
-  MODULES.flatMap(({ global, file, input }, i) => {
+  IIFE_BUNDLES.flatMap(({ global, file, input }, i) => {
     const analyzePlugins =
       analyze && i === 0
         ? [
@@ -89,6 +93,7 @@ export default defineConfig(
           extend: true,
           sourcemap: true,
           banner,
+          footer,
           exports: "named" as const,
           entryFileNames: `documonster.${file}.iife.js`
         },
@@ -103,6 +108,7 @@ export default defineConfig(
           extend: true,
           sourcemap: false,
           banner,
+          footer,
           exports: "named" as const,
           minify: true,
           entryFileNames: `documonster.${file}.iife.min.js`
