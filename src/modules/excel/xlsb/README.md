@@ -68,10 +68,11 @@ strictly because its referenced differential style (DXF) is not modelled yet.
 
 Tests cover malformed framing, internal round-trips, Node file and stream IO,
 browser execution, and an optional LibreOffice open/convert oracle. The oracle
-runs when `DOCUMONSTER_XLSB_LIBREOFFICE_VALIDATION=1` is set. Development also
-checks valid files from Apache POI, Calamine, and the Apache-licensed `jsxlsb`
-reference fixture, whose shared strings, Unicode text, cell coordinates, and
-merged range are intentionally different from the generated corpus.
+runs when `DOCUMONSTER_XLSB_LIBREOFFICE_VALIDATION=1` is set and is enabled in
+the repository's LibreOffice CI job. Development also checks valid files from
+Apache POI, Calamine, and the Apache-licensed `jsxlsb` reference fixture, whose
+shared strings, Unicode text, cell coordinates, and merged range are
+intentionally different from the generated corpus.
 
 Record IDs and payload layouts come from Microsoft's `[MS-XLSB]` specification.
 The `jsxlsb` project was used as an interoperability reference, not as an
@@ -120,4 +121,5 @@ XLSB_BENCHMARK_ROWS=50000 XLSB_BENCHMARK_RUNS=7 pnpm benchmark:xlsb
 
 The benchmark is diagnostic rather than a CI performance budget: machine load,
 runtime version, and garbage collection materially affect timings. Its JSON
-output records the Node version and complete benchmark configuration.
+output records the Node version and complete benchmark configuration. CI runs
+the command to prevent benchmark drift but does not enforce timing thresholds.
