@@ -110,7 +110,7 @@ const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
 const parsed = Workbook.create();
 await Workbook.read(parsed, bytes); // autodetects XLSB
 
-// Pull- and push-based streaming use the same contracts as Workbook XLSX IO.
+// Pull- and push-based streaming use the canonical Workbook IO contracts.
 for await (const chunk of Xlsb.toStream(workbook)) {
   // upload or persist chunk
 }
@@ -121,6 +121,26 @@ handling. `XlsbWriteOptions` controls strict fidelity checks and ZIP metadata;
 `unsupported: "ignore"` explicitly opts into dropping unsupported edited state.
 Malformed BIFF12 data throws `XlsbParseError`, while a strict write that cannot
 preserve workbook state throws `ExcelNotSupportedError`.
+
+The explicit namespace exposes the complete format-specific IO surface:
+
+| Method                                        | Node.js  | Browser      | Purpose                                                    |
+| --------------------------------------------- | -------- | ------------ | ---------------------------------------------------------- |
+| `Xlsb.read(workbook, data, options?)`         | Yes      | Yes          | Read XLSB bytes or an optionally base64-encoded string.    |
+| `Xlsb.toBuffer(workbook, options?)`           | `Buffer` | `Uint8Array` | Serialize the workbook to XLSB bytes.                      |
+| `Xlsb.readStream(workbook, source, options?)` | Yes      | Yes          | Consume a sync or async iterable of byte chunks.           |
+| `Xlsb.writeStream(workbook, sink, options?)`  | Yes      | Yes          | Push an XLSB package to a backpressure-aware archive sink. |
+| `Xlsb.toStream(workbook, options?)`           | Yes      | Yes          | Return a pull-driven readable XLSB byte stream.            |
+| `Xlsb.readFile(workbook, path, options?)`     | Yes      | —            | Read an XLSB file path.                                    |
+| `Xlsb.writeFile(workbook, path, options?)`    | Yes      | —            | Write an XLSB file path.                                   |
+
+The canonical `Workbook` methods accept `WorkbookReadOptions`,
+`WorkbookWriteOptions`, and `WorkbookStreamOptions`. `Workbook.read` detects
+XLSB from package bytes, `readFile`/`writeFile` use the `.xlsb` extension, and
+stream IO requires `format: "xlsb"` because a stream is not opened ahead of
+time for package inspection. The explicit `Xlsb` methods never need a format
+flag. Portable stream contracts are named `XlsbInputStream`, `XlsbReadable`,
+and `XlsbWritable`.
 
 The XLSB implementation covers scalar and rich values, errors, dates, full cell
 styles, rows and columns, workbook and sheet views, merges, hyperlinks, legacy
@@ -250,7 +270,7 @@ DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRan
 Setting a formula stores it; it does not evaluate it. To compute results,
 import the calculation engine from the `documonster/excel/formula` subpath
 (kept separate so the ~200 KB engine stays out of bundles that only read and
-write XLSX — there is no install or registration step):
+write workbooks — there is no install or registration step):
 
 ```typescript
 import { Workbook, Cell } from "documonster/excel";
@@ -1475,7 +1495,10 @@ import type {
   WorkbookStreamOptions,
   XlsbReadOptions,
   XlsbWriteOptions,
-  XlsbStreamOptions
+  XlsbStreamOptions,
+  XlsbInputStream,
+  XlsbReadable,
+  XlsbWritable
 } from "documonster/excel";
 
 // Style values are now declarable, so styles can be composed and shared.

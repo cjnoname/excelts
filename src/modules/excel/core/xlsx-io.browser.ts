@@ -152,6 +152,10 @@ export function writeStream(
  * const response = new Response(Readable.toWeb(Workbook.toStream(wb) as Readable));
  * ```
  *
+ * With `format: "xlsb"`, this delegates to the XLSB serializer and applies
+ * `XlsbStreamOptions`. The XLSX entry-buffering details below apply only to the
+ * default XLSX path.
+ *
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
  * backpressure is sampled after each ZIP entry, and a worksheet is rendered as
  * one entry, so peak buffering may substantially exceed the

@@ -38,7 +38,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write XLSX.
+433-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate XLSX or XLSB workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write workbooks.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -115,6 +115,8 @@ const sheet = Workbook.addWorksheet(workbook, "Sheet1");
 Worksheet.addRow(sheet, ["Name", "Age"]);
 Worksheet.addRow(sheet, ["Alice", 30]);
 await Workbook.writeFile(workbook, "output.xlsx");
+// Use a .xlsb path to select the binary workbook writer.
+await Workbook.writeFile(workbook, "output.xlsb");
 
 // Read
 const wb = Workbook.create();

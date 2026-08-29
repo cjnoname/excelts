@@ -66,11 +66,11 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
  * `Buffer.from(bytes)` that a `Uint8Array` declaration invites, and which really
  * does copy the whole package.
  *
- * The guarantee is structural, not a re-label: `StreamBuf.read()` already hands
- * back a `Buffer` view on Node, so the common path returns that value untouched,
- * and the fallback wraps the existing memory (`Buffer.from(buffer, byteOffset,
- * byteLength)` is a view, never a copy). Either way no bytes are duplicated, and
- * the declared type cannot silently drift from the runtime one.
+ * The guarantee is structural, not a re-label: the XLSX `StreamBuf.read()` path
+ * already hands back a `Buffer` view, while the XLSB and fallback paths wrap the
+ * existing memory (`Buffer.from(buffer, byteOffset, byteLength)` is a view,
+ * never a copy). No bytes are duplicated, and the declared type cannot silently
+ * drift from the runtime one.
  */
 export async function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions): Promise<Buffer> {
   if (options?.format === "xlsb") {
@@ -181,6 +181,10 @@ export function writeStream(
  * still assignable to `XlsxReadable`, which is identical in both builds, so
  * cross-platform code written against that name keeps compiling while Node code
  * gets the nominal `stream.Readable`.
+ *
+ * With `format: "xlsb"`, this delegates to the XLSB serializer and applies
+ * `XlsbStreamOptions`. The XLSX entry-buffering details below apply only to the
+ * default XLSX path.
  *
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
  * backpressure is sampled after each ZIP entry, and a worksheet is rendered as

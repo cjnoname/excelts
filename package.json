@@ -19,6 +19,7 @@
     "typescript",
     "word",
     "workbook",
+    "xlsb",
     "xlsx",
     "xml",
     "zero-dependency",

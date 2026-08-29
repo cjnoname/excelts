@@ -109,7 +109,7 @@ const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
 const parsed = Workbook.create();
 await Workbook.read(parsed, bytes); // autodetects XLSB
 
-// Pull-based streaming uses the same contract as Workbook XLSX IO.
+// Pull-based streaming uses the canonical Workbook IO contract.
 for await (const chunk of Xlsb.toStream(workbook)) {
   // upload or persist chunk
 }
@@ -119,6 +119,24 @@ for await (const chunk of Xlsb.toStream(workbook)) {
 控制严格保真检查及 ZIP 元数据；`unsupported: "ignore"` 表示明确允许丢弃编辑后
 仍不受支持的状态。格式错误的 BIFF12 数据会抛出 `XlsbParseError`，严格写入无法
 保留工作簿状态时会抛出 `ExcelNotSupportedError`。
+
+显式命名空间提供完整的格式专用 IO 接口：
+
+| 方法                                          | Node.js  | 浏览器       | 用途                                       |
+| --------------------------------------------- | -------- | ------------ | ------------------------------------------ |
+| `Xlsb.read(workbook, data, options?)`         | 是       | 是           | 读取 XLSB 字节或可选的 base64 编码字符串。 |
+| `Xlsb.toBuffer(workbook, options?)`           | `Buffer` | `Uint8Array` | 将工作簿序列化为 XLSB 字节。               |
+| `Xlsb.readStream(workbook, source, options?)` | 是       | 是           | 消费同步或异步的字节块 iterable。          |
+| `Xlsb.writeStream(workbook, sink, options?)`  | 是       | 是           | 将 XLSB 包推送到支持背压的 archive sink。  |
+| `Xlsb.toStream(workbook, options?)`           | 是       | 是           | 返回由消费者拉取的 XLSB 可读字节流。       |
+| `Xlsb.readFile(workbook, path, options?)`     | 是       | —            | 读取 XLSB 文件路径。                       |
+| `Xlsb.writeFile(workbook, path, options?)`    | 是       | —            | 写入 XLSB 文件路径。                       |
+
+规范的 `Workbook` 方法接受 `WorkbookReadOptions`、`WorkbookWriteOptions` 和
+`WorkbookStreamOptions`。`Workbook.read` 根据包字节检测 XLSB，`readFile`/
+`writeFile` 根据 `.xlsb` 扩展名选择格式；流式 IO 需要 `format: "xlsb"`，因为
+流不会被预先打开以检查包内容。显式 `Xlsb` 方法不需要格式标志。可移植流契约命名为
+`XlsbInputStream`、`XlsbReadable` 和 `XlsbWritable`。
 
 当前实现覆盖标量与富文本值、错误、日期、完整单元格样式、行列属性、工作簿与
 工作表视图、合并单元格、超链接、传统备注、数据验证、保护、页面设置、定义名称、
@@ -230,7 +248,7 @@ DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRan
 ```
 
 设置公式只是存下公式,并不会求值。要计算结果,从 `documonster/excel/formula`
-subpath 导入计算引擎(单独拆开,好让约 200 KB 的引擎不进入只读写 XLSX 的
+subpath 导入计算引擎(单独拆开,好让约 200 KB 的引擎不进入只读写工作簿的
 bundle — 无需任何安装或注册步骤):
 
 ```typescript
@@ -1444,7 +1462,10 @@ import type {
   WorkbookStreamOptions,
   XlsbReadOptions,
   XlsbWriteOptions,
-  XlsbStreamOptions
+  XlsbStreamOptions,
+  XlsbInputStream,
+  XlsbReadable,
+  XlsbWritable
 } from "documonster/excel";
 
 // 样式值可以被声明，因此样式能够组合与复用。

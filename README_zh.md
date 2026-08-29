@@ -37,7 +37,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Formula — Excel 兼容公式引擎
 
-433 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 workbook;用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤,且引擎不会进入只读写 XLSX 的 bundle。
+433 函数计算引擎，包含 tokenizer、parser、依赖图、动态数组 spill，支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 XLSX 或 XLSB 工作簿；用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤，且引擎不会进入只读写工作簿的 bundle。
 
 - [文档](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [示例](src/modules/formula/examples/)
@@ -114,6 +114,8 @@ const sheet = Workbook.addWorksheet(workbook, "Sheet1");
 Worksheet.addRow(sheet, ["姓名", "年龄"]);
 Worksheet.addRow(sheet, ["Alice", 30]);
 await Workbook.writeFile(workbook, "output.xlsx");
+// Use a .xlsb path to select the binary workbook writer.
+await Workbook.writeFile(workbook, "output.xlsb");
 
 // 读取
 const wb = Workbook.create();

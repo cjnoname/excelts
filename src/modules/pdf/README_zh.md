@@ -200,14 +200,14 @@ const url = URL.createObjectURL(blob);
 window.open(url);
 ```
 
-### 读取 XLSX 并导出 PDF
+### 读取 XLSX 或 XLSB 并导出 PDF
 
 ```typescript
 import { Workbook } from "documonster/excel";
 import { Pdf } from "documonster/pdf";
 
 const workbook = Workbook.create();
-await Workbook.readFile(workbook, "report.xlsx");
+await Workbook.readFile(workbook, "report.xlsb"); // .xlsx uses the same API
 
 const pdf = await Pdf.fromExcel(workbook, {
   showGridLines: true,

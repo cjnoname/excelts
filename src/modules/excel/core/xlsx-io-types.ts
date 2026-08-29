@@ -1,6 +1,8 @@
 /**
- * Structural stream contracts for the public XLSX IO surface.
+ * Structural stream contracts for the canonical workbook IO surface.
  *
+ * The historical `Xlsx*` names remain for compatibility, but these structures
+ * also describe canonical `Workbook` stream calls when they dispatch to XLSB.
  * Kept in its own module so both platform IO variants (`xlsx-io.ts` /
  * `xlsx-io.browser.ts`), the serializer (`xlsx/xlsx.browser.ts`), and the
  * pull-source adapter (`xlsx-stream.ts`) share one definition instead of each
@@ -17,7 +19,7 @@ import type { IReadable } from "@stream";
  */
 export type XlsxStreamListener = (...args: any[]) => void;
 
-/** Minimal event-emitter contract used by XLSX stream IO. */
+/** Minimal event-emitter contract used by workbook stream IO. */
 export interface XlsxEmitterLike {
   on(event: string, listener: XlsxStreamListener): this;
   once(event: string, listener: XlsxStreamListener): this;
@@ -40,7 +42,7 @@ export interface XlsxWritable extends XlsxEmitterLike {
 }
 
 /**
- * Cross-platform readable XLSX byte source.
+ * Cross-platform readable workbook byte source.
  *
  * Identical in the Node and browser builds on purpose: this is the name a
  * cross-platform program writes against, so it must mean the same thing in both.
