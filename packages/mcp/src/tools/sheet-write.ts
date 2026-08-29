@@ -21,7 +21,7 @@ import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, outputDisplay, resolveInRoot, resolveOutputPath } from "../sandbox.js";
 import { addChart, chartSchema, generateSchema, writeGenerated } from "./chart.js";
-import { assertNonMacroOutput } from "./document.js";
+import { assertNonMacroOutput, requireSpreadsheetFormat } from "./document.js";
 import { writeWithPolicy } from "./fs-helpers.js";
 import { textResult } from "./result.js";
 import {
@@ -115,12 +115,12 @@ export const sheetWriteTool = defineTool({
   group: "excel",
   title: "Write a spreadsheet",
   description:
-    "Create an .xlsx from a declarative spec: one call describes every sheet, its data, formulas, widths, freeze panes, merges and formatting. Use `fromCsv` to pull existing data in server-side instead of copying rows through your reply. Formulas are evaluated before saving unless recalculate is false.",
+    "Create an .xlsx or .xlsb from a declarative spec: one call describes every sheet, its data, formulas, widths, freeze panes, merges and formatting. Use `fromCsv` to pull existing data in server-side instead of copying rows through your reply. Formulas are evaluated before saving unless recalculate is false. Charts currently require .xlsx.",
   inputSchema: {
     path: z
       .string()
       .min(1)
-      .describe("Output .xlsx path below --output-root; returned as @output/<path>."),
+      .describe("Output .xlsx or .xlsb path below --output-root; returned as @output/<path>."),
     sheets: z.array(sheetSchema).min(1).describe("One entry per worksheet, in order."),
     overwrite: z
       .boolean()
@@ -146,6 +146,16 @@ export const sheetWriteTool = defineTool({
     const { config } = context;
     assertWritable(config);
     assertNonMacroOutput(args.path);
+    const format = requireSpreadsheetFormat(args.path, "path");
+    if (
+      format === "xlsb" &&
+      args.sheets.some(sheet => sheet.charts !== undefined && sheet.charts.length > 0)
+    ) {
+      throw toolError.unsupported(
+        "cannot create charts in XLSB output yet",
+        "Use an .xlsx output path, or omit charts. Other sheet_write fields are supported in XLSB."
+      );
+    }
 
     const target = await resolveOutputPath(config, args.path);
     for (const sheet of args.sheets) {
@@ -179,7 +189,7 @@ export const sheetWriteTool = defineTool({
     // is handled by the atomic writer, since a model writes "out/report.xlsx"
     // without checking that "out" exists.
     await writeWithPolicy(target, args.overwrite === true, temporary =>
-      Workbook.writeFile(wb, temporary)
+      Workbook.writeFile(wb, temporary, { format })
     );
 
     return textResult(

@@ -82,8 +82,8 @@ widened.`
 
 ## Spreadsheets
 - \`sheet_read\` — read a bounded window.
-- \`sheet_write\` — create an .xlsx from a spec.
-- \`sheet_edit\` — patch an existing .xlsx.
+- \`sheet_write\` — create an .xlsx or .xlsb from a spec.
+- \`sheet_edit\` — patch an existing .xlsx, .xlsm or .xlsb.
 - \`formula_evaluate\` — evaluate a formula against supplied values.
 
 ## Documents
@@ -115,11 +115,11 @@ widened.`
 - A Word file with \`{{placeholders}}\` → \`template_fill\`, not \`doc_edit\`.
 - A Word file with grey form fields → \`form_fill\`, not \`doc_edit\`.
 - Changing ordinary prose → \`doc_edit\`.
-- Producing a PDF → make a .docx or .xlsx first, then \`doc_convert\`.
+- Producing a PDF → make a .docx, .xlsx or .xlsb first, then \`doc_convert\`.
   \`pdf_edit\` changes an existing PDF; it does not create content.
 - Two versions of a document → \`doc_review\`, not two \`doc_read\` calls.
 - A chart → a \`charts\` entry in \`sheet_write\`, or an \`add_chart\` op in
-  \`sheet_edit\`. There is no separate chart tool.
+  \`sheet_edit\`. Charts require XLSX output; there is no separate chart tool.
 - Test data → \`generate\` in \`sheet_write\`. Never emit thousands of rows yourself.`
   },
 

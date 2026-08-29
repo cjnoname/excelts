@@ -80,7 +80,7 @@ export const docReadTool = defineTool({
       default:
         throw toolError.unsupported(
           `doc_read cannot read .${format} files`,
-          format === "xlsx" || format === "csv"
+          format === "xlsx" || format === "xlsb" || format === "csv"
             ? "Use sheet_read for spreadsheets and CSV files."
             : "Supported: .docx, .pdf, .md, .txt, .html"
         );

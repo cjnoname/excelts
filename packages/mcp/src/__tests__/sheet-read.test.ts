@@ -91,6 +91,16 @@ describe("sheet_read", () => {
     expect(text).toContain("| 2 | r1 | 10 |");
   });
 
+  it("reads an XLSB workbook through the same bounded table surface", async () => {
+    const fx = await fixture();
+    const file = await makeWorkbook(fx, "book.xlsb", 2);
+
+    const text = await read(fx, { path: file });
+    expect(text).toContain("| 1 | region | amount |");
+    expect(text).toContain("| 3 | r2 | 20 |");
+    expect(text).toContain("other sheets: Notes");
+  });
+
   it("reports the used area and the sheet it read", async () => {
     const fx = await fixture();
     const file = await makeWorkbook(fx, "book.xlsx", 3);

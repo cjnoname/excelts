@@ -89,6 +89,18 @@ describe("doc_inspect content detection", () => {
     expect(text).toContain("Read one with `sheet_read`");
   });
 
+  it("recognises XLSB package parts and lists their sheets", async () => {
+    const fx = await fixture();
+    const wb = Workbook.create();
+    Worksheet.addAoa(Workbook.addWorksheet(wb, "Binary Data"), [["value"], [42]]);
+    await Workbook.writeFile(wb, path.join(fx.root, "real.xlsb"));
+
+    const text = await inspect(fx, "real.xlsb");
+    expect(text).toContain("kind: **excel**");
+    expect(text).toContain("| `Binary Data` | A1:A2 | 2 | 1 |");
+    expect(text).not.toContain("Extension mismatch");
+  });
+
   it("classifies a zip-shaped .xlsx without workbook parts as zip", async () => {
     const fx = await fixture();
     await writeMagic(fx, "fake.xlsx", MAGIC.zip);

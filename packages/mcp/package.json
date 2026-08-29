@@ -12,6 +12,7 @@
     "mcp",
     "model-context-protocol",
     "pdf",
+    "xlsb",
     "xlsx"
   ],
   "homepage": "https://github.com/documonster/documonster/tree/main/packages/mcp#readme",

@@ -237,6 +237,16 @@ describe("doc_convert", () => {
     expect(await readFile(path.join(fx.root, "out.csv"), "utf8")).toContain("APAC");
   });
 
+  it("converts XLSB to CSV through the same workbook route", async () => {
+    const fx = await fixture();
+    const source = await makeWorkbook(fx, "book.xlsb");
+    const report = await run(docConvertTool, fx, { from: source, to: "out.csv" });
+
+    expect(report).toContain("xlsb → csv");
+    expect(report).toContain("only one sheet");
+    expect(await readFile(path.join(fx.root, "out.csv"), "utf8")).toContain("APAC");
+  });
+
   it("selects the sheet for a csv export", async () => {
     const fx = await fixture();
     const source = await makeWorkbook(fx);
@@ -244,25 +254,30 @@ describe("doc_convert", () => {
     expect(await readFile(path.join(fx.root, "notes.csv"), "utf8")).toContain("second sheet");
   });
 
-  it("converts xlsx to PDF, recalculating formulas first", async () => {
-    const fx = await fixture();
-    const wb = Workbook.create();
-    const ws = Workbook.addWorksheet(wb, "S");
-    Worksheet.addAoa(ws, [[10], [20]]);
-    // Stored WITHOUT a leading "=", and with no cached result, so only a real
-    // recalculation can put 30 into the PDF.
-    const { Cell } = await import("documonster/excel");
-    Cell.setValue(ws, "A3", { formula: "SUM(A1:A2)" });
-    await Workbook.writeFile(wb, path.join(fx.root, "calc.xlsx"));
+  it.each(["xlsx", "xlsb"] as const)(
+    "converts %s to PDF, recalculating formulas first",
+    async format => {
+      const fx = await fixture();
+      const wb = Workbook.create();
+      const ws = Workbook.addWorksheet(wb, "S");
+      Worksheet.addAoa(ws, [[10], [20]]);
+      // Stored WITHOUT a leading "=", and with no cached result, so only a real
+      // recalculation can put 30 into the PDF.
+      const { Cell } = await import("documonster/excel");
+      Cell.setValue(ws, "A3", { formula: "SUM(A1:A2)" });
+      const source = `calc.${format}`;
+      await Workbook.writeFile(wb, path.join(fx.root, source));
 
-    const report = await run(docConvertTool, fx, { from: "calc.xlsx", to: "calc.pdf" });
-    expect(report).toContain("recalculated");
+      const report = await run(docConvertTool, fx, { from: source, to: `calc-${format}.pdf` });
+      expect(report).toContain("recalculated");
 
-    const parsed = await Pdf.read(new Uint8Array(await readFile(path.join(fx.root, "calc.pdf"))), {
-      extractText: true
-    });
-    expect(parsed.pages[0]?.text).toContain("30");
-  });
+      const parsed = await Pdf.read(
+        new Uint8Array(await readFile(path.join(fx.root, `calc-${format}.pdf`))),
+        { extractText: true }
+      );
+      expect(parsed.pages[0]?.text).toContain("30");
+    }
+  );
 
   it("converts csv to xlsx", async () => {
     const fx = await fixture();
@@ -274,6 +289,19 @@ describe("doc_convert", () => {
     const ws = Workbook.getWorksheet(wb, "Sheet1");
     expect(ws).toBeDefined();
     expect(Worksheet.toAoa(ws!)).toEqual([
+      ["a", "b"],
+      [1, 2]
+    ]);
+  });
+
+  it("converts CSV to XLSB and produces a readable binary workbook", async () => {
+    const fx = await fixture();
+    await writeFile(path.join(fx.root, "in.csv"), "a,b\n1,2\n", "utf8");
+    await run(docConvertTool, fx, { from: "in.csv", to: "out.xlsb" });
+
+    const wb = Workbook.create();
+    await Workbook.readFile(wb, path.join(fx.root, "out.xlsb"));
+    expect(Worksheet.toAoa(Workbook.getWorksheet(wb, "Sheet1")!)).toEqual([
       ["a", "b"],
       [1, 2]
     ]);

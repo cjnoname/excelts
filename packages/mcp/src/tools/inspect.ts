@@ -187,6 +187,7 @@ function describeExtensionMismatch(filePath: string, kind: FileKind): string[] {
 const CLAIMED_BY_EXTENSION: Readonly<Record<string, FileKind>> = {
   ".xlsx": "excel",
   ".xlsm": "excel",
+  ".xlsb": "excel",
   ".xltx": "excel",
   ".docx": "word",
   ".docm": "word",
@@ -259,12 +260,12 @@ async function describeWorkbook(resolved: string, config: ServerConfig): Promise
 
   const sheets = Workbook.getWorksheets(wb);
   if (sheets.length === 0) {
-    // A valid .xlsx always has at least one sheet, and a ZIP that merely looks
+    // A valid Excel workbook always has at least one sheet, and a ZIP that merely looks
     // like one parses without error into an empty workbook — so report the
     // likely cause rather than the literal finding.
     return [
       "No worksheets were found. A valid Excel workbook always has at least one, so this is most",
-      "likely a ZIP file that is not really an .xlsx. Treat the extension as unreliable."
+      "likely a ZIP file that is not really an Excel workbook. Treat the extension as unreliable."
     ];
   }
 
@@ -513,12 +514,12 @@ async function detectKind(filePath: string, head: Uint8Array): Promise<FileKind>
   return textKindFromExtension(filePath);
 }
 
-/** Identify OOXML by the parts in the ZIP, never by the filename. */
+/** Identify OOXML and XLSB packages by their ZIP parts, never by the filename. */
 async function zipContentKind(filePath: string): Promise<FileKind> {
   try {
     const archive = await ArchiveFile.fromFile(filePath);
     const names = new Set((await archive.getEntries()).map(entry => entry.path));
-    if (names.has("xl/workbook.xml")) {
+    if (names.has("xl/workbook.xml") || names.has("xl/workbook.bin")) {
       return "excel";
     }
     if (names.has("word/document.xml")) {

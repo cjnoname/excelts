@@ -22,6 +22,7 @@ import { z } from "zod";
 import { toolError } from "../errors.js";
 import { assertWritable, resolveEditTarget, resolveInRoot } from "../sandbox.js";
 import { addChart, chartSchema } from "./chart.js";
+import { requireSpreadsheetFormat } from "./document.js";
 import {
   assertUnchanged,
   backupOnce,
@@ -115,7 +116,7 @@ export const sheetEditTool = defineTool({
   group: "excel",
   title: "Edit an existing spreadsheet",
   description:
-    "Apply a list of edits to an existing .xlsx: set cells, ranges or formulas, clear, insert or delete rows, restyle, add a chart or add a sheet. All edits succeed or none are written. Use dryRun first to see what would change. Read the sheet with sheet_read before editing so cell references are right. Renaming is intentionally not exposed because formulas and chart references cannot be rewritten safely.",
+    "Apply a list of edits to an existing .xlsx, .xlsm, or .xlsb: set cells, ranges or formulas, clear, insert or delete rows, restyle, add a chart or add a sheet. All edits succeed or none are written. Charts currently require .xlsx/.xlsm output. Use dryRun first to see what would change. Read the sheet with sheet_read before editing so cell references are right. Renaming is intentionally not exposed because formulas and chart references cannot be rewritten safely.",
   inputSchema: {
     path: z.string().min(1).describe("Workbook to edit, relative to the server root."),
     out: z
@@ -154,6 +155,14 @@ export const sheetEditTool = defineTool({
   handler: async (args, context) => {
     const { config } = context;
     assertWritable(config);
+    requireSpreadsheetFormat(args.path, "path");
+    const outputFormat = requireSpreadsheetFormat(args.out ?? args.path, args.out ? "out" : "path");
+    if (outputFormat === "xlsb" && args.ops.some(op => op.op === "add_chart")) {
+      throw toolError.unsupported(
+        "cannot add charts to XLSB output yet",
+        "Use an .xlsx output path, or omit the add_chart operation. Other sheet_edit operations are supported in XLSB."
+      );
+    }
 
     const resolved = await resolveInRoot(config, args.path, { mustExist: true });
     const inputVersion = await fingerprint(resolved);
@@ -171,7 +180,7 @@ export const sheetEditTool = defineTool({
     } catch (cause) {
       throw toolError.unsupported(
         `could not read ${args.path} as a workbook`,
-        "Run doc_inspect to confirm the file really is an .xlsx package.",
+        "Run doc_inspect to confirm the file really is an XLSX, XLSM, or XLSB package.",
         { cause }
       );
     }
@@ -232,7 +241,20 @@ export const sheetEditTool = defineTool({
     // Written to a sibling and renamed: the in-memory application above is only
     // half of "atomic" — writing straight to the path would truncate the user's
     // file before the new bytes are complete.
-    await replaceAtomically(writeTarget.path, temporary => Workbook.writeFile(wb, temporary));
+    try {
+      await replaceAtomically(writeTarget.path, temporary =>
+        Workbook.writeFile(wb, temporary, { format: outputFormat })
+      );
+    } catch (cause) {
+      if (outputFormat === "xlsb" && errorChainHasName(cause, "ExcelNotSupportedError")) {
+        throw toolError.unsupported(
+          "could not edit the XLSB without discarding unsupported workbook state",
+          "The XLSB writer is strict by default. Use a tool that understands the unsupported feature; this MCP server does not expose lossy XLSB writes.",
+          { cause }
+        );
+      }
+      throw cause;
+    }
 
     return textResult(
       config,
@@ -396,4 +418,18 @@ function requireAddress(address: string): string {
   // Reuse the range parser for the Excel row/column bounds.
   parseRange(upper);
   return upper;
+}
+
+/** Whether an error or one of its ES2022 causes has the requested name. */
+function errorChainHasName(value: unknown, name: string): boolean {
+  const seen = new Set<Error>();
+  let current = value;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current.name === name) {
+      return true;
+    }
+    seen.add(current);
+    current = current.cause;
+  }
+  return false;
 }
