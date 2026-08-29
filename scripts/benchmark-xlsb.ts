@@ -26,6 +26,7 @@ interface FormatBenchmarkResult {
   bytes: number;
   write: BenchmarkStatistics;
   read: BenchmarkStatistics;
+  readSkipBlankCells?: BenchmarkStatistics;
 }
 
 const DEFAULT_ROWS = 10_000;
@@ -34,11 +35,12 @@ const FIXED_MOD_TIME = new Date("2026-01-01T00:00:00.000Z");
 
 const rows = positiveInteger("XLSB_BENCHMARK_ROWS", DEFAULT_ROWS);
 const runs = positiveInteger("XLSB_BENCHMARK_RUNS", DEFAULT_RUNS);
+const trailingBlankRows = nonNegativeInteger("XLSB_BENCHMARK_TRAILING_BLANK_ROWS", 0);
 const formats: WorkbookFormat[] = ["xlsx", "xlsb"];
 const results: FormatBenchmarkResult[] = [];
 
 for (const format of formats) {
-  const workbook = buildWorkbook(rows);
+  const workbook = buildWorkbook(rows, trailingBlankRows);
   const write = await measure(runs, async () =>
     Workbook.toBuffer(workbook, {
       format,
@@ -49,15 +51,27 @@ for (const format of formats) {
   const read = await measure(runs, async () => {
     const loaded = Workbook.create();
     await Workbook.read(loaded, bytes);
-    assertLoadedWorkbook(loaded, rows);
+    assertLoadedWorkbook(loaded, rows, trailingBlankRows, "keep");
     return loaded;
   });
+  const readSkipBlankCells =
+    format === "xlsb" && trailingBlankRows > 0
+      ? await measure(runs, async () => {
+          const loaded = Workbook.create();
+          await Workbook.read(loaded, bytes, { blankCells: "skip" });
+          assertLoadedWorkbook(loaded, rows, trailingBlankRows, "skip");
+          return loaded;
+        })
+      : undefined;
 
   results.push({
     format,
     bytes: bytes.byteLength,
     write: summarize(write.samples, rows),
-    read: summarize(read.samples, rows)
+    read: summarize(read.samples, rows),
+    ...(readSkipBlankCells
+      ? { readSkipBlankCells: summarize(readSkipBlankCells.samples, rows) }
+      : {})
   });
 }
 
@@ -73,6 +87,7 @@ console.log(
         rows,
         columns: 8,
         measuredCells: rows * 8,
+        trailingBlankRows,
         warmups: 1,
         runs,
         node: process.version
@@ -89,7 +104,7 @@ console.log(
   )
 );
 
-function buildWorkbook(rowCount: number): Workbook.Handle {
+function buildWorkbook(rowCount: number, trailingBlankRowCount: number): Workbook.Handle {
   const workbook = Workbook.create();
   workbook.creator = "documonster XLSB benchmark";
   workbook.company = "documonster";
@@ -141,6 +156,9 @@ function buildWorkbook(rowCount: number): Workbook.Handle {
     author: "documonster",
     note: "Representative XLSX/XLSB IO benchmark"
   });
+  for (let index = 0; index < trailingBlankRowCount; index++) {
+    Cell.setStyle(sheet, `A${rowCount + 2 + index}`, { numFmt: "0.00" });
+  }
 
   const summary = Workbook.addWorksheet(workbook, "Summary");
   Cell.setValue(summary, "A1", "Rows");
@@ -189,7 +207,12 @@ function summarize(samples: BenchmarkSample[], rowCount: number): BenchmarkStati
   };
 }
 
-function assertLoadedWorkbook(workbook: Workbook.Handle, rowCount: number): void {
+function assertLoadedWorkbook(
+  workbook: Workbook.Handle,
+  rowCount: number,
+  trailingBlankRowCount: number,
+  blankCells: "keep" | "skip"
+): void {
   const sheet = Workbook.getWorksheet(workbook, "Transactions");
   if (!sheet || Cell.getValue(sheet, `A${rowCount + 1}`) !== rowCount) {
     throw new Error("benchmark round-trip did not preserve the last transaction row");
@@ -197,6 +220,13 @@ function assertLoadedWorkbook(workbook: Workbook.Handle, rowCount: number): void
   const formula = Cell.getFormula(sheet, `H${rowCount + 1}`);
   if (formula !== `E${rowCount + 1}*1.2`) {
     throw new Error(`benchmark round-trip changed the last formula: ${formula}`);
+  }
+  if (trailingBlankRowCount > 0) {
+    const address = `A${rowCount + trailingBlankRowCount + 1}`;
+    const retained = Cell.find(sheet, address) !== undefined;
+    if (retained !== (blankCells === "keep")) {
+      throw new Error(`benchmark ${blankCells} read produced an unexpected cell at ${address}`);
+    }
   }
 }
 
@@ -215,6 +245,14 @@ function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function nonNegativeInteger(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return value;
 }
