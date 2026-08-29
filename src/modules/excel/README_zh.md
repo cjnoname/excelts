@@ -1325,13 +1325,22 @@ const url = URL.createObjectURL(blob);
 
 ### 与 Script 标签配合使用
 
+excel 模块有自己的 IIFE 产物，挂在 `Documonster.Excel` 下——命名空间与 ESM 入口
+完全一致，只是在共享全局下多一层。没有全家桶产物，因此文件名就写明了模块。
+
+<!-- x-release-please-start-version -->
+
 ```html
-<script src="https://unpkg.com/documonster/dist/iife/documonster.iife.min.js"></script>
+<script src="https://unpkg.com/documonster@0.10.0/dist/iife/documonster.excel.iife.min.js"></script>
 <script>
-  const { Workbook } = Documonster;
+  const { Workbook, Cell } = Documonster.Excel;
   const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "Sheet1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
 </script>
 ```
+
+<!-- x-release-please-end -->
 
 ### 浏览器注意事项
 

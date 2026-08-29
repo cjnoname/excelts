@@ -194,10 +194,27 @@ Workbook.addWorksheet(wb, "S1");
 const buffer = await Workbook.toBuffer(wb);
 ```
 
+<!-- x-release-please-start-version -->
+
 ```html
-<!-- Script 标签（无需打包工具） -->
-<script src="https://unpkg.com/documonster/dist/iife/documonster.excel.iife.min.js"></script>
+<!-- Script 标签（无需打包工具）— 每个模块一个 IIFE，共享同一个 `Documonster` 全局 -->
+<script src="https://unpkg.com/documonster@0.10.0/dist/iife/documonster.excel.iife.min.js"></script>
+<script>
+  const { Workbook, Cell } = Documonster.Excel;
+  const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "S1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
+  Workbook.toBuffer(wb).then(buffer => console.log(buffer.byteLength));
+</script>
 ```
+
+<!-- x-release-please-end -->
+
+URL 中的版本号是刻意锁定的：不锁版本的 `unpkg.com/documonster/…` 会解析到最新版，
+于是一次发布就会改变一个并未要求改变的页面。每个模块都有自己的产物——把 `excel`
+换成 `word`、`pdf`、`csv`、`markdown`、`xml`、`formula`、`archive` 或 `stream`，
+再从 `Documonster.Word`、`Documonster.Pdf`…… 上取用即可。同时加载多个也没问题，
+它们扩展的是同一个全局对象。
 
 > IIFE 打包产物不包含公式计算引擎。如果需要重算公式，请改用 ESM + 导入
 > `documonster/excel/formula`。

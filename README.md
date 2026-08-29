@@ -207,10 +207,28 @@ Workbook.addWorksheet(wb, "S1");
 const buffer = await Workbook.toBuffer(wb);
 ```
 
+<!-- x-release-please-start-version -->
+
 ```html
-<!-- Script tag (no bundler) -->
-<script src="https://unpkg.com/documonster/dist/iife/documonster.excel.iife.min.js"></script>
+<!-- Script tag (no bundler) — one IIFE per module, each under the shared `Documonster` global -->
+<script src="https://unpkg.com/documonster@0.10.0/dist/iife/documonster.excel.iife.min.js"></script>
+<script>
+  const { Workbook, Cell } = Documonster.Excel;
+  const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "S1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
+  Workbook.toBuffer(wb).then(buffer => console.log(buffer.byteLength));
+</script>
 ```
+
+<!-- x-release-please-end -->
+
+The URL is pinned on purpose: an unpinned `unpkg.com/documonster/…` resolves to
+whatever is newest, so a future release would change a page that never asked to
+change. Every module ships its own bundle — swap `excel` for `word`, `pdf`,
+`csv`, `markdown`, `xml`, `formula`, `archive` or `stream`, and read it back off
+`Documonster.Word`, `Documonster.Pdf`, … Loading several is fine; they extend one
+shared global.
 
 > The IIFE bundle does not include the formula calculation engine. Use
 > ESM + `documonster/excel/formula` if you need to recalculate formulas.

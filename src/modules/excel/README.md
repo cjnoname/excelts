@@ -1351,13 +1351,23 @@ const url = URL.createObjectURL(blob);
 
 ### Using with Script Tags
 
+The excel module ships its own IIFE bundle, exposed as `Documonster.Excel` — the
+same namespaces as the ESM entry, one level down from the shared global. There is
+no whole-family bundle, so the file name names the module.
+
+<!-- x-release-please-start-version -->
+
 ```html
-<script src="https://unpkg.com/documonster/dist/iife/documonster.iife.min.js"></script>
+<script src="https://unpkg.com/documonster@0.10.0/dist/iife/documonster.excel.iife.min.js"></script>
 <script>
-  const { Workbook } = Documonster;
+  const { Workbook, Cell } = Documonster.Excel;
   const wb = Workbook.create();
+  const ws = Workbook.addWorksheet(wb, "Sheet1");
+  Cell.setValue(ws, "A1", "Hello, Browser!");
 </script>
 ```
+
+<!-- x-release-please-end -->
 
 ### Browser Notes
 
