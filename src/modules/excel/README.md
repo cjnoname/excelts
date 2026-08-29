@@ -127,6 +127,12 @@ links, conditional formatting, and dynamic arrays still fail edited strict
 writes instead of being silently discarded. An unchanged loaded workbook is
 returned byte-for-byte, including macros and opaque package parts.
 
+Maintainers can run `pnpm verify:xlsb-corpus` for the pinned Calamine, Apache
+POI, and `jsxlsb` interoperability corpus, and `pnpm benchmark:xlsb` for the
+same-workbook XLSX/XLSB IO comparison. Cache, offline, refresh, private-corpus,
+and benchmark sizing options are documented in
+[`xlsb/README.md`](xlsb/README.md).
+
 ### Reading a Range
 
 `Range.getValues` reads a rectangular block as a row-major matrix:

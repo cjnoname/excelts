@@ -78,3 +78,40 @@ The `jsxlsb` project was used as an interoperability reference, not as an
 authority: several of its record IDs, direct-string/RK readers, and a row-header
 writer differ from the current protocol specification, so those paths are not
 copied verbatim.
+
+### Reproducible corpus
+
+`pnpm verify:xlsb-corpus` downloads a pinned, SHA-256-verified set of XLSB
+fixtures from Calamine, Apache POI, and `jsxlsb`, reads each through the public
+`Workbook` API, and verifies byte-for-byte passthrough of unchanged files. The
+files are cached under the gitignored `tmp/xlsb-corpus/` directory and are not
+distributed with documonster.
+
+```bash
+pnpm verify:xlsb-corpus              # populate or reuse the cache
+pnpm verify:xlsb-corpus -- --offline # require a complete valid cache
+pnpm verify:xlsb-corpus -- --refresh # redownload every pinned fixture
+```
+
+Set `DOCUMONSTER_XLSB_CORPUS_DIR` to include an additional private/local XLSB
+tree. `DOCUMONSTER_XLSB_CORPUS_CACHE` overrides the cache path. The pinned
+sources, revisions, licenses, and hashes live in
+`scripts/xlsb-corpus-manifest.json`. The password-protected Calamine fixture is
+kept as an expected rejection because encrypted OLE-wrapped XLSB packages are
+outside the current ZIP-based reader.
+
+### XLSX/XLSB benchmark
+
+`pnpm benchmark:xlsb` builds one representative workbook for each format and
+reports median write/read time, retained heap delta, rows per second, output
+size, and XLSB-to-XLSX ratios. Both formats receive the same compression level,
+fixed ZIP timestamp, data, table, formulas, styles, note, views, and metadata.
+
+```bash
+pnpm benchmark:xlsb
+XLSB_BENCHMARK_ROWS=50000 XLSB_BENCHMARK_RUNS=7 pnpm benchmark:xlsb
+```
+
+The benchmark is diagnostic rather than a CI performance budget: machine load,
+runtime version, and garbage collection materially affect timings. Its JSON
+output records the Node version and complete benchmark configuration.
