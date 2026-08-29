@@ -80,6 +80,7 @@ interface Relationship {
 
 interface XlsbLoadState {
   cachedFormulaCount: number;
+  skippedBlankCellCount: number;
   unsupportedFormatting: boolean;
   unsupportedParts: string[];
   unsupportedRecords: string[];
@@ -195,6 +196,7 @@ export async function readXlsb(
   applyAppProperties(parsed, findPart(files, "docProps/app.xml")?.data);
 
   let cachedFormulaCount = 0;
+  let skippedBlankCellCount = 0;
   const unsupportedRecords = workbookPart.unsupportedRecordTypes.map(type =>
     unsupportedRecord("xl/workbook.bin", type)
   );
@@ -307,6 +309,7 @@ export async function readXlsb(
       { hyperlinkTargets }
     );
     cachedFormulaCount += result.cachedFormulaCount;
+    skippedBlankCellCount += result.skippedBlankCellCount;
     unsupportedRecords.push(
       ...result.unsupportedRecordTypes.map(type => unsupportedRecord(actualPath, type))
     );
@@ -376,6 +379,7 @@ export async function readXlsb(
   setWorkbookModel(workbook, parsedModel);
   loadedXlsbState.set(workbook, {
     cachedFormulaCount,
+    skippedBlankCellCount,
     unsupportedFormatting:
       styleTable.hasUnsupportedFormatting || sharedStringTable.hasUnsupportedFormatting,
     unsupportedParts: [
@@ -692,6 +696,11 @@ function validateWorkbookForWrite(
   const unsupported: string[] = [];
   if (loadState?.cachedFormulaCount) {
     unsupported.push(`${loadState.cachedFormulaCount} formula(s) loaded as cached values`);
+  }
+  if (loadState?.skippedBlankCellCount) {
+    unsupported.push(
+      `${loadState.skippedBlankCellCount} styled blank cell(s) skipped at read time`
+    );
   }
   if (loadState?.unsupportedFormatting) {
     unsupported.push("loaded style flags that have no Workbook model representation");

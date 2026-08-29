@@ -1,6 +1,6 @@
 import { cellGetValue } from "@excel/core/cell";
 import { addWorksheet, createWorkbook } from "@excel/core/workbook.browser";
-import { getCell } from "@excel/core/worksheet-core";
+import { findCell, findRow, getCell } from "@excel/core/worksheet-core";
 import {
   createBinaryWriter,
   createPayload,
@@ -91,6 +91,80 @@ describe("XLSB worksheet records", () => {
     expect(cellGetValue(getCell(worksheet, "G1"))).toBe("shared");
   });
 
+  it("skips long and normalized short blank cells without materializing default rows", () => {
+    const writer = createBinaryWriter();
+    writeRecord(writer, XlsbRecordType.BeginSheet);
+    writeRecord(writer, XlsbRecordType.BeginSheetData);
+    writeRecord(writer, XlsbRecordType.RowHdr, rowHeaderPayload(0, 0, 1));
+    writeRecord(writer, XlsbRecordType.CellBlank, blankPayload(0, 1));
+    writeRecord(writer, XlsbRecordType.ShortBlank, blankPayload(0, 1).subarray(4));
+    writeRecord(writer, XlsbRecordType.RowHdr, rowHeaderPayload(5_000, 0, 0));
+    writeRecord(writer, XlsbRecordType.CellBlank, blankPayload(0, 1));
+    writeRecord(writer, XlsbRecordType.EndSheetData);
+    writeRecord(writer, XlsbRecordType.EndSheet);
+
+    const workbook = createWorkbook();
+    const worksheet = addWorksheet(workbook, "Sheet1");
+    const result = parseWorksheetPart(
+      worksheet,
+      finishBinaryWriter(writer),
+      [],
+      {
+        styles: [{}, { numFmt: "0.00" }],
+        namedStyles: [],
+        fonts: [],
+        numFmtIds: [0],
+        customFormats: new Map(),
+        hasUnsupportedFormatting: false,
+        unsupportedRecordTypes: []
+      },
+      false,
+      { sheetNames: ["Sheet1"], externalSheets: [] },
+      { blankCells: "skip" }
+    );
+
+    expect(result.skippedBlankCellCount).toBe(3);
+    expect(findCell(worksheet, "A1")).toBeUndefined();
+    expect(findCell(worksheet, "B1")).toBeUndefined();
+    expect(findCell(worksheet, "A5001")).toBeUndefined();
+    expect(findRow(worksheet, 1)).toBeUndefined();
+    expect(findRow(worksheet, 5_001)).toBeUndefined();
+  });
+
+  it("keeps a row with non-default properties when all of its blank cells are skipped", () => {
+    const writer = createBinaryWriter();
+    writeRecord(writer, XlsbRecordType.BeginSheet);
+    writeRecord(writer, XlsbRecordType.BeginSheetData);
+    writeRecord(writer, XlsbRecordType.RowHdr, rowHeaderPayload(9, 0, 0, 0x18));
+    writeRecord(writer, XlsbRecordType.CellBlank, blankPayload(0, 0));
+    writeRecord(writer, XlsbRecordType.EndSheetData);
+    writeRecord(writer, XlsbRecordType.EndSheet);
+
+    const workbook = createWorkbook();
+    const worksheet = addWorksheet(workbook, "Sheet1");
+    const result = parseWorksheetPart(
+      worksheet,
+      finishBinaryWriter(writer),
+      [],
+      {
+        styles: [{}],
+        namedStyles: [],
+        fonts: [],
+        numFmtIds: [0],
+        customFormats: new Map(),
+        hasUnsupportedFormatting: false,
+        unsupportedRecordTypes: []
+      },
+      false,
+      { sheetNames: ["Sheet1"], externalSheets: [] },
+      { blankCells: "skip" }
+    );
+
+    expect(result.skippedBlankCellCount).toBe(1);
+    expect(findRow(worksheet, 10)).toMatchObject({ hidden: true });
+    expect(findCell(worksheet, "A10")).toBeUndefined();
+  });
+
   it("falls back to a formula's cached result when its token stream is unsupported", () => {
     const writer = createBinaryWriter();
     writeRecord(writer, XlsbRecordType.BeginSheet);
@@ -128,14 +202,29 @@ describe("XLSB worksheet records", () => {
   });
 });
 
-function rowHeaderPayload(row: number, firstColumn: number, lastColumn: number): Uint8Array {
+function rowHeaderPayload(
+  row: number,
+  firstColumn: number,
+  lastColumn: number,
+  flags = 0
+): Uint8Array {
   const payload = createPayload(25);
   payload.view.setUint32(0, row, true);
   payload.view.setUint16(8, 300, true);
+  payload.bytes[11] = flags;
   payload.view.setUint32(13, 1, true);
   payload.view.setUint32(17, firstColumn, true);
   payload.view.setUint32(21, lastColumn, true);
   return payload.bytes;
+}
+
+function blankPayload(column: number, style: number): Uint8Array {
+  const payload = new Uint8Array(8);
+  const view = new DataView(payload.buffer);
+  view.setUint32(0, column, true);
+  view.setUint16(4, style, true);
+  payload[6] = style >>> 16;
+  return payload;
 }
 
 function directStringPayload(column: number, value: string): Uint8Array {

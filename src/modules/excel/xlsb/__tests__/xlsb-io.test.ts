@@ -13,6 +13,109 @@ import { theme1Xml } from "@excel/xlsx/xml/theme1";
 import { describe, expect, it } from "vitest";
 
 describe("XLSB IO", () => {
+  it("skips styled blank cells without losing values or silent write fidelity", async () => {
+    const source = Workbook.create();
+    const sheet = Workbook.addWorksheet(source, "Data");
+    Cell.setValue(sheet, "A1", "name");
+    Cell.setStyle(sheet, "A1", { font: { bold: true } });
+    Cell.setStyle(sheet, "B1", {
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFCC00" } }
+    });
+    Cell.setValue(sheet, "B2", 12.5);
+    Cell.setNumFmt(sheet, "B2", "0.00");
+    Cell.setStyle(sheet, "E2", { numFmt: "0.00" });
+    Cell.setStyle(sheet, "F2", { numFmt: "0.00" });
+    Cell.setValue(sheet, "C3", { formula: "B2*2", result: 25 });
+    Cell.setStyle(sheet, "C3", { font: { italic: true } });
+    Cell.setValue(sheet, "D3", new Date("2026-08-29T00:00:00.000Z"));
+    for (let row = 4; row <= 5_003; row++) {
+      Cell.setStyle(sheet, `A${row}`, { numFmt: "0.00" });
+    }
+
+    const bytes = await Workbook.toBuffer(source, {
+      format: "xlsb",
+      zip: { reproducible: true }
+    });
+
+    const omitted = Workbook.create();
+    await Workbook.read(omitted, bytes, { format: "xlsb" });
+    const omittedSheet = Workbook.getWorksheet(omitted, "Data")!;
+    expect(Cell.find(omittedSheet, "B1")).toBeDefined();
+    expect(Cell.find(omittedSheet, "A5003")).toBeDefined();
+    expect(Worksheet.rowCount(omittedSheet)).toBe(5_003);
+
+    const kept = Workbook.create();
+    await Workbook.read(kept, bytes, { format: "xlsb", blankCells: "keep" });
+    expect(Cell.find(Workbook.getWorksheet(kept, "Data")!, "A5003")).toBeDefined();
+
+    const skipped = Workbook.create();
+    await Workbook.read(skipped, bytes, { format: "xlsb", blankCells: "skip" });
+    const skippedSheet = Workbook.getWorksheet(skipped, "Data")!;
+    expect(Cell.getValue(skippedSheet, "A1")).toBe("name");
+    expect(Cell.getStyle(skippedSheet, "A1").font).toMatchObject({ bold: true });
+    expect(Cell.getValue(skippedSheet, "B2")).toBe(12.5);
+    expect(Cell.getNumFmt(skippedSheet, "B2")).toBe("0.00");
+    expect(Cell.getFormula(skippedSheet, "C3")).toBe("B2*2");
+    expect(Cell.getResult(skippedSheet, "C3")).toBe(25);
+    expect(Cell.getStyle(skippedSheet, "C3").font).toMatchObject({ italic: true });
+    expect((Cell.getValue(skippedSheet, "D3") as Date).toISOString()).toBe(
+      "2026-08-29T00:00:00.000Z"
+    );
+    expect(Cell.find(skippedSheet, "B1")).toBeUndefined();
+    expect(Cell.find(skippedSheet, "E2")).toBeUndefined();
+    expect(Cell.find(skippedSheet, "F2")).toBeUndefined();
+    expect(Cell.find(skippedSheet, "A5003")).toBeUndefined();
+    expect(Worksheet.rowCount(skippedSheet)).toBe(3);
+    expect(Worksheet.actualRowCount(skippedSheet)).toBe(3);
+    expect(Worksheet.columnCount(skippedSheet)).toBe(4);
+    expect(Worksheet.actualColumnCount(skippedSheet)).toBe(4);
+    expect(Worksheet.dimensions(skippedSheet)).toEqual({ top: 1, left: 1, bottom: 3, right: 4 });
+
+    expect([...(await Workbook.toBuffer(skipped, { format: "xlsb" }))]).toEqual([...bytes]);
+
+    Cell.setValue(skippedSheet, "A2", "edited");
+    await expect(Workbook.toBuffer(skipped, { format: "xlsb" })).rejects.toThrow(
+      "5003 styled blank cell(s) skipped at read time"
+    );
+    const lossy = await Workbook.toBuffer(skipped, {
+      format: "xlsb",
+      unsupported: "ignore",
+      zip: { reproducible: true }
+    });
+    const reread = Workbook.create();
+    await Workbook.read(reread, lossy, { format: "xlsb" });
+    const rereadSheet = Workbook.getWorksheet(reread, "Data")!;
+    expect(Cell.getValue(rereadSheet, "A2")).toBe("edited");
+    expect(Cell.find(rereadSheet, "B1")).toBeUndefined();
+    expect(Cell.find(rereadSheet, "A5003")).toBeUndefined();
+  });
+
+  it("applies row and column limits before counting skipped blank cells", async () => {
+    const source = Workbook.create();
+    const sheet = Workbook.addWorksheet(source, "Limits");
+    Cell.setValue(sheet, "A1", "value");
+    Cell.setStyle(sheet, "B1", { numFmt: "0.00" });
+    Cell.setStyle(sheet, "A2", { numFmt: "0.00" });
+    Cell.setStyle(sheet, "A3", { numFmt: "0.00" });
+    const bytes = await Workbook.toBuffer(source, { format: "xlsb" });
+
+    const loaded = Workbook.create();
+    await Workbook.read(loaded, bytes, {
+      format: "xlsb",
+      blankCells: "skip",
+      maxRows: 2,
+      maxCols: 1
+    });
+    const loadedSheet = Workbook.getWorksheet(loaded, "Limits")!;
+    expect(Cell.find(loadedSheet, "B1")).toBeUndefined();
+    expect(Cell.find(loadedSheet, "A2")).toBeUndefined();
+    expect(Cell.find(loadedSheet, "A3")).toBeUndefined();
+    Cell.setValue(loadedSheet, "A1", "edited");
+    await expect(Workbook.toBuffer(loaded, { format: "xlsb" })).rejects.toThrow(
+      "1 styled blank cell(s) skipped at read time"
+    );
+  });
+
   it("round-trips scalar cells, dates, number formats, sheet state, dimensions and merges", async () => {
     const source = Workbook.create();
     source.creator = "documonster test";

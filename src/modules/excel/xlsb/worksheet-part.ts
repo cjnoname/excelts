@@ -69,6 +69,8 @@ export interface XlsbWorksheetReadOptions {
   maxCols?: number;
   /** Preserve formulas, keep cached results, or reject formula cells. Defaults to `preserve`. */
   formulas?: "preserve" | "cached" | "error";
+  /** Keep value-less styled cells (default) or skip them so they are not materialized. */
+  blankCells?: "keep" | "skip";
 }
 
 /** Controls how the writer handles workbook state that XLSB cannot preserve. */
@@ -86,6 +88,7 @@ export interface XlsbWorksheetRelationships {
 
 export interface XlsbWorksheetParseResult {
   cachedFormulaCount: number;
+  skippedBlankCellCount: number;
   legacyDrawingRelationId?: string;
   tableRelationIds: string[];
   unsupportedSettings: string[];
@@ -135,6 +138,7 @@ interface PendingFormulaCell {
 
 interface ParsedCellResult {
   cachedFormula: boolean;
+  skippedBlank?: boolean;
   pendingFormula?: PendingFormulaCell;
 }
 
@@ -164,6 +168,7 @@ export function parseWorksheetPart(
   let pendingIsoProtection: readonly number[] | undefined;
   let pendingFormula: PendingFormulaCell | undefined;
   let cachedFormulaCount = 0;
+  let skippedBlankCellCount = 0;
   let legacyDrawingRelationId: string | undefined;
   const tableRelationIds: string[] = [];
   const unsupportedSettings: string[] = [];
@@ -203,7 +208,7 @@ export function parseWorksheetPart(
       );
     }
     if (record.type === XlsbRecordType.RowHdr) {
-      currentRow = parseRow(worksheet, record.data, styleTable, options.maxRows);
+      currentRow = parseRow(worksheet, record.data, styleTable, options);
       currentColumn = -1;
       continue;
     }
@@ -352,6 +357,9 @@ export function parseWorksheetPart(
     if (parsedCell.cachedFormula) {
       cachedFormulaCount++;
     }
+    if (parsedCell.skippedBlank) {
+      skippedBlankCellCount++;
+    }
   }
   if (pendingFormula) {
     throw new XlsbParseError(
@@ -361,6 +369,7 @@ export function parseWorksheetPart(
   }
   return {
     cachedFormulaCount,
+    skippedBlankCellCount,
     legacyDrawingRelationId,
     tableRelationIds,
     unsupportedSettings,
@@ -840,7 +849,7 @@ function parseRow(
   worksheet: WorksheetData,
   data: Uint8Array,
   styles: XlsbStyleTable,
-  maxRows: number | undefined
+  options: XlsbWorksheetReadOptions
 ): number {
   const reader = new XlsbBinaryReader(data, "BrtRowHdr");
   const rowIndex = reader.u32();
@@ -849,18 +858,34 @@ function parseRow(
   reader.u8();
   const flags = reader.u8();
   reader.u8();
-  if (maxRows !== undefined && rowIndex >= maxRows) {
+  if (options.maxRows !== undefined && rowIndex >= options.maxRows) {
+    return rowIndex;
+  }
+
+  const outlineLevel = flags & 0x07;
+  const collapsed = (flags & 0x08) !== 0;
+  const hidden = (flags & 0x10) !== 0;
+  const customHeight = (flags & 0x20) !== 0;
+  const hasStyle = (flags & 0x40) !== 0 && Boolean(styles.styles[styleIndex]);
+  if (
+    options.blankCells === "skip" &&
+    !outlineLevel &&
+    !collapsed &&
+    !hidden &&
+    !customHeight &&
+    !hasStyle
+  ) {
     return rowIndex;
   }
 
   const row = getRow(worksheet, rowIndex + 1);
-  row.outlineLevel = flags & 0x07;
-  row.hidden = (flags & 0x10) !== 0;
-  row.customHeight = (flags & 0x20) !== 0;
+  row.outlineLevel = outlineLevel;
+  row.hidden = hidden;
+  row.customHeight = customHeight;
   if (row.customHeight) {
     row.height = heightTwips / 20;
   }
-  if ((flags & 0x40) !== 0 && styles.styles[styleIndex]) {
+  if (hasStyle) {
     row.style = { ...styles.styles[styleIndex] };
   }
   return rowIndex;
@@ -935,6 +960,9 @@ function parseCell(
   reader.u8();
   if (options.maxCols !== undefined && columnIndex >= options.maxCols) {
     return { cachedFormula: false };
+  }
+  if (recordType === XlsbRecordType.CellBlank && options.blankCells === "skip") {
+    return { cachedFormula: false, skippedBlank: true };
   }
 
   const style = styleTable.styles[styleIndex] ?? {};
