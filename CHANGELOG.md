@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.11.0](https://github.com/documonster/documonster/compare/v0.10.0...v0.11.0) (2026-08-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* `engines.node` is now `>=22.13.0` and there is no transpiled CommonJS tree. Node 22.0–22.11 must upgrade, and Jest consumers need a transform (see the README). TypeScript consumers on `moduleResolution: node16` must move to `nodenext`.
+
+### Features
+
+* **cjk:** Make East Asian text a first-class case across PDF, Word and Excel ([b880569](https://github.com/documonster/documonster/commit/b880569544d8938751104319dd8d71a6dac2c2f8))
+* **excel:** Publish the page-break API, and make every example a verified contract ([c997f7e](https://github.com/documonster/documonster/commit/c997f7e943f63ec670ae0cbb2762a73470a6f074))
+* Make the package ESM-only and cut it from 76 MB to 18 MB ([2c2ccf7](https://github.com/documonster/documonster/commit/2c2ccf7bca4a80c5190e6e40775ac482b637a58b))
+* Publish encodePng and gate documentation against the public API ([08690b3](https://github.com/documonster/documonster/commit/08690b3a25c74d243cdbc97c8911be3d271230a4))
+* Render Markdown faithfully to PDF, and give MCP diagram and image support ([903ff45](https://github.com/documonster/documonster/commit/903ff45d2485c8883016caea890b5230d956f9ae))
+
+
+### Bug Fixes
+
+* **build:** Bind IIFE bundles to globalThis, and stop the banner drifting ([32076e0](https://github.com/documonster/documonster/commit/32076e0cb35d2b3b2c0f6506831d7d98c3787b07))
+* **ci:** Separate the consumer's Node floor from the toolchain's, and stop reporting native paths ([e441d99](https://github.com/documonster/documonster/commit/e441d992d146a220005218dd2cc20f2013ea0c59))
+* **docs:** Make every documented CDN URL and browser snippet run ([3d76fb5](https://github.com/documonster/documonster/commit/3d76fb5b3e160bfbc98ef8d2aea5f7f649b50e38))
+* **gates:** Close three CodeQL findings, and drop a dead store in the Word wrapper ([4a49acc](https://github.com/documonster/documonster/commit/4a49acc71f50c8fd67cdd857b2ac68ffe146b870))
+* **gates:** Make the inline-markup strip repeat where the analyser can see it ([62c1c0d](https://github.com/documonster/documonster/commit/62c1c0d5f77009c63c7bc789a46748d24f757fb5))
+* **pkg:** Give author object form and drop the dead main pointer ([d01b22f](https://github.com/documonster/documonster/commit/d01b22f84bc49edd0f27cbed947627d58a6f60ba))
+
 ## [0.10.0](https://github.com/documonster/documonster/compare/v0.9.0...v0.10.0) (2026-08-22)
 
 

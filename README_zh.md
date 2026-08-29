@@ -198,7 +198,7 @@ const buffer = await Workbook.toBuffer(wb);
 
 ```html
 <!-- Script 标签（无需打包工具）— 每个模块一个 IIFE，共享同一个 `Documonster` 全局 -->
-<script src="https://unpkg.com/documonster@0.10.0/dist/iife/documonster.excel.iife.min.js"></script>
+<script src="https://unpkg.com/documonster@0.11.0/dist/iife/documonster.excel.iife.min.js"></script>
 <script>
   const { Workbook, Cell } = Documonster.Excel;
   const wb = Workbook.create();
