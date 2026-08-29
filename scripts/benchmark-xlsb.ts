@@ -163,6 +163,8 @@ async function measure<T>(runCount: number, operation: () => Promise<T>): Promis
     const start = performance.now();
     lastValue = await operation();
     const durationMs = performance.now() - start;
+    // Measure retained heap after the timed operation; GC time is deliberately excluded.
+    global.gc?.();
     samples.push({
       durationMs,
       heapDeltaMb: (process.memoryUsage().heapUsed - heapBefore) / 1024 / 1024
