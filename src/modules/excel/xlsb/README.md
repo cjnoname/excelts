@@ -83,7 +83,13 @@ copied verbatim.
 
 `pnpm verify:xlsb-corpus` downloads a pinned, SHA-256-verified set of XLSB
 fixtures from Calamine, Apache POI, and `jsxlsb`, reads each through the public
-`Workbook` API, and verifies byte-for-byte passthrough of unchanged files. The
+`Workbook` API, verifies byte-for-byte passthrough of unchanged files, and runs
+the semantic expectations stored beside each selected fixture in the manifest.
+Those probes cover worksheet names, the 1900/1904 date epochs, scalar and date
+cells, formula text and cached results, comments, hyperlinks, Unicode, and
+merged ranges. The `jsxlsb` fixture also receives a new cell, is serialized with
+the explicit `unsupported: "ignore"` opt-in required by its opaque records, and
+is read again; every original semantic probe and the mutation must survive. The
 files are cached under the gitignored `tmp/xlsb-corpus/` directory and are not
 distributed with documonster.
 

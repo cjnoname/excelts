@@ -129,8 +129,10 @@ returned byte-for-byte, including macros and opaque package parts.
 
 Maintainers can run `pnpm verify:xlsb-corpus` for the pinned Calamine, Apache
 POI, and `jsxlsb` interoperability corpus, and `pnpm benchmark:xlsb` for the
-same-workbook XLSX/XLSB IO comparison. Cache, offline, refresh, private-corpus,
-and benchmark sizing options are documented in
+same-workbook XLSX/XLSB IO comparison. The corpus also pins semantic probes for
+sheet names, dates and epochs, formulas, comments, hyperlinks, Unicode, merges,
+and one edited XLSB round-trip. Cache, offline, refresh, private-corpus, and
+benchmark sizing options are documented in
 [`xlsb/README.md`](xlsb/README.md).
 
 ### Reading a Range
