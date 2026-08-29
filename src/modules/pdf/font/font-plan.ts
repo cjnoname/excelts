@@ -6,6 +6,10 @@
  * before PDF encoding; this planner only keeps grapheme clusters on one face.
  */
 
+// The canonical WinAnsi predicate. A local copy here excluded the control
+// characters (`0x00–0x1f`, `0x7f`) that the real one accepts, so a tab or a
+// newline was reported as a code point the face has no glyph for.
+import { isWinAnsiCodePoint } from "@pdf/core/pdf-stream";
 import type {
   CompiledPdfFontConfig,
   CompiledPdfFontFace,
@@ -14,6 +18,7 @@ import type {
 } from "@pdf/font/font-config";
 import { getCharWidth, getFontAscent, getFontDescent } from "@pdf/font/metrics";
 import type { TtfFont } from "@pdf/font/ttf-parser";
+import { graphemeClusters } from "@utils/grapheme";
 
 export interface TextIntent {
   readonly text: string;
@@ -126,8 +131,6 @@ interface SelectedCluster {
   codepoints: number[];
 }
 
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 /** Create a planner from compiled TTF configuration, generic faces, or one legacy TTF face. */
 export function buildFontPlan(
   input: CompiledPdfFontConfig | FontPlanConfig | CompiledPdfFontFace
@@ -231,15 +234,20 @@ function finalizePlan(config: InternalConfig, intents: readonly TextIntent[]): F
 function selectSegments(config: InternalConfig, intent: TextIntent): SelectedCluster[] {
   const families = familyCandidates(config, intent.family);
   const result: SelectedCluster[] = [];
-  for (const part of segmenter.segment(intent.text)) {
-    const codepoints = Array.from(part.segment, char => char.codePointAt(0)!);
+  // `graphemeClusters`, not a module-level `new Intl.Segmenter`: Firefox only
+  // gained that API in 125 and this package supports 102, where constructing it at
+  // module load threw `Intl.Segmenter is not a constructor` on *import* — before
+  // any call, so no consumer could guard against it. `@utils/grapheme` detects the
+  // API lazily and falls back.
+  for (const cluster of graphemeClusters(intent.text)) {
+    const codepoints = Array.from(cluster, char => char.codePointAt(0)!);
     const selected = selectFace(families, codepoints, intent.bold, intent.italic);
     const previous = result[result.length - 1];
     if (previous?.faceId === selected.faceId) {
-      previous.text += part.segment;
+      previous.text += cluster;
       previous.codepoints.push(...codepoints);
     } else {
-      result.push({ ...selected, text: part.segment, codepoints });
+      result.push({ ...selected, text: cluster, codepoints });
     }
   }
   return result;
@@ -296,11 +304,18 @@ function faceCandidates(
 
 function familyCandidates(config: InternalConfig, requested: string | undefined): InternalFamily[] {
   const named = requested ? config.familyLookup.get(normalizeName(requested)) : undefined;
-  if (!named) {
-    return [config.defaultFamily];
-  }
+  // An unrecognised name lands on `default`, but that is not a reason to drop the
+  // fallback chain. Returning `[defaultFamily]` alone made `fallbackFamilies` apply
+  // only to text that already named a configured family — and a document names the
+  // fonts *it* was written with (`Calibri`, `Courier New`), which a caller
+  // configuring a CJK face has no reason to have configured. So the common case
+  // silently had no fallback at all: every code point `default` lacked became
+  // `.notdef` while a configured fallback family sat there holding the glyph.
+  const chain = named
+    ? [named, ...config.fallbackFamilies, config.defaultFamily]
+    : [config.defaultFamily, ...config.fallbackFamilies];
   const result: InternalFamily[] = [];
-  for (const family of [named, ...config.fallbackFamilies, config.defaultFamily]) {
+  for (const family of chain) {
     if (!result.includes(family)) {
       result.push(family);
     }
@@ -461,16 +476,4 @@ function isCoverageIgnorable(codePoint: number): boolean {
   // grapheme together is not enough: the selected face must carry the mark or
   // the accent would silently disappear.
   return false;
-}
-
-function isWinAnsiCodePoint(codePoint: number): boolean {
-  return (
-    (codePoint >= 0x20 && codePoint <= 0x7e) ||
-    (codePoint >= 0xa0 && codePoint <= 0xff) ||
-    [
-      0x20ac, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152,
-      0x17d, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a,
-      0x153, 0x17e, 0x178
-    ].includes(codePoint)
-  );
 }

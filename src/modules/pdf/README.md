@@ -1014,6 +1014,98 @@ await Pdf.fromExcel(workbook, {
 });
 ```
 
+### System font auto-discovery
+
+On Node, a document that contains characters WinAnsi cannot encode — CJK, most
+notably — and that supplies neither `font` nor `fonts` triggers a best-effort
+scan of the host's font directories for a face to borrow glyphs for those
+characters from. Latin text keeps its standard-14 face, so bold and italic
+survive. Nothing is scanned in the browser, or when a font is supplied
+explicitly.
+
+The scan prefers the platform's own CJK faces and treats broad-coverage
+catch-alls such as Arial Unicode MS as a last resort: it covers almost every
+script in one file, but its CJK glyphs sit small on the em and read as visibly
+worse than any system CJK face. Collections are searched face by face, since the
+faces of one `.ttc` differ in both coverage and regional conventions — macOS
+`Songti.ttc` holds 8,535 glyphs in face 0 and 43,033 in face 1.
+
+`preferSystemFonts` names the families you would rather have, in order:
+
+```typescript
+// Simplified Chinese punctuation conventions; the Traditional face of the same
+// .ttc would be "Heiti TC".
+await Pdf.fromExcel(workbook, { preferSystemFonts: ["Heiti SC", "Songti SC"] });
+
+new Pdf.Builder().preferSystemFonts(["Microsoft YaHei", "Noto Sans CJK SC"]);
+```
+
+Names match the font's family name case-insensitively, and are also how a
+specific face inside a collection is reached. A family that is not installed,
+cannot be parsed, or does not cover the document's text is skipped and the
+built-in order applies — this steers a best-effort search rather than
+constraining it. Use `fonts` when a face is a requirement.
+
+### East Asian language and glyph forms
+
+Unicode Han Unification gives Chinese, Japanese and Korean the same code points
+for the characters they share, but not the same shapes — 「者」「骨」「今」「青」
+「每」are each drawn differently by region. A font chosen purely by _coverage_ can
+therefore be correct and still wrong: a Japanese face draws Chinese text that a
+Chinese reader sees as malformed.
+
+Selection is therefore by language first, coverage second:
+
+```typescript
+await Pdf.fromExcel(workbook, { textLanguage: "zh-Hans" }); // or zh-Hant, ja, ko
+new Pdf.Builder().textLanguage("zh-Hant");
+```
+
+Left unset, the language is inferred from the content: a single kana settles
+Japanese, Hangul settles Korean, and characters that exist in only one of
+Simplified or Traditional Chinese settle those. Text made purely of forms common
+to all of CJK carries no evidence, and Simplified Chinese families are preferred
+in that case — a default rather than a detection, and the reason to state the
+language when you know it.
+
+`Pdf.fromChart` accepts both options too, so a standalone chart's labels get the
+same regional control as a workbook or a document.
+
+Where a collection holds several weights of one family — macOS `Songti.ttc` lists
+`Songti SC` at Black before its Regular — the regular weight is chosen rather than
+whichever face the file happens to list first.
+
+The language also picks between the faces of one collection: macOS
+`STHeiti Light.ttc` holds `Heiti TC` at face 0 and `Heiti SC` at face 1, and
+`Songti.ttc` holds eight faces across both scripts. `preferSystemFonts` still
+outranks the language when you name a family yourself.
+
+Two limits are worth knowing. CFF-flavoured fonts (`.otf`, and `.ttc` files
+whose faces are CFF) are rejected because the subsetting embedder needs `glyf`
+outlines — which rules out macOS PingFang and Hiragino, and the official Noto
+Sans CJK `.otf`/`.ttc` releases; use Noto Sans SC's `.ttf` build instead. And
+because results depend on what the host has installed, `disableFontAutoDiscovery`
+turns the scan off entirely when byte-stable output matters more than legibility.
+
+`disableFontAutoDiscovery` is available on every entry point, not just the
+builder — the same export is otherwise reproducible or not depending on which
+function produced it:
+
+```typescript
+import { Pdf } from "documonster/pdf";
+
+// Deterministic: either the supplied font draws the text or nothing does.
+const bytes = await Pdf.fromExcel(workbook, {
+  disableFontAutoDiscovery: true,
+  fonts: { default: { regular: myFontBytes } }
+});
+```
+
+It disables _discovery_, not embedding, so a font you supply is still used. With
+no font supplied the characters keep their Unicode for copy and search and render
+as `.notdef` boxes, and `onWarning` names the blocks that were lost — turning the
+scan off does not turn the diagnostic off with it.
+
 Font fallback is scalar rendering, not complex text layout. OpenType shaping (GSUB/GPOS), bidi reordering, and color emoji are **not supported** — configuring a font does not make shaping-dependent Arabic or Indic text render correctly.
 
 These limits are detectable rather than silent: when the document contains a complex script, right-to-left text, or an embedded font carrying color glyph tables (`COLR`/`CBDT`/`sbix`/`SVG`), `onWarning` reports it once per feature, naming the scripts or font families involved. Pre-shape and pre-order such text (or render it as an image) before drawing it.

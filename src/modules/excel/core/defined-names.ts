@@ -489,18 +489,6 @@ export function definedNamesRemoveAllNames(dn: DefinedNamesData, location: CellL
   });
 }
 
-export function definedNamesForEach(
-  dn: DefinedNamesData,
-  callback: (name: string, cell: DefinedNameCell) => void
-): void {
-  Object.entries(dn.matrixMap).forEach(([sKey, matrix]) => {
-    const bareName = dn.nameForKey[sKey] ?? sKey;
-    matrix.forEach((cell: DefinedNameCell) => {
-      callback(bareName, cell);
-    });
-  });
-}
-
 // get all the names of a cell
 export function definedNamesGetNames(dn: DefinedNamesData, addressStr: string): string[] {
   const location = colCache.decodeEx(addressStr);
@@ -575,7 +563,7 @@ export function definedNamesGetAllEntries(dn: DefinedNamesData): DefinedNameMode
   return result;
 }
 
-export function _definedNamesExplore(
+function _definedNamesExplore(
   dn: DefinedNamesData,
   matrix: CellMatrix,
   cell: DefinedNameCell

@@ -126,15 +126,6 @@ export function columnCollapsed(c: ColumnData): boolean {
   return !!(c.outlineLevel && c.outlineLevel >= (c.worksheet.properties.outlineLevelCol ?? 0));
 }
 
-export function columnToString(c: ColumnData): string {
-  const headers = columnHeaders(c);
-  return JSON.stringify({
-    key: c.key,
-    width: c.width,
-    headers: headers.length ? headers : undefined
-  });
-}
-
 export function columnEquivalentTo(c: ColumnData, other: ColumnData): boolean {
   return (
     c.width === other.width &&

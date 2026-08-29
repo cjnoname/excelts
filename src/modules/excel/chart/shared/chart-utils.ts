@@ -506,26 +506,6 @@ export function normalizeHex6(hex: string | undefined): string | undefined {
 }
 
 /**
- * Extract the alpha channel from a hex colour string (if present) as
- * a fraction in `[0, 1]`. Accepts `#RGBA` and `#RRGGBBAA`; the 3-
- * and 6-digit forms have no alpha and return `undefined`.
- */
-function hexAlpha(hex: string | undefined): number | undefined {
-  if (!hex) {
-    return undefined;
-  }
-  const clean = hex.replace(/^#/, "").toUpperCase();
-  if (/^[0-9A-F]{8}$/.test(clean)) {
-    return parseInt(clean.slice(6, 8), 16) / 255;
-  }
-  if (/^[0-9A-F]{4}$/.test(clean)) {
-    const aNibble = clean[3];
-    return parseInt(aNibble + aNibble, 16) / 255;
-  }
-  return undefined;
-}
-
-/**
  * White-blend `hex` by `alpha` — a cheap opacity approximation for
  * SVG surfaces that don't support per-element `fill-opacity`. Accepts
  * 3/4/6/8-digit hex; returns the input untouched for anything else
@@ -574,38 +554,6 @@ export function interpolateColor(a: string, b: string, t: number): string {
       .toUpperCase();
   };
   return `#${mix(0)}${mix(2)}${mix(4)}`;
-}
-
-/**
- * Convert a hex colour string to a {@link PdfColor}. Preserves an
- * explicit alpha byte when the caller supplied 4- or 8-digit hex —
- * PDF surfaces that honour `PdfColor.a` (notably `PdfPageBuilder` via
- * `/ExtGState`) then produce real translucency. Malformed input
- * degrades to opaque black rather than producing `NaN` channels, which
- * would emit broken PDF content.
- */
-export function hexToPdfColor(hex: string): PdfColor {
-  const clean = normalizeHex6(hex);
-  if (!clean) {
-    return { r: 0, g: 0, b: 0 };
-  }
-  const alpha = hexAlpha(hex);
-  const base: PdfColor = {
-    r: parseInt(clean.slice(0, 2), 16) / 255,
-    g: parseInt(clean.slice(2, 4), 16) / 255,
-    b: parseInt(clean.slice(4, 6), 16) / 255
-  };
-  return alpha !== undefined ? { ...base, a: alpha } : base;
-}
-
-/**
- * Like {@link hexToPdfColor} but attaches an explicit alpha value.
- * Callers use this to mirror the SVG path's `withAlpha(color, 0.35)`
- * pattern on the PDF bridge: the hex itself stays opaque, `a` carries
- * the transparency the SVG would paint by white-blending.
- */
-export function hexToPdfColorWithAlpha(hex: string, alpha: number): PdfColor {
-  return { ...hexToPdfColor(hex), a: clamp01(alpha) };
 }
 
 // ============================================================================
@@ -1030,4 +978,46 @@ export function densifySparsePoints<T, Raw>(
     dense[idx] = coerce(p.value);
   }
   return dense;
+}
+
+/**
+ * Whether `xml:space="preserve"` is required to keep this text intact.
+ *
+ * Leading or trailing whitespace, a tab or newline, or a run of two or more
+ * spaces all survive a round trip only when the attribute is written.
+ *
+ * Shared by both chart serialisers, which had a copy each.
+ */
+export function needsXmlSpacePreserve(text: string): boolean {
+  if (text === "") {
+    return false;
+  }
+  if (/^\s|\s$/.test(text)) {
+    return true;
+  }
+  if (/[\t\n\r]/.test(text)) {
+    return true;
+  }
+  if (/\s{2,}/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Map the public API's friendly tick-mark names (`inside` / `outside`,
+ * matching `types.ts:TickMark`) back to the OOXML `ST_TickMark` tokens
+ * (`in` / `out`) on the way out. Keeps the writers aligned with the parser at
+ * `chart-ex-parser.parseAxis`.
+ *
+ * Shared by both chart serialisers, which had a copy each.
+ */
+export function tickMarkToOoxml(value: "none" | "inside" | "outside" | "cross"): string {
+  if (value === "inside") {
+    return "in";
+  }
+  if (value === "outside") {
+    return "out";
+  }
+  return value;
 }

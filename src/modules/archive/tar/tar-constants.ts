@@ -14,8 +14,6 @@ export const TAR_BLOCK_SIZE = 512;
 // Magic values
 export const USTAR_MAGIC = "ustar\0"; // POSIX ustar
 export const USTAR_VERSION = "00";
-export const GNU_MAGIC = "ustar "; // GNU tar (note the space, no null)
-export const GNU_VERSION = " \0";
 
 // File type flags (single character)
 export const TAR_TYPE = {

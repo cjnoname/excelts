@@ -35,12 +35,12 @@ export interface PdfNamedFontFamily {
  * Embedded font-family configuration shared by PDF exporters and the builder.
  *
  * Font selection is deterministic. An unrecognized or omitted family name uses
- * `default`. For a recognized family, selection preserves the requested style
- * across the family chain first: requested family, `fallbackFamilies`, then
- * `default`. Only when no family has that style and glyph coverage does it
- * degrade the style (for example bold → regular) across the same chain.
- * Fallback keeps each Unicode grapheme on one face; it does not split a
- * grapheme across fonts.
+ * `default`, followed by `fallbackFamilies`. For a recognized family the chain is
+ * the requested family, `fallbackFamilies`, then `default`. Selection preserves
+ * the requested style across the whole chain first; only when no family has that
+ * style and glyph coverage does it degrade the style (for example bold → regular)
+ * across the same chain. Fallback keeps each Unicode grapheme on one face; it does
+ * not split a grapheme across fonts.
  *
  * The renderer does not perform OpenType shaping (GSUB/GPOS), bidi reordering,
  * or color-emoji rendering.

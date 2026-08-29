@@ -7,6 +7,7 @@
  */
 
 import type { PdfFontConfig } from "@pdf/font/font-config";
+import type { CjkLanguage } from "@utils/cjk";
 
 // =============================================================================
 // PDF Input Data Model (Excel-independent)
@@ -889,6 +890,12 @@ export interface PdfExportOptions {
    * missing-glyph fallback. This keeps fallback deterministic instead of
    * borrowing from whichever configured font happens to come next.
    *
+   * `fallbackFamilies` applies to text served by `default` as well as to text
+   * that named a configured family. That matters because a document names the
+   * fonts it was authored with — `Calibri`, `Courier New` — which a caller
+   * configuring a CJK face has no reason to have configured, so `default` is the
+   * common case rather than the exception.
+   *
    * Each family requires `regular`. Missing style slots fall back to that
    * family's regular face. A source may select a face inside a TrueType
    * Collection through `collectionIndex`.
@@ -905,12 +912,105 @@ export interface PdfExportOptions {
   fonts?: PdfFontConfig;
 
   /**
+   * Turn off the host font scan entirely.
+   *
+   * When neither {@link font} nor {@link fonts} is given and the document contains
+   * characters WinAnsi cannot encode, the exporter scans the host's font
+   * directories and borrows glyphs from whatever it finds. That is the difference
+   * between a readable page and a row of `.notdef` boxes, but it makes the output
+   * a function of the machine: a workbook exported on a Mac embeds Heiti SC, the
+   * same workbook on a bare CI container embeds nothing and renders tofu.
+   *
+   * Not every character does, and {@link onWarning} distinguishes the two. Arrows,
+   * box-drawing characters, dingbats, enclosed numerals and the rest of the symbol
+   * blocks are drawn by built-in Type3 glyphs whether or not a face was found — those
+   * are reported as a typeface inconsistency, not a loss. Ideographs, kana and Hangul
+   * have no such substitute, and those are the ones that become `.notdef`.
+   *
+   * Set this when identical bytes across hosts matter more than legibility — a
+   * golden-file test, a reproducible build, a signed document whose digest must
+   * match. The characters keep their Unicode for copy and search either way; only
+   * the glyphs are lost, and {@link onWarning} reports exactly which blocks.
+   *
+   * ```typescript
+   * // Deterministic: either this font can draw the text or nothing can.
+   * Pdf.fromExcel(workbook, {
+   *   disableFontAutoDiscovery: true,
+   *   fonts: { default: { regular: myFontBytes } }
+   * });
+   * ```
+   *
+   * Ignored when {@link font} or {@link fonts} is supplied, since no discovery
+   * runs in that case. Node-only, like the scan it disables.
+   *
+   * @default false
+   */
+  disableFontAutoDiscovery?: boolean;
+
+  /**
+   * System font families that auto-discovery should prefer, in order, ahead of
+   * its built-in preference list.
+   *
+   * When neither {@link font} nor {@link fonts} is given and the document
+   * contains characters WinAnsi cannot encode, a best-effort scan of the host's
+   * font directories picks a face to borrow glyphs from. The built-in order has
+   * to choose something for every platform; naming families here says which
+   * installed face you would rather have:
+   *
+   * ```typescript
+   * Pdf.fromExcel(workbook, { preferSystemFonts: ["Heiti SC", "Songti SC"] });
+   * ```
+   *
+   * Names are matched against the font's family name, case-insensitively, and
+   * are also how a specific face inside a TrueType Collection is reached
+   * (`"Heiti SC"` and `"Heiti TC"` are two faces of one `.ttc`). A family that
+   * is not installed, cannot be parsed, or does not cover the document's
+   * characters is skipped and the built-in order applies — this steers a
+   * best-effort search rather than constraining it. Use {@link fonts} when a
+   * specific face is a requirement.
+   *
+   * Node-only, and ignored when a font is supplied explicitly.
+   */
+  preferSystemFonts?: readonly string[];
+
+  /**
+   * The East Asian written language of the content, so auto-discovery picks a
+   * face drawn in that regional hand.
+   *
+   * Unicode Han Unification gives Chinese, Japanese and Korean the same code
+   * points for shared characters but not the same shapes — 「者」「骨」「今」
+   * 「青」「每」are each drawn differently — so a font chosen purely by coverage
+   * can be *correct and still wrong*: a Japanese face draws Chinese text that a
+   * Chinese reader sees as malformed.
+   *
+   * ```typescript
+   * Pdf.fromExcel(workbook, { textLanguage: "zh-Hans" });
+   * ```
+   *
+   * Left unset, the language is inferred from the content's own characters (kana
+   * settles Japanese, Hangul Korean, and characters unique to Simplified or
+   * Traditional Chinese settle those). Text made only of forms common to all of
+   * CJK carries no evidence and Chinese is preferred — a default rather than a
+   * detection, which is the reason to state the language when you know it.
+   *
+   * Node-only, and ignored when a font is supplied explicitly.
+   */
+  textLanguage?: CjkLanguage;
+
+  /**
    * Receive non-fatal font diagnostics raised while exporting.
    *
-   * Currently reports characters that no configured typeface covers. Those
-   * characters still carry their original Unicode for copy and search, but the
-   * page shows the `.notdef` glyph, and only the caller can decide which
-   * fallback family to add. Without this callback the condition is invisible.
+   * Currently raised for:
+   *
+   * - **characters no configured typeface covers.** They still carry their original
+   *   Unicode for copy and search, but the page shows the `.notdef` glyph, and only
+   *   the caller can decide which fallback family to add.
+   * - **a system font auto-embedded on this host.** The page is readable, but the
+   *   output is now a function of what the machine has installed — the same input
+   *   on a bare container embeds nothing. Supply the font, or set
+   *   {@link disableFontAutoDiscovery}, if the bytes have to be reproducible.
+   *
+   * Without this callback neither condition is visible.
    *
    * The callback is synchronous and may fire more than once per export.
    */

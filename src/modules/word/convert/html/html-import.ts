@@ -21,6 +21,7 @@
  * ```
  */
 
+import { isEastAsianTypeface } from "@utils/cjk-typefaces";
 import { base64ToUint8Array } from "@utils/utils";
 import { sanitizeUrl } from "@word/core/internal-utils";
 import type {
@@ -2722,9 +2723,17 @@ function makeRun(text: string, ctx: InlineContext): Run {
     props.vertAlign = "subscript";
   }
   if (ctx.code) {
+    // Courier New has no CJK glyphs, so it must not claim `w:eastAsia`: doing so
+    // replaced the inherited East Asian face and left Chinese inside a `<code>`
+    // span pointing at a typeface that cannot draw it.
     props.font = { ascii: "Courier New", hAnsi: "Courier New" };
   } else if (ctx.fontFamily) {
-    props.font = { ascii: ctx.fontFamily, hAnsi: ctx.fontFamily };
+    // A CSS `font-family` naming a Chinese typeface has to reach the ideographs,
+    // which are resolved through `w:eastAsia`; a Latin one must leave that slot
+    // inherited.
+    props.font = isEastAsianTypeface(ctx.fontFamily)
+      ? { ascii: ctx.fontFamily, hAnsi: ctx.fontFamily, eastAsia: ctx.fontFamily }
+      : { ascii: ctx.fontFamily, hAnsi: ctx.fontFamily };
   }
   if (ctx.fontSize) {
     props.size = ctx.fontSize;

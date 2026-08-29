@@ -20,6 +20,7 @@
  *   Half-point 24 = 12pt font; line height ~14.4pt = 288 twips (single-spaced)
  */
 
+import { splitByScript } from "@utils/cjk";
 import {
   getFontAscent,
   getFontDescent,
@@ -35,7 +36,11 @@ import {
   LINE_HEIGHT_FACTOR,
   SCRIPT_BASELINE_SHIFT_FACTOR,
   SCRIPT_FONT_SIZE_RATIO,
-  resolveCellMarginsTwips
+  mergeRunProperties,
+  minimumRowHeightPt,
+  resolveCellMarginsTwips,
+  resolveColumnWidthsTwips,
+  resolveHeadingScale
 } from "@word/layout/layout-constants";
 import { resolveWordLineMetrics } from "@word/layout/line-metrics";
 import { resolveRunStyle, resolveStyle } from "@word/query/style-resolve";
@@ -294,11 +299,20 @@ function computeLineHeight(spacing: LineSpacing | undefined, fontSizeHalfPt: num
 }
 
 /** The paragraph's effective font size, in half-points. */
-function getParagraphFontSize(
+/**
+ * The size an *empty* paragraph's line box takes, in half-points.
+ *
+ * `w:pPr/w:rPr/w:sz` describes the paragraph **mark** — the pilcrow — and nothing
+ * else. Using it as the default for every run that declares no size of its own is
+ * a different statement, and a wrong one: an 8pt mark shrank the body text with it
+ * (a 60-paragraph document reported one page and paginated to two), and a 36pt mark
+ * inflated it sixfold (15 pages reported against 3). It governs the line height
+ * only when there is no run to measure, which is what the positioned pass does.
+ */
+function paragraphMarkFontSize(
   props: ParagraphProperties | undefined,
   defaultFontSize: number
 ): number {
-  // The paragraph mark's run properties can carry the font size.
   return props?.markRunProperties?.size ?? defaultFontSize;
 }
 
@@ -324,22 +338,120 @@ function scaledCharWidth(
 }
 
 /**
- * Font name from a run's already-resolved properties.
+ * The Latin and East Asian typefaces a run draws with.
  *
  * Takes the merged properties rather than the raw run so a caller that has
  * already resolved them — every caller does, to read the size and the
  * bold/italic flags — does not pay for a second `resolveRunStyle`, which
  * rebuilds a style map each time.
+ *
+ * `w:rFonts` names them separately and this pass read `w:ascii` only, so a run
+ * carrying `w:eastAsia="宋体"` was measured against the Latin face — the
+ * typeface the author asked for reached neither pagination nor the PDF bridge.
+ *
+ * `eastAsia` falls back to the Latin name rather than to `"Calibri"`: naming one
+ * typeface for a run means it for the whole run.
  */
-function getRunFontName(props: RunProperties | undefined, inherited?: string): string {
+function getRunFonts(
+  props: RunProperties | undefined,
+  inherited?: string
+): { ascii: string; eastAsia: string } {
   const font = props?.font;
   if (!font) {
-    return inherited ?? "Calibri";
+    const name = inherited ?? "Calibri";
+    return { ascii: name, eastAsia: name };
   }
   if (typeof font === "string") {
-    return font;
+    return { ascii: font, eastAsia: font };
   }
-  return (font as FontSpec).ascii ?? (font as FontSpec).hAnsi ?? inherited ?? "Calibri";
+  const spec = font as FontSpec;
+  const ascii = spec.ascii ?? spec.hAnsi ?? inherited ?? "Calibri";
+  return { ascii, eastAsia: spec.eastAsia ?? ascii };
+}
+
+/**
+ * Measure text with the run's own pair of typefaces, one stretch per script.
+ *
+ * Uniform text takes a single measurement, so Latin-only input is unchanged.
+ */
+function measureRunByScript(
+  text: string,
+  props: RunProperties | undefined,
+  inherited: string | undefined,
+  fontSize: number,
+  measureFn: (t: string, f: string, s: number, b?: boolean, i?: boolean) => number
+): number {
+  const fonts = getRunFonts(props, inherited);
+  if (fonts.ascii === fonts.eastAsia) {
+    return measureFn(text, fonts.ascii, fontSize, props?.bold, props?.italic);
+  }
+  let total = 0;
+  for (const run of splitByScript(text)) {
+    total += measureFn(
+      run.text,
+      run.cjk ? fonts.eastAsia : fonts.ascii,
+      fontSize,
+      props?.bold,
+      props?.italic
+    );
+  }
+  return total;
+}
+
+/**
+ * The extreme vertical metrics of every face a run draws with.
+ *
+ * Ascent and descent belong to a face, so a mixed run cannot sum them — but it
+ * cannot pick one either. This used to take the East Asian face whenever the text
+ * contained any CJK, on the stated grounds that "the CJK face is the taller". That
+ * is not true of real faces: measured against the OS/2 typo metrics, Songti SC and
+ * Heiti SC give 0.86em ascent, while Helvetica Neue gives 0.95em and Hoefler Text
+ * 1.01em — so a Latin face inside a mostly-Chinese run was measured against the
+ * shorter CJK face and the estimate came out *below* the positioned pass.
+ *
+ * That inverted the invariant this pass exists to hold (see
+ * {@link estimateParagraphLineHeight}): with `w:ascii="Hoefler Text"` and
+ * `w:eastAsia="Songti SC"` the estimate was 25% short, so `pageCount` reported one
+ * page where the positioned pass produced two — and `NUMPAGES`, `PAGE`, TOC page
+ * numbers and `PAGEREF` are all derived from that number.
+ *
+ * Same shape as `measureRunMetrics` in the positioned pass, which is what keeps
+ * the two from disagreeing again.
+ */
+function measureRunMetricsByScript(
+  text: string,
+  props: RunProperties | undefined,
+  inherited: string | undefined,
+  fontSize: number,
+  measure: (
+    text: string,
+    font: string,
+    size: number,
+    bold?: boolean,
+    italic?: boolean
+  ) => { ascent: number; descent: number }
+): { ascent: number; descent: number } {
+  const fonts = getRunFonts(props, inherited);
+  if (fonts.ascii === fonts.eastAsia) {
+    return measure(text, fonts.ascii, fontSize, props?.bold, props?.italic);
+  }
+  let ascent = -Infinity;
+  let descent = Infinity;
+  for (const run of splitByScript(text)) {
+    const m = measure(
+      run.text,
+      run.cjk ? fonts.eastAsia : fonts.ascii,
+      fontSize,
+      props?.bold,
+      props?.italic
+    );
+    ascent = Math.max(ascent, m.ascent);
+    descent = Math.min(descent, m.descent);
+  }
+  // Empty text yields no stretches; fall back to the Latin face for the metrics.
+  return ascent === -Infinity
+    ? measure(text, fonts.ascii, fontSize, props?.bold, props?.italic)
+    : { ascent, descent };
 }
 
 /** Same character-style/direct-formatting merge the positioned pass uses. */
@@ -355,11 +467,7 @@ function effectiveRunProperties(run: Run, inherited?: RunProperties): RunPropert
   const merged =
     activeDoc && run.properties?.style
       ? resolveRunStyle(activeDoc, run, inherited).runProperties
-      : inherited
-        ? run.properties
-          ? { ...inherited, ...run.properties }
-          : inherited
-        : run.properties;
+      : mergeRunProperties(inherited, run.properties);
   cache?.set(run, merged);
   return merged;
 }
@@ -746,18 +854,16 @@ function measureParagraphTextWidth(
       const text = getRunText(child);
       if (text.length > 0) {
         const props = effectiveRunProperties(child, inheritedProps);
-        const fontName = getRunFontName(props, inheritedFont);
         const fontSize = getRunLayoutFontSizePt(props, defaultFontSize);
-        totalWidth += measureFn(text, fontName, fontSize, props?.bold, props?.italic);
+        totalWidth += measureRunByScript(text, props, inheritedFont, fontSize, measureFn);
       }
     } else if (isHyperlink(child)) {
       for (const run of child.children) {
         const text = getRunText(run);
         if (text.length > 0) {
           const props = effectiveRunProperties(run, inheritedProps);
-          const fontName = getRunFontName(props, inheritedFont);
           const fontSize = getRunLayoutFontSizePt(props, defaultFontSize);
-          totalWidth += measureFn(text, fontName, fontSize, props?.bold, props?.italic);
+          totalWidth += measureRunByScript(text, props, inheritedFont, fontSize, measureFn);
         }
       }
     }
@@ -769,7 +875,8 @@ function measureParagraphTextWidth(
 function getMaxRunFontSize(
   children: readonly ParagraphChild[],
   defaultFontSize: number,
-  inheritedProps?: RunProperties
+  inheritedProps?: RunProperties,
+  emptyParagraphSize = defaultFontSize
 ): number {
   let maxSize = 0;
   for (const child of children) {
@@ -789,7 +896,8 @@ function getMaxRunFontSize(
       }
     }
   }
-  return maxSize || defaultFontSize;
+  // No run to measure: the paragraph mark's own size decides the line box.
+  return maxSize || emptyParagraphSize;
 }
 
 /** Effective rendered size of a run; Word draws scripts at 65% of their source size. */
@@ -907,22 +1015,35 @@ function estimateParagraphHeight(
     spaceAfter = spacing.after;
   }
 
+  // A heading with no declared `w:sz` is drawn larger by a heuristic scale. The
+  // positioned pass applies it and this one did not, so a run of `Heading 1`
+  // paragraphs was estimated at body height — 40 of them reported one page and
+  // paginated to two, which is the number `NUMPAGES`, `PAGE`, TOC entries and
+  // `PAGEREF` are all resolved from. Same expression as the positioned pass, from
+  // `layout-constants`.
+  const headingScale = resolveHeadingScale(props, res.runProperties?.size);
+
   // Paragraph font size — a run that declares no size of its own inherits it
   // from the style chain.
   const fontSize = getMaxRunFontSize(
     para.children,
-    getParagraphFontSize(props, inheritedSize),
-    res.runProperties
+    inheritedSize,
+    res.runProperties,
+    paragraphMarkFontSize(props, inheritedSize)
   );
 
-  // Line height
-  const lineHeight = computeLineHeight(spacing, fontSize);
+  // Line height. `headingScale` applies here and *only* here, matching the
+  // positioned pass: it enlarges the line box of a heading that declares no
+  // `w:sz`, but the runs are still measured — and therefore still wrapped — at
+  // their own size. Scaling the width too turned a one-line heading into two and
+  // over-reserved by 1.8×, which is as wrong for `NUMPAGES` as under-reserving.
+  const lineHeight = computeLineHeight(spacing, fontSize) * headingScale;
 
   // Check if inline images increase the effective line height
   const imgMaxHeight = getInlineImageMaxHeight(para.children);
   const effectiveLineHeight = estimateParagraphLineHeight(
     para.children,
-    getParagraphFontSize(props, inheritedSize),
+    inheritedSize,
     inheritedFont,
     res.runProperties,
     lineHeight,
@@ -1011,13 +1132,17 @@ function estimateParagraphLineHeight(
     const text = getRunText(run);
     const props = effectiveRunProperties(run, inheritedProps);
     const fontSize = getRunLayoutFontSizePt(props, inheritedSizeHalfPt);
-    const fontName = getRunFontName(props, inheritedFont);
-    const metrics = measureTextMetricsFn
-      ? measureTextMetricsFn(text, fontName, fontSize, props?.bold, props?.italic)
-      : {
-          ascent: getFontAscent(styledFontVariant(fontName, props?.bold, props?.italic), fontSize),
-          descent: getFontDescent(styledFontVariant(fontName, props?.bold, props?.italic), fontSize)
-        };
+    const metrics = measureRunMetricsByScript(
+      text,
+      props,
+      inheritedFont,
+      fontSize,
+      measureTextMetricsFn ??
+        ((t, font, size, bold, italic) => ({
+          ascent: getFontAscent(styledFontVariant(font, bold, italic), size),
+          descent: getFontDescent(styledFontVariant(font, bold, italic), size)
+        }))
+    );
     const shift =
       props?.vertAlign === "superscript"
         ? fontSize * SCRIPT_BASELINE_SHIFT_FACTOR
@@ -1070,21 +1195,19 @@ function estimateRowHeight(
 
   // Calculate the maximum content height across all cells in this row
   const colCount = row.cells.length;
-  const colWidths = table.columnWidths;
+  // Scaled to the measure, like the positioned pass: `w:tblGrid` is advisory, and a
+  // grid wider than the page is shrunk to fit. Using the declared twips as-is
+  // estimated a table from the Excel or HTML bridge with columns twice their drawn
+  // width — half the wrapped lines, and a page count short of the truth.
+  const colWidths = resolveColumnWidthsTwips(table, colCount, availableWidth);
 
   let maxCellHeight = 0;
   for (let c = 0; c < colCount; c++) {
     const cell = row.cells[c];
-    // Estimate cell width from column widths or divide equally
-    let cellWidth: number;
-    if (colWidths && c < colWidths.length) {
-      const gridSpan = cell.properties?.gridSpan ?? 1;
-      cellWidth = 0;
-      for (let g = 0; g < gridSpan && c + g < colWidths.length; g++) {
-        cellWidth += colWidths[c + g];
-      }
-    } else {
-      cellWidth = Math.floor(availableWidth / Math.max(1, colCount));
+    const gridSpan = cell.properties?.gridSpan ?? 1;
+    let cellWidth = 0;
+    for (let g = 0; g < gridSpan && c + g < colWidths.length; g++) {
+      cellWidth += colWidths[c + g];
     }
 
     // Inset by the cell's effective margins (`w:tcMar` → `w:tblCellMar` →
@@ -1132,9 +1255,9 @@ function estimateRowHeight(
     return Math.max(row.properties.height.value, maxCellHeight);
   }
 
-  // Minimum height: at least one line, plus the table's own cell margins.
-  const tableMargins = resolveCellMarginsTwips(table.properties, undefined);
-  const minHeight = baseLineHeight(defaultFontSize) + tableMargins.top + tableMargins.bottom;
+  // Minimum height: one line plus the table's own cell margins, from the same
+  // function the positioned pass uses.
+  const minHeight = minimumRowHeightPt(table.properties, defaultFontSize / 2) * 20;
   return Math.max(minHeight, maxCellHeight);
 }
 
@@ -1661,7 +1784,12 @@ function layoutDocumentInner(doc: DocxDocument, options?: LayoutOptions): Layout
     const spacing = props?.spacing;
     const inheritedSize = inheritedFontSize(res, defaultFontSize);
     const inheritedFont = inheritedFontName(res);
-    const fontSize = getMaxRunFontSize(para.children, getParagraphFontSize(props, inheritedSize));
+    const fontSize = getMaxRunFontSize(
+      para.children,
+      inheritedSize,
+      undefined,
+      paragraphMarkFontSize(props, inheritedSize)
+    );
     const lineHeight = computeLineHeight(spacing, fontSize);
 
     // Line count for the paragraph (CJK-aware).

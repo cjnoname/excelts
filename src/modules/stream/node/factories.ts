@@ -86,7 +86,18 @@ export function createReadableFromAsyncIterable<T>(
 }
 
 /**
- * Create a readable stream from an array
+ * Create a readable stream from an array.
+ *
+ * `undefined` entries are skipped. In object mode a stream's end-of-data signal *is*
+ * `push(null)`, and `push(undefined)` is treated the same way — so an `undefined` in
+ * the middle of the array used to end the stream early on Node and surface as a
+ * `null` chunk in the browser. Node 26.8 turned the former into a hard
+ * `Cannot read properties of undefined (reading 'then')` from the async iterator,
+ * which is how a bug that had always been there became visible.
+ *
+ * Skipping is the only self-consistent reading: `0`, `""` and `false` are ordinary
+ * values that must survive, and there is no in-band way to carry "a chunk whose
+ * value is undefined" through a stream whose terminator is a nullish push.
  */
 export function createReadableFromArray<T>(
   data: T[],
@@ -98,7 +109,11 @@ export function createReadableFromArray<T>(
     objectMode: options?.objectMode ?? true,
     read() {
       while (index < data.length) {
-        if (!this.push(data[index++])) {
+        const chunk = data[index++];
+        if (chunk === undefined) {
+          continue; // not a value a stream can carry — see the note above
+        }
+        if (!this.push(chunk)) {
           // Backpressure - wait for next read
           return;
         }

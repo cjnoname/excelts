@@ -227,18 +227,6 @@ export function writeCentralDirectoryHeaderInto(
   );
 }
 
-export function buildCentralDirectoryHeader(input: ZipCentralDirectoryHeaderInput): Uint8Array {
-  const header = new Uint8Array(
-    ZIP_CENTRAL_DIR_HEADER_FIXED_SIZE +
-      input.fileName.length +
-      input.extraField.length +
-      input.comment.length
-  );
-  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-  writeCentralDirectoryHeaderInto(header, view, 0, input);
-  return header;
-}
-
 export interface ZipEndOfCentralDirectoryInput {
   entryCount: number;
   centralDirSize: number;

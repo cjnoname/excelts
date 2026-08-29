@@ -560,7 +560,7 @@ describe("PdfDocumentBuilder", () => {
     const page = doc.addPage();
     page.drawText("中文测试", { x: 72, y: 700, fontSize: 12 });
     await doc.build();
-    const nowarn = warnings.find(w => w.includes("non-WinAnsi"));
+    const nowarn = warnings.find(w => w.includes("no glyph in any available font"));
     expect(nowarn).toBeDefined();
     // Diagnostic lists at least one sample code point in U+XXXX form.
     expect(nowarn).toMatch(/U\+[0-9A-F]{4}/);

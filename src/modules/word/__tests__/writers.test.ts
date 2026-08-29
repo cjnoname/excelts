@@ -424,7 +424,41 @@ describe("renderRunProperties", () => {
     const xml = new XmlWriter();
     renderRunProperties(xml, { font: "Arial" });
     const output = xml.toString();
+    // A Latin family leaves the East Asian slot inherited. Claiming it would
+    // point ideographs at a face with no CJK glyphs — worse than the East Asian
+    // face they inherit from docDefaults.
     expect(output).toContain('<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>');
+  });
+
+  it("names the East Asian slot so a Chinese typeface reaches Chinese text", () => {
+    // `w:ascii`/`w:hAnsi` govern only ASCII and High ANSI, so without this
+    // `{ font: "宋体" }` applied to none of a run's Chinese text.
+    const xml = new XmlWriter();
+    renderRunProperties(xml, { font: "宋体" });
+    expect(xml.toString()).toContain('w:eastAsia="宋体"');
+  });
+
+  it("recognises East Asian families by their English and localized names", () => {
+    for (const name of ["SimSun", "Microsoft YaHei", "微软雅黑", "MS Gothic", "Malgun Gothic"]) {
+      const xml = new XmlWriter();
+      renderRunProperties(xml, { font: name });
+      expect(xml.toString(), name).toContain(`w:eastAsia="${name}"`);
+    }
+  });
+
+  it("leaves the East Asian slot inherited for Latin families", () => {
+    for (const name of ["Calibri Light", "Courier New", "Times New Roman", "Helvetica"]) {
+      const xml = new XmlWriter();
+      renderRunProperties(xml, { font: name });
+      expect(xml.toString(), name).not.toContain("w:eastAsia");
+    }
+  });
+
+  it("leaves the East Asian slot alone when the object form omits it", () => {
+    // A caller that wants a Latin-only override says so explicitly.
+    const xml = new XmlWriter();
+    renderRunProperties(xml, { font: { ascii: "Arial", hAnsi: "Arial" } });
+    expect(xml.toString()).not.toContain("w:eastAsia");
   });
 
   it("emits color", () => {

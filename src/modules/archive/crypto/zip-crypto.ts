@@ -152,28 +152,6 @@ export function zipCryptoCreateHeader(
 }
 
 /**
- * Decrypt data in-place after header decryption.
- */
-export function zipCryptoDecryptData(state: ZipCryptoState, data: Uint8Array): Uint8Array {
-  const output = new Uint8Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    output[i] = zipCryptoDecryptByte(state, data[i]!);
-  }
-  return output;
-}
-
-/**
- * Encrypt data after header encryption.
- */
-export function zipCryptoEncryptData(state: ZipCryptoState, data: Uint8Array): Uint8Array {
-  const output = new Uint8Array(data.length);
-  for (let i = 0; i < data.length; i++) {
-    output[i] = zipCryptoEncryptByte(state, data[i]!);
-  }
-  return output;
-}
-
-/**
  * High-level decryption interface for ZipCrypto.
  *
  * @param encryptedData - Full encrypted data including 12-byte header

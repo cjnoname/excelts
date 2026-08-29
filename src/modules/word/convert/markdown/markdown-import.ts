@@ -19,6 +19,7 @@
 
 import { mapToStandardFont, measureTextWidth, styledFontVariant } from "@utils/font-metrics";
 import { emuToPt, ptToTwips, twipsToPt } from "@utils/units";
+import { eastAsianDefaultsFor, withEastAsianDefaults } from "@word/core/east-asian-defaults";
 import { sanitizeUrl } from "@word/core/internal-utils";
 import { isRun } from "@word/core/text-utils";
 import {
@@ -26,6 +27,7 @@ import {
   DEFAULT_PAGE_MARGIN_TWIPS,
   DEFAULT_PAGE_WIDTH_TWIPS
 } from "@word/layout/layout-constants";
+import { extractText } from "@word/query/search";
 import type {
   AbstractNumbering,
   Alignment,
@@ -175,15 +177,20 @@ export async function markdownToDocx(
   options?: MarkdownImportOptions
 ): Promise<DocxDocument> {
   const { body, state } = await markdownToDocxBodyInternal(markdown, options);
-  return {
+  const doc: DocxDocument = {
     body,
-    docDefaults: defaultMarkdownDocDefaults(),
     styles: defaultMarkdownStyles(),
     abstractNumberings: state.abstractNumberings,
     numberingInstances: state.numberingInstances,
     ...(state.footnotes.length > 0 ? { footnotes: state.footnotes } : {}),
     ...(state.images.length > 0 ? { images: state.images } : {})
   };
+  // Language is read off the *document*, not the Markdown it came from. Source text
+  // includes things the reader never sees: a link's URL, an unreferenced footnote
+  // definition, fence markers. Measured, a single Japanese hostname in a link — text
+  // that appears nowhere in the body — was enough to label a page of Chinese prose
+  // `ja-JP`, so every Chinese word in it was proofed against a Japanese dictionary.
+  return { ...doc, docDefaults: defaultMarkdownDocDefaults(extractText(doc), options) };
 }
 
 /**
@@ -222,7 +229,13 @@ export async function markdownToDocxBody(
     footnotes: state.footnotes,
     images: state.images,
     styles: defaultMarkdownStyles(),
-    docDefaults: defaultMarkdownDocDefaults()
+    // Same reasoning as `markdownToDocx`: the language is read off the converted
+    // content. `body` alone is enough here — footnotes and images are returned
+    // alongside it and carry no language evidence of their own that the body lacks.
+    docDefaults: defaultMarkdownDocDefaults(
+      extractText({ body, footnotes: state.footnotes }),
+      options
+    )
   };
 }
 
@@ -2568,14 +2581,33 @@ const HEADING_SPACING = {
   lineRule: "auto" as const
 };
 
-function defaultMarkdownDocDefaults(): DocDefaults {
+/**
+ * Document defaults for a converted Markdown file.
+ *
+ * `text` is the converted document's own text, not the Markdown source — see the call
+ * site for why that distinction changes the proofing language.
+ *
+ * `defaultFont` and `defaultFontSize` belong here rather than only on individual runs.
+ * They used to be written *only* onto ordinary text runs, which left everything that
+ * inherits instead — list markers, field results, empty runs, table cells that carry
+ * no explicit properties — on the built-in Calibri while the paragraphs beside them
+ * used the requested face. Stating them once as the document default is what makes the
+ * option mean "the default", and the per-run writes then only need to cover what
+ * genuinely differs.
+ */
+function defaultMarkdownDocDefaults(text: string, options?: MarkdownImportOptions): DocDefaults {
+  const derived = eastAsianDefaultsFor(text);
+  const base = {
+    size: options?.defaultFontSize ?? pxHalfPt(BODY_PX),
+    font: options?.defaultFont ?? "Calibri"
+  };
   return {
     // `html, body { font-size: 14px; line-height: 22px }` and
     // `p { margin-bottom: 16px }`.
     paragraphProperties: {
       spacing: { after: pxTwips(16), line: lineHeight(BODY_LINE), lineRule: "auto" }
     },
-    runProperties: { size: pxHalfPt(BODY_PX), font: "Calibri" }
+    runProperties: derived === undefined ? base : withEastAsianDefaults(base, derived)
   };
 }
 

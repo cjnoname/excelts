@@ -147,3 +147,40 @@ describe("the widest of several strings", () => {
     expect(widestText(["MMMM", "iiiiii"], style)).toBe(measureText("iiiiii", style));
   });
 });
+
+describe("wrapText — East Asian text", () => {
+  // A Chinese chart label or diagram caption was one unbreakable token, so it
+  // never wrapped however narrow the box. Break opportunities now come from
+  // `@utils/cjk`.
+  const style = { size: 10 };
+
+  it("should wrap Chinese text", () => {
+    const lines = wrapText("这是一段很长的中文文本需要在单元格里自动换行显示出来", style, 60);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.join("")).toBe("这是一段很长的中文文本需要在单元格里自动换行显示出来");
+  });
+
+  it("should keep every line within the limit", () => {
+    const lines = wrapText("季度环比同比增长率毛利净利营业收入成本费用", style, 50);
+    for (const line of lines) {
+      expect(measureText(line, style)).toBeLessThanOrEqual(50);
+    }
+  });
+
+  it("should not start a line with sentence-final punctuation", () => {
+    const lines = wrapText("甲乙丙丁戊己庚辛。壬癸子丑寅卯", style, 40);
+    for (const line of lines.slice(1)) {
+      expect(line.startsWith("。")).toBe(false);
+      expect(line.startsWith("，")).toBe(false);
+    }
+  });
+
+  it("should still honour explicit newlines", () => {
+    expect(wrapText("第一行\n第二行", style, 500)).toEqual(["第一行", "第二行"]);
+  });
+
+  it("should wrap Japanese and Korean", () => {
+    expect(wrapText("これはとても長い日本語のテキストです", style, 40).length).toBeGreaterThan(1);
+    expect(wrapText("이것은매우긴한국어텍스트입니다", style, 40).length).toBeGreaterThan(1);
+  });
+});

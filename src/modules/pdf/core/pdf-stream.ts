@@ -425,6 +425,28 @@ export class PdfContentStream {
   }
 
   /**
+   * Show pre-encoded hex strings with explicit displacements between them.
+   *
+   * `TJ` numbers are thousandths of a unit of text space and are *subtracted* from
+   * the displacement, so a negative number opens a gap. This exists because `Tw`
+   * cannot: PDF 32000-1 §9.3.3 applies word spacing to a single-byte code 32 only,
+   * and "shall not apply to occurrences of the byte value 32 in multiple-byte
+   * codes" — so with an `Identity-H` CIDFont, where every code is two bytes, `Tw`
+   * is silently a no-op and a justified Latin line came out short of its column.
+   *
+   * Entries are alternating hex strings and numbers, already in the order they
+   * should appear.
+   */
+  showTextHexWithAdjustments(parts: readonly (string | number)[]): this {
+    if (parts.length === 0) {
+      return this;
+    }
+    const body = parts.map(part => (typeof part === "number" ? pdfNumber(part) : part)).join(" ");
+    this.parts.push(`[${body}] TJ`);
+    return this;
+  }
+
+  /**
    * Move to the next line and show a text string.
    */
   nextLineShowText(text: string): this {

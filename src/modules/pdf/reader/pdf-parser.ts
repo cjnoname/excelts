@@ -91,12 +91,6 @@ export function dictGetBool(dict: PdfDictValue, key: string): boolean | undefine
   return typeof val === "boolean" ? val : undefined;
 }
 
-/** Get a dictionary value from a PDF dictionary */
-export function dictGetDict(dict: PdfDictValue, key: string): PdfDictValue | undefined {
-  const val = dict.get(key);
-  return isPdfDict(val) ? val : undefined;
-}
-
 /** Get an array value from a PDF dictionary */
 export function dictGetArray(dict: PdfDictValue, key: string): PdfArrayValue | undefined {
   const val = dict.get(key);
@@ -113,18 +107,6 @@ export function dictGetRef(dict: PdfDictValue, key: string): PdfRef | undefined 
 export function dictGetBytes(dict: PdfDictValue, key: string): Uint8Array | undefined {
   const val = dict.get(key);
   return val instanceof Uint8Array ? val : undefined;
-}
-
-/** Get a string value that may be either a name (string) or bytes decoded as latin1 */
-export function dictGetString(dict: PdfDictValue, key: string): string | undefined {
-  const val = dict.get(key);
-  if (typeof val === "string") {
-    return val;
-  }
-  if (val instanceof Uint8Array) {
-    return decodePdfStringBytes(val);
-  }
-  return undefined;
 }
 
 /**

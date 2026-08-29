@@ -1519,33 +1519,6 @@ export function getTxPrColor(txPr: ChartTextProperties): ChartColor | undefined 
   return parsed.color;
 }
 
-/**
- * Get the font family (typeface) declared on `<a:latin>` / `<a:cs>`
- * within a `txPr` raw or structured object. Returns `undefined` if the
- * properties do not carry a typeface, in which case renderers should
- * use their own default.
- */
-export function getTxPrFontFamily(txPr: ChartTextProperties): string | undefined {
-  const parsed = isRawXml(txPr) ? parseTxPr(txPr) : txPr;
-  return parsed.fontFamily;
-}
-
-/**
- * Get the boolean bold flag from a `txPr`'s first `a:defRPr`/`a:rPr`.
- */
-export function getTxPrBold(txPr: ChartTextProperties): boolean | undefined {
-  const parsed = isRawXml(txPr) ? parseTxPr(txPr) : txPr;
-  return parsed.bold;
-}
-
-/**
- * Get the boolean italic flag from a `txPr`'s first `a:defRPr`/`a:rPr`.
- */
-export function getTxPrItalic(txPr: ChartTextProperties): boolean | undefined {
-  const parsed = isRawXml(txPr) ? parseTxPr(txPr) : txPr;
-  return parsed.italic;
-}
-
 // ============================================================================
 // Build structured spPr / txPr models
 // ============================================================================

@@ -158,17 +158,6 @@ export function rangeCreate(...args: RangeInput[]): RangeData {
   return r;
 }
 
-export function rangeSetTLBR(
-  r: RangeData,
-  t: number | string,
-  l: number | string,
-  b?: number | string,
-  rt?: number,
-  s?: string
-): void {
-  setTLBR(r, t, l, b, rt, s);
-}
-
 export function rangeTop(r: RangeData): number {
   return r.top || 1;
 }

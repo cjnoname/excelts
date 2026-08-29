@@ -91,15 +91,6 @@ export interface ZIP64EOCDInfo {
 }
 
 /**
- * Combined EOCD parse result.
- */
-export interface EOCDParseResult {
-  eocd: EOCDInfo;
-  zip64Eocd: ZIP64EOCDInfo | null;
-  comment: string;
-}
-
-/**
  * Options for parsing Central Directory entries.
  */
 export interface CentralDirectoryParseOptions {

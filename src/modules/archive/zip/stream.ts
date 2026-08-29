@@ -74,16 +74,6 @@ const SMART_STORE_DECIDE_BYTES = 16 * 1024;
 const INPUT_BATCH_BYTES = 65536;
 
 /**
- * Encryption options for streaming ZIP creation.
- */
-export interface StreamingZipEncryptionOptions {
-  /** Encryption method to use */
-  encryptionMethod?: ZipEncryptionMethod;
-  /** Password for encryption */
-  password?: string | Uint8Array;
-}
-
-/**
  * True Streaming ZIP File - compresses chunk by chunk
  */
 export class ZipDeflateFile {

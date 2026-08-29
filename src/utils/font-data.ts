@@ -1,3 +1,5 @@
+import { isFullWidthCodePoint } from "./font-metrics";
+
 /**
  * Font metric data for auto-fit column width and row height calculation.
  *
@@ -629,7 +631,73 @@ const FONT_WIDTH_FACTORS: Record<string, [number, number, number]> = {
   "\ub9d1\uc740 \uace0\ub515": [1.12, 1.28, 1.14],
   "batang": [1.10, 1.10, 1.10],
   "gulim": [1.10, 1.10, 1.10],
-  "dotum": [1.10, 1.10, 1.10]
+  "dotum": [1.10, 1.10, 1.10],
+  // --- Native-language names for the faces above ---
+  //
+  // A CJK font carries a localized family name, and that is the one the host
+  // application writes: a Chinese Windows Excel stores `微软雅黑`, not
+  // `Microsoft YaHei`. Only some of these had been added, so the single most
+  // common Chinese UI font on Windows fell through to the generic default and
+  // measured 21% narrower under its own name than under its English one — the
+  // same text, two different column widths depending on which name reached us.
+  "\u5fae\u8f6f\u96c5\u9ed1": [1.18, 1.30, 1.18],                     // 微软雅黑
+  "\u5fae\u8f6f\u96c5\u9ed1 ui": [1.18, 1.30, 1.18],                  // 微软雅黑 UI
+  "\u5fae\u8edf\u6b63\u9ed1\u9ad4": [1.12, 1.28, 1.14],              // 微軟正黑體
+  "microsoft jhenghei": [1.12, 1.28, 1.14],
+  "microsoft jhenghei ui": [1.12, 1.28, 1.14],
+  "\u65b0\u7d30\u660e\u9ad4": [1.10, 1.10, 1.10],                     // 新細明體
+  "pmingliu": [1.10, 1.10, 1.10],
+  "\u7d30\u660e\u9ad4": [1.10, 1.10, 1.10],                            // 細明體
+  "mingliu": [1.10, 1.10, 1.10],
+  "\u6a19\u6977\u9ad4": [1.10, 1.10, 1.10],                            // 標楷體
+  "dfkai-sb": [1.10, 1.10, 1.10],
+  "\u534e\u6587\u7ec6\u9ed1": [1.10, 1.10, 1.10],                     // 华文细黑
+  "stheiti": [1.10, 1.10, 1.10],
+  "\u534e\u6587\u5b8b\u4f53": [1.10, 1.10, 1.10],                     // 华文宋体
+  "stsong": [1.10, 1.10, 1.10],
+  "\u534e\u6587\u6977\u4f53": [1.10, 1.10, 1.10],                     // 华文楷体
+  "stkaiti": [1.10, 1.10, 1.10],
+  "\u534e\u6587\u4eff\u5b8b": [1.10, 1.10, 1.10],                     // 华文仿宋
+  "stfangsong": [1.10, 1.10, 1.10],
+  // Apple's system Chinese faces, and the open-source families that ship with
+  // most Linux distributions and are the usual answer in a container.
+  "pingfang sc": [1.05, 1.24, 1.10],
+  "pingfang tc": [1.05, 1.24, 1.10],
+  "pingfang hk": [1.05, 1.24, 1.10],
+  "\u82f9\u65b9-\u7b80": [1.05, 1.24, 1.10],                           // 苹方-简
+  "\u860b\u65b9-\u7e41": [1.05, 1.24, 1.10],                           // 蘋方-繁
+  "heiti sc": [1.10, 1.10, 1.10],
+  "heiti tc": [1.10, 1.10, 1.10],
+  "songti sc": [1.10, 1.10, 1.10],
+  "songti tc": [1.10, 1.10, 1.10],
+  "kaiti sc": [1.10, 1.10, 1.10],
+  "kaiti tc": [1.10, 1.10, 1.10],
+  "hiragino sans gb": [1.10, 1.24, 1.10],
+  "hiragino kaku gothic pron": [1.10, 1.24, 1.18],
+  "\u30d2\u30e9\u30ae\u30ce\u89d2\u30b4 pron": [1.10, 1.24, 1.18],  // ヒラギノ角ゴ ProN
+  "noto sans cjk sc": [1.05, 1.28, 1.10],
+  "noto sans cjk tc": [1.05, 1.28, 1.10],
+  "noto sans cjk jp": [1.05, 1.28, 1.18],
+  "noto sans cjk kr": [1.05, 1.28, 1.14],
+  "noto sans sc": [1.05, 1.28, 1.10],
+  "noto sans tc": [1.05, 1.28, 1.10],
+  "noto sans jp": [1.05, 1.28, 1.18],
+  "noto sans kr": [1.05, 1.28, 1.14],
+  "source han sans sc": [1.05, 1.28, 1.10],
+  "source han sans cn": [1.05, 1.28, 1.10],
+  "\u601d\u6e90\u9ed1\u4f53": [1.05, 1.28, 1.10],                     // 思源黑体
+  "source han serif sc": [1.10, 1.10, 1.10],
+  "\u601d\u6e90\u5b8b\u4f53": [1.10, 1.10, 1.10],                     // 思源宋体
+  "wenquanyi micro hei": [1.10, 1.24, 1.10],
+  "wenquanyi zen hei": [1.10, 1.24, 1.10],
+  "\u6587\u6cc9\u9a7f\u5fae\u7c73\u9ed1": [1.10, 1.24, 1.10],       // 文泉驿微米黑
+  "droid sans fallback": [1.10, 1.20, 1.10],
+  "\u6e38\u30b4\u30b7\u30c3\u30af": [1.17, 1.32, 1.18],              // 游ゴシック
+  "nanumgothic": [1.12, 1.28, 1.14],
+  "nanum gothic": [1.12, 1.28, 1.14],
+  "\ub098\ub214\uace0\ub515": [1.12, 1.28, 1.14],                     // 나눔고딕
+  "apple sd gothic neo": [1.10, 1.24, 1.14],
+  "applegothic": [1.10, 1.24, 1.14]
 };
 
 // =============================================================================
@@ -687,42 +755,29 @@ export function getDefaultFontMetrics(): FontMetrics {
 
 /**
  * Get the advance width of a character in FUnits for a given font.
- * Returns the font's defaultAdvance if the character is not in the table.
  *
- * For CJK Unified Ideographs (U+4E00..U+9FFF, U+3400..U+4DBF, U+F900..U+FAFF),
- * returns the font's cjkAdvance.
+ * A code point drawn one em wide gets the font's `cjkAdvance`; anything else is looked
+ * up in the per-font advance map, falling back to `defaultAdvance`.
+ *
+ * "One em wide" is {@link isWideCharacter}, not a private range list. It *was* a
+ * private list — the third copy of this table in the codebase, and the narrowest:
+ * missing Hangul Jamo, the Yi syllabary, the fullwidth signs, the vertical and small
+ * compatibility forms, CJK Extension G and every emoji, while claiming 16 code points
+ * that are unassigned or noncharacters (`U+3040`, `U+D7A4–D7AF`, `U+2FFFE–2FFFF`).
+ *
+ * Worth being exact about what that cost, because the obvious reading is wrong: those
+ * 60,291 code points were **not** being measured with a Latin advance. `charPx` in
+ * `text-measure` tests `isWideCharacter` and returns one em before it ever reaches
+ * here, so the divergent half of the list was unreachable and the table was dead
+ * weight rather than an active defect. Its only live effect was the reverse: the 16
+ * unassigned code points did reach it and were given a full em.
+ *
+ * It is still the right thing to delete. A fourth copy of a table that disagrees with
+ * the other three is a bug waiting for its first caller — and `isWideCharacter`, ten
+ * lines below, was already fixed this way after exactly that happened.
  */
 export function getCharAdvance(metrics: FontMetrics, codePoint: number): number {
-  // CJK Unified Ideographs and Extensions
-  if (
-    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
-    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
-    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
-    (codePoint >= 0x20000 && codePoint <= 0x323af)
-  ) {
-    return metrics.cjkAdvance;
-  }
-
-  // Hiragana, Katakana, CJK Symbols and Punctuation
-  if (codePoint >= 0x3000 && codePoint <= 0x30ff) {
-    return metrics.cjkAdvance;
-  }
-
-  // Hangul Syllables
-  if (codePoint >= 0xac00 && codePoint <= 0xd7af) {
-    return metrics.cjkAdvance;
-  }
-
-  // Fullwidth forms (U+FF01..U+FF60)
-  if (codePoint >= 0xff01 && codePoint <= 0xff60) {
-    return metrics.cjkAdvance;
-  }
-
-  // CJK Radicals, Kangxi, Bopomofo, CJK Enclosed, Compatibility
-  if (
-    (codePoint >= 0x2e80 && codePoint <= 0x2fdf) ||
-    (codePoint >= 0x3100 && codePoint <= 0x33ff)
-  ) {
+  if (isWideCharacter(codePoint)) {
     return metrics.cjkAdvance;
   }
 
@@ -747,46 +802,37 @@ export function getFontWidthFactors(fontName: string): [number, number, number] 
 }
 
 /**
- * Check if a code point is an East Asian wide/fullwidth character.
- * This replaces an external Unicode width table.
+ * Note on the third element (`wide`).
+ *
+ * It is **no longer consulted for full-width characters**. Those advance by
+ * exactly one em, which is a property of the character rather than of the face —
+ * verified against every CJK font on a Mac, each of which gives U+4E2D an advance
+ * equal to its own `unitsPerEm` — so `@utils/text-measure` computes them from the
+ * em directly.
+ *
+ * Scaling them by this factor was a double approximation: the factor itself was
+ * an estimate, and it multiplied a digit width that falls back to Calibri's for
+ * any face without registered metrics, which is every CJK face. Measured against
+ * real advances the declared values over-stated Heiti by 22%, AppleGothic by 55%
+ * and NanumGothic by 47%.
+ *
+ * The element is retained because the tuple shape is part of this module's
+ * published surface, and a face may yet need it for something that is genuinely
+ * face-dependent.
+ */
+
+/**
+ * Whether a code point is East Asian Wide or Fullwidth, i.e. drawn one em wide.
+ *
+ * Forwards to {@link isFullWidthCodePoint}. This used to be a second, narrower
+ * copy of the same table, and the two disagreed: it was missing Hangul Jamo
+ * (`U+1100–115F`, `U+A960–A97F`), the vertical and small compatibility forms
+ * (`U+FE10–FE19`, `U+FE30–FE6F`), the fullwidth signs (`U+FFE0–FFE6`) and every
+ * emoji. So the same character was one column wide when Excel measured a cell
+ * and two when Word paginated a paragraph — one of those two was always wrong.
  */
 export function isWideCharacter(codePoint: number): boolean {
-  // CJK Unified Ideographs
-  if (codePoint >= 0x4e00 && codePoint <= 0x9fff) {
-    return true;
-  }
-  // CJK Unified Ideographs Extension A
-  if (codePoint >= 0x3400 && codePoint <= 0x4dbf) {
-    return true;
-  }
-  // CJK Compatibility Ideographs
-  if (codePoint >= 0xf900 && codePoint <= 0xfaff) {
-    return true;
-  }
-  // Fullwidth forms
-  if (codePoint >= 0xff01 && codePoint <= 0xff60) {
-    return true;
-  }
-  // CJK Symbols and Punctuation, Hiragana, Katakana
-  if (codePoint >= 0x3000 && codePoint <= 0x30ff) {
-    return true;
-  }
-  // CJK Radicals, Kangxi, Bopomofo, CJK Enclosed, Compatibility
-  if (
-    (codePoint >= 0x2e80 && codePoint <= 0x2fdf) ||
-    (codePoint >= 0x3100 && codePoint <= 0x33ff)
-  ) {
-    return true;
-  }
-  // Hangul Syllables
-  if (codePoint >= 0xac00 && codePoint <= 0xd7af) {
-    return true;
-  }
-  // CJK Unified Ideographs Extensions B through H
-  if (codePoint >= 0x20000 && codePoint <= 0x323af) {
-    return true;
-  }
-  return false;
+  return isFullWidthCodePoint(codePoint);
 }
 
 export { CALIBRI_11PT_PX };

@@ -431,7 +431,7 @@ export function copyChartSidecars(
   }
 }
 
-export function _rewriteCrossWorkbookImageTarget(
+function _rewriteCrossWorkbookImageTarget(
   wb: WorkbookData,
   target: string,
   targetWorkbook: WorkbookData

@@ -1,13 +1,14 @@
 import { createWorkbook, addWorksheet } from "@excel/core/workbook";
 import { Cell } from "@excel/index";
 import { PdfFontError } from "@pdf/errors";
-import { embedTtfFont } from "@pdf/font/font-embedder";
+import { collectEmbeddedGlyphUses, embedTtfFont } from "@pdf/font/font-embedder";
 import { FontManager } from "@pdf/font/font-manager";
 import { parseTtf } from "@pdf/font/ttf-parser";
 import type { TtfFont } from "@pdf/font/ttf-parser";
 import { PdfDocument } from "@pdf/reader/pdf-document";
 import { isPdfArray, isPdfDict } from "@pdf/reader/pdf-parser";
 import { readPdf } from "@pdf/reader/pdf-reader";
+import { countGlyphAdvances } from "@utils/cjk";
 /**
  * Tests for TrueType font parsing, subsetting, and embedding.
  */
@@ -174,6 +175,27 @@ describe("TrueType Font Parser", () => {
     data[2] = 0x54;
     data[3] = 0x4f;
     expect(() => parseTtf(data)).toThrow(PdfFontError);
+  });
+
+  // A TrueType wrapper is not a promise of TrueType outlines. macOS ships the
+  // faces CoreText renders Chinese with as sfntVersion 0x00010000 carrying a
+  // private `hvgl` table and no `glyf`: it used to parse, report full CJK
+  // coverage, and then subset to nothing — a 2 KB PDF with every glyph blank
+  // and no error raised.
+  it("should reject a TrueType font whose outlines are not in glyf", () => {
+    const noGlyf = buildTtfWithCmap([{ start: 0x41, end: 0x42, delta: -0x40 }], 3, {
+      omitTables: ["glyf"],
+      extraTableTags: ["hvgl"]
+    });
+    expect(() => parseTtf(noGlyf)).toThrow(PdfFontError);
+    expect(() => parseTtf(noGlyf)).toThrow(/no 'glyf' table/);
+  });
+
+  it("should reject a TrueType font with no loca table", () => {
+    const noLoca = buildTtfWithCmap([{ start: 0x41, end: 0x42, delta: -0x40 }], 3, {
+      omitTables: ["loca"]
+    });
+    expect(() => parseTtf(noLoca)).toThrow(/no 'loca' table/);
   });
 
   it("should reject invalid data", () => {
@@ -775,6 +797,79 @@ describe("auto-discovered fallback fonts", () => {
     expect(mixed).toBeGreaterThan(latinOnly);
   });
 
+  it("loads real Type3 widths for code points an incomplete fallback lacks", async () => {
+    // `prepare()` used to skip the Type3 metrics whenever *any* face was embedded,
+    // on the assumption that an embedded face covers everything. Auto-discovery no
+    // longer requires total coverage, so an incomplete fallback is ordinary — and
+    // the 600 default it fell back to is wrong for most of these code points.
+    // `U+2003` EM SPACE is 1000 and `U+200B` ZERO WIDTH SPACE is 0.
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const plain = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("\u2003", plain);
+    manager.trackText("\u200b", plain);
+    await manager.prepare();
+
+    const em = manager.measureText("\u2003", plain, 100);
+    const zero = manager.measureText("\u200b", plain, 100);
+
+    // 1000/1000 em and 0/1000 em, not 600/1000 for both.
+    expect(em).toBeCloseTo(100, 3);
+    expect(zero).toBeCloseTo(0, 3);
+    expect(em).not.toBeCloseTo(zero, 3);
+  });
+
+  it("separates characters Type3 can draw from real tofu", async () => {
+    // Two different outcomes, and one sentence cannot describe both. Type3 has a glyph
+    // for `☐` and none for `中`, so the checkbox draws correctly while the ideograph is
+    // a `.notdef` box — reporting them together promised NOTDEF for a character that
+    // renders fine, and sent the reader after a font they did not need for it.
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const plain = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("\u2610\u4e2d", plain); // both outside the arrow-only face
+    await manager.prepare();
+
+    const warnings: string[] = [];
+    manager.reportDiagnostics(message => warnings.push(message));
+    const joined = warnings.join(" ");
+
+    // The ideograph is named as tofu, the checkbox as a Type3 substitution.
+    expect(joined).toContain("no glyph in any available font");
+    expect(joined).toMatch(/CJK Unified Ideographs/);
+    expect(joined).toContain("built-in Type3 glyphs");
+    expect(joined).toMatch(/Miscellaneous Symbols/);
+    // And it never claims nothing is embedded when a face is.
+    expect(joined).not.toContain("no TrueType font is embedded");
+  });
+
+  it("says nothing about tofu when Type3 covers every missing character", async () => {
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const plain = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("\u2610", plain);
+    await manager.prepare();
+
+    const warnings: string[] = [];
+    manager.reportDiagnostics(message => warnings.push(message));
+    const joined = warnings.join(" ");
+
+    expect(joined).toContain("built-in Type3 glyphs");
+    expect(joined).not.toContain("no glyph in any available font");
+  });
+
+  it("still reports tofu when no face is embedded at all", async () => {
+    const manager = new FontManager();
+    const plain = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("\u4e2d", plain);
+    await manager.prepare();
+
+    const warnings: string[] = [];
+    manager.reportDiagnostics(message => warnings.push(message));
+
+    expect(warnings.join(" ")).toContain("no glyph in any available font");
+  });
+
   it("preserves bold, italic and monospace in a document containing an arrow", async () => {
     const { Pdf } = await import("@pdf/index");
     const doc = new Pdf.Builder();
@@ -838,5 +933,96 @@ describe("fallback fonts and grapheme clusters", () => {
     const heart = fragments.find(f => f.text.includes("\u2764"))!;
     // "A" at 12pt Helvetica advances 0.667 em = 8.004pt.
     expect(heart.x - first.x).toBeCloseTo(8.004, 2);
+  });
+});
+
+describe("glyph advance counting agrees with the embedder", () => {
+  // `Tc` is added after every glyph shown, so the number of glyphs is the
+  // multiplier for a justified stretch. Three places needed it and each guessed:
+  // the Word layout counted grapheme clusters, which under-counts `中` + U+0301
+  // (drawn as two glyphs), and the PDF renderer counted code points, which
+  // over-counts `辻` + IVS (drawn as one). The layout then believed a line was a
+  // different width than was drawn and the line missed its margin.
+  //
+  // `countGlyphAdvances` is that single definition. The embedder decides what is
+  // actually drawn, so this pins the two together — the check that would have
+  // caught the drift.
+  it.each([
+    ["中文"],
+    ["中\u0301文"],
+    ["中\uFE0F文"],
+    ["中\u{E0100}文"],
+    ["辻\u{E0100}"],
+    ["中\u200d文"],
+    ["中\u200c文"],
+    ["甲\u0301乙\u0301"],
+    ["👍\uFE0F"],
+    ["𠀀𠀁"],
+    ["日本語"],
+    ["e\u0301"],
+    ["x\u0301\u0302"],
+    ["a b c"]
+  ])("should count the glyphs the embedder emits for %j", text => {
+    expect(countGlyphAdvances(text)).toBe(collectEmbeddedGlyphUses(text).length);
+  });
+});
+
+describe("widening a fallback face cannot change measured widths", () => {
+  /** Two faces that agree on `A` but not on `Ā`, mirroring two real CJK families. */
+  const narrow = (): TtfFont =>
+    parseTtf(
+      buildTtfWithCmap(
+        [
+          { start: 0x41, end: 0x41, delta: 1 - 0x41 },
+          { start: 0x100, end: 0x100, delta: 2 - 0x100 }
+        ],
+        3,
+        { familyName: "Narrow", advanceWidths: [500, 500, 700] }
+      )
+    );
+
+  const wide = (): TtfFont =>
+    parseTtf(
+      buildTtfWithCmap(
+        [
+          { start: 0x41, end: 0x41, delta: 1 - 0x41 },
+          { start: 0x100, end: 0x100, delta: 2 - 0x100 },
+          { start: 0x4e2d, end: 0x4e2d, delta: 3 - 0x4e2d }
+        ],
+        4,
+        { familyName: "Wide", advanceWidths: [500, 500, 740, 1000] }
+      )
+    );
+
+  it("refuses a wider face that would re-measure an already drawn code point", () => {
+    // Measured on the real families: 345 code points outside Latin-1 that `Kaiti SC`
+    // and `Heiti SC` both cover have different advances — `Ā` is 0.699 em against
+    // 0.740. Two CJK faces agree on every ideograph, because a full-width character is
+    // one em, so a swap looks harmless right up to the first non-ideograph.
+    const manager = new FontManager();
+    manager.registerFallbackFont(narrow());
+    const resource = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("\u0100", resource);
+    const measured = manager.measureText("\u0100", resource, 1000);
+
+    expect(manager.widenFallbackFont(wide())).toBe(false);
+    expect(manager.measureText("\u0100", resource, 1000)).toBeCloseTo(measured, 6);
+  });
+
+  it("accepts a wider face that agrees on everything already drawn", () => {
+    const manager = new FontManager();
+    manager.registerFallbackFont(narrow());
+    const resource = manager.resolveFont("Helvetica", false, false);
+    // Only `A` has been drawn, and `A` is WinAnsi — nothing was measured through the
+    // fallback, so the wider face is free to take over and cover `中` as well.
+    manager.trackText("A", resource);
+
+    expect(manager.widenFallbackFont(wide())).toBe(true);
+    expect(manager.fallbackResourceFor(0x4e2d)).not.toBeNull();
+  });
+
+  it("registers straight away when there is no incumbent", () => {
+    const manager = new FontManager();
+    expect(manager.widenFallbackFont(wide())).toBe(true);
   });
 });

@@ -57,6 +57,12 @@ export type { DocxToPdfOptions } from "@pdf/word-bridge";
 
 export type { PdfCell, PdfRow, PdfColumn, PdfSheet, PdfBook, PdfImage, PdfInput } from "@pdf/pdf";
 
+// `textLanguage` appears in five public option types and on the builder, so the
+// type naming its values has to be nameable too: a caller could pass the literal
+// but not store it in a variable, write a wrapper signature, or build a config
+// object.
+export type { CjkLanguage } from "@utils/cjk";
+
 export type {
   PdfExportOptions,
   PdfOrientation,

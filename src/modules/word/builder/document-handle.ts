@@ -8,6 +8,8 @@
 import { paragraph, textParagraph, heading } from "@word/builder/paragraph-builders";
 import { pageBreak, floatingImage, mathBlock } from "@word/builder/run-builders";
 import { gridBorders, simpleTable } from "@word/builder/table-builders";
+import { eastAsianDefaultsFor, withEastAsianDefaults } from "@word/core/east-asian-defaults";
+import { extractText } from "@word/query/search";
 import type {
   DocxDocument,
   BodyContent,
@@ -538,19 +540,47 @@ export function addStyle(doc: DocumentHandle, style: StyleDef): void {
 
 export function useDefaultStyles(doc: DocumentHandle): void {
   const s = _toState(doc);
+  const existing = s.docDefaults;
   s.docDefaults = {
     runProperties: {
-      font: { ascii: "Calibri", hAnsi: "Calibri", eastAsia: "SimSun", cs: "Times New Roman" },
+      // No `eastAsia` face and no `language.eastAsia`: this function runs before any
+      // content exists, so it cannot know which East Asian language the document is
+      // in, and both were previously answered inconsistently — `SimSun` was stated
+      // while the matching `zh-CN` was refused on the grounds that the language was
+      // unknowable. Naming a Chinese face is exactly the same claim as naming a
+      // Chinese language, so either both are guesses or neither is.
+      //
+      // `build()` fills both in from the document's own text, which is where the
+      // answer actually is. A caller who wants to decide for itself sets them here
+      // through `setDocDefaults` and `build()` leaves them alone.
+      font: { ascii: "Calibri", hAnsi: "Calibri", cs: "Times New Roman" },
       size: 22,
       sizeCs: 22,
-      language: { val: "en-US" }
+      language: { val: "en-US" },
+      // Anything the caller already stated wins. This is "supply the defaults I have
+      // not set", not "discard my settings and take mine": overwriting `docDefaults`
+      // outright meant a `setDocDefaults` call followed by `useDefaultStyles` silently
+      // lost the caller's size, font and spacing.
+      ...existing?.runProperties
     },
     paragraphProperties: {
-      spacing: { after: 160, line: 259, lineRule: "auto" }
+      spacing: { after: 160, line: 259, lineRule: "auto" },
+      ...existing?.paragraphProperties
     }
   };
 
-  s.styles.push(
+  addDefaultStyles(s);
+}
+
+/**
+ * Add the built-in style set, replacing any entry that already uses the same id.
+ *
+ * Appending unconditionally made a second `useDefaultStyles()` call produce 38 styles
+ * with 19 distinct ids — a duplicate definition of every one of them, and a document
+ * whose `styles.xml` declares `Normal` twice.
+ */
+function addDefaultStyles(s: _DocumentState): void {
+  const defaults: StyleDef[] = [
     { type: "paragraph", styleId: "Normal", name: "Normal", isDefault: true, qFormat: true },
     {
       type: "paragraph",
@@ -780,7 +810,18 @@ export function useDefaultStyles(doc: DocumentHandle): void {
       link: "Footer",
       uiPriority: 99
     }
-  );
+  ];
+
+  for (const style of defaults) {
+    const at = s.styles.findIndex(
+      existing => existing.styleId === style.styleId && existing.type === style.type
+    );
+    if (at >= 0) {
+      s.styles[at] = style;
+    } else {
+      s.styles.push(style);
+    }
+  }
 }
 
 export function setHeader(doc: DocumentHandle, type: string, content: HeaderFooterContent): void {
@@ -839,7 +880,7 @@ export function nextBookmarkId(doc: DocumentHandle): number {
 
 export function build(doc: DocumentHandle): DocxDocument {
   const s = _toState(doc);
-  return {
+  const assembled: DocxDocument = {
     docType: s.docType,
     body: s.body,
     sectionProperties: s.sectionProperties ?? {
@@ -876,5 +917,38 @@ export function build(doc: DocumentHandle): DocxDocument {
     thumbnail: s.thumbnail,
     opaqueParts: s.opaqueParts && s.opaqueParts.length > 0 ? s.opaqueParts : undefined,
     vbaProject: s.vbaProject
+  };
+
+  // Declare the East Asian proofing language, unless the caller already did.
+  //
+  // This is the last point at which the document's text is all in one place, and it is
+  // the right one: doing it in `Io.toBuffer` would also rewrite documents that came
+  // from `Io.read`, injecting a language their author never chose into a
+  // read-mutate-write round trip. `build` only ever sees a document this library
+  // assembled.
+  //
+  // Without it, every manually built Chinese document opens in Word with a red
+  // underline under every word — the same defect the Markdown importer had, reached by
+  // the other construction path. `useDefaultStyles` cannot fix it, because it runs
+  // before any content exists; that is why it states only the Latin language and
+  // leaves both East Asian slots to be filled from the text here.
+  //
+  // A stated `language.eastAsia` stops this outright rather than merging field by
+  // field, and that is the intended reading: a caller who named the language owns the
+  // East Asian declaration, including the choice to leave the face to Word. It also
+  // means `extractText` is not walked for a document that has already answered.
+  if (assembled.docDefaults?.runProperties?.language?.eastAsia !== undefined) {
+    return assembled;
+  }
+  const derived = eastAsianDefaultsFor(extractText(assembled));
+  if (!derived) {
+    return assembled;
+  }
+  return {
+    ...assembled,
+    docDefaults: {
+      ...assembled.docDefaults,
+      runProperties: withEastAsianDefaults(assembled.docDefaults?.runProperties, derived)
+    }
   };
 }

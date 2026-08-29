@@ -14,8 +14,9 @@
  */
 
 import type { RasterFont } from "@draw/raster/glyph-rasterizer";
-import { loadSystemFont, rasterizeGlyph } from "@draw/raster/glyph-rasterizer";
+import { rasterizeGlyph } from "@draw/raster/glyph-rasterizer";
 import { STROKE_FONT } from "@draw/raster/stroke-font";
+import { loadSystemFont } from "@draw/raster/system-raster-font";
 import { measureText } from "@draw/text";
 import { DEFAULT_TEXT_FAMILY } from "@draw/types";
 import { parseCssColor } from "@utils/svg-lex";

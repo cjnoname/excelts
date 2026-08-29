@@ -468,20 +468,6 @@ export function uint8ArrayToNodeBufferView(data: Uint8Array): Uint8Array {
 }
 
 /**
- * Convert any input to string
- */
-export function anyToString(
-  input: string | Uint8Array | ArrayBuffer | number[],
-  encoding?: string
-): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  const arr = toUint8Array(input);
-  return getTextDecoder(encoding).decode(arr);
-}
-
-/**
  * Convert collected chunks to a string.
  *
  * Common logic shared by Node.js and browser Collector `toString()`:

@@ -993,6 +993,58 @@ await Pdf.fromExcel(workbook, {
 });
 ```
 
+### 系统字体自动发现
+
+在 Node 环境下,若文档含有 WinAnsi 无法编码的字符(最典型的就是中文),且既未提供 `font` 也未提供 `fonts`,则会尽力扫描宿主机的字体目录,找一个 face 来为这些字符借用字形。拉丁文本仍使用标准 14 字体,因此粗体与斜体不会丢失。浏览器环境不扫描;显式提供字体时也不扫描。
+
+扫描优先选择平台自带的中文字体,并把 Arial Unicode MS 这类广覆盖字体视为最后兜底:它一个文件几乎覆盖所有文字系统,但其中文字形字面偏小,观感明显差于任何系统中文字体。TTC 集合会逐 face 搜索,因为同一个 `.ttc` 内各 face 的覆盖范围与地区排版惯例并不相同——macOS `Songti.ttc` 的 face 0 只有 8,535 个字形,face 1 有 43,033 个。
+
+`preferSystemFonts` 用于按顺序指定你想要的字体族:
+
+```typescript
+// 简体中文标点惯例;同一个 .ttc 内的繁体 face 名为 "Heiti TC"。
+await Pdf.fromExcel(workbook, { preferSystemFonts: ["Heiti SC", "Songti SC"] });
+
+new Pdf.Builder().preferSystemFonts(["Microsoft YaHei", "Noto Sans CJK SC"]);
+```
+
+名称按字体族名大小写不敏感匹配,同时也是选中 TTC 内特定 face 的方式。若指定的字体族未安装、无法解析,或无法覆盖文档文本,则跳过并回退到内置顺序——它引导的是一次尽力而为的搜索,而非硬性约束。若某个 face 是硬性要求,请使用 `fonts`。
+
+### 东亚语言与字形
+
+Unicode Han Unification 让中日韩共用汉字使用同一码位,但字形并不相同——「者」「骨」「今」「青」「每」在各地区的写法各不一样。因此仅按**覆盖范围**挑选字体可能"正确但依然是错的":用日文字体渲染中文,中文读者看到的是错别字感。
+
+所以选择顺序是**先语言,后覆盖**:
+
+```typescript
+await Pdf.fromExcel(workbook, { textLanguage: "zh-Hans" }); // 也可以是 zh-Hant / ja / ko
+new Pdf.Builder().textLanguage("zh-Hant");
+```
+
+未指定时,语言由内容推断:出现假名即判定日文,出现谚文即判定韩文,只在简体或繁体之一中存在的字用于区分简繁。若文本全部由中日韩共通字形组成(如日期、专有名词),则没有任何证据可用,此时优先简体中文字体族——这是**默认值**而非检测结果,也正是知道语言时应当显式指定的原因。
+
+`Pdf.fromChart` 同样接受这两个选项,因此独立图表的标签也能获得与工作簿、文档一致的地区控制。
+
+当一个 TTC 集合内同一字体族有多个字重时(macOS 的 `Songti.ttc` 把 `Songti SC` 的 Black 排在 Regular 之前),会选择常规字重,而不是文件中排在最前的那个 face。
+
+语言同时用于在一个 TTC 集合的多个 face 之间取舍:macOS 的 `STHeiti Light.ttc` 中 face 0 是 `Heiti TC`、face 1 是 `Heiti SC`,而 `Songti.ttc` 有跨简繁的八个 face。若你自行指定字体族名,`preferSystemFonts` 的优先级仍高于语言。
+
+有两点限制需要注意。CFF 轮廓的字体(`.otf`,以及各 face 均为 CFF 的 `.ttc`)会被拒绝,因为子集化嵌入器需要 `glyf` 轮廓——这排除了 macOS 的苹方(PingFang)与冬青黑体(Hiragino),也排除了官方 Noto Sans CJK 的 `.otf`/`.ttc` 发行版;请改用 Noto Sans SC 的 `.ttf` 版本。另外,由于结果取决于宿主机安装了什么字体,当输出字节稳定性比可读性更重要时,可用 `disableFontAutoDiscovery` 彻底关闭扫描。
+
+该选项在**所有入口**上都可用,而非仅 builder —— 否则同一份导出是否可复现,会取决于你调用了哪个函数:
+
+```typescript
+import { Pdf } from "documonster/pdf";
+
+// 确定性输出:要么由你提供的字体绘制,要么谁也画不出
+const bytes = await Pdf.fromExcel(workbook, {
+  disableFontAutoDiscovery: true,
+  fonts: { default: { regular: myFontBytes } }
+});
+```
+
+它关闭的是**发现**,不是嵌入,所以你显式提供的字体依然生效。若未提供字体,字符仍保留其 Unicode(可复制、可搜索),只是渲染为 `.notdef` 方框,并且 `onWarning` 会指出丢失了哪些区块 —— 关掉扫描不会连诊断一起关掉。
+
 字体 fallback 只是标量渲染,不是复杂文本布局。本模块**不支持** OpenType shaping(GSUB/GPOS)、bidi 重排与彩色 emoji——仅配置字体不能让依赖 shaping 的 Arabic 或 Indic 文本正确渲染。
 
 这些限制是可检测的,不会静默发生:当文档包含复杂文字系统(script)、从右至左文本,或内嵌字体带有彩色字形表(`COLR`/`CBDT`/`sbix`/`SVG`)时,`onWarning` 会按特性各上报一次,并指出涉及的文字系统或字体族。请在绘制前自行完成 shaping 与重排(或改为渲染为图片)。

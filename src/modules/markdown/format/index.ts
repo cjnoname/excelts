@@ -34,30 +34,36 @@
 
 import { ESCAPE_AND_NEWLINE, NEWLINE_IN_CELL } from "@markdown/constants";
 import type { MarkdownAlignment, MarkdownFormatOptions } from "@markdown/types";
+import { isFullWidthCodePoint } from "@utils/font-metrics";
 
 // =============================================================================
 // Unicode Display Width
 // =============================================================================
 
 /**
- * Calculate the display width of a string in a monospace terminal.
- * CJK characters, fullwidth forms, and most emoji are 2 columns wide.
- * This enables proper column alignment in tables containing these characters.
+ * Calculate the display width of a string in a monospace terminal, which is what
+ * makes a table's columns line up when its cells contain East Asian text or emoji.
+ *
+ * Width comes from {@link isFullWidthCodePoint} rather than a range list kept here.
+ * The list this replaced was a near-copy of that table, and it was wrong in both
+ * directions — measured, not assumed:
+ *
+ *   - Under by one: `⌚` `☔` `⭐` and the rest of the BMP emoji, plus the CJK
+ *     compatibility squares such as `㏀`, all of which occupy two columns.
+ *   - Over by one: it counted *every* surrogate pair as two columns, so
+ *     `𝐀` (Mathematical Bold A) and `𐀀` (Linear B) were double-width when both are
+ *     East Asian Width Narrow. Being a supplementary-plane character is not the same
+ *     thing as being wide.
+ *
+ * Zero-width and combining code points stay here: those are a different question
+ * (they advance nothing at all) and are not answered anywhere else.
  */
 function displayWidth(str: string): number {
   let width = 0;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-
-    // Handle surrogate pairs (emoji and supplementary plane characters)
-    if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
-      const low = str.charCodeAt(i + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        width += 2;
-        i++;
-        continue;
-      }
-    }
+  // By code point, so a surrogate pair is one character and can be asked about
+  // directly instead of assumed from its encoding.
+  for (const char of str) {
+    const code = char.codePointAt(0)!;
 
     // Zero-width characters
     if (
@@ -80,26 +86,7 @@ function displayWidth(str: string): number {
       continue;
     }
 
-    // Fullwidth and wide characters: CJK, Hangul, Katakana/Hiragana, etc.
-    if (
-      (code >= 0x1100 && code <= 0x115f) || // Hangul Jamo
-      (code >= 0x2e80 && code <= 0x303e) || // CJK Radicals, Kangxi, CJK Symbols
-      (code >= 0x3040 && code <= 0x33bf) || // Hiragana, Katakana, Bopomofo, CJK Compat
-      (code >= 0x3400 && code <= 0x4dbf) || // CJK Unified Ideographs Extension A
-      (code >= 0x4e00 && code <= 0xa4cf) || // CJK Unified Ideographs, Yi
-      (code >= 0xa960 && code <= 0xa97f) || // Hangul Jamo Extended-A
-      (code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
-      (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
-      (code >= 0xfe10 && code <= 0xfe19) || // Vertical forms
-      (code >= 0xfe30 && code <= 0xfe6f) || // CJK Compatibility Forms
-      (code >= 0xff01 && code <= 0xff60) || // Fullwidth ASCII/Latin
-      (code >= 0xffe0 && code <= 0xffe6) // Fullwidth Signs
-    ) {
-      width += 2;
-      continue;
-    }
-
-    width += 1;
+    width += isFullWidthCodePoint(code) ? 2 : 1;
   }
   return width;
 }

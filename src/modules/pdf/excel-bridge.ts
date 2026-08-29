@@ -131,6 +131,8 @@ import type {
   PdfCellTypeValue
 } from "@pdf/types";
 import { PdfCellType } from "@pdf/types";
+import type { CjkLanguage } from "@utils/cjk";
+import { normalizeLoneCarriageReturns } from "@utils/text-measure";
 import { hexToRgb01 } from "@utils/theme-colors";
 import { emuToPx } from "@utils/units";
 import { base64ToUint8Array } from "@utils/utils.base";
@@ -228,6 +230,31 @@ export interface ChartToPdfOptions {
   /** Embedded typefaces used by selectable vector-chart text. */
   fonts?: PdfFontConfig;
   /**
+   * System font families auto-discovery should prefer, in order.
+   *
+   * A standalone chart's category and value labels are text like any other, so a
+   * Chinese chart needs the same regional control the workbook and document
+   * exporters offer. Without these two options it was the one entry point that
+   * could not ask for a face, and fell back to whatever coverage found first.
+   *
+   * @see `PdfExportOptions.preferSystemFonts`
+   */
+  preferSystemFonts?: readonly string[];
+
+  /**
+   * Turn off the host font scan entirely, for byte-stable output across hosts.
+   *
+   * @see `PdfExportOptions.disableFontAutoDiscovery`
+   */
+  disableFontAutoDiscovery?: boolean;
+  /**
+   * The East Asian written language of the chart's labels, so auto-discovery
+   * picks a face drawn in that regional hand.
+   *
+   * @see `PdfExportOptions.textLanguage`
+   */
+  textLanguage?: CjkLanguage;
+  /**
    * Receive non-fatal font diagnostics raised while rendering.
    *
    * @see `PdfExportOptions.onWarning`
@@ -280,7 +307,12 @@ export async function chartToPdf(
   const pageWidth = options.pageWidth ?? Math.max(width + margin * 2, 400);
   const pageHeight = options.pageHeight ?? Math.max(height + margin * 2, 300);
 
-  const doc = new PdfDocumentBuilder({ fonts: options.fonts });
+  const doc = new PdfDocumentBuilder({
+    fonts: options.fonts,
+    preferSystemFonts: options.preferSystemFonts,
+    textLanguage: options.textLanguage,
+    disableFontAutoDiscovery: options.disableFontAutoDiscovery
+  });
   if (options.onWarning) {
     doc.onWarning(options.onWarning);
   }
@@ -1114,9 +1146,21 @@ function mapValueType(vt: number): PdfCellTypeValue {
 }
 
 /**
- * Get display text for a cell, applying numFmt formatting.
+ * The text a cell contributes to the page.
+ *
+ * Line breaks are normalised on the way in — see
+ * {@link normalizeLoneCarriageReturns}. This is the one place cell text enters the
+ * PDF pipeline, so a lone CR is dealt with here rather than in each of the
+ * thirteen places downstream that split on a newline.
  */
 function getCellDisplayText(cell: CellData): string {
+  return normalizeLoneCarriageReturns(rawCellDisplayText(cell));
+}
+
+/**
+ * Get display text for a cell, applying numFmt formatting.
+ */
+function rawCellDisplayText(cell: CellData): string {
   if (!cell) {
     return "";
   }
@@ -1177,7 +1221,9 @@ function convertCellValue(cell: CellData): unknown {
     if (rtValue?.richText) {
       return {
         richText: rtValue.richText.map(run => ({
-          text: run.text,
+          // Normalised per run, like the plain path. The rewrite preserves length,
+          // so the run boundaries the renderer measures against are unchanged.
+          text: normalizeLoneCarriageReturns(run.text),
           font: run.font ? convertFontStyle(run.font) : undefined
         }))
       };

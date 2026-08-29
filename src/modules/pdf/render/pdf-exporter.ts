@@ -47,6 +47,8 @@ import type {
   PdfWatermark
 } from "@pdf/types";
 import { PageSizes, PdfCellType, isPdfChartsheet } from "@pdf/types";
+import { addCjkLanguageEvidence, concludeCjkLanguage, createCjkLanguageEvidence } from "@utils/cjk";
+import type { CjkLanguage, CjkLanguageEvidence } from "@utils/cjk";
 import { yieldToEventLoop } from "@utils/utils.base";
 
 // =============================================================================
@@ -138,8 +140,29 @@ async function prepareExport(
   // and vector charts have all reported their Unicode text.
   const fontData = options?.font ?? null;
 
-  if (!fontData && !options?.fonts) {
-    registerSystemFontForCodePoints(fontManager, collectNonWinAnsiCodePoints(sheets));
+  // `disableFontAutoDiscovery` gates both discovery sites — this one and the
+  // post-layout widening below. Gating only one would make the option depend on
+  // whether a header, a watermark or a chart happened to introduce a character the
+  // cells did not, which is not a distinction a caller asking for deterministic
+  // output can reason about.
+  // Walked at most once. `collectNonWinAnsi` visits every header, footer, cell and
+  // rich-text run of every sheet; it is a pure function of `sheets`, which nothing
+  // between the two former call sites modified, so the second walk produced the same
+  // answer at full cost. The language tally the seeding path threw away is reused
+  // here too.
+  let collected: ReturnType<typeof collectNonWinAnsi> | undefined;
+  const nonWinAnsi = (): ReturnType<typeof collectNonWinAnsi> =>
+    (collected ??= collectNonWinAnsi(sheets));
+
+  if (!fontData && !options?.fonts && options?.disableFontAutoDiscovery !== true) {
+    const found = nonWinAnsi();
+    registerSystemFontForCodePoints(
+      fontManager,
+      found.codePoints,
+      options?.preferSystemFonts,
+      options?.textLanguage,
+      concludeCjkLanguage(found.evidence)
+    );
   }
 
   if (fontData) {
@@ -161,8 +184,32 @@ async function prepareExport(
   // Type3 metrics are part of layout, not a side effect of writing resources.
   // Seed the repertoire now and load its real widths before any wrapping,
   // alignment or pagination decision is made.
-  if (!fontManager.hasEmbeddedFont()) {
-    for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
+  //
+  // Unconditionally, because "a face is embedded" does not mean "every character has a
+  // glyph". Auto-discovery is no longer required to cover the symbols Type3 can draw,
+  // so an incomplete fallback is the ordinary case: guarding this on
+  // `hasEmbeddedFont()` measured every character the face lacked at the 600 default and
+  // then drew it at its real Type3 width. `U+2003` EM SPACE is 1000 and `U+200B` ZERO
+  // WIDTH SPACE is 0, so the error is 40% of an em per character, not a rounding
+  // difference — enough to move a line break or a page.
+  //
+  // `prepare()` itself only reads the widths of code points that still need Type3, so
+  // for a face that does cover everything this seeds the repertoire and loads nothing.
+  //
+  // Two exclusions, and the distinction between them is the point. A *configured* font
+  // set plans every run against a named family, so its `trackText` requires the
+  // resource `resolveFont` returned and it never reaches Type3 — seeding a bare
+  // repertoire there throws. A face the caller embedded *explicitly* covers the
+  // document by contract, so it needs no Type3 widths; seeding anyway widened its
+  // subset and renumbered its CIDs.
+  //
+  // An auto-discovered fallback is neither: it is a best-effort guess that is now
+  // allowed to miss the symbols Type3 can draw, so it is exactly the case that must be
+  // seeded. `hasEmbeddedFont()` cannot express that — it is true for both — which is
+  // why this asks `hasFallbackFont()` instead.
+  const explicitFace = fontManager.hasEmbeddedFont() && !fontManager.hasFallbackFont();
+  if (!fontManager.hasConfiguredFonts() && !explicitFace) {
+    for (const codePoint of nonWinAnsi().codePoints) {
       fontManager.trackText(String.fromCodePoint(codePoint));
     }
     await fontManager.prepare();
@@ -207,8 +254,12 @@ async function finishExport(
   const documentOptions = resolveOptions(options, sheets[0]);
 
   ensureAtLeastOnePage(allPages, documentOptions, sheets);
-  if (!fontManager.hasEmbeddedFont()) {
-    for (const codePoint of collectNonWinAnsiCodePoints(sheets)) {
+  // Same exclusions as the seeding above.
+  if (
+    !fontManager.hasConfiguredFonts() &&
+    !(fontManager.hasEmbeddedFont() && !fontManager.hasFallbackFont())
+  ) {
+    for (const codePoint of collectNonWinAnsi(sheets).codePoints) {
       fontManager.trackText(String.fromCodePoint(codePoint));
     }
   }
@@ -226,7 +277,9 @@ async function finishExport(
     fontManager.trackText(watermark.text, resourceName);
   }
 
-  registerAutoDiscoveredFont(fontManager);
+  if (options?.disableFontAutoDiscovery !== true) {
+    registerAutoDiscoveredFont(fontManager, options?.preferSystemFonts, options?.textLanguage);
+  }
 
   const fontObjectMap = await fontManager.writeFontResources(writer);
   const { pageObjNums, sheetFirstPage, pagesTreeObjNum } = await renderAllPages(
@@ -284,28 +337,79 @@ function preflightCharts(allPages: LayoutPage[], fontManager: FontManager): Char
   return cache;
 }
 
-function registerAutoDiscoveredFont(fontManager: FontManager): void {
-  if (fontManager.hasEmbeddedFont()) {
+function registerAutoDiscoveredFont(
+  fontManager: FontManager,
+  preferredFamilies: readonly string[] | undefined,
+  textLanguage: CjkLanguage | undefined
+): void {
+  // A fallback face already in hand is *not* the end of the question. Discovery
+  // runs once before layout, from the cell text alone, but a header, a footer, a
+  // text watermark and a vector chart's labels report their characters only
+  // afterwards — so a face chosen for the body could be missing a character that
+  // arrived later, and returning here left it to a Type3 NOTDEF box. The builder
+  // already reconsidered an incomplete face; this pipeline did not, so the same
+  // document came out with tofu through `Pdf.create` and correct through
+  // `Pdf.Builder`.
+  //
+  // A face the caller embedded explicitly is never revisited: `embedFont` is a
+  // statement about the document, not a best-effort guess.
+  const uncoveredByFallback = fontManager.hasFallbackFont()
+    ? fontManager.getUncoveredFallbackCodePoints()
+    : null;
+  if (fontManager.hasEmbeddedFont() && (uncoveredByFallback?.size ?? 0) === 0) {
     return;
   }
   const codePoints = fontManager.getType3CodePoints();
   if (codePoints.size === 0) {
     return;
   }
-  registerSystemFontForCodePoints(fontManager, codePoints);
+  registerSystemFontForCodePoints(
+    fontManager,
+    codePoints,
+    preferredFamilies,
+    textLanguage,
+    // The manager counted the evidence as every run was tracked.
+    fontManager.getTextLanguage(),
+    true
+  );
 }
 
 function registerSystemFontForCodePoints(
   fontManager: FontManager,
-  codePoints: ReadonlySet<number>
+  codePoints: ReadonlySet<number>,
+  preferredFamilies: readonly string[] | undefined,
+  textLanguage: CjkLanguage | undefined,
+  detectedLanguage: CjkLanguage | undefined,
+  widening = false
 ): void {
-  const ttf = findSystemFontForCodePoints(codePoints);
+  const ttf = findSystemFontForCodePoints(
+    codePoints,
+    preferredFamilies ?? [],
+    // Han-unified code points cover Chinese, Japanese and Korean alike, so a
+    // face picked by coverage alone can draw Chinese in a Japanese hand. The
+    // language is counted from the text itself (see `collectNonWinAnsi`) rather
+    // than inferred from `codePoints`, which is a Set and has no multiplicity.
+    textLanguage ?? detectedLanguage
+  );
   if (ttf) {
     // A discovered font lends glyphs for the code points WinAnsi cannot encode;
     // it does not become the document font. Registering it as the document font
     // routed every cell through one regular face, so a single CJK character
     // stripped bold and italic from the whole workbook.
-    fontManager.registerFallbackFont(ttf);
+    //
+    // `widening` marks the second, post-layout attempt. That one goes through
+    // `widenFallbackFont`, which refuses a face that would change a width layout has
+    // already used — two CJK faces agree on every ideograph but not on the 345
+    // non-Latin-1 code points they share.
+    if (widening) {
+      if (!fontManager.widenFallbackFont(ttf)) {
+        return;
+      }
+    } else {
+      fontManager.registerFallbackFont(ttf);
+    }
+    // Reported by `reportDiagnostics`, so every pipeline says the same thing.
+    fontManager.noteAutoDiscoveredFont(ttf.familyName, codePoints.size);
   }
 }
 
@@ -1206,8 +1310,12 @@ function isWatermarkApplicable(watermark: PdfWatermark, page: LayoutPage): boole
  * focused on cell text, which is where non-WinAnsi characters
  * overwhelmingly appear.
  */
-function collectNonWinAnsiCodePoints(sheets: PdfWorkbookSheet[]): Set<number> {
+function collectNonWinAnsi(sheets: PdfWorkbookSheet[]): {
+  codePoints: Set<number>;
+  evidence: CjkLanguageEvidence;
+} {
   const result = new Set<number>();
+  const evidence = createCjkLanguageEvidence();
   for (const sheet of sheets) {
     const headerFooter = sheet.headerFooter;
     if (headerFooter) {
@@ -1224,7 +1332,7 @@ function collectNonWinAnsiCodePoints(sheets: PdfWorkbookSheet[]): Set<number> {
         }
         for (const runs of [content.left, content.center, content.right]) {
           for (const run of runs) {
-            collectFromText(run.text, result);
+            collectFromText(run.text, result, evidence);
           }
         }
       }
@@ -1234,7 +1342,7 @@ function collectNonWinAnsiCodePoints(sheets: PdfWorkbookSheet[]): Set<number> {
     }
     for (const row of sheet.rows.values()) {
       for (const cell of row.cells.values()) {
-        collectFromText(cell.text, result);
+        collectFromText(cell.text, result, evidence);
         if (
           cell.type === PdfCellType.RichText &&
           cell.value &&
@@ -1243,19 +1351,26 @@ function collectNonWinAnsiCodePoints(sheets: PdfWorkbookSheet[]): Set<number> {
         ) {
           const runs = (cell.value as { richText: Array<{ text?: string }> }).richText;
           for (const run of runs) {
-            collectFromText(run.text, result);
+            collectFromText(run.text, result, evidence);
           }
         }
       }
     }
   }
-  return result;
+  return { codePoints: result, evidence };
 }
 
-function collectFromText(text: string | undefined, out: Set<number>): void {
+function collectFromText(
+  text: string | undefined,
+  out: Set<number>,
+  evidence: CjkLanguageEvidence
+): void {
   if (!text) {
     return;
   }
+  // Counted here, where the text still has its repetitions, because `out` is a
+  // Set and cannot carry them.
+  addCjkLanguageEvidence(evidence, text);
   for (let i = 0; i < text.length; i++) {
     const cp = text.codePointAt(i)!;
     if (cp > 0xffff) {

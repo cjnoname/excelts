@@ -34,6 +34,8 @@ import type {
   ShapeTransform
 } from "@excel/chart/model/types";
 import {
+  needsXmlSpacePreserve,
+  tickMarkToOoxml,
   escapeXml,
   escapeXmlAttr,
   fmtNumAttr,
@@ -2223,34 +2225,3 @@ function renderColorModifiers(c: ChartColor): string {
  *   - ≥2 consecutive whitespace characters internally, or
  *   - any tab / newline / carriage return character.
  */
-function needsXmlSpacePreserve(text: string): boolean {
-  if (text === "") {
-    return false;
-  }
-  if (/^\s|\s$/.test(text)) {
-    return true;
-  }
-  if (/[\t\n\r]/.test(text)) {
-    return true;
-  }
-  if (/\s{2,}/.test(text)) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Map the public API's friendly tick-mark names (`inside` / `outside`,
- * matching `types.ts:TickMark`) back to the OOXML `ST_TickMark` tokens
- * (`in` / `out`) on the way out. Keeps the writer aligned with the
- * parser at `chart-ex-parser.parseAxis`.
- */
-function tickMarkToOoxml(value: "none" | "inside" | "outside" | "cross"): string {
-  if (value === "inside") {
-    return "in";
-  }
-  if (value === "outside") {
-    return "out";
-  }
-  return value;
-}

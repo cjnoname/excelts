@@ -531,3 +531,91 @@ End of document.`;
     });
   });
 });
+
+describe("East Asian proofing language", () => {
+  /** The `w:rPrDefault` run properties of a converted document. */
+  const defaults = async (markdown: string) =>
+    (await markdownToDocx(markdown)).docDefaults?.runProperties;
+
+  it("declares the East Asian language so Word does not spell-check Chinese as English", async () => {
+    // Without `w:lang/@w:eastAsia` Word proofs East Asian text in the *Latin*
+    // language, so every Chinese word arrives underlined as a spelling mistake.
+    // Declaring nothing is not neutral — it means en-US in practice.
+    const rPr = await defaults("# 第一章\n\n销售业绩概述与毛利率统计。\n");
+
+    expect(rPr?.language?.eastAsia).toBe("zh-CN");
+    expect(rPr?.language?.val).toBe("en-US");
+  });
+
+  it("names the East Asian font slot alongside the language", async () => {
+    // `w:eastAsia` is the face Word uses for Han; declaring the language while
+    // leaving the slot unset says what the text is and then lets Word guess.
+    const rPr = await defaults("# 第一章\n\n销售业绩概述。\n");
+
+    expect(rPr?.font).toMatchObject({ ascii: "Calibri", eastAsia: "SimSun" });
+  });
+
+  it("detects Traditional Chinese, Japanese and Korean separately", async () => {
+    // The value is read off the text, which is what makes it safe to state at all:
+    // applying zh-CN proofing to Japanese would be worse than applying none.
+    expect((await defaults("繁體中文銷售業績概述。"))?.language?.eastAsia).toBe("zh-TW");
+    expect((await defaults("日本語のテスト資料です。"))?.language?.eastAsia).toBe("ja-JP");
+    expect((await defaults("한국어 보고서 자료입니다."))?.language?.eastAsia).toBe("ko-KR");
+  });
+
+  it("leaves a document with no East Asian text untouched", async () => {
+    // No evidence, no claim: an English document keeps exactly its previous
+    // defaults rather than being labelled with somebody else's locale.
+    const rPr = await defaults("# Title\n\nPlain English paragraph.\n");
+
+    expect(rPr?.language).toBeUndefined();
+    expect(rPr?.font).toBe("Calibri");
+  });
+
+  it("writes the language into styles.xml, not just the model", async () => {
+    const doc = await markdownToDocx("# 第一章\n\n销售业绩概述。\n");
+    const styles = await Io.readDocxPart(await Io.toBuffer(doc), "word/styles.xml");
+    const xml = new TextDecoder().decode(styles!);
+
+    expect(xml).toContain('<w:lang w:val="en-US" w:eastAsia="zh-CN"/>');
+    expect(xml).toContain('w:eastAsia="SimSun"');
+  });
+});
+
+describe("Markdown defaults come from the converted document", () => {
+  const defaults = async (markdown: string, options?: Parameters<typeof markdownToDocx>[1]) =>
+    (await markdownToDocx(markdown, options)).docDefaults?.runProperties;
+
+  it("ignores East Asian text that only exists in the Markdown source", async () => {
+    // A link's URL and an unreferenced footnote definition appear nowhere in the
+    // document, but detection read the raw source: one Japanese hostname was enough to
+    // label a page of Chinese prose `ja-JP`, so every Chinese word in it was proofed
+    // against a Japanese dictionary.
+    const chinese = "# 销售报表\n\n中文正文与统计数据。\n";
+
+    expect(
+      (await defaults(`${chinese}\n[链接](https://例えばのサイトです.jp/テスト)\n`))?.language
+        ?.eastAsia
+    ).toBe("zh-CN");
+    expect(
+      (await defaults(`${chinese}\n[^unused]: 日本語のテキストです\n`))?.language?.eastAsia
+    ).toBe("zh-CN");
+  });
+
+  it("still detects a document that really is Japanese", async () => {
+    expect((await defaults("# 見出し\n\n日本語の本文です。\n"))?.language?.eastAsia).toBe("ja-JP");
+  });
+
+  it("puts defaultFont and defaultFontSize in the document defaults", async () => {
+    // They were written only onto ordinary text runs, so list markers, field results,
+    // empty runs and anything inheriting stayed on Calibri while the paragraphs beside
+    // them used the requested face.
+    const rPr = await defaults("# 标题\n\n中文正文\n", {
+      defaultFont: "Arial",
+      defaultFontSize: 24
+    });
+
+    expect(rPr?.font).toMatchObject({ ascii: "Arial" });
+    expect(rPr?.size).toBe(24);
+  });
+});

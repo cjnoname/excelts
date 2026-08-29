@@ -554,7 +554,42 @@ const scenarios: Scenario[] = [
     mustNotInclude: exclude("mermaid", ["modules/draw/"]),
     platform: "browser",
     lazySplit: true
-  }
+  },
+
+  // ===========================================================================
+  // No Node-only font acquisition in a browser bundle.
+  //
+  // Two modules exist only to read fonts off a disk, and each carries a table of
+  // per-platform paths and filenames: `pdf/font/system-fonts.ts` (the curated CJK
+  // families — `/System/Library/Fonts/Supplemental`, `msyh.ttc`, `PingFang SC`, and
+  // several hundred more) and `draw/raster/system-raster-font.ts` (the Arial /
+  // Helvetica / DejaVu fallbacks). Both used to ship to browsers: a
+  // `typeof process === "undefined"` guard makes them *inert*, not absent, because
+  // a bundler must keep every string a reachable module might use. Each now has a
+  // `.browser.ts` stub, worth 13.7 kB minified off the pdf bundle and 5.2 kB off
+  // excel.
+  //
+  // Asserted on the module graph rather than by grepping the output for path
+  // strings: that catches a reintroduction whatever the new table happens to
+  // contain, and the `.browser` suffix means the stubs themselves do not match.
+  ...(
+    [
+      ["pdf", "Pdf"],
+      ["excel", "Workbook"],
+      ["word", "Io"],
+      ["draw", "renderDrawList"]
+    ] as const
+  ).map(([mod, name]) => ({
+    name: `browser /${mod}: no Node-only font acquisition`,
+    importFrom: `${PKG_NAME}/${mod}`,
+    imports: [name],
+    mustNotInclude: [
+      "modules/pdf/font/system-fonts.js",
+      "modules/draw/raster/system-raster-font.js"
+    ],
+    platform: "browser" as const,
+    lazySplit: true
+  }))
 ];
 
 // =============================================================================

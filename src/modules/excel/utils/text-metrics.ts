@@ -25,9 +25,11 @@
 import { ValueType } from "@excel/core/enums";
 import type { Font, Alignment, NumFmt, RichText } from "@excel/types";
 import { getCellDisplayText } from "@excel/utils/cell-format";
+import { canBreakBetween } from "@utils/cjk";
 import type { FontMetrics } from "@utils/font-data";
 import { getFontMetrics } from "@utils/font-data";
-import { _measureCharPx, measureTextWidthPx, resolveFont } from "@utils/text-measure";
+import { graphemeClusters } from "@utils/grapheme";
+import { createLineMeasurer, isAscii, measureTextWidthPx, resolveFont } from "@utils/text-measure";
 import type { MeasuredFont } from "@utils/text-measure";
 import { charWidthToPixel, getPixelPadding, pixelToCharWidth, pixelToPoints } from "@utils/units";
 
@@ -245,6 +247,14 @@ export function calculateWrappedLineCount(
  *
  * Excel breaks at spaces and hyphens. If a single word exceeds the column
  * width, the word overflows on its line (Excel does not mid-word break).
+ *
+ * One pass over the grapheme clusters, deciding break opportunities as it goes.
+ * Segmenting into word strings and then re-segmenting each of them into clusters
+ * to measure meant every character was handed to `Intl.Segmenter` twice — and for
+ * East Asian text, where each character is its own word, that is one `segment()`
+ * call and one array per character. It cost 8× on Latin and 16× on CJK
+ * (`autoFitRows` over 3000×8: 90 ms → 721 ms and 68 ms → 1107 ms), which a
+ * workbook with no CJK in it was paying for nothing.
  */
 function _countWrappedLines(
   line: string,
@@ -252,68 +262,78 @@ function _countWrappedLines(
   resolved: ResolvedFont,
   metrics: FontMetrics | undefined
 ): number {
-  // Split line into "words" — segments separated by spaces or hyphens.
-  // The delimiter (space/hyphen) is included at the end of the preceding word,
-  // matching how Excel accounts for space width before breaking.
-  const words = _splitIntoWords(line);
-
-  if (words.length === 0) {
-    return 1;
-  }
-
+  // The same measurer the width path uses, so a cell whose column is set to that
+  // path's own answer reports one line. Summing a per-character measurement here
+  // skipped every adjustment that belongs to the line — superscript scaling, and
+  // the whole estimate a face with no registered metrics is measured by — so the
+  // two disagreed on 26 of 42 font/text combinations.
+  const measurer = createLineMeasurer(resolved, metrics);
+  const lineParts = measurer.create();
+  const wordParts = measurer.create();
   let lineCount = 1;
-  let currentWidth = 0;
+  let lineEmpty = true;
+  // Whether anything has been added to `wordParts` since the last flush. Tracked
+  // rather than inferred from `px(wordParts) === 0`: a real word can measure zero.
+  // The tier-2 formula is `round(advanceFU / unitsPerEm * ppem)`, so at 1pt — where
+  // ppem rounds to 1 — 84,353 code points come out 0px wide, and `"iii WWWW"` in a
+  // 2px column reported one line because `"iii "` looked like an empty word and was
+  // dropped instead of placed.
+  let wordEmpty = true;
+  let prevBaseCp = -1;
 
-  for (const word of words) {
-    // Measure word width
-    let wordWidth = 0;
-    for (const char of word) {
-      wordWidth += _measureCharPx(char.codePointAt(0)!, resolved, metrics);
+  /** Place the accumulated word, wrapping first if it does not fit. */
+  const place = (): void => {
+    if (wordEmpty) {
+      return;
     }
-
-    if (currentWidth === 0) {
-      // First word on line: always place it (even if wider than column)
-      currentWidth = wordWidth;
-    } else if (currentWidth + wordWidth > columnWidthPx) {
-      // Word doesn't fit on current line: wrap
+    if (lineEmpty) {
+      // First word on the line: always placed, even if wider than the column.
+      measurer.addParts(lineParts, wordParts);
+      lineEmpty = false;
+    } else if (measurer.pxOfSum(lineParts, wordParts) > columnWidthPx) {
       lineCount++;
-      currentWidth = wordWidth;
+      measurer.reset(lineParts);
+      measurer.addParts(lineParts, wordParts);
     } else {
-      // Word fits: accumulate
-      currentWidth += wordWidth;
+      measurer.addParts(lineParts, wordParts);
+    }
+    measurer.reset(wordParts);
+    wordEmpty = true;
+  };
+
+  // A line that is entirely ASCII takes an index-based loop: every ASCII
+  // character is its own grapheme cluster — that range holds no combining marks,
+  // surrogate pairs or emoji sequences — so the clusters are identical, and it
+  // needs neither `Intl.Segmenter` nor a one-character string per character.
+  // Break decisions come from `canBreakBetween` in both branches, so they cannot
+  // disagree about where a line may break. A workbook with no CJK in it was
+  // paying for the segmenter on every cell.
+  if (isAscii(line)) {
+    for (let i = 0; i < line.length; i++) {
+      const cp = line.charCodeAt(i);
+      if (prevBaseCp >= 0 && canBreakBetween(prevBaseCp, cp)) {
+        place();
+      }
+      prevBaseCp = cp;
+      measurer.addAscii(wordParts, cp);
+      wordEmpty = false;
+    }
+  } else {
+    for (const cluster of graphemeClusters(line)) {
+      // The line-breaking class belongs to the cluster's base character, not to a
+      // trailing variation selector or combining mark.
+      const baseCp = cluster.codePointAt(0)!;
+      if (prevBaseCp >= 0 && canBreakBetween(prevBaseCp, baseCp)) {
+        place();
+      }
+      prevBaseCp = baseCp;
+      measurer.addCluster(wordParts, cluster);
+      wordEmpty = false;
     }
   }
+  place();
 
   return lineCount;
-}
-
-/**
- * Split a line into words for wrapping purposes.
- * Delimiters (space, hyphen) are kept at the end of the preceding word.
- * This matches Excel's wrapping behavior where the space is consumed
- * before the line break.
- *
- * "Hello World" → ["Hello ", "World"]
- * "one-two-three" → ["one-", "two-", "three"]
- * "a  b" → ["a ", " ", "b"]
- */
-function _splitIntoWords(line: string): string[] {
-  const words: string[] = [];
-  let current = "";
-
-  for (const char of line) {
-    current += char;
-    // Break after spaces and hyphens
-    if (char === " " || char === "-" || char === "\t") {
-      words.push(current);
-      current = "";
-    }
-  }
-  if (current) {
-    words.push(current);
-  }
-
-  return words;
 }
 
 /**

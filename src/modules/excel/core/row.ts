@@ -73,12 +73,6 @@ export function rowCreate(worksheet: Worksheet, number: number): RowData {
   return { worksheet, number, cells: [], style: {}, outlineLevel: 0 };
 }
 
-export function rowDestroy(r: RowData): void {
-  r.worksheet = undefined!;
-  r.cells = undefined!;
-  r.style = undefined!;
-}
-
 export function rowFindCell(r: RowData, colNumber: number): CellData | undefined {
   return r.cells[colNumber - 1];
 }
@@ -172,18 +166,10 @@ export function rowSetFont(r: RowData, value: Partial<Font> | undefined): void {
   }
 }
 
-export function rowAlignment(r: RowData): Partial<Alignment> | undefined {
-  return r.style.alignment;
-}
-
 export function rowSetAlignment(r: RowData, value: Partial<Alignment> | undefined): void {
   if (value !== undefined) {
     applyStyle(r, "alignment", value);
   }
-}
-
-export function rowProtection(r: RowData): Partial<Protection> | undefined {
-  return r.style.protection;
 }
 
 export function rowSetProtection(r: RowData, value: Partial<Protection> | undefined): void {
@@ -192,18 +178,10 @@ export function rowSetProtection(r: RowData, value: Partial<Protection> | undefi
   }
 }
 
-export function rowBorder(r: RowData): Partial<Borders> | undefined {
-  return r.style.border;
-}
-
 export function rowSetBorder(r: RowData, value: Partial<Borders> | undefined): void {
   if (value !== undefined) {
     applyStyle(r, "border", value);
   }
-}
-
-export function rowFill(r: RowData): Fill | undefined {
-  return r.style.fill;
 }
 
 export function rowSetFill(r: RowData, value: Fill | undefined): void {

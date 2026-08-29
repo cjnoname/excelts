@@ -35,6 +35,15 @@ import {
 import { TextFeatureReport } from "@pdf/font/text-features";
 import type { TtfFont } from "@pdf/font/ttf-parser";
 import type { Type3FontResult } from "@pdf/font/type3-font";
+import { isType3Drawable } from "@pdf/font/type3-repertoire";
+import {
+  addCjkLanguageEvidence,
+  concludeCjkLanguage,
+  createCjkLanguageEvidence,
+  isGlyphlessControl
+} from "@utils/cjk";
+import type { CjkLanguage } from "@utils/cjk";
+import { describeCodePointBlocks } from "@utils/unicode-blocks";
 
 export interface RoutedFontSegment {
   readonly text: string;
@@ -184,6 +193,8 @@ export class FontManager {
   private nextConfiguredFaceId = 1;
   private resourcesWritten = false;
   private missingCodePoints = new Set<number>();
+  /** Set by {@link noteAutoDiscoveredFont} when a face was found by scanning. */
+  private autoDiscovered: { familyName: string; codePointCount: number } | undefined;
   private readonly textFeatures = new TextFeatureReport();
   /**
    * Set while reserving renderer-generated characters (see `trackText`). Those
@@ -218,6 +229,8 @@ export class FontManager {
 
   // --- Type3 fallback font tracking ---
   private type3CodePoints = new Set<number>();
+  /** Running language tally; see {@link getTextLanguage}. */
+  private readonly languageEvidence = createCjkLanguageEvidence();
   private _type3Result: Type3FontResult | null = null;
 
   // --- Diagnostic tracking (consumed by writers that surface warnings) ---
@@ -264,6 +277,77 @@ export class FontManager {
     return this.registerTtfFont(font, true);
   }
 
+  /**
+   * Replace the fallback face with one that covers more, but only when doing so
+   * cannot change a width that layout has already used.
+   *
+   * Discovery runs once, before layout, from the text the layout model contains. A
+   * header, a footer, a watermark or a vector chart's labels report their characters
+   * only afterwards, so the face chosen for the body may lack one of them — which is
+   * why a second, wider face is looked for at all.
+   *
+   * Swapping the face outright is not safe, though, and the failure is geometric
+   * rather than cosmetic. Two CJK faces agree on every ideograph, because a
+   * full-width character advances by exactly one em, so the problem hides in
+   * everything else: measured across `Kaiti SC` and `Heiti SC`, 345 code points
+   * outside Latin-1 that both faces cover have different advances — `Ā` is 0.699 em
+   * in one and 0.740 in the other. Replacing the face after those were measured
+   * moves a line break by 6% of an em per occurrence.
+   *
+   * So the swap is allowed only when the new face reports the same advance for every
+   * code point already measured through the old one. When it does not, the existing
+   * face is kept: a `.notdef` box for a late character is a visible, local defect,
+   * while silently re-flowing text against different metrics is neither.
+   *
+   * Returns `true` when the face was replaced.
+   */
+  widenFallbackFont(font: TtfFont): boolean {
+    if (this.config) {
+      throw new PdfFontError("Cannot widen a fallback face on a configured FontManager");
+    }
+    const incumbent = this.embeddedFont;
+    if (incumbent === null || !this.embeddedFontIsFallback) {
+      this.registerFallbackFont(font);
+      return true;
+    }
+    for (const codePoint of this.usedCodePoints) {
+      if (isWinAnsiCodePoint(codePoint)) {
+        continue; // drawn by a standard-14 face, not by either fallback
+      }
+      const oldGid = incumbent.cmap.get(codePoint);
+      if (oldGid === undefined || oldGid === 0) {
+        continue; // the incumbent never measured it
+      }
+      const newGid = font.cmap.get(codePoint);
+      if (newGid === undefined || newGid === 0) {
+        return false; // the "wider" face is narrower here
+      }
+      const oldAdvance = advanceEm(incumbent, oldGid);
+      const newAdvance = advanceEm(font, newGid);
+      if (oldAdvance !== newAdvance) {
+        return false;
+      }
+    }
+    this.registerFallbackFont(font);
+    return true;
+  }
+
+  /**
+   * Note that this face came from scanning the host, not from the caller.
+   *
+   * Reported by {@link reportDiagnostics}, which every pipeline calls — the warning
+   * used to be raised at the one discovery site inside `PdfDocumentBuilder.build()`,
+   * so `Pdf.create`, `Pdf.fromExcel` and `Pdf.fromDocx` embedded a face off the host
+   * and said nothing. Those are the entry points most likely to be producing a
+   * golden file, and the output stops being reproducible the moment it happens.
+   *
+   * Separate from `registerFallbackFont` because a caller naming its own
+   * `fallbackFamilies` is not making a guess and must not be warned about.
+   */
+  noteAutoDiscoveredFont(familyName: string, codePointCount: number): void {
+    this.autoDiscovered = { familyName, codePointCount };
+  }
+
   private registerTtfFont(font: TtfFont, fallbackOnly: boolean): string {
     if (this.config) {
       throw new PdfFontError("Cannot register a legacy embedded font on a configured FontManager");
@@ -301,6 +385,18 @@ export class FontManager {
   }
 
   /**
+   * Whether this manager routes text through a configured font set rather than the
+   * legacy single-face path.
+   *
+   * A configured manager plans every run against a named family, so its `trackText`
+   * requires the resource returned by `resolveFont` and it never falls back to Type3.
+   * Callers that seed a bare repertoire to load Type3 widths have to skip it.
+   */
+  hasConfiguredFonts(): boolean {
+    return this.config !== null;
+  }
+
+  /**
    * Read-only view of the non-WinAnsi code points encountered so far when
    * no font is embedded. Used by callers (`PdfDocumentBuilder.build()`)
    * to decide whether to auto-discover a system font before the Type3
@@ -309,6 +405,19 @@ export class FontManager {
    */
   getType3CodePoints(): Set<number> {
     return new Set(this.type3CodePoints);
+  }
+
+  /**
+   * The East Asian language the tracked text points to, or `undefined`.
+   *
+   * Accumulated as text is tracked rather than derived afterwards from
+   * {@link getType3CodePoints}: that returns a *set*, and a set has no
+   * multiplicity, so `国国国國` would look like one Simplified character against
+   * one Traditional one and decide nothing. Auto-discovery needs the language to
+   * pick a regional face, so the evidence is counted while the text is in hand.
+   */
+  getTextLanguage(): CjkLanguage | undefined {
+    return concludeCjkLanguage(this.languageEvidence);
   }
 
   /** Code points rendered as .notdef because no configured face covered them. */
@@ -329,6 +438,14 @@ export class FontManager {
    */
   reportDiagnostics(warn: (message: string) => void): void {
     this.textFeatures.report(warn);
+    if (this.autoDiscovered) {
+      warn(
+        `Auto-embedded system font '${this.autoDiscovered.familyName}' to render ` +
+          `${this.autoDiscovered.codePointCount} non-WinAnsi character(s). ` +
+          `Call embedFont(bytes) explicitly for deterministic output.`
+      );
+    }
+    this.reportCoverage(warn);
     const missing = this.missingCodePoints;
     if (missing.size === 0) {
       return;
@@ -342,6 +459,66 @@ export class FontManager {
         `and will render with the .notdef glyph (e.g. ${sample}). ` +
         `Add a named fallback family through fallbackFamilies.`
     );
+  }
+
+  /**
+   * Report non-WinAnsi characters that will render as Type3 NOTDEF boxes.
+   *
+   * This lives here rather than in `PdfDocumentBuilder.build()` because it is the
+   * condition `PdfExportOptions.onWarning` documents — "characters that no
+   * configured typeface covers … without this callback the condition is
+   * invisible" — and the builder's copy was reachable only from the Word bridge.
+   * The spreadsheet exporter is a separate pipeline that never ran it, so
+   * `Pdf.create` and `Pdf.fromExcel` produced a PDF with tofu boxes in it and
+   * said nothing at all. `missingCodePoints` below does not cover this case: it is
+   * recorded while routing text through an *embedded* face's cmap, and here there
+   * is no embedded face to route through.
+   *
+   * Called from {@link reportDiagnostics}, which every pipeline already invokes,
+   * so a new entry point cannot forget it.
+   *
+   * The warning names Unicode blocks rather than listing hex. A list of five code
+   * points is a hex dump: it says how many characters are missing but not *what*
+   * they are, so it cannot tell the author which font to install. "CJK Unified
+   * Ideographs (42, e.g. 中 U+4E2D)" does — the information matplotlib puts inside
+   * the tofu box itself via Unicode's Last Resort font, which a warning can carry
+   * without needing a font to draw it.
+   */
+  private reportCoverage(warn: (message: string) => void): void {
+    const type3 = this.type3CodePoints;
+    if (type3.size === 0) {
+      return;
+    }
+    // A fallback face that covers everything leaves nothing to report; one that is
+    // merely incomplete is reported for the part it cannot draw.
+    const uncovered = this.hasFallbackFont() ? this.getUncoveredFallbackCodePoints() : type3;
+    if (this.hasEmbeddedFont() && uncovered.size === 0) {
+      return;
+    }
+    // Two different outcomes, and reporting them as one sends the reader after the
+    // wrong fix. Type3 has a real glyph for every arrow, box-drawing character,
+    // dingbat and enclosed numeral — that is exactly why auto-discovery is allowed to
+    // pick a regional face that lacks them — and no glyph at all for an ideograph. So
+    // `☐` draws correctly while `中` becomes a `.notdef` box, and the old wording
+    // promised NOTDEF for both.
+    const substituted = [...uncovered].filter(cp => isType3Drawable(cp));
+    const tofu = [...uncovered].filter(cp => !isType3Drawable(cp));
+
+    if (tofu.length > 0) {
+      warn(
+        `${tofu.length} character(s) have no glyph in any available font and will render as ` +
+          `.notdef boxes: ${describeCodePointBlocks(new Set(tofu))}. ` +
+          `Call embedFont(bytes) with a font that covers these blocks.`
+      );
+    }
+    if (substituted.length > 0) {
+      warn(
+        `${substituted.length} character(s) are outside the embedded font and will be drawn ` +
+          `with built-in Type3 glyphs: ${describeCodePointBlocks(new Set(substituted))}. ` +
+          `Pass a font covering them through embedFont(bytes) to keep the whole document in ` +
+          `one typeface.`
+      );
+    }
   }
 
   /**
@@ -421,6 +598,33 @@ export class FontManager {
   }
 
   /**
+   * Non-WinAnsi code points the current fallback face cannot draw.
+   *
+   * Empty when there is no fallback face, because then *every* non-WinAnsi code
+   * point is uncovered and {@link getType3CodePoints} already reports them.
+   *
+   * This exists so a caller can tell "a face is registered" from "every character
+   * has a glyph", which are not the same question. A pipeline that measures a
+   * document, registers the face it chose, and only later draws more text — a
+   * chart's own axis labels are not part of the layout model — needs the second
+   * one: the face that covered the body may not cover a character that arrives
+   * afterwards, and stopping at "a font is present" left those characters as
+   * `.notdef` boxes even though another installed face could draw them.
+   */
+  getUncoveredFallbackCodePoints(): Set<number> {
+    const uncovered = new Set<number>();
+    if (!this.embeddedFont || !this.embeddedFontIsFallback) {
+      return uncovered;
+    }
+    for (const cp of this.type3CodePoints) {
+      if ((this.embeddedFont.cmap.get(cp) ?? 0) === 0) {
+        uncovered.add(cp);
+      }
+    }
+    return uncovered;
+  }
+
+  /**
    * Record that a text string will be rendered, tracking its code points.
    * Must be called for every text string before writing the PDF.
    *
@@ -437,6 +641,7 @@ export class FontManager {
    *     fallback when none is available.
    */
   trackText(text: string, resourceName?: string): void {
+    addCjkLanguageEvidence(this.languageEvidence, text);
     if (this.config) {
       if (!resourceName) {
         throw new PdfFontError(
@@ -603,7 +808,7 @@ export class FontManager {
           if (
             !this.suppressCoverageDiagnostics &&
             (state.source.font.cmap.get(codePoint) ?? 0) === 0 &&
-            !isSemanticControl(codePoint)
+            !isGlyphlessControl(codePoint)
           ) {
             this.missingCodePoints.add(codePoint);
           }
@@ -636,15 +841,34 @@ export class FontManager {
 
   /** Load lazy Type3 metrics before synchronous layout starts. */
   async prepare(): Promise<void> {
-    if (!this.config && !this.embeddedFont && this.type3CodePoints.size > 0) {
-      const { lookupGlyph } = await import("@pdf/font/type3-glyphs");
-      this.type3PlanningWidths = new Map(
-        [...this.type3CodePoints].map(codePoint => [
-          codePoint,
-          lookupGlyph(codePoint)?.width ?? 600
-        ])
-      );
+    if (this.config) {
+      return;
     }
+    // Which code points will actually be drawn by a Type3 glyph. Without an
+    // embedded face that is all of them; with one it is the part it cannot draw.
+    //
+    // The second case used to be skipped, on the assumption that an embedded face
+    // covers everything it was chosen for. Auto-discovery no longer requires total
+    // coverage — it requires the East Asian text, because a symbol it lacks is
+    // drawn by Type3 rather than disqualifying an entire regional face — so an
+    // incomplete fallback is now the ordinary case rather than a corner.
+    //
+    // Skipping it silently measured every such character at the 600 default, and
+    // Type3 widths are not uniform: across U+2000–U+27FF they take thirteen
+    // distinct values, and 122 of the code points a macOS Chinese face lacks are
+    // not 600 — the fixed-width spaces among them (`U+2003` em space is 1000,
+    // `U+200B` zero width is 0). Measuring a zero-width space as 0.6 em is a
+    // visible layout error, not a rounding one.
+    const needingType3 = this.embeddedFont
+      ? this.getUncoveredFallbackCodePoints()
+      : this.type3CodePoints;
+    if (needingType3.size === 0) {
+      return;
+    }
+    const { lookupGlyph } = await import("@pdf/font/type3-glyphs");
+    this.type3PlanningWidths = new Map(
+      [...needingType3].map(codePoint => [codePoint, lookupGlyph(codePoint)?.width ?? 600])
+    );
   }
 
   /** Alias for build contexts that name the pre-layout step finalize. */
@@ -853,15 +1077,19 @@ export class FontManager {
       const descent = this.getFontDescent(resourceName, fontSize);
       return { width: 0, ascent, descent, lineHeight: ascent - descent };
     }
-    let width = 0;
+    // Accumulate unscaled and scale once, exactly as `measureText` does. Scaling
+    // per segment and then summing is the same value in exact arithmetic but not in
+    // floating point, and the two are used interchangeably — a caller that already
+    // has the metrics must be able to read `width` instead of measuring again.
+    let unscaledWidth = 0;
     let ascent = 0;
     let descent = 0;
     for (const segment of segments) {
-      width += segment.width * fontSize;
+      unscaledWidth += segment.width;
       ascent = Math.max(ascent, segment.ascent * fontSize);
       descent = Math.min(descent, segment.descent * fontSize);
     }
-    return { width, ascent, descent, lineHeight: ascent - descent };
+    return { width: unscaledWidth * fontSize, ascent, descent, lineHeight: ascent - descent };
   }
 
   /**
@@ -1205,6 +1433,17 @@ function encodeWithEmbeddedFont(text: string, embedded: EmbeddedFont): string {
 /**
  * Measure text width using the embedded font's cmap + advanceWidths.
  */
+/**
+ * One glyph's advance in 1/1000 em, rounded exactly as the PDF `/W` array is.
+ *
+ * Comparing raw font units would call two faces different when the widths actually
+ * written to the file are identical, which is the only difference that can move a
+ * line. Used by {@link FontManager.widenFallbackFont}.
+ */
+function advanceEm(font: TtfFont, gid: number): number {
+  return Math.round(((font.advanceWidths[gid] ?? 0) * 1000) / font.unitsPerEm);
+}
+
 function measureEmbeddedText(text: string, font: TtfFont, fontSize: number): number {
   let totalEm = 0;
   for (let i = 0; i < text.length; i++) {
@@ -1214,7 +1453,7 @@ function measureEmbeddedText(text: string, font: TtfFont, fontSize: number): num
     }
     // Semantic controls are attached to the neighbouring visible CID by the
     // embedder and have zero advance of their own.
-    if (isSemanticControl(cp)) {
+    if (isGlyphlessControl(cp)) {
       continue;
     }
     const gid = font.cmap.get(cp) ?? 0;
@@ -1239,15 +1478,6 @@ function codePointsOf(text: string): number[] {
   return Array.from(text, char => char.codePointAt(0)!);
 }
 
-function isSemanticControl(codePoint: number): boolean {
-  return (
-    codePoint === 0x200c ||
-    codePoint === 0x200d ||
-    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
-    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
-  );
-}
-
 function configuredSegment(
   text: string,
   codepoints: readonly number[],
@@ -1255,7 +1485,7 @@ function configuredSegment(
 ): RoutedFontSegment {
   const font = state.source.font;
   const width = codepoints.reduce((sum, codePoint) => {
-    if (isSemanticControl(codePoint)) {
+    if (isGlyphlessControl(codePoint)) {
       return sum;
     }
     const glyphId = font.cmap.get(codePoint) ?? 0;

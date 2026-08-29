@@ -1641,6 +1641,25 @@ export function runStreamTests(imports: StreamModuleImports): void {
         expect(results).toContain(false);
       });
 
+      it("should skip undefined without ending the stream", async () => {
+        // A stream's terminator is a nullish push, so `push(undefined)` reads as
+        // end-of-data. An `undefined` in the middle of the array therefore used to
+        // truncate on Node and appear as a `null` chunk in the browser — the two
+        // implementations disagreed, and neither matched the array. Node 26.8 turned
+        // the Node case into `Cannot read properties of undefined (reading 'then')`
+        // from the async iterator, which is what finally made it visible.
+        const readable = createReadableFromArray([0, "", false, undefined, 7, undefined, "tail"], {
+          objectMode: true
+        });
+        const results: unknown[] = [];
+        for await (const chunk of readable) {
+          results.push(chunk);
+        }
+
+        // Everything after the first `undefined` survives, and no `null` is invented.
+        expect(results).toEqual([0, "", false, 7, "tail"]);
+      });
+
       it("should handle objects with various types", async () => {
         const data = [
           { type: "string", value: "hello" },
