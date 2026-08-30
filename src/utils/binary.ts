@@ -467,6 +467,356 @@ export function uint8ArrayToNodeBufferView(data: Uint8Array): Uint8Array {
   return bufferCtor.from(data.buffer, data.byteOffset, data.byteLength);
 }
 
+// =============================================================================
+// Little-endian scalar IO
+// =============================================================================
+
+// Every binary container this library speaks — ZIP local/central headers, BIFF12
+// records, CFB sector tables, PNG's one big-endian exception aside — is a stream
+// of little-endian fixed-width integers. This section is the single
+// implementation of that, and it lives at Layer 0 because `archive/` (ZIP),
+// `excel/` (BIFF12) and `word/` (CFB) all need it and none of them may import
+// each other.
+//
+// Two shapes, and the split is about allocation rather than taste:
+//
+//   * The free functions take an explicit offset and use byte arithmetic, so a
+//     handful of reads at known positions costs nothing. Reaching for a
+//     `DataView` here would allocate one per call.
+//   * `BinaryReader` caches a single `DataView` and advances a cursor, which is
+//     what you want when decoding a record field by field. `getFloat64` has no
+//     cheap byte-arithmetic equivalent, so sequential decoding needs the view
+//     anyway.
+//
+// Mixing the two up is a measurable mistake in both directions, which is why
+// both are here with the reason attached.
+//
+// Both shapes reject an out-of-range read rather than returning a value built
+// from missing bytes. That is not defensive habit: indexing past the end of a
+// `Uint8Array` yields `undefined`, and `undefined | 0` is `0`, so a truncated
+// four-byte field silently reads as a plausible smaller number. A ZIP with two
+// bytes where a signature belongs would report "invalid signature" instead of
+// "truncated", and a CRC field short by one byte would report a mismatch — both
+// blaming the wrong thing at the wrong offset. `DataView` throws here, and
+// replacing it with byte arithmetic must not quietly give that up.
+
+/** Assert that `count` bytes are readable at `offset`. */
+function requireBytes(bytes: Uint8Array, offset: number, count: number): void {
+  if (!Number.isInteger(offset) || offset < 0 || offset + count > bytes.length) {
+    throw new RangeError(
+      `cannot read ${count} byte(s) at offset ${offset}: length is ${bytes.length}`
+    );
+  }
+}
+
+/** Read an unsigned 16-bit little-endian integer at `offset`. */
+export function readUint16LE(bytes: Uint8Array, offset: number): number {
+  requireBytes(bytes, offset, 2);
+  return (bytes[offset] | (bytes[offset + 1] << 8)) >>> 0;
+}
+
+/** Read an unsigned 32-bit little-endian integer at `offset`. */
+export function readUint32LE(bytes: Uint8Array, offset: number): number {
+  requireBytes(bytes, offset, 4);
+  return (
+    (bytes[offset] |
+      (bytes[offset + 1] << 8) |
+      (bytes[offset + 2] << 16) |
+      (bytes[offset + 3] << 24)) >>>
+    0
+  );
+}
+
+/** Read a signed 32-bit little-endian integer at `offset`. */
+export function readInt32LE(bytes: Uint8Array, offset: number): number {
+  requireBytes(bytes, offset, 4);
+  return (
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+  );
+}
+
+/** Encode an unsigned 16-bit little-endian integer as 2 bytes. */
+export function writeUint16LE(value: number): Uint8Array {
+  const out = new Uint8Array(2);
+  out[0] = value & 0xff;
+  out[1] = (value >>> 8) & 0xff;
+  return out;
+}
+
+/** Encode an unsigned 32-bit little-endian integer as 4 bytes. */
+export function writeUint32LE(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  out[0] = value & 0xff;
+  out[1] = (value >>> 8) & 0xff;
+  out[2] = (value >>> 16) & 0xff;
+  out[3] = (value >>> 24) & 0xff;
+  return out;
+}
+
+// A shared 8-byte scratch view for the float conversions in the free-function
+// path. Allocating a DataView to encode one number is the thing this section
+// exists to avoid, and the conversions are synchronous and non-reentrant, so one
+// scratch buffer is safe.
+const _scratch = new DataView(new ArrayBuffer(8));
+
+/** Read a 64-bit little-endian IEEE 754 double at `offset`. */
+export function readFloat64LE(bytes: Uint8Array, offset: number): number {
+  requireBytes(bytes, offset, 8);
+  for (let i = 0; i < 8; i++) {
+    _scratch.setUint8(i, bytes[offset + i]);
+  }
+  return _scratch.getFloat64(0, true);
+}
+
+/** Encode a 64-bit little-endian IEEE 754 double as 8 bytes. */
+export function writeFloat64LE(value: number): Uint8Array {
+  _scratch.setFloat64(0, value, true);
+  const out = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    out[i] = _scratch.getUint8(i);
+  }
+  return out;
+}
+
+/**
+ * Sequential little-endian reader over a byte range.
+ *
+ * The `DataView` is built once in the constructor rather than per read — a
+ * record decoder performs tens of reads per record and hundreds of thousands per
+ * worksheet, and allocating a view for each one both costs an allocation and
+ * stops the read from inlining.
+ *
+ * Every read is bounds-checked and reports the cursor position, because the
+ * alternative — letting `DataView` throw its own `RangeError` — tells you that
+ * something was out of range but not where you were in the stream, which is the
+ * only useful part when the input is a few megabytes of binary records.
+ */
+export class BinaryReader {
+  private readonly view: DataView;
+  private readonly data: Uint8Array;
+  private readonly label: string;
+  private offset: number;
+
+  /**
+   * @param data   Bytes to read. Views are honoured; the reader never copies.
+   * @param offset Initial cursor position, relative to `data`.
+   * @param label  Named in bounds-error messages, e.g. a part or record name.
+   */
+  constructor(data: Uint8Array, offset = 0, label = "binary stream") {
+    this.data = data;
+    this.view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    this.label = label;
+    this.offset = 0;
+    this.position = offset;
+  }
+
+  get position(): number {
+    return this.offset;
+  }
+
+  /**
+   * Move the cursor.
+   *
+   * Validated for the same reason the reads are: a position derived from a
+   * declared offset in the input can be negative, fractional or past the end, and
+   * an unvalidated cursor turns that into a `remaining` of `NaN` or a negative
+   * number. From there every subsequent bounds check silently passes or fails for
+   * the wrong reason, and the error surfaces far from the field that was wrong.
+   */
+  set position(value: number) {
+    if (!Number.isInteger(value) || value < 0 || value > this.data.length) {
+      throw new RangeError(
+        `${this.label}: cannot seek to ${value} — length is ${this.data.length}`
+      );
+    }
+    this.offset = value;
+  }
+
+  get remaining(): number {
+    return this.data.length - this.offset;
+  }
+
+  /** The bytes this reader was constructed over, unsliced. */
+  get bytes(): Uint8Array {
+    return this.data;
+  }
+
+  /**
+   * Assert that `length` more bytes are available.
+   *
+   * Public because a decoder that is about to read a variable-length field
+   * usually wants to reject an absurd declared length before allocating for it,
+   * rather than after.
+   */
+  require(length: number): void {
+    if (!Number.isInteger(length) || length < 0 || length > this.remaining) {
+      throw new RangeError(
+        `${this.label}: truncated at byte ${this.offset} — need ${length} byte(s), ${this.remaining} remain`
+      );
+    }
+  }
+
+  readUint8(): number {
+    this.require(1);
+    const value = this.view.getUint8(this.offset);
+    this.offset += 1;
+    return value;
+  }
+
+  readInt8(): number {
+    this.require(1);
+    const value = this.view.getInt8(this.offset);
+    this.offset += 1;
+    return value;
+  }
+
+  readUint16(): number {
+    this.require(2);
+    const value = this.view.getUint16(this.offset, true);
+    this.offset += 2;
+    return value;
+  }
+
+  readInt16(): number {
+    this.require(2);
+    const value = this.view.getInt16(this.offset, true);
+    this.offset += 2;
+    return value;
+  }
+
+  readUint32(): number {
+    this.require(4);
+    const value = this.view.getUint32(this.offset, true);
+    this.offset += 4;
+    return value;
+  }
+
+  readInt32(): number {
+    this.require(4);
+    const value = this.view.getInt32(this.offset, true);
+    this.offset += 4;
+    return value;
+  }
+
+  readFloat64(): number {
+    this.require(8);
+    const value = this.view.getFloat64(this.offset, true);
+    this.offset += 8;
+    return value;
+  }
+
+  readBigUint64(): bigint {
+    this.require(8);
+    const value = this.view.getBigUint64(this.offset, true);
+    this.offset += 8;
+    return value;
+  }
+
+  /** Read `length` bytes as a view into the source — never a copy. */
+  readBytes(length: number): Uint8Array {
+    this.require(length);
+    const bytes = this.data.subarray(this.offset, this.offset + length);
+    this.offset += length;
+    return bytes;
+  }
+
+  skip(length: number): void {
+    this.require(length);
+    this.offset += length;
+  }
+
+  /**
+   * A view into the source between two absolute positions.
+   *
+   * Deliberately `subarray` semantics — clamped, negative indices count from the
+   * end — because that is what a method named `slice` is expected to do, and the
+   * ZIP parsers are written against it. It is not a bounds-checked read: use the
+   * cursor reads when a short range should be reported as truncation.
+   */
+  slice(start: number, end: number): Uint8Array {
+    return this.data.subarray(start, end);
+  }
+
+  /** Read a uint32 at an absolute offset without moving the cursor. */
+  peekUint32(offset: number): number {
+    // `Number.isInteger` first: every comparison against `NaN` is false, so a
+    // range check alone lets `NaN` through, and `DataView` then coerces it to 0
+    // and returns the *first* uint32 in the stream as though it were the one
+    // asked for.
+    if (!Number.isInteger(offset) || offset < 0 || offset + 4 > this.data.length) {
+      throw new RangeError(
+        `${this.label}: cannot peek 4 byte(s) at ${offset} — length is ${this.data.length}`
+      );
+    }
+    return this.view.getUint32(offset, true);
+  }
+}
+
+/**
+ * Growable little-endian byte sink.
+ *
+ * Chunks are collected and joined once on `toUint8Array()`, which is both faster
+ * and simpler than repeatedly reallocating a single buffer, and it lets a caller
+ * hand over an already-built payload with `writeBytes` without a copy into an
+ * intermediate.
+ */
+export class BinaryWriter {
+  private readonly chunks: Uint8Array[] = [];
+  private total = 0;
+
+  /** Bytes written so far. */
+  get length(): number {
+    return this.total;
+  }
+
+  writeUint8(value: number): this {
+    return this.push(Uint8Array.of(value & 0xff));
+  }
+
+  writeUint16(value: number): this {
+    return this.push(writeUint16LE(value));
+  }
+
+  writeUint32(value: number): this {
+    return this.push(writeUint32LE(value));
+  }
+
+  writeInt32(value: number): this {
+    return this.push(writeUint32LE(value >>> 0));
+  }
+
+  writeFloat64(value: number): this {
+    return this.push(writeFloat64LE(value));
+  }
+
+  /** Append bytes verbatim. The chunk is referenced, not copied. */
+  writeBytes(chunk: Uint8Array): this {
+    return chunk.length === 0 ? this : this.push(chunk);
+  }
+
+  /** Append `count` zero bytes — reserved or unused spec fields. */
+  writeZeros(count: number): this {
+    // A count, unlike a value, has no sensible coercion. `writeZeros(1.9)` would
+    // be truncated to one byte by `Uint8Array` and `writeZeros(-4)` silently does
+    // nothing, so a caller that mis-derived a reserved-field width from the input
+    // would emit a differently shaped record and find out much later.
+    if (!Number.isInteger(count) || count < 0) {
+      throw new RangeError(`byte count must be a non-negative integer: ${count}`);
+    }
+    return count === 0 ? this : this.push(new Uint8Array(count));
+  }
+
+  toUint8Array(): Uint8Array {
+    return concatUint8Arrays(this.chunks, this.total);
+  }
+
+  private push(chunk: Uint8Array): this {
+    this.chunks.push(chunk);
+    this.total += chunk.length;
+    return this;
+  }
+}
+
 /**
  * Convert collected chunks to a string.
  *

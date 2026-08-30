@@ -517,7 +517,7 @@ It is **not** a replacement for Excel / LibreOffice rendering when pixel-identic
 - DrawingML effect filters (shadow / glow / soft-edge / blur / reflection) emit as SVG `<filter>` but are silently dropped by the Node PNG rasteriser
 - Pivot chart field buttons and drop-zone UI are metadata-only — the host application still draws them
 
-**For production-grade rendering**, round-trip the `.xlsx` through headless LibreOffice (`soffice --convert-to pdf`). The byte-preserving round-trip + `templateMode: "strict"` guarantees in this library make that a safe handoff.
+**For production-grade rendering**, round-trip the `.xlsx` through headless LibreOffice (`soffice --convert-to pdf`). An unmodified chart part is handed to LibreOffice as the exact bytes that were loaded, and `templateMode: "strict"` refuses to re-render an edited chart part it cannot patch in place — so the handoff does not quietly substitute a reconstruction for the original.
 
 ### Classic Chart
 
@@ -949,6 +949,59 @@ await Workbook.toBuffer(workbook, { strictTemplateMode: true });
 
 Strict template mode affects edited chart parts loaded from an existing workbook. Newly created charts still render structurally.
 
+### Package Part Preservation
+
+A real workbook carries parts this library does not model: a VBA project, custom document properties, data connections, query tables, printer settings, vendor extensions. The contract for those is:
+
+> **Preserve every part whose reachability can be re-established; drop the rest deliberately and report why.**
+
+Preserving a part means more than keeping its bytes. A reader finds a part through a relationship and decides how to interpret it from its content type, and this writer regenerates both `[Content_Types].xml` and every `.rels` file from the model. So three things travel with a preserved part:
+
+- its `Override` content type, or the `Default` for its extension — promoted to an explicit `Override` when the source package declared that extension differently from what this writer emits, so a vendor type is not silently rewritten to `application/xml`;
+- its own `.rels`, so whatever it points at still resolves;
+- the relationships that pointed **at** it, re-registered on the parts that declared them — including the `r:id` inside `<pageSetup>`, without which a preserved `printerSettings` part is present but unused.
+
+`xl/vbaProject.bin` is the case that motivates all of this: the workbook content type is round-tripped, so before package-part preservation existed, reading an `.xlsm` and writing it produced a file that still declared itself macro-enabled with every macro gone.
+
+#### What is deliberately not written back
+
+Three categories, and the reasons differ:
+
+| Category               | Parts                                                               | Why                                                                                                                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stale caches           | `xl/calcChain.xml`, `xl/volatileDependencies.xml`, `xl/revisions/*` | They describe a workbook state the write invalidates. Excel rebuilds them on open, so omitting them is not data loss — it is declining to assert something false.                                                           |
+| Invalidated signatures | `_xmlsignatures/*`                                                  | A signature covers the exact bytes it was made over, and re-serialising any modelled part changes them. A file that is honestly unsigned is better than one that claims a guarantee it no longer has.                       |
+| Unreachable            | anything nothing in the output would point at                       | A part no application can reach is indistinguishable from a part that was never there, and a relationship whose target is absent is worse than either — a dangling reference is one of the things Excel offers to "repair". |
+
+A part becomes unreachable when the sheet that referenced it is deleted, or when its only inbound relationship came from a part whose `.rels` this writer regenerates without a channel for preserved edges. Reachability is transitive, so a chain hanging off a dropped part collapses with it.
+
+Anything not in those categories is preserved, including parts this library has never seen. An unclassified part is more likely to be your data than something this library may delete, and a slightly larger file is a much cheaper mistake than a missing feature.
+
+#### Inspecting what happened
+
+Drops are recorded rather than silent, because two of the reasons are things a caller may need to act on:
+
+```typescript
+import { Workbook } from "documonster/excel";
+import type { OpaqueDrop } from "documonster/excel";
+
+const workbook = Workbook.create();
+await Workbook.readFile(workbook, "signed-macro-enabled.xlsm");
+
+const drops: readonly OpaqueDrop[] = Workbook.getModel(workbook).opaqueDrops ?? [];
+for (const drop of drops) {
+  console.warn(`${drop.path}: ${drop.reason} — ${drop.description}`);
+}
+// _xmlsignatures/sig1.xml: invalidated-signature — digital signature over the
+// source bytes, which this write replaces
+```
+
+`Workbook.getModel(workbook).opaqueParts` lists what was kept, each entry carrying its `path`, `data`, `contentType`, and the relationships in both directions.
+
+#### Boundary
+
+Preserved inbound relationships are re-emitted on the package root, on `xl/workbook.xml`, and on worksheets. A relationship that reached a part from a chart, drawing or pivot table is recorded on read — which is what makes the decision informed — but has no channel back into the output, so such a part is reported as `unreachable` rather than written where nothing refers to it.
+
 ### Oracle And Corpus Testing
 
 The repository includes optional harnesses for real-application validation. They are disabled by default because they require external binaries or private fixture corpora.
@@ -1016,7 +1069,8 @@ Excel and WPS can be wired into the same pattern by providing CI jobs that conve
 | Pivot charts            | classic pivot chart source metadata, field buttons/filter metadata, pivot chartsheets (metadata-only — see pivot chart note below)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Presets                 | 99 classic presets + 10 ChartEx presets — cone/cylinder/pyramid, scatter variants, stock, surface/contour, exploded pie/doughnut, histogram/pareto/waterfall/funnel/treemap/sunburst/boxWhisker/regionMap (via `EXCEL_CHART_PRESETS` / `EXCEL_CHART_EX_PRESETS`)                                                                                                                                                                                                                                                                                                                        |
 | ChartEx helpers         | `chartExOptionsFromTable` / `chartExOptionsFromRows` (+ `Chart.addExFromTable/addExFromRows`) for sunburst/treemap/waterfall/funnel/histogram/pareto/boxWhisker                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Template fidelity       | byte-preserving round-trip, raw-XML patching for narrow edits, `templateMode: "strict"` to refuse silent loss, `Chart.unknownElements` surfacing `c15:` / `cx14:` vendor tags                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Template fidelity       | byte-preserving round-trip of unmodified chart / chartEx parts and their style and colour sidecars (not of the package as a whole), raw-XML patching for narrow edits, `templateMode: "strict"` to refuse silent loss, `Chart.unknownElements` surfacing `c15:` / `cx14:` vendor tags                                                                                                                                                                                                                                                                                                   |
+| Package part fidelity   | unmodelled parts (VBA project, custom properties, connections, query tables, printer settings, vendor extensions) preserved with their content type and relationships in both directions; stale caches, invalidated signatures and unreachable parts dropped deliberately and reported via `WorkbookModel.opaqueDrops`                                                                                                                                                                                                                                                                  |
 | Rendering scope         | **zero-dependency deterministic preview** — not an Excel-identical compositor. Classic charts use a `ChartScene` IR for SVG, PNG, PDF; ChartEx uses dedicated geometry collectors for SVG and vector PDF. For pixel-perfect output, round-trip the `.xlsx` through `soffice --convert-to pdf`                                                                                                                                                                                                                                                                                           |
 | Rendering features      | deterministic SVG, browser PNG, Node PNG fallback (honours text `rotate`), PDF drawing bridge (labels/markers/errorBars/trendlines/leader lines/data tables); text anchor+rotation+color+fontFamily (`bold`/`italic` from `txPr/a:latin`); radar/area/bubble true alpha via `PdfColor.a` → `/ExtGState`; bar3D true axonometric projection (`view3D.rotX` / `rotY` / `rAngAx`) with three shaded faces; text sized via `@excel/utils/text-metrics` (Calibri/Arial/Times/9 fonts + ~230 category factors). DrawingML effect filters emit as SVG `<filter>` but are not reproduced in PDF |
 | Commercial-grade gaps   | Excel-perfect rendering, true 3D for line3D/pie3D/area3D/surface3D, arbitrary unknown XML mutation, and full real-file compatibility matrices require external oracle testing                                                                                                                                                                                                                                                                                                                                                                                                           |

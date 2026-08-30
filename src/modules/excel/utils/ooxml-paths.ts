@@ -193,6 +193,11 @@ export function toContentTypesPartName(zipPath: string): string {
   return zipPath.startsWith("/") ? zipPath : `/${zipPath}`;
 }
 
+/** Inverse of {@link toContentTypesPartName}: `/xl/workbook.xml` → `xl/workbook.xml`. */
+export function fromContentTypesPartName(partName: string): string {
+  return partName.startsWith("/") ? partName.slice(1) : partName;
+}
+
 export function themePath(themeName: string): string {
   return `xl/theme/${themeName}.xml`;
 }

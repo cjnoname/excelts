@@ -493,7 +493,7 @@ Documonster 包含结构化的图表 API、用于模板的原始 XML 保留，�
 - DrawingML 效果滤镜（阴影/发光/柔化边缘/模糊/反射）会以 SVG `<filter>` 形式输出，但被 Node PNG 栅格化器静默丢弃
 - 透视图字段按钮和拖放区 UI 仅为元数据 —— 仍由宿主应用程序绘制它们
 
-**对于生产级渲染**，请通过无头 LibreOffice（`soffice --convert-to pdf`）对 `.xlsx` 进行往返转换。本库的字节保留往返 + `templateMode: "strict"` 保证使得这一交接是安全的。
+**对于生产级渲染**，请通过无头 LibreOffice（`soffice --convert-to pdf`）对 `.xlsx` 进行往返转换。未被修改的图表部件会以加载时的原始字节交给 LibreOffice，而 `templateMode: "strict"` 会拒绝重新渲染任何无法就地修补的已编辑图表部件——因此这一交接不会悄悄用重建产物替换原件。
 
 ### 经典图表
 
@@ -924,6 +924,59 @@ await Workbook.toBuffer(workbook, { strictTemplateMode: true });
 
 严格模板模式影响从现有工作簿加载的、被编辑过的图表部件。新创建的图表仍按结构化方式渲染。
 
+### 包部件保留
+
+真实工作簿会携带本库并未建模的部件：VBA 项目、自定义文档属性、数据连接、查询表、打印机设置、厂商扩展。对这些部件的契约是：
+
+> **保留每一个能够重新建立可达性的部件；其余部件明确丢弃，并报告原因。**
+
+保留一个部件不只是留下它的字节。读取方通过 relationship 找到部件，并通过 content type 决定如何解释它，而本 writer 会从模型重新生成 `[Content_Types].xml` 和每一个 `.rels` 文件。因此有三样东西随保留部件一起被带出：
+
+- 它的 `Override` content type，或其扩展名对应的 `Default` —— 当源包对该扩展名的声明与本 writer 输出的不同时，会被提升为该部件上的显式 `Override`，使厂商类型不会被静默改写成 `application/xml`；
+- 它自己的 `.rels`，使它指向的内容仍然可以解析；
+- 指向**它**的 relationship，重新登记在原本声明这些 relationship 的部件上 —— 包括 `<pageSetup>` 中的 `r:id`，缺少它时保留下来的 `printerSettings` 部件虽然存在却不会被使用。
+
+`xl/vbaProject.bin` 是促成这整套机制的案例：工作簿 content type 是会往返保留的，因此在包部件保留机制存在之前，读取一个 `.xlsm` 再写出会得到一个仍然声称启用宏、而其中所有宏都已消失的文件。
+
+#### 哪些内容会被明确地不写回
+
+三类，原因各不相同：
+
+| 类别     | 部件                                                                | 原因                                                                                                                                             |
+| -------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 陈旧缓存 | `xl/calcChain.xml`、`xl/volatileDependencies.xml`、`xl/revisions/*` | 它们描述的是一个被本次写入作废的工作簿状态。Excel 会在打开时重建它们，因此省略它们不是数据丢失 —— 而是拒绝断言一件不成立的事。                   |
+| 失效签名 | `_xmlsignatures/*`                                                  | 签名覆盖的是它被创建时的确切字节，而重新序列化任何已建模部件都会改变这些字节。一个诚实地未签名的文件，好过一个声称拥有它已不再具备的保证的文件。 |
+| 不可达   | 输出中不会有任何内容指向的部件                                      | 应用程序无法到达的部件，与从未存在过的部件没有区别；而目标缺失的 relationship 比两者都更糟 —— 悬空引用正是 Excel 会提示"修复"的问题之一。        |
+
+当引用某部件的工作表被删除，或该部件唯一的入边来自一个由本 writer 重新生成 `.rels`、且没有保留边回填通道的部件时，该部件即成为不可达。可达性是传递的，因此挂在被丢弃部件之下的整条链会随之一并消失。
+
+不属于上述类别的内容都会被保留，包括本库从未见过的部件。一个未分类的部件更可能是你的数据，而不是本库有权删除的东西；而"文件略大"这个错误的代价，远低于"功能缺失"。
+
+#### 检查发生了什么
+
+丢弃会被记录而非静默处理，因为其中两类原因是调用方可能需要采取行动的：
+
+```typescript
+import { Workbook } from "documonster/excel";
+import type { OpaqueDrop } from "documonster/excel";
+
+const workbook = Workbook.create();
+await Workbook.readFile(workbook, "signed-macro-enabled.xlsm");
+
+const drops: readonly OpaqueDrop[] = Workbook.getModel(workbook).opaqueDrops ?? [];
+for (const drop of drops) {
+  console.warn(`${drop.path}: ${drop.reason} — ${drop.description}`);
+}
+// _xmlsignatures/sig1.xml: invalidated-signature — digital signature over the
+// source bytes, which this write replaces
+```
+
+`Workbook.getModel(workbook).opaqueParts` 列出被保留下来的部件，每一项都携带其 `path`、`data`、`contentType`，以及两个方向上的 relationship。
+
+#### 边界
+
+被保留的入边会在包根、`xl/workbook.xml` 以及工作表上重新发射。从 chart、drawing 或 pivot table 指向某部件的 relationship 会在读取时被记录 —— 这正是让上述判定有据可依的原因 —— 但它没有回到输出的通道，因此这类部件会被报告为 `unreachable`，而不是被写入一个没有任何内容引用它的位置。
+
 ### Oracle 与语料库测试
 
 该仓库包含用于真实应用验证的可选测试框架。它们默认禁用，因为需要外部二进制文件或私有的固定语料库。
@@ -991,7 +1044,8 @@ Excel 和 WPS 可以通过提供 CI 作业接入同样的模式，这些作业�
 | 透视图           | 经典透视图源元数据、字段按钮/筛选元数据、透视图图表工作表（仅元数据 —— 参见下方透视图说明）                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 预设             | 99 个经典预设 + 10 个 ChartEx 预设 —— 圆锥/圆柱/棱锥、散点变体、股价、曲面/等高线、分离饼图/圆环图、histogram/pareto/waterfall/funnel/treemap/sunburst/boxWhisker/regionMap（通过 `EXCEL_CHART_PRESETS` / `EXCEL_CHART_EX_PRESETS`）                                                                                                                                                                                                                                                             |
 | ChartEx 辅助方法 | `chartExOptionsFromTable` / `chartExOptionsFromRows`（+ `Chart.addExFromTable/addExFromRows`），用于 sunburst/treemap/waterfall/funnel/histogram/pareto/boxWhisker                                                                                                                                                                                                                                                                                                                               |
-| 模板保真度       | 字节保留往返、用于狭窄编辑的原始 XML 修补、`templateMode: "strict"` 以拒绝静默丢失、`Chart.unknownElements` 浮现 `c15:` / `cx14:` 厂商标签                                                                                                                                                                                                                                                                                                                                                       |
+| 模板保真度       | 未修改的 chart / chartEx 部件及其样式与配色 sidecar 的逐字节保留往返（不是整个包的逐字节保留）、用于狭窄编辑的原始 XML 修补、`templateMode: "strict"` 以拒绝静默丢失、`Chart.unknownElements` 浮现 `c15:` / `cx14:` 厂商标签                                                                                                                                                                                                                                                                     |
+| 包部件保真度     | 未建模部件（VBA 项目、自定义属性、连接、查询表、打印机设置、厂商扩展）连同其 content type 与两个方向的 relationship 一并保留；陈旧缓存、失效签名与不可达部件被明确丢弃，并通过 `WorkbookModel.opaqueDrops` 报告                                                                                                                                                                                                                                                                                  |
 | 渲染范围         | **零依赖确定性预览** —— 并非与 Excel 一致的合成器。经典图表对 SVG、PNG、PDF 使用 `ChartScene` IR；ChartEx 对 SVG 和矢量 PDF 使用专门的几何收集器。对于像素级精确的输出，请通过 `soffice --convert-to pdf` 对 `.xlsx` 进行往返转换                                                                                                                                                                                                                                                                |
 | 渲染特性         | 确定性 SVG、浏览器 PNG、Node PNG 回退（遵循文本 `rotate`）、PDF 绘图桥（标签/标记/误差线/趋势线/引导线/数据表）；文本锚点+旋转+颜色+字体族（来自 `txPr/a:latin` 的 `bold`/`italic`）；radar/area/bubble 通过 `PdfColor.a` → `/ExtGState` 实现真实 alpha；bar3D 真实轴测投影（`view3D.rotX` / `rotY` / `rAngAx`）带三个着色面；文本尺寸通过 `@excel/utils/text-metrics` 计算（Calibri/Arial/Times/9 种字体 + 约 230 个类别因子）。DrawingML 效果滤镜以 SVG `<filter>` 形式输出，但在 PDF 中不复现 |
 | 商业级差距       | Excel 完美渲染、line3D/pie3D/area3D/surface3D 的真实 3D、任意未知 XML 修改，以及完整的真实文件兼容性矩阵，都需要外部 oracle 测试                                                                                                                                                                                                                                                                                                                                                                 |

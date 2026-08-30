@@ -281,26 +281,15 @@ export function isValidZipRecordSignature(sig: number): boolean {
   }
 }
 
-function readUint32LEFromBytes(view: Uint8Array, offset: number): number {
-  return (
-    (view[offset] |
-      0 |
-      ((view[offset + 1] | 0) << 8) |
-      ((view[offset + 2] | 0) << 16) |
-      ((view[offset + 3] | 0) << 24)) >>>
-    0
-  );
-}
-
 function readUint16LEFromBytes(view: Uint8Array, offset: number): number {
   return (view[offset] | ((view[offset + 1] | 0) << 8)) >>> 0;
 }
 
 function parseCrxHeaderFast(data: Uint8Array): CrxHeader {
   return {
-    version: readUint32LEFromBytes(data, 0),
-    pubKeyLength: readUint32LEFromBytes(data, 4),
-    signatureLength: readUint32LEFromBytes(data, 8)
+    version: readUint32LE(data, 0),
+    pubKeyLength: readUint32LE(data, 4),
+    signatureLength: readUint32LE(data, 8)
   };
 }
 
@@ -311,9 +300,9 @@ function parseLocalFileHeaderVarsFast(data: Uint8Array): EntryVars {
     compressionMethod: readUint16LEFromBytes(data, 4),
     lastModifiedTime: readUint16LEFromBytes(data, 6),
     lastModifiedDate: readUint16LEFromBytes(data, 8),
-    crc32: readUint32LEFromBytes(data, 10),
-    compressedSize: readUint32LEFromBytes(data, 14),
-    uncompressedSize: readUint32LEFromBytes(data, 18),
+    crc32: readUint32LE(data, 10),
+    compressedSize: readUint32LE(data, 14),
+    uncompressedSize: readUint32LE(data, 18),
     fileNameLength: readUint16LEFromBytes(data, 22),
     extraFieldLength: readUint16LEFromBytes(data, 24)
   };
@@ -321,10 +310,10 @@ function parseLocalFileHeaderVarsFast(data: Uint8Array): EntryVars {
 
 function parseDataDescriptorVarsFast(data: Uint8Array): DataDescriptorVars {
   return {
-    dataDescriptorSignature: readUint32LEFromBytes(data, 0),
-    crc32: readUint32LEFromBytes(data, 4),
-    compressedSize: readUint32LEFromBytes(data, 8),
-    uncompressedSize: readUint32LEFromBytes(data, 12)
+    dataDescriptorSignature: readUint32LE(data, 0),
+    crc32: readUint32LE(data, 4),
+    compressedSize: readUint32LE(data, 8),
+    uncompressedSize: readUint32LE(data, 12)
   };
 }
 

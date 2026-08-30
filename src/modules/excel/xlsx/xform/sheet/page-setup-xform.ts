@@ -53,6 +53,17 @@ interface PageSetupModel {
   useFirstPageNumber?: boolean;
   usePrinterDefaults?: boolean;
   copies?: number;
+  /**
+   * `r:id` of the printer-settings part, when the source sheet had one.
+   *
+   * Not a modelled page-setup property — it is the only thing that connects the
+   * sheet to a preserved `xl/printerSettings/printerSettingsN.bin`. Dropping it
+   * while preserving the part and its relationship produces a package that
+   * carries printer settings no sheet refers to, which is the same as not having
+   * preserved them at all. The writer re-emits whatever id that relationship
+   * ended up with, since a preserved id can collide with a freshly allocated one.
+   */
+  rId?: string;
 }
 
 class PageSetupXform extends BaseXform {
@@ -95,7 +106,8 @@ class PageSetupXform extends BaseXform {
         firstPageNumber: useFirstPageNumber ? model.firstPageNumber : undefined,
         useFirstPageNumber: booleanToXml(useFirstPageNumber),
         usePrinterDefaults: booleanToXml(model.usePrinterDefaults!),
-        copies: model.copies
+        copies: model.copies,
+        "r:id": model.rId
       };
       if (Object.values(attributes).some((value: unknown) => value !== undefined)) {
         xmlStream.leafNode(this.tag, attributes);
@@ -125,7 +137,8 @@ class PageSetupXform extends BaseXform {
               : undefined,
           useFirstPageNumber: parseXsdBoolean(node.attributes.useFirstPageNumber) ?? false,
           usePrinterDefaults: node.attributes.usePrinterDefaults === "1",
-          copies: parseInt(node.attributes.copies ?? "1", 10)
+          copies: parseInt(node.attributes.copies ?? "1", 10),
+          rId: node.attributes["r:id"]
         };
         return true;
       default:

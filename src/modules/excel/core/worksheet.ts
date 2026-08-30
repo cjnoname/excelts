@@ -63,6 +63,7 @@ import type {
 import { formCheckboxCreate, formCheckboxFromModel } from "@excel/core/form-control";
 import type { WorksheetImage, ImageModel } from "@excel/core/image";
 import { imageClone, imageCreate, imageModel } from "@excel/core/image";
+import type { OpaqueRelationship } from "@excel/core/opaque-part";
 import { withPivotChartSource } from "@excel/core/pivot-chart";
 import type { PivotTable, PivotTableModel } from "@excel/core/pivot-table";
 import { makePivotTable } from "@excel/core/pivot-table";
@@ -189,6 +190,11 @@ export interface WorksheetModel {
   autoFilter: AutoFilter | null;
   autoFilterCriteria?: AutoFilterCriteria;
   sortStateXml?: string;
+  /**
+   * Relationships from this sheet to preserved parts this library does not
+   * model. See `WorksheetData._opaqueRels`.
+   */
+  opaqueRels?: OpaqueRelationship[];
   worksheetNamespaceAttributes?: Record<string, string>;
   worksheetMcIgnorable?: string;
   sortStateAutoFilterRef?: string;
@@ -2486,6 +2492,7 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
     autoFilter: ws.autoFilter,
     autoFilterCriteria: ws._autoFilterCriteria,
     sortStateXml: ws._sortStateXml,
+    opaqueRels: ws._opaqueRels,
     worksheetNamespaceAttributes: ws._worksheetNamespaceAttributes,
     worksheetMcIgnorable: ws._worksheetMcIgnorable,
     sortStateAutoFilterRef: ws._sortStateAutoFilterRef,
@@ -2620,6 +2627,7 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws.autoFilter = value.autoFilter;
   ws._autoFilterCriteria = value.autoFilterCriteria;
   ws._sortStateXml = value.sortStateXml;
+  ws._opaqueRels = value.opaqueRels;
   ws._worksheetNamespaceAttributes = value.worksheetNamespaceAttributes;
   ws._worksheetMcIgnorable = value.worksheetMcIgnorable;
   ws._sortStateAutoFilterRef = value.sortStateAutoFilterRef;

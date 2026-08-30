@@ -163,6 +163,23 @@ import {
   worksheetRelTarget
 } from "@excel/utils/ooxml-paths";
 import { StreamBuf } from "@excel/utils/stream-buf";
+import type {
+  OpaqueDrop,
+  OpaquePart,
+  OpaqueRelationship,
+  OpaqueSourceRelationship
+} from "@excel/xlsx/opaque-parts";
+import {
+  appendOpaqueSourceRelationships,
+  collectOpaqueParts,
+  isRelationshipsPart,
+  opaqueContentTypeDeclarations,
+  groupOpaqueRelationshipsBySource,
+  ownerOfRelationshipsPart,
+  relationshipsPathFor,
+  resolveReachableOpaqueParts,
+  resolveRelationshipTarget
+} from "@excel/xlsx/opaque-parts";
 import { RelType } from "@excel/xlsx/rel-type";
 import type { ParsedExternalLink } from "@excel/xlsx/xform/book/external-link-xform";
 import { ExternalLinkXform } from "@excel/xlsx/xform/book/external-link-xform";
@@ -179,6 +196,7 @@ import { ContentTypesXform } from "@excel/xlsx/xform/core/content-types-xform";
 import { CoreXform } from "@excel/xlsx/xform/core/core-xform";
 import { FeaturePropertyBagXform } from "@excel/xlsx/xform/core/feature-property-bag-xform";
 import { MetadataXform } from "@excel/xlsx/xform/core/metadata-xform";
+import type { RelationshipModel } from "@excel/xlsx/xform/core/relationship-xform";
 import { RelationshipsXform } from "@excel/xlsx/xform/core/relationships-xform";
 import type { ParsedPivotTableModel } from "@excel/xlsx/xform/pivot-table/pivot-table-xform";
 import { WorkSheetXform } from "@excel/xlsx/xform/sheet/worksheet-xform";
@@ -545,10 +563,11 @@ class StreamingZipWriterAdapter implements IZipWriter {
 /**
  * Options for reading (loading) an XLSX workbook.
  *
- * All officially supported options are declared below with proper types so
- * callers get IDE completion and type-checking. Additional fields are
- * permitted via the index signature for forward compatibility and for
- * callers who subclass `XLSX` to pass through private flags.
+ * The option set is closed. It used to carry an `[key: string]: unknown` index
+ * signature "for forward compatibility", which in practice meant a misspelled or
+ * unsupported option type-checked and was then silently ignored — the failure
+ * mode a typed options bag exists to prevent. A new option is a new declared
+ * field here.
  */
 export interface XlsxReadOptions {
   /**
@@ -573,11 +592,6 @@ export interface XlsxReadOptions {
    * contain corrupted or unsupported elements you want to ignore.
    */
   ignoreNodes?: string[];
-  /**
-   * Forward-compatibility / subclass extension escape hatch. Unknown keys are
-   * passed through to internal loaders; unrecognised keys are ignored.
-   */
-  [key: string]: unknown;
 }
 
 export interface ZipWriterOptions {
@@ -593,10 +607,10 @@ export type XlsxTemplateMode = "preserve" | "strict";
 /**
  * Options for writing an XLSX workbook.
  *
- * All officially supported options are declared below with proper types so
- * callers get IDE completion and type-checking. Additional fields are
- * permitted via the index signature for forward compatibility and for
- * callers who subclass `XLSX` to pass through private flags.
+ * The option set is closed — see {@link XlsxReadOptions} for why. This matters
+ * more here than on the read side: a write option that is accepted and dropped
+ * produces a file that differs from what the caller asked for, with nothing
+ * anywhere reporting it.
  */
 export interface XlsxWriteOptions {
   /** ZIP archive options (compression level, timestamps, ...). */
@@ -661,11 +675,6 @@ export interface XlsxWriteOptions {
    * @see OoxmlValidationReport
    */
   validate?: boolean;
-  /**
-   * Forward-compatibility / subclass extension escape hatch. Unknown keys are
-   * passed through to internal writers; unrecognised keys are ignored.
-   */
-  [key: string]: unknown;
 }
 
 export type XlsxOptions = XlsxReadOptions & XlsxWriteOptions;
@@ -5064,6 +5073,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     await this.addCore(zip, model);
     await this.addPersons(zip, model);
     await this.addSlicerAndTimelineParts(zip, model);
+    await this.addOpaqueParts(zip, model);
   }
 
   /**
@@ -5298,7 +5308,16 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       externalLinkRelsByIndex: {} as Record<number, ExternalLinkRelsEntry[]>,
       // Chartsheets keyed by sheet number
       chartsheets: {} as Record<number, any>,
-      chartsheetRels: {} as Record<number, any[]>
+      chartsheetRels: {} as Record<number, any[]>,
+      // Staging for opaque (unmodelled) parts. A ZIP imposes no entry order, so
+      // bytes, content types and relationships are gathered independently while
+      // walking the package and joined in reconcile() once all three are known.
+      opaqueUnknownEntries: new Map<string, Uint8Array>(),
+      opaqueContentTypeOverrides: new Map<string, string>(),
+      opaqueContentTypeDefaults: {} as Record<string, string>,
+      opaqueRelationshipsBySource: new Map<string, OpaqueRelationship[]>(),
+      opaqueParts: [] as OpaquePart[],
+      opaqueDrops: [] as OpaqueDrop[]
     };
   }
 
@@ -5348,7 +5367,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
 
     switch (entryName) {
       case OOXML_PATHS.rootRels:
-        model.globalRels = await this.parseRels(stream);
+        model.globalRels = await this.parseRels(stream, model, "");
         return true;
       case OOXML_PATHS.xlWorkbook: {
         const workbook = await this.parseWorkbook(stream);
@@ -5369,7 +5388,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         await model.sharedStrings.parseStream(stream);
         return true;
       case OOXML_PATHS.xlWorkbookRels:
-        model.workbookRels = await this.parseRels(stream);
+        model.workbookRels = await this.parseRels(stream, model, OOXML_PATHS.xlWorkbook);
         return true;
       case OOXML_PATHS.contentTypes: {
         // Capture the Override ContentType for /xl/workbook.xml. Templates
@@ -5382,6 +5401,12 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         const parsed = await new ContentTypesXform().parseStream(stream);
         if (parsed?.workbookContentType) {
           model.workbookContentType = parsed.workbookContentType;
+        }
+        for (const [partPath, contentType] of Object.entries(parsed?.overrides ?? {})) {
+          model.opaqueContentTypeOverrides.set(partPath, contentType);
+        }
+        for (const [extension, contentType] of Object.entries(parsed?.defaults ?? {})) {
+          model.opaqueContentTypeDefaults[extension] = contentType;
         }
         return true;
       }
@@ -5615,9 +5640,23 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   // Parse helpers - shared by all platforms
   // ===========================================================================
 
-  parseRels(stream: IParseStream): Promise<any> {
+  /**
+   * Parse a `.rels` part and register its edges for opaque reachability.
+   *
+   * `source` is required rather than optional on purpose. Whether a preserved
+   * part is still reachable depends on every relationship in the package, not
+   * just the ones this writer regenerates, so a `.rels` file parsed without being
+   * registered here silently makes an unreachable part look like a part that
+   * never had an inbound edge — which is the one case that must be emitted. Making
+   * the parameter mandatory means a new `.rels` handler cannot omit it.
+   *
+   * @param source Part whose relationships these are; `""` for the package root.
+   */
+  async parseRels(stream: IParseStream, model: any, source: string): Promise<any> {
     const xform = new RelationshipsXform();
-    return xform.parseStream(stream);
+    const relationships = await xform.parseStream(stream);
+    this._recordOpaqueRelationships(model, source, relationships);
+    return relationships;
   }
 
   parseWorkbook(stream: IParseStream): Promise<any> {
@@ -5635,6 +5674,32 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   // ===========================================================================
 
   async reconcile(model: any, options?: XlsxOptions): Promise<void> {
+    // Join the opaque staging maps first: everything else in reconcile works on
+    // modelled state, and the preserved parts must be settled before the model
+    // is handed to the workbook.
+    const opaque = collectOpaqueParts({
+      unknownEntries: model.opaqueUnknownEntries,
+      contentTypeOverrides: model.opaqueContentTypeOverrides,
+      relationshipsBySource: model.opaqueRelationshipsBySource
+    });
+    model.opaqueParts = opaque.parts;
+    model.opaqueDrops = opaque.drops;
+    // Distribute sheet-sourced inbound relationships onto the sheets that
+    // declared them, so they move with the sheet rather than with its position.
+    const inboundBySource = groupOpaqueRelationshipsBySource(opaque.parts);
+    for (const worksheet of model.worksheets) {
+      const rels = inboundBySource.get(worksheetPath(worksheet.sheetNo));
+      if (rels) {
+        worksheet.opaqueRels = rels;
+      }
+    }
+    // The staging maps hold every unrecognised entry's bytes. They are load-time
+    // scratch, and the assembled parts now own that memory, so release them
+    // rather than carry a second reference to the whole set into the workbook.
+    delete model.opaqueUnknownEntries;
+    delete model.opaqueContentTypeOverrides;
+    delete model.opaqueRelationshipsBySource;
+
     const workbookXform = new WorkbookXform();
     const worksheetXform = new WorkSheetXform(options);
 
@@ -6289,9 +6354,9 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     model: any,
     sheetNo: number
   ): Promise<void> {
-    const xform = new RelationshipsXform();
-    const relationships = await xform.parseStream(stream);
-    model.worksheetRels[sheetNo] = relationships;
+    // A sheet is where Excel looks for printer settings, so a relationship from
+    // here may be the only thing that reaches a preserved part.
+    model.worksheetRels[sheetNo] = await this.parseRels(stream, model, worksheetPath(sheetNo));
   }
 
   async _processMediaEntry(stream: IParseStream, model: any, filename: string): Promise<void> {
@@ -6393,9 +6458,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   async _processDrawingRelsEntry(entry: any, model: any, name: string): Promise<void> {
-    const xform = new RelationshipsXform();
-    const relationships = await xform.parseStream(entry);
-    model.drawingRels[name] = relationships;
+    model.drawingRels[name] = await this.parseRels(entry, model, drawingPath(name));
   }
 
   async _processVmlDrawingEntry(entry: any, model: any, zipPath: string): Promise<void> {
@@ -6421,9 +6484,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   async _processVmlDrawingHFRelsEntry(entry: any, model: any, name: string): Promise<void> {
-    const xform = new RelationshipsXform();
     model.vmlDrawingHFRels ??= {};
-    model.vmlDrawingHFRels[name] = await xform.parseStream(entry);
+    model.vmlDrawingHFRels[name] = await this.parseRels(entry, model, `xl/drawings/${name}.vml`);
   }
 
   async _processThemeEntry(stream: IParseStream, model: any, name: string): Promise<void> {
@@ -6469,9 +6531,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   async _processPivotTableRelsEntry(stream: IParseStream, model: any, name: string): Promise<void> {
-    const xform = new RelationshipsXform();
-    const relationships = await xform.parseStream(stream);
-    model.pivotTableRels[name] = relationships;
+    model.pivotTableRels[name] = await this.parseRels(stream, model, `xl/pivotTables/${name}.xml`);
   }
 
   async _processPivotCacheDefinitionEntry(
@@ -6527,7 +6587,11 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     model: any,
     index: number
   ): Promise<void> {
-    const relationships = await this.parseRels(stream);
+    const relationships = await this.parseRels(
+      stream,
+      model,
+      `xl/externalLinks/externalLink${index}.xml`
+    );
     model.externalLinkRelsByIndex[index] = relationships ?? [];
   }
 
@@ -6558,9 +6622,11 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     model: any,
     chartNumber: number
   ): Promise<void> {
-    const xform = new RelationshipsXform();
-    const relationships = await xform.parseStream(stream);
-    model.chartRels[chartNumber] = relationships;
+    model.chartRels[chartNumber] = await this.parseRels(
+      stream,
+      model,
+      `xl/charts/chart${chartNumber}.xml`
+    );
   }
 
   async _processChartStyleEntry(
@@ -6638,8 +6704,11 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
 
     const chartsheetRelsNo = getChartsheetNoFromRelsPath(entryName);
     if (chartsheetRelsNo !== undefined) {
-      const rels = await this.parseRels(stream);
-      model.chartsheetRels[chartsheetRelsNo] = rels;
+      model.chartsheetRels[chartsheetRelsNo] = await this.parseRels(
+        stream,
+        model,
+        chartsheetPath(chartsheetRelsNo)
+      );
       return true;
     }
 
@@ -6822,9 +6891,11 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
 
     const chartExRelsNumber = getChartExNumberFromRelsPath(entryName);
     if (chartExRelsNumber !== undefined) {
-      const relsXform = new RelationshipsXform();
-      const relationships = await relsXform.parseStream(stream);
-      model.chartExRels[chartExRelsNumber] = relationships;
+      model.chartExRels[chartExRelsNumber] = await this.parseRels(
+        stream,
+        model,
+        `xl/charts/chartEx${chartExRelsNumber}.xml`
+      );
       return true;
     }
 
@@ -6864,7 +6935,62 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       return true;
     }
 
-    return false;
+    // Nothing above recognised this entry. Keep it rather than drain it: an
+    // unrecognised part is far more likely to be someone's data (a VBA project,
+    // custom properties, a data connection) than something this writer is
+    // entitled to delete. `collectOpaqueParts` applies the drop policy later,
+    // once the whole package has been seen.
+    if (isRelationshipsPart(entryName)) {
+      const owner = ownerOfRelationshipsPart(entryName);
+      if (owner !== undefined) {
+        await this.parseRels(stream, model, owner);
+      }
+      // Handled as relationships, not as bytes: a preserved part's `.rels` is
+      // re-emitted from its parsed `relationships` so that a relationship
+      // pointing at something we dropped does not survive as a dangling
+      // reference. Returning true stops the caller draining it as unknown.
+      return true;
+    }
+
+    model.opaqueUnknownEntries.set(entryName, rawData ?? (await this.collectStreamData(stream)));
+    return true;
+  }
+
+  /**
+   * Record a parsed `.rels` file against the part that declares it.
+   *
+   * Both the modelled rels (root, workbook) and an opaque part's own rels land
+   * here, because resolving "what pointed at this preserved part" needs every
+   * relationship in the package, not just the unrecognised ones.
+   */
+  protected _recordOpaqueRelationships(
+    model: any,
+    source: string,
+    rels: readonly RelationshipModel[] | undefined
+  ): void {
+    if (!rels || rels.length === 0) {
+      return;
+    }
+    // `Id`/`Type`/`Target` are optional on `RelationshipModel` because it is the
+    // raw attribute bag the SAX parser produced, so a malformed `.rels` can be
+    // missing any of them. Such an entry is skipped rather than defaulted: an
+    // edge with no target cannot make anything reachable, and inventing one would
+    // put a broken relationship into the output.
+    const recorded: OpaqueRelationship[] = [];
+    for (const rel of rels) {
+      if (rel.Id === undefined || rel.Type === undefined || rel.Target === undefined) {
+        continue;
+      }
+      recorded.push({
+        id: rel.Id,
+        type: rel.Type,
+        target: rel.Target,
+        targetMode: rel.TargetMode
+      });
+    }
+    if (recorded.length > 0) {
+      model.opaqueRelationshipsBySource.set(source, recorded);
+    }
   }
 
   // ===========================================================================
@@ -6907,7 +7033,30 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   async addContentTypes(zip: IZipWriter, model: any): Promise<void> {
-    await this._renderToZip(zip, OOXML_PATHS.contentTypes, new ContentTypesXform(), model);
+    // Extensions this writer declares itself. A preserved part that relied on a
+    // conflicting Default for one of these needs an Override instead, or the
+    // writer's value silently reclassifies it.
+    const reserved = new Map<string, string>([
+      ["rels", "application/vnd.openxmlformats-package.relationships+xml"],
+      ["xml", "application/xml"]
+    ]);
+    for (const medium of model.media ?? []) {
+      if (medium?.type === "image" && typeof medium.extension === "string") {
+        const extension = medium.extension.toLowerCase();
+        reserved.set(extension, extension === "svg" ? "image/svg+xml" : `image/${extension}`);
+      }
+    }
+
+    const declarations = opaqueContentTypeDeclarations(
+      model.opaqueParts,
+      model.opaqueContentTypeDefaults,
+      reserved
+    );
+    await this._renderToZip(zip, OOXML_PATHS.contentTypes, new ContentTypesXform(), {
+      ...model,
+      opaqueContentTypes: declarations.overrides,
+      opaqueContentTypeDefaults: declarations.defaults
+    });
   }
 
   async addApp(zip: IZipWriter, model: any): Promise<void> {
@@ -6926,12 +7075,104 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     }
   }
 
-  async addOfficeRels(zip: IZipWriter, _model: any): Promise<void> {
-    await this._renderToZip(zip, OOXML_PATHS.rootRels, new RelationshipsXform(), [
+  async addOfficeRels(zip: IZipWriter, model: any): Promise<void> {
+    const relationships: any[] = [
       { Id: "rId1", Type: XLSX.RelType.OfficeDocument, Target: OOXML_PATHS.xlWorkbook },
       { Id: "rId2", Type: XLSX.RelType.CoreProperties, Target: OOXML_PATHS.docPropsCore },
       { Id: "rId3", Type: XLSX.RelType.ExtenderProperties, Target: OOXML_PATHS.docPropsApp }
-    ]);
+    ];
+    appendOpaqueSourceRelationships(relationships, model.opaqueParts, "");
+    await this._renderToZip(zip, OOXML_PATHS.rootRels, new RelationshipsXform(), relationships);
+  }
+
+  /**
+   * Write the preserved parts and each one's own `.rels`.
+   *
+   * The relationships that point *at* these parts are not written here — they
+   * belong to `[Content_Types].xml` and to the `.rels` of the modelled parts
+   * that declared them, which are regenerated elsewhere and pick the preserved
+   * entries up through `appendOpaqueSourceRelationships`.
+   */
+  /**
+   * Drop preserved parts this write would leave unreachable, before anything is
+   * emitted.
+   *
+   * Runs at the head of `prepareModel` because four writers consume the result —
+   * the content types, the root rels, the workbook rels and the parts themselves —
+   * and a part dropped after one of them had already declared it would leave the
+   * package inconsistent in a different way than the one being fixed.
+   */
+  protected _resolveOpaqueReachability(model: any): void {
+    const parts: OpaquePart[] = model.opaqueParts ?? [];
+    if (parts.length === 0) {
+      return;
+    }
+
+    // The edges this write will actually emit: the root and workbook rels are
+    // rebuilt with the preserved entries appended, and each sheet re-emits its
+    // own. Sheet-sourced targets are resolved against a canonical worksheet path
+    // because every sheet lives in `xl/worksheets/`, so a relative target
+    // resolves identically whichever file index the sheet ends up with — which
+    // is also why deleting a sheet is what removes its edges, not renumbering.
+    const emitted: OpaqueSourceRelationship[] = [];
+    for (const part of parts) {
+      for (const inbound of part.sourceRelationships ?? []) {
+        if (inbound.source === "" || inbound.source === OOXML_PATHS.xlWorkbook) {
+          emitted.push(inbound);
+        }
+      }
+    }
+    const canonicalSheet = worksheetPath(1);
+    for (const worksheet of model.worksheets ?? []) {
+      for (const relationship of worksheet.opaqueRels ?? []) {
+        emitted.push({ ...relationship, source: canonicalSheet });
+      }
+    }
+
+    const resolved = resolveReachableOpaqueParts(parts, emitted);
+    if (resolved.drops.length === 0) {
+      return;
+    }
+
+    model.opaqueParts = resolved.parts;
+    model.opaqueDrops = [...(model.opaqueDrops ?? []), ...resolved.drops];
+
+    // A sheet must not keep pointing at a part that is no longer written.
+    const kept = new Set(resolved.parts.map(part => part.path.toLowerCase()));
+    for (const worksheet of model.worksheets ?? []) {
+      if (!worksheet.opaqueRels) {
+        continue;
+      }
+      const surviving = worksheet.opaqueRels.filter((relationship: OpaqueRelationship) => {
+        const target = resolveRelationshipTarget(
+          canonicalSheet,
+          relationship.target,
+          relationship.targetMode
+        );
+        return !target || kept.has(target.toLowerCase());
+      });
+      worksheet.opaqueRels = surviving.length > 0 ? surviving : undefined;
+    }
+  }
+
+  async addOpaqueParts(zip: IZipWriter, model: any): Promise<void> {
+    const parts: OpaquePart[] = model.opaqueParts ?? [];
+    for (const part of parts) {
+      await this._appendToZip(zip, part.data, { name: part.path });
+      if (part.relationships && part.relationships.length > 0) {
+        await this._renderToZip(
+          zip,
+          relationshipsPathFor(part.path),
+          new RelationshipsXform(),
+          part.relationships.map(rel => ({
+            Id: rel.id,
+            Type: rel.type,
+            Target: rel.target,
+            ...(rel.targetMode ? { TargetMode: rel.targetMode } : {})
+          }))
+        );
+      }
+    }
   }
 
   async addWorkbookRels(zip: IZipWriter, model: any): Promise<void> {
@@ -7033,6 +7274,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         Target: externalLinkRelTargetFromWorkbook(link.index)
       });
     }
+
+    appendOpaqueSourceRelationships(relationships, model.opaqueParts, OOXML_PATHS.xlWorkbook);
 
     const xform = new RelationshipsXform();
     await this._renderToZip(zip, OOXML_PATHS.xlWorkbookRels, xform, relationships);
@@ -7806,6 +8049,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   prepareModel(model: any, options: any): void {
+    this._resolveOpaqueReachability(model);
     model.creator = model.creator ?? "Documonster";
     model.lastModifiedBy = model.lastModifiedBy ?? "Documonster";
     model.created = model.created ?? new Date();

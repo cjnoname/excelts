@@ -37,6 +37,7 @@ import {
   definedNamesModel,
   definedNamesSetModel
 } from "@excel/core/defined-names";
+import type { OpaqueDrop, OpaquePart } from "@excel/core/opaque-part";
 import { withPivotChartSource } from "@excel/core/pivot-chart";
 import type { PivotTable } from "@excel/core/pivot-table";
 import type { WorkbookData, NamedStyleEntry } from "@excel/core/workbook-core";
@@ -195,6 +196,33 @@ export interface WorkbookModel {
   timelineParts?: Record<string, Uint8Array>;
   timelineCacheParts?: Record<string, Uint8Array>;
   /**
+   * Package parts this library does not model, preserved verbatim together with
+   * their content type and the relationships that reach them.
+   *
+   * Without this the loader drained unrecognised entries and dropped the bytes,
+   * so `read` followed by `write` silently deleted a VBA project, custom
+   * document properties, data connections, query tables and printer settings.
+   * The macro case was the sharpest: `workbookContentType` *is* round-tripped,
+   * so the output kept declaring itself macro-enabled with no macros left in it.
+   */
+  opaqueParts?: OpaquePart[];
+  /**
+   * `Default` content-type declarations the preserved parts rely on, keyed by
+   * lower-case extension. Separate from {@link OpaquePart.contentType} because a
+   * Default is a property of the package, not of one part.
+   */
+  opaqueContentTypeDefaults?: Record<string, string>;
+  /**
+   * Preserved parts that were deliberately not written back, and why.
+   *
+   * Reported rather than discarded because two of the reasons are things a caller
+   * may need to act on: a digital signature is removed on any write that
+   * re-serialises a modelled part, and a part becomes unreachable when the sheet
+   * that referenced it is deleted. Populated on read and topped up at write time,
+   * when reachability is finally known.
+   */
+  opaqueDrops?: OpaqueDrop[];
+  /**
    * External workbook references in declaration order. Matches the on-disk
    * `[N]Sheet!Ref` indexing (1-based). Empty or undefined when the workbook
    * has no external references.
@@ -349,6 +377,9 @@ export function createWorkbook(options?: { formulaSyntaxProbe?: SyntaxProbe }): 
   wb._slicerCacheParts = {};
   wb._timelineParts = {};
   wb._timelineCacheParts = {};
+  wb._opaqueParts = [];
+  wb._opaqueContentTypeDefaults = {};
+  wb._opaqueDrops = [];
   wb._writerExternalLinkCache = new Map();
   wb._definedNames = createDefinedNames(options?.formulaSyntaxProbe);
 
@@ -1207,7 +1238,10 @@ export function getWorkbookModel(wb: WorkbookData): WorkbookModel {
     slicerParts: wb._slicerParts,
     slicerCacheParts: wb._slicerCacheParts,
     timelineParts: wb._timelineParts,
-    timelineCacheParts: wb._timelineCacheParts
+    timelineCacheParts: wb._timelineCacheParts,
+    opaqueParts: wb._opaqueParts,
+    opaqueContentTypeDefaults: wb._opaqueContentTypeDefaults,
+    opaqueDrops: wb._opaqueDrops
   };
 }
 
@@ -1312,6 +1346,9 @@ export function setWorkbookModel(wb: WorkbookData, value: WorkbookModel): void {
   wb._slicerCacheParts = value.slicerCacheParts ?? {};
   wb._timelineParts = value.timelineParts ?? {};
   wb._timelineCacheParts = value.timelineCacheParts ?? {};
+  wb._opaqueParts = value.opaqueParts ?? [];
+  wb._opaqueContentTypeDefaults = value.opaqueContentTypeDefaults ?? {};
+  wb._opaqueDrops = value.opaqueDrops ?? [];
   // Preserve external workbook references (empty array if none)
   wb.externalLinks = value.externalLinks ? [...value.externalLinks] : [];
   // Reset the writer-scoped auto-discovery cache — loading a fresh

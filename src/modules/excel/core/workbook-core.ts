@@ -23,6 +23,7 @@ import type { ChartEntry } from "@excel/chart/model/types";
 import type { BuiltinCellStyle } from "@excel/core/builtin-cell-styles";
 import { BUILTIN_CELL_STYLES } from "@excel/core/builtin-cell-styles";
 import type { DefinedNamesData } from "@excel/core/defined-names";
+import type { OpaqueDrop, OpaquePart } from "@excel/core/opaque-part";
 import type { PivotTable } from "@excel/core/pivot-table";
 import type {
   WorkbookMedia,
@@ -114,6 +115,11 @@ export interface WorkbookData {
   _slicerCacheParts: Record<string, Uint8Array>;
   _timelineParts: Record<string, Uint8Array>;
   _timelineCacheParts: Record<string, Uint8Array>;
+  /** Preserved unmodelled package parts — see `WorkbookModel.opaqueParts`. */
+  _opaqueParts: OpaquePart[];
+  _opaqueContentTypeDefaults: Record<string, string>;
+  /** Preserved parts not written back — see `WorkbookModel.opaqueDrops`. */
+  _opaqueDrops: OpaqueDrop[];
   _xlsx?: XLSX;
   userFunctions?: Map<string, WorkbookFunctionDescriptor>;
 }

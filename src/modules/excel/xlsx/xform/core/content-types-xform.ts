@@ -17,6 +17,7 @@ import {
   pivotCacheRecordsPath,
   pivotTablePath,
   tablePath,
+  fromContentTypesPartName,
   toContentTypesPartName,
   worksheetPath
 } from "@excel/utils/ooxml-paths";
@@ -47,6 +48,17 @@ interface ContentTypesModel {
    * the plain-workbook type below.
    */
   workbookContentType?: string;
+  /**
+   * `Override` declarations for preserved parts this library does not model,
+   * keyed by zip-relative path. Round-tripped from the source package so a
+   * carried-through part stays classifiable by Excel.
+   */
+  opaqueContentTypes?: Record<string, string>;
+  /**
+   * `Default` declarations keyed by lower-case extension, for preserved parts
+   * that were registered by extension rather than by an explicit `Override`.
+   */
+  opaqueContentTypeDefaults?: Record<string, string>;
   media?: { type?: string; extension: string }[];
   worksheets: { fileIndex: number }[];
   chartsheets?: { sheetNo: number }[];
@@ -83,7 +95,11 @@ interface ContentTypesModel {
 
 // used for rendering the [Content_Types].xml file; on parse it captures only
 // the workbook part's Override ContentType (see parseOpen).
-class ContentTypesXform extends BaseXform<{ workbookContentType?: string }> {
+class ContentTypesXform extends BaseXform<{
+  workbookContentType?: string;
+  overrides?: Record<string, string>;
+  defaults?: Record<string, string>;
+}> {
   render(xmlStream: XmlSink, model: ContentTypesModel): void {
     xmlStream.openXml(StdDocAttributes);
 
@@ -97,7 +113,10 @@ class ContentTypesXform extends BaseXform<{ workbookContentType?: string }> {
         if (isExternalImage(medium)) {
           return;
         }
-        const imageType = medium.extension;
+        // Lower-cased: OPC matches an extension case-insensitively, so treating
+        // `PNG` and `png` as different keys emits both and produces a duplicate
+        // Default — itself a package error.
+        const imageType = medium.extension.toLowerCase();
         if (!mediaHash[imageType]) {
           mediaHash[imageType] = true;
           xmlStream.leafNode("Default", {
@@ -116,9 +135,28 @@ class ContentTypesXform extends BaseXform<{ workbookContentType?: string }> {
     });
     xmlStream.leafNode("Default", { Extension: "xml", ContentType: "application/xml" });
 
+    // Extension defaults needed by preserved parts. The caller has already
+    // resolved which of these can be a Default and which had to become a
+    // per-part Override (see `opaqueContentTypeDeclarations`), so this list
+    // never collides with the ones emitted above.
+    Object.entries(model.opaqueContentTypeDefaults ?? {}).forEach(([extension, contentType]) => {
+      xmlStream.leafNode("Default", { Extension: extension, ContentType: contentType });
+    });
+
     xmlStream.leafNode("Override", {
       PartName: toContentTypesPartName(OOXML_PATHS.xlWorkbook),
       ContentType: model.workbookContentType ?? PLAIN_WORKBOOK_CONTENT_TYPE
+    });
+
+    // Preserved parts this library does not model. Emitted first so a later
+    // modelled Override always wins: `opaqueContentTypes` is captured from the
+    // source package, and if a part has since become modelled the writer's own
+    // declaration is the current one.
+    Object.entries(model.opaqueContentTypes ?? {}).forEach(([path, contentType]) => {
+      xmlStream.leafNode("Override", {
+        PartName: toContentTypesPartName(path),
+        ContentType: contentType
+      });
     });
 
     model.worksheets.forEach(worksheet => {
@@ -430,18 +468,42 @@ class ContentTypesXform extends BaseXform<{ workbookContentType?: string }> {
   }
 
   parseOpen(node: ParseOpenTag): boolean {
-    // Read side: capture only the Override for `/xl/workbook.xml`, whose
-    // ContentType varies by workbook kind (plain / template / macro-enabled)
-    // and must be round-tripped so Excel doesn't see a content-type ⁄
-    // extension mismatch. Every other part is regenerated on write.
+    // Read side: capture the Override for `/xl/workbook.xml`, whose ContentType
+    // varies by workbook kind (plain / template / macro-enabled) and must be
+    // round-tripped so Excel doesn't see a content-type ⁄ extension mismatch.
+    //
+    // Every Override is also recorded in `overrides`, because a part this
+    // library does not model is preserved verbatim on write and needs its
+    // declared content type to travel with it — bytes alone leave Excel with a
+    // part it cannot classify. The modelled parts re-declare themselves during
+    // `render`, so their entries here are simply unused.
     const localName = node.name.includes(":")
       ? node.name.slice(node.name.indexOf(":") + 1)
       : node.name;
     if (localName === "Override") {
       const partName = node.attributes.PartName;
       const contentType = node.attributes.ContentType;
-      if (partName === toContentTypesPartName(OOXML_PATHS.xlWorkbook) && contentType) {
-        this.model = { ...(this.model ?? {}), workbookContentType: contentType };
+      if (partName && contentType) {
+        const overrides = { ...(this.model?.overrides ?? {}) };
+        overrides[fromContentTypesPartName(partName)] = contentType;
+        this.model = { ...(this.model ?? {}), overrides };
+        if (partName === toContentTypesPartName(OOXML_PATHS.xlWorkbook)) {
+          this.model = { ...this.model, workbookContentType: contentType };
+        }
+      }
+    } else if (localName === "Default") {
+      // `Default` matters as much as `Override` for preserved parts, and it is
+      // easy to overlook because the parts this library models are all declared
+      // by Override. `xl/printerSettings/printerSettings1.bin` is typical: Excel
+      // registers it with a single `Default Extension="bin"`, so capturing only
+      // Overrides preserves the bytes and loses the declaration — which the
+      // OOXML self-check reports as `content-types-missing-for-part`.
+      const extension = node.attributes.Extension;
+      const contentType = node.attributes.ContentType;
+      if (extension && contentType) {
+        const defaults = { ...(this.model?.defaults ?? {}) };
+        defaults[extension.toLowerCase()] = contentType;
+        this.model = { ...(this.model ?? {}), defaults };
       }
     }
     return true;

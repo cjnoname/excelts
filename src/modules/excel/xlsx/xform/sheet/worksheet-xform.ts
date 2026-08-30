@@ -319,6 +319,44 @@ class WorkSheetXform extends BaseXform {
       });
     }
 
+    // Relationships to preserved parts this library does not model — printer
+    // settings, query tables. `rels` is rebuilt from empty on every write, so
+    // without this the part survives in the package with nothing pointing at it,
+    // which to Excel is the same as it not being there.
+    //
+    // The original rId is reused when free, because the preserved part's own XML
+    // may name it; on a collision `nextRid` allocates above every id in use.
+    const opaqueIdRemap = new Map<string, string>();
+    for (const opaque of model.opaqueRels ?? []) {
+      const taken = rels.some(rel => rel.Id === opaque.id);
+      const id = taken ? nextRid(rels) : opaque.id;
+      if (id !== opaque.id) {
+        opaqueIdRemap.set(opaque.id, id);
+      }
+      rels.push({
+        Id: id,
+        Type: opaque.type,
+        Target: opaque.target,
+        ...(opaque.targetMode ? { TargetMode: opaque.targetMode } : {})
+      });
+    }
+
+    // Sheet XML that names one of those ids has to follow it. `<pageSetup r:id>`
+    // is the case that occurs in practice: without this the reference either
+    // vanishes with the id or, worse, keeps pointing at an id a hyperlink or
+    // drawing has since been given — a silently wrong target rather than a
+    // missing one.
+    if (model.pageSetup?.rId) {
+      const remapped = opaqueIdRemap.get(model.pageSetup.rId);
+      if (remapped) {
+        model.pageSetup = { ...model.pageSetup, rId: remapped };
+      } else if (!rels.some(rel => rel.Id === model.pageSetup.rId)) {
+        // The printer-settings part is gone (dropped as unreachable, or never
+        // preserved), so the attribute must go rather than dangle.
+        model.pageSetup = { ...model.pageSetup, rId: undefined };
+      }
+    }
+
     // Handle pre-loaded drawing (from file read) that may contain charts or other non-image content.
     // Chart anchors (with chartNumber from reconcile) are preserved and get fresh rels.
     // Group anchors (`<xdr:grpSp>`, captured verbatim by GenericEchoXform — no

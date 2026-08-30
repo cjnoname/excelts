@@ -50,6 +50,7 @@ import type { DataValidationsData } from "@excel/core/data-validations";
 import { Enums } from "@excel/core/enums";
 import type { FormCheckboxData } from "@excel/core/form-control";
 import type { WorksheetImage } from "@excel/core/image";
+import type { OpaqueRelationship } from "@excel/core/opaque-part";
 import type { PivotTable } from "@excel/core/pivot-table";
 import type { RangeData } from "@excel/core/range";
 import { rangeCreate, rangeRange } from "@excel/core/range";
@@ -183,6 +184,15 @@ export interface WorksheetData {
   _autoFilterCriteria?: AutoFilterCriteria;
   /** The worksheet's `<sortState>` block, preserved verbatim from a loaded file. */
   _sortStateXml?: string;
+  /**
+   * Relationships from this sheet to preserved parts this library does not model
+   * — printer settings and query tables are the common cases.
+   *
+   * They live on the sheet rather than on the workbook because that is where
+   * Excel looks for them, and they travel with the sheet's own model so that
+   * reordering or renaming sheets cannot detach a part from the one that owns it.
+   */
+  _opaqueRels?: OpaqueRelationship[];
   /** Additional root namespace declarations needed by preserved worksheet XML. */
   _worksheetNamespaceAttributes?: Record<string, string>;
   _worksheetMcIgnorable?: string;

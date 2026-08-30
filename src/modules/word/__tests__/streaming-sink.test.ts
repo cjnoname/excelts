@@ -9,6 +9,7 @@
  *  - `reset()` is rejected in sink mode.
  */
 
+import { extractAll } from "@archive/unzip/extract";
 import { ZipDeflate } from "@archive/zip/stream";
 import { PartPath } from "@word/constants";
 import { describe, it, expect, vi } from "vitest";
@@ -23,8 +24,40 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+/**
+ * Describe a package by its entries' actual decompressed content.
+ *
+ * The comparison has to be on content, not on size. The previous version of this
+ * test asserted the two packages had the same total byte length, which fails ~60%
+ * of the time when the two builds straddle a clock second: `docProps/core.xml`
+ * embeds `new Date()` at second resolution (`word/writer/parts-writer.ts`), and
+ * the *digits* of that timestamp change how well the part deflates — measured at
+ * 257, 258 and 259 bytes across one minute of timestamps.
+ *
+ * Comparing per-entry lengths instead would fix the flake and give up the test:
+ * two documents differing in every character but not in length would pass. So the
+ * entries are decompressed and compared byte for byte, with the timestamps inside
+ * `core.xml` — and only the timestamps — normalised away.
+ */
+async function describePackage(bytes: Uint8Array): Promise<string> {
+  const entries = await extractAll(bytes);
+  const decoder = new TextDecoder();
+  return [...entries.keys()]
+    .sort()
+    .map(path => {
+      const data = entries.get(path)!.data;
+      if (path === PartPath.CoreProps) {
+        // Two independent builds legitimately disagree here, and only here.
+        const xml = decoder.decode(data).replace(/>[^<]*T[^<]*Z</g, ">(timestamp)<");
+        return `${path}\n${xml}`;
+      }
+      return `${path}\n${[...data].join(",")}`;
+    })
+    .join("\n---\n");
+}
+
 describe("StreamingDocxWriter — sink mode", () => {
-  it("delivers byte-identical output through a Web WritableStream", async () => {
+  it("delivers equivalent output through a Web WritableStream", async () => {
     // Build the same document twice: once buffered, once via sink.
     const buffered = Streaming.createDocxStream();
     for (let i = 0; i < 50; i++) {
@@ -53,7 +86,7 @@ describe("StreamingDocxWriter — sink mode", () => {
       sinkBytes.set(c, off);
       off += c.length;
     }
-    expect(sinkBytes.length).toBe(reference.length);
+    expect(await describePackage(sinkBytes)).toBe(await describePackage(reference));
     // ZIP magic
     expect(sinkBytes[0]).toBe(0x50);
     expect(sinkBytes[1]).toBe(0x4b);

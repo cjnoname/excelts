@@ -288,6 +288,15 @@ export type {
   WorkbookModel,
   WorkbookProtectionModel
 } from "@excel/core/workbook.browser";
+// Reachable from `WorkbookModel.opaqueParts` / `.opaqueDrops`, so a caller that
+// inspects either needs to be able to name what it got back.
+export type {
+  OpaqueDrop,
+  OpaqueDropReason,
+  OpaquePart,
+  OpaqueRelationship,
+  OpaqueSourceRelationship
+} from "@excel/core/opaque-part";
 
 // --- Errors (extend BaseError; consistent with every other module's entry) ---
 export {
