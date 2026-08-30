@@ -56,32 +56,50 @@ export { DEFAULT_SCANNER_CONFIG } from "@csv/parse/scanner/types";
 // =============================================================================
 
 /**
+ * Matches the next line terminator: CRLF, lone CR, or LF. Global so `exec`
+ * resumes from `lastIndex` and returns the first terminator after it.
+ *
+ * One combined search is what keeps field scanning linear. Two separate
+ * `indexOf("\n")` / `indexOf("\r")` calls look equivalent, but each call scans to
+ * the end of the input when its character is absent — and every field of an
+ * LF-only file (or a CR-only file) pays that full scan, so parsing became
+ * O(fields × bytes): ~40 s for a 6.5 MB, 50 000-row LF file that takes ~60 ms
+ * with CRLF endings.
+ */
+const NEWLINE_PATTERN = /\r\n?|\n/g;
+
+/**
  * Find the next newline position and determine its type.
  *
  * @returns [position, length] where length is 1 for \n/\r, 2 for \r\n, or [-1, 0] if not found
  */
 function findNewline(input: string, start: number): [number, number] {
-  const len = input.length;
-  const lfPos = input.indexOf("\n", start);
-  const crPos = input.indexOf("\r", start);
+  NEWLINE_PATTERN.lastIndex = start;
+  const match = NEWLINE_PATTERN.exec(input);
 
   // Neither found
-  if (lfPos === -1 && crPos === -1) {
+  if (match === null) {
     return [-1, 0];
   }
 
-  // Only LF found, or LF comes before CR
-  if (crPos === -1 || (lfPos !== -1 && lfPos < crPos)) {
-    return [lfPos, 1];
+  const pos = match.index;
+  const terminator = match[0];
+
+  if (terminator === "\n") {
+    return [pos, 1];
   }
 
-  // CR found first (or only CR)
-  if (crPos + 1 < len) {
-    return input[crPos + 1] === "\n" ? [crPos, 2] : [crPos, 1];
+  if (terminator === "\r\n") {
+    return [pos, 2];
+  }
+
+  // Lone CR with more input after it
+  if (pos + 1 < input.length) {
+    return [pos, 1];
   }
 
   // CR at end of buffer - might be CRLF, need more data
-  return [crPos, -1]; // -1 signals "maybe CRLF"
+  return [pos, -1]; // -1 signals "maybe CRLF"
 }
 
 /**

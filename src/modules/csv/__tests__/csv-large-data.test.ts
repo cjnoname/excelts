@@ -224,6 +224,29 @@ describe("performance", () => {
 
     expect(ms).toBeLessThan(500);
   });
+
+  // Regression: the scanner used to run indexOf("\n") and indexOf("\r") separately per
+  // field. In a file without "\r" the second call walked to the end of the input on
+  // every field, so parse time grew with fields × bytes: ~3 s for this input and
+  // ~40 s for 50 000 rows, while the same data with CRLF endings took ~30 ms.
+  it("parses 20000x14 LF-only rows within 1000ms (newline scan stays linear)", async () => {
+    // generateLargeCsv joins rows with "\n" — no "\r" anywhere in the input.
+    const csv = generateLargeCsv(20000, 14);
+
+    const { result, ms } = await measureTime(() => Csv.parse(csv) as string[][]);
+
+    expect(result).toHaveLength(20001);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it("parses 20000x14 CR-only rows within 1000ms (newline scan stays linear)", async () => {
+    const csv = generateLargeCsv(20000, 14).replace(/\r?\n/g, "\r");
+
+    const { result, ms } = await measureTime(() => Csv.parse(csv) as string[][]);
+
+    expect(result).toHaveLength(20001);
+    expect(ms).toBeLessThan(1000);
+  });
 });
 
 // =============================================================================

@@ -216,6 +216,25 @@ describe("Scanner - Newline Handling", () => {
     expect(rows[1].newline).toBe("\r\n");
     expect(rows[2].newline).toBe("\r");
   });
+
+  it("should scan large LF-only and CR-only inputs to the same fields as CRLF", () => {
+    const rowCount = 5000;
+    const body = Array.from(
+      { length: rowCount },
+      (_, i) => `r${i},alpha,beta,gamma,${i * 7},"quoted, field",delta`
+    );
+
+    const lf = scanAllRows(body.join("\n") + "\n");
+    const cr = scanAllRows(body.join("\r") + "\r");
+    const crlf = scanAllRows(body.join("\r\n") + "\r\n");
+
+    expect(lf).toHaveLength(rowCount);
+    expect(cr.map(row => row.fields)).toEqual(lf.map(row => row.fields));
+    expect(crlf.map(row => row.fields)).toEqual(lf.map(row => row.fields));
+    expect(new Set(lf.map(row => row.newline))).toEqual(new Set(["\n"]));
+    expect(new Set(cr.map(row => row.newline))).toEqual(new Set(["\r"]));
+    expect(new Set(crlf.map(row => row.newline))).toEqual(new Set(["\r\n"]));
+  });
 });
 
 // =============================================================================
