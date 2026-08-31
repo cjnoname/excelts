@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.1](https://github.com/documonster/documonster/compare/v0.11.0...v0.11.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **csv:** Search once per field, and stop re-reading what a chunk already delivered ([fbbeac1](https://github.com/documonster/documonster/commit/fbbeac1d3b4fd4e455a72849ff50c005665a2432))
+
+
+### Code Refactoring
+
+* **csv:** Give delimiter detection one home, and stop deciding it by chunk size ([ea9b9cc](https://github.com/documonster/documonster/commit/ea9b9ccb691cfb74262d50fa3b61c9c7fadf49af))
+
 ## [0.11.0](https://github.com/documonster/documonster/compare/v0.10.0...v0.11.0) (2026-08-29)
 
 
