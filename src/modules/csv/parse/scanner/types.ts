@@ -15,31 +15,31 @@
  */
 export interface ScannerConfig {
   /** Field delimiter (supports multi-character, e.g., "||" or "\t\t") */
-  delimiter: string;
+  readonly delimiter: string;
 
   /** Quote character (single character, e.g., '"') */
-  quote: string;
+  readonly quote: string;
 
   /** Escape character (usually same as quote for RFC 4180, or backslash) */
-  escape: string;
+  readonly escape: string;
 
   /** Whether quoting is enabled */
-  quoteEnabled: boolean;
+  readonly quoteEnabled: boolean;
 
   /** Allow unescaped quotes mid-field (relaxed parsing mode) */
-  relaxQuotes: boolean;
+  readonly relaxQuotes: boolean;
 }
 
 /**
  * Default scanner configuration
  */
-export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
+export const DEFAULT_SCANNER_CONFIG: ScannerConfig = Object.freeze({
   delimiter: ",",
   quote: '"',
   escape: '"',
   quoteEnabled: true,
   relaxQuotes: false
-};
+});
 
 // =============================================================================
 // Scan Result Types

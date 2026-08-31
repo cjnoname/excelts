@@ -36,4 +36,25 @@ describe("Documonster.Csv IIFE bundle", () => {
       ["1", "2"]
     ]);
   });
+
+  it("streams rows across one-character chunk boundaries", async () => {
+    const parser = new Csv.ParserStream();
+    const rows: string[][] = [];
+    parser.on("data", (row: string[]) => rows.push(row));
+    const ended = new Promise<void>((resolve, reject) => {
+      parser.on("end", resolve);
+      parser.on("error", reject);
+    });
+
+    for (const char of 'a,"b\nc",d\ne,"f""g",h\n') {
+      parser.write(char);
+    }
+    parser.end();
+    await ended;
+
+    expect(rows).toEqual([
+      ["a", "b\nc", "d"],
+      ["e", 'f"g', "h"]
+    ]);
+  });
 });

@@ -216,6 +216,163 @@ describe("Scanner - Newline Handling", () => {
     expect(rows[1].newline).toBe("\r\n");
     expect(rows[2].newline).toBe("\r");
   });
+  // A large input is the case that reaches the regex hand-off for every field, and the one
+  // where a per-candidate search used to go quadratic. Whichever terminator a file uses, the
+  // fields must come out identical and each row must report the terminator it actually had.
+  it("scans large LF-only and CR-only inputs to the same fields as CRLF", () => {
+    const rowCount = 5000;
+    const body = Array.from(
+      { length: rowCount },
+      (_, i) => `r${i},alpha,beta,gamma,${i * 7},"quoted, field",delta`
+    );
+
+    const lf = scanAllRows(`${body.join("\n")}\n`);
+    const cr = scanAllRows(`${body.join("\r")}\r`);
+    const crlf = scanAllRows(`${body.join("\r\n")}\r\n`);
+
+    expect(lf).toHaveLength(rowCount);
+    expect(cr.map(row => row.fields)).toEqual(lf.map(row => row.fields));
+    expect(crlf.map(row => row.fields)).toEqual(lf.map(row => row.fields));
+    expect(new Set(lf.map(row => row.newline))).toEqual(new Set(["\n"]));
+    expect(new Set(cr.map(row => row.newline))).toEqual(new Set(["\r"]));
+    expect(new Set(crlf.map(row => row.newline))).toEqual(new Set(["\r\n"]));
+  });
+});
+
+// =============================================================================
+// Scanner - Field Terminator Search
+// =============================================================================
+
+/**
+ * A field ends at the first delimiter or line terminator, and the scanner finds it with
+ * one search: a bounded character-by-character scan that hands off to a regex when the
+ * field turns out to be long. These cases pin the parts of that search a shorter input
+ * would never reach — the hand-off boundary, and the delimiters that are awkward to
+ * express in a pattern.
+ *
+ * Searching per candidate instead (one `indexOf` each for the delimiter, LF and CR) was
+ * quadratic: a character the input lacks has no match to stop at, so its search walks to
+ * the end of the input, once per field. The perf gates for that live in
+ * csv-large-data.test.ts; these are the correctness half.
+ */
+describe("Scanner - Field Terminator Search", () => {
+  // The inline scan runs 16 characters before the regex takes over, so a terminator
+  // landing on either side of that (and exactly on it) exercises different code.
+  it.each([0, 1, 14, 15, 16, 17, 18, 31, 32, 33, 100])(
+    "finds a delimiter %i characters into a field",
+    width => {
+      const first = "a".repeat(width);
+      const rows = scanAllRows(`${first},second\n`);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].fields).toEqual([first, "second"]);
+    }
+  );
+
+  it.each([0, 1, 15, 16, 17, 33])("finds a line ending %i characters into a field", width => {
+    const only = "a".repeat(width);
+
+    expect(scanAllRows(`${only}\nnext\n`)[0].fields).toEqual([only]);
+    expect(scanAllRows(`${only}\r\nnext\r\n`)[0].fields).toEqual([only]);
+    expect(scanAllRows(`${only}\rnext\r`)[0].fields).toEqual([only]);
+    expect(scanAllRows(`${only}\r\nnext\r\n`)[0].newline).toBe("\r\n");
+  });
+
+  it("keeps the terminator search past the inline limit from crossing a row", () => {
+    // Every field is longer than the inline scan window, so every field is found by the
+    // regex hand-off rather than the loop.
+    const long = "x".repeat(40);
+    const rows = scanAllRows(`${long}0,${long}1\n${long}2,${long}3\n`);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].fields).toEqual([`${long}0`, `${long}1`]);
+    expect(rows[1].fields).toEqual([`${long}2`, `${long}3`]);
+  });
+
+  // A delimiter is interpolated into a pattern, so anything with meaning there has to
+  // survive as a literal.
+  it.each(["|", ".", "$", "^", "*", "+", "?", "(", ")", "[", "]", "{", "}", "\\"])(
+    "treats %s as a literal delimiter",
+    delimiter => {
+      const rows = scanAllRows(`a${delimiter}b\nc${delimiter}d\n`, { delimiter });
+
+      expect(rows).toHaveLength(2);
+      expect(rows[0].fields).toEqual(["a", "b"]);
+      expect(rows[1].fields).toEqual(["c", "d"]);
+    }
+  );
+
+  it.each(["|", ".", "\\"])(
+    "treats %s as a literal delimiter past the inline scan limit",
+    delimiter => {
+      const long = "y".repeat(40);
+      const rows = scanAllRows(`${long}${delimiter}${long}\n`, { delimiter });
+
+      expect(rows[0].fields).toEqual([long, long]);
+    }
+  );
+
+  it.each(["||", "::", "<>", "\t\t"])("supports the multi-character delimiter %s", delimiter => {
+    const rows = scanAllRows(`a${delimiter}b${delimiter}c\n`, { delimiter });
+
+    expect(rows[0].fields).toEqual(["a", "b", "c"]);
+  });
+
+  it("supports a multi-character delimiter past the inline scan limit", () => {
+    const long = "z".repeat(40);
+    const rows = scanAllRows(`${long}||${long}\n`, { delimiter: "||" });
+
+    expect(rows[0].fields).toEqual([long, long]);
+  });
+
+  it("does not mistake a partial multi-character delimiter for the whole one", () => {
+    const rows = scanAllRows("a|b||c\n", { delimiter: "||" });
+
+    expect(rows[0].fields).toEqual(["a|b", "c"]);
+  });
+
+  it("does not mistake a partial multi-character delimiter past the inline limit", () => {
+    const long = "w".repeat(40);
+    const rows = scanAllRows(`${long}|${long}||tail\n`, { delimiter: "||" });
+
+    expect(rows[0].fields).toEqual([`${long}|${long}`, "tail"]);
+  });
+
+  // A delimiter is interpolated into a pattern, and the engine rejects one that grows too
+  // large — on first execution, not at construction. The previous indexOf-based search had no
+  // such limit, so neither may this one. Fields must exceed the inline scan window for the
+  // pattern to be reached at all.
+  it("splits on a delimiter far too long to embed in a pattern", () => {
+    const delimiter = "x".repeat(100_000);
+    const long = "A".repeat(40);
+    const rows = scanAllRows(`${long}${delimiter}B\n${long}${delimiter}D\n`, { delimiter });
+
+    expect(rows.map(row => row.fields)).toEqual([
+      [long, "B"],
+      [long, "D"]
+    ]);
+  });
+
+  it("treats an empty delimiter as no field separator at any field length", () => {
+    const short = "a".repeat(15);
+    const long = "b".repeat(40);
+
+    expect(scanAllRows(`${short}\n${long}`, { delimiter: "" }).map(row => row.fields)).toEqual([
+      [short],
+      [long]
+    ]);
+  });
+
+  // A delimiter that is itself a line terminator is pathological but reachable through
+  // the public options, and the search has to resolve the tie the same way everywhere.
+  it.each(["\n", "\r", "\r\n"])(
+    "resolves %j used as both delimiter and line terminator",
+    delimiter => {
+      const rows = scanAllRows(`a${delimiter}b${delimiter}`, { delimiter });
+
+      expect(rows.flatMap(row => row.fields).filter(field => field !== "")).toEqual(["a", "b"]);
+    }
+  );
 });
 
 // =============================================================================
@@ -759,5 +916,146 @@ describe("parseWithScanner - Edge Cases", () => {
     const rows = Array.from({ length: 100 }, (_, i) => `a${i},b${i},c${i}`);
     const { results } = parseWithScanner_(rows.join("\n") + "\n", {});
     expect(results).toHaveLength(100);
+  });
+});
+
+// =============================================================================
+// Scanner - Streaming Emits As Soon As A Row Completes
+// =============================================================================
+
+/**
+ * A row must come out of `nextRow()` on the feed that completes it, not be left for
+ * `flush()`. Output equality cannot check this — `flush()` is authoritative at end of input,
+ * so a row that emerges late still emerges, with the same fields, in the same order — and a
+ * suite of thousands of chunk-size comparisons duly passed while this was broken.
+ *
+ * What it costs when it is wrong is latency and buffer growth: rows arrive in a batch at the
+ * end rather than as they parse, which is the point of streaming. It is asserted here rather
+ * than through `CsvParserStream` because the scanner is synchronous, so "the row is available
+ * now" is a fact rather than a race.
+ *
+ * The mechanism at risk is the wait: while a quoted field is open the scanner waits for a
+ * quote rather than re-reading the buffer, and decides from run parity across chunk
+ * boundaries whether one closed the field. Getting that parity wrong in the direction of
+ * "still open" is exactly a late row.
+ */
+describe("Scanner - Streaming Emits As Soon As A Row Completes", () => {
+  /** Feed `csv` in fixed-size pieces, collecting rows without ever calling flush(). */
+  function rowsBeforeFlush(csv: string, chunkSize: number, config?: Partial<ScannerConfig>) {
+    const scanner = createScanner(config);
+    const rows: string[][] = [];
+    for (let i = 0; i < csv.length; i += chunkSize) {
+      scanner.feed(csv.slice(i, i + chunkSize));
+      let row: RowScanResult | null;
+      while ((row = scanner.nextRow()) !== null) {
+        rows.push([...row.fields]);
+      }
+    }
+    return rows;
+  }
+
+  it("emits a quoted row terminated by a newline without waiting for flush", () => {
+    // Every run length, every offset, every chunk size: the run may be split anywhere, and a
+    // chunk may consist of nothing but quotes with a partial run already carried into it.
+    for (let runLength = 0; runLength <= 6; runLength++) {
+      for (let prefixLength = 0; prefixLength <= 4; prefixLength++) {
+        const csv = `"${"a".repeat(prefixLength)}${'"'.repeat(runLength)}b",z\n`;
+        const expected = rowsBeforeFlush(csv, csv.length);
+        expect(expected).toHaveLength(1);
+
+        for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+          expect(rowsBeforeFlush(csv, chunkSize)).toEqual(expected);
+        }
+      }
+    }
+  });
+
+  it("emits each of several quoted rows on the feed that completes it", () => {
+    const csv = '"a""b",1\n"c\nd",2\n"","e""""f"\n';
+    const whole = rowsBeforeFlush(csv, csv.length);
+    expect(whole).toHaveLength(3);
+
+    for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+      expect(rowsBeforeFlush(csv, chunkSize)).toEqual(whole);
+    }
+  });
+
+  it("emits rows promptly with a distinct escape character", () => {
+    const csv = '"a\\"b",1\n"c",2\n';
+    const whole = rowsBeforeFlush(csv, csv.length, { escape: "\\" });
+    expect(whole).toEqual([
+      ['a"b', "1"],
+      ["c", "2"]
+    ]);
+
+    for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+      expect(rowsBeforeFlush(csv, chunkSize, { escape: "\\" })).toEqual(whole);
+    }
+  });
+
+  it("does not delay a relaxed quote whose multi-character delimiter crosses chunks", () => {
+    const scanner = createScanner({ delimiter: "||", relaxQuotes: true });
+
+    scanner.feed('"a"|');
+    expect(scanner.nextRow()).toBeNull();
+    scanner.feed("|b\nc,d\n");
+
+    expect(scanner.nextRow()?.fields).toEqual(["a", "b"]);
+    expect(scanner.nextRow()?.fields).toEqual(["c,d"]);
+    expect(scanner.nextRow()).toBeNull();
+  });
+
+  it("replays a failed relaxed delimiter prefix that itself contains a quote", () => {
+    const scanner = createScanner({ delimiter: 'a"x', escape: "\\", relaxQuotes: true });
+
+    scanner.feed('"q"');
+    expect(scanner.nextRow()).toBeNull();
+    scanner.feed('a"\nsecond\n');
+
+    expect([...(scanner.nextRow()?.fields ?? [])]).toEqual(['q"a']);
+    expect([...(scanner.nextRow()?.fields ?? [])]).toEqual(["second"]);
+  });
+
+  it("exposes an immutable config because waiting state is derived from it", () => {
+    const scanner = createScanner({ delimiter: "||" });
+
+    expect(Object.isFrozen(scanner.config)).toBe(true);
+    expect(() => {
+      (scanner.config as { delimiter: string }).delimiter = ",";
+    }).toThrow(TypeError);
+    expect(scanner.config.delimiter).toBe("||");
+    expect(Object.isFrozen(DEFAULT_SCANNER_CONFIG)).toBe(true);
+  });
+
+  it("emits unquoted rows promptly whatever the line ending", () => {
+    // Compared against the same input delivered whole rather than against a row count: an
+    // input ending in a bare CR legitimately holds its last row back, because whether that CR
+    // is a line ending or half a CRLF is not decided until the next character or end of input.
+    for (const csv of ["a,b\nc,d\n", "a,b\r\nc,d\r\n", "a,b\rc,d\r"]) {
+      const whole = rowsBeforeFlush(csv, csv.length);
+
+      for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+        expect(rowsBeforeFlush(csv, chunkSize)).toEqual(whole);
+      }
+    }
+  });
+
+  // An empty quoted field is the case where the opening quote sits next to the closing one,
+  // so a count of the trailing quote run that included the opening quote would read this as
+  // still open and hold the row back.
+  it.each([
+    ['a,"",b\n', "empty quoted field mid row"],
+    ['"",x\n', "empty quoted field first"],
+    ['x,""\n', "empty quoted field last"],
+    ['"""",x\n', "quoted field holding one escaped quote"],
+    ['"a","","b"\n', "empty quoted field between values"],
+    ['"",""\n"y","z"\n', "empty quoted fields then a further row"]
+  ])("emits %s promptly (%s)", csv => {
+    const whole = rowsBeforeFlush(csv, csv.length);
+    expect(whole).toHaveLength(csv.includes('\n"y"') ? 2 : 1);
+
+    for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+      expect(rowsBeforeFlush(csv, chunkSize)).toEqual(whole);
+    }
   });
 });

@@ -227,6 +227,125 @@ describe("performance", () => {
 });
 
 // =============================================================================
+// Scan Complexity Tests
+// =============================================================================
+
+/**
+ * Finding the end of a field used to mean one `indexOf` per candidate — the delimiter,
+ * LF and CR — and taking whichever came first. A character the input does not contain has
+ * no match to stop at, so its search walks to the end of the input before returning -1,
+ * and *every field* paid that walk: O(fields x bytes).
+ *
+ * Which shapes that hit depended only on which character was missing, which is why it went
+ * unnoticed. CRLF input always has both a CR and an LF a few bytes away, and a dense
+ * multi-column row always has a delimiter a few bytes away. Those were fast. An LF-only
+ * file (Unix, LibreOffice, anything script-generated) has no CR at all; a single-column
+ * file has no delimiter at all. Those were quadratic, and `lineEnding` could not help
+ * because the scan never consulted it.
+ *
+ * Each case pairs a shape that was affected with one that never was, since that comparison
+ * is what makes the claim — same complexity class — rather than a millisecond budget that
+ * would only describe this machine.
+ *
+ * The bound is deliberately far looser than the effect: every broken shape is slower by
+ * well over an order of magnitude. The floor is the part that matters in practice. Without
+ * it the bound is a multiple of a baseline that is itself only
+ * a few milliseconds, and these tests run while the rest of the suite occupies the other
+ * cores — where a single measurement of that size varies by more than the multiple. Two of
+ * these gates were flaky for exactly that reason before the floor went in.
+ *
+ * Deliberately absent: a test that doubles the input and asserts the time less than
+ * doubles. It is the most direct statement of "not quadratic" and it did catch the bug, but
+ * detecting linear-against-quadratic growth over a single doubling needs a tight multiplier,
+ * which is the one thing that cannot be
+ * made reliable here. The cases below catch the same defect with an order of magnitude to
+ * spare.
+ */
+describe("scan complexity", () => {
+  /** Rows of identical shape, joined with the requested line ending. */
+  function rowsWithEnding(rowCount: number, cols: number, ending: string): string {
+    const line = Array.from({ length: cols }, (_, c) => `field${c}value`).join(",");
+    return Array.from({ length: rowCount }, () => line).join(ending) + ending;
+  }
+
+  async function msToParse(csv: string) {
+    const { result, ms } = await measureTime(() => Csv.parse(csv) as string[][]);
+    return { rows: result.length, ms };
+  }
+
+  /**
+   * Bound for a measurement whose baseline is a shape the defect never touched.
+   *
+   * The floor keeps this above the noise of a few tens of milliseconds rather than
+   * proportional to a baseline that small. It makes the bound partly absolute, which is
+   * worth naming — but the floor leaves generous room for a correct implementation while the
+   * defect costs orders of magnitude more.
+   */
+  function boundFrom(baselineMs: number): number {
+    return Math.max(baselineMs, 60) * 10;
+  }
+
+  it("parses LF-only input in the same time as CRLF", async () => {
+    const rowCount = 20000;
+    const lf = rowsWithEnding(rowCount, 14, "\n");
+    const crlf = rowsWithEnding(rowCount, 14, "\r\n");
+    expect(lf).not.toContain("\r");
+
+    // CRLF first, so the LF run cannot be the one paying for a cold cache.
+    const crlfRun = await msToParse(crlf);
+    const lfRun = await msToParse(lf);
+
+    expect(lfRun.rows).toBe(rowCount);
+    expect(crlfRun.rows).toBe(rowCount);
+    // The CR search used to run to the end of the input once per field.
+    expect(lfRun.ms).toBeLessThan(boundFrom(crlfRun.ms));
+  });
+
+  it("parses CR-only input in the same time as CRLF", async () => {
+    const rowCount = 20000;
+    const cr = rowsWithEnding(rowCount, 14, "\r");
+    const crlf = rowsWithEnding(rowCount, 14, "\r\n");
+    expect(cr).not.toContain("\n");
+
+    const crlfRun = await msToParse(crlf);
+    const crRun = await msToParse(cr);
+
+    expect(crRun.rows).toBe(rowCount);
+    expect(crRun.ms).toBeLessThan(boundFrom(crlfRun.ms));
+  });
+
+  it("parses single-column input in the same time as multi-column of the same size", async () => {
+    // No row holds a delimiter, so the delimiter search had nothing to stop at either.
+    const singleColumn = rowsWithEnding(150000, 1, "\r\n");
+    const multiColumn = rowsWithEnding(15000, 12, "\r\n");
+    expect(singleColumn).not.toContain(",");
+    // Comparable byte counts, so the comparison is about shape and not size.
+    expect(singleColumn.length).toBeGreaterThan(multiColumn.length * 0.7);
+    expect(singleColumn.length).toBeLessThan(multiColumn.length * 1.4);
+
+    const multiRun = await msToParse(multiColumn);
+    const singleRun = await msToParse(singleColumn);
+
+    expect(singleRun.rows).toBe(150000);
+    // Was several seconds, and grew with the square of the input.
+    expect(singleRun.ms).toBeLessThan(boundFrom(multiRun.ms));
+  });
+
+  it("parses a delimiter absent from the data in the same time as one present", async () => {
+    // Tab-separated data read in the default comma mode: same bytes, but the delimiter
+    // never appears, so its search ran to the end of the input on every field.
+    const present = rowsWithEnding(50000, 8, "\r\n");
+    const absent = present.replaceAll(",", "\t");
+
+    const presentRun = await msToParse(present);
+    const absentRun = await msToParse(absent);
+
+    expect(absentRun.rows).toBe(50000);
+    expect(absentRun.ms).toBeLessThan(boundFrom(presentRun.ms));
+  });
+});
+
+// =============================================================================
 // Memory Boundary Tests
 // =============================================================================
 describe("memory", () => {

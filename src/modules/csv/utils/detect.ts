@@ -14,6 +14,9 @@
  * - generate.ts: Test data generation
  */
 
+import { CsvError } from "@csv/errors";
+import { scanRow } from "@csv/parse/scanner";
+
 // =============================================================================
 // Utility Functions
 // =============================================================================
@@ -68,7 +71,21 @@ export function normalizeEscapeOption(
  * Common CSV delimiters to try during auto-detection
  * Order matters - comma is most common, then semicolon (European), tab, pipe
  */
-const AUTO_DETECT_DELIMITERS = [",", ";", "\t", "|"] as const;
+export const AUTO_DETECT_DELIMITERS = [",", ";", "\t", "|"] as const;
+
+/**
+ * Candidates a detector will weigh.
+ *
+ * Shared with `CsvParserStream` because the two must agree: an empty list once meant "no
+ * candidates, fall back to comma" here and "not configured, use the defaults" there, so the
+ * same options produced different delimiters from `Csv.parse` and a streamed parse. An empty
+ * list is read as "unset", which is what a caller passing one is asking for.
+ */
+export function delimiterCandidates(delimitersToGuess?: readonly string[]): readonly string[] {
+  return delimitersToGuess && delimitersToGuess.length > 0
+    ? delimitersToGuess
+    : AUTO_DETECT_DELIMITERS;
+}
 
 /**
  * Default delimiter when auto-detection fails
@@ -99,6 +116,32 @@ const FORMULA_ESCAPE_CHARS = new Set([
 // =============================================================================
 // BOM and Formula Detection
 // =============================================================================
+
+/**
+ * Apply a `beforeFirstChunk` hook and strip any BOM, in that order.
+ *
+ * Shared by `Csv.parse` and `CsvParserStream` so the hook cannot be validated on one path and
+ * ignored on the other, and so a hook is free to introduce or remove a BOM either way.
+ *
+ * @throws CsvError when the hook returns something that is neither a string nor nullish.
+ */
+export function applyFirstChunkPreprocessing(
+  input: string,
+  beforeFirstChunk: ((chunk: string) => string | void) | undefined
+): string {
+  let text = input;
+  if (beforeFirstChunk) {
+    const result = beforeFirstChunk(text);
+    if (typeof result === "string") {
+      text = result;
+    } else if (result !== undefined && result !== null) {
+      throw new CsvError(
+        `beforeFirstChunk must return a string or undefined, got ${typeof result}`
+      );
+    }
+  }
+  return stripBom(text);
+}
 
 /**
  * Strip UTF-8 BOM (Byte Order Mark) from start of string if present.
@@ -210,24 +253,27 @@ export function detectDelimiter(
   quote: string = '"',
   delimitersToGuess?: string[],
   comment?: string,
-  skipEmptyLines?: boolean | "greedy"
+  // Accepted for call-site compatibility and deliberately unused: a record that is empty or
+  // only whitespace is never scored, whatever this says, because it cannot indicate a
+  // delimiter. See isScorableDetectionRecord.
+  skipEmptyLines?: boolean | "greedy",
+  scannerOptions?: { escape?: string; relaxQuotes?: boolean; lineEnding?: string }
 ): string {
-  const delimiters = delimitersToGuess ?? AUTO_DETECT_DELIMITERS;
+  void skipEmptyLines;
+  const delimiters = delimiterCandidates(delimitersToGuess);
   const defaultDelimiter = delimiters[0] ?? DEFAULT_DELIMITER;
-
-  // Get sample lines (first 10 meaningful lines)
-  const lines = getSampleLines(input, 10, quote, comment, skipEmptyLines);
-
-  if (lines.length === 0) {
-    return defaultDelimiter;
-  }
 
   let bestDelimiter = defaultDelimiter;
   let bestDelta: number | undefined;
   let bestAvgFieldCount: number | undefined;
 
   for (const delimiter of delimiters) {
-    const { avgFieldCount, delta } = scoreDelimiter(lines, delimiter, quote);
+    // Quote recognition depends on field boundaries, and field boundaries depend on the
+    // candidate delimiter. Parse each candidate with the real scanner rather than first
+    // splitting lines with a delimiter-independent quote toggle; the latter mistakes a
+    // mid-field quote for an opening quote under one candidate and not another.
+    const fieldCounts = sampleFieldCounts(input, delimiter, quote, comment, scannerOptions);
+    const { avgFieldCount, delta } = scoreFieldCounts(fieldCounts);
 
     // Require at least ~2 fields on average
     if (avgFieldCount <= 1.99) {
@@ -250,66 +296,91 @@ export function detectDelimiter(
 }
 
 /**
- * Get sample lines from input, skipping empty lines
+ * Records each delimiter candidate is scored on.
+ *
+ * Shared with `CsvParserStream`, which must wait for the same sample before committing so a
+ * streamed parse and `Csv.parse` cannot disagree about the delimiter.
  */
-function getSampleLines(
+export const DELIMITER_DETECTION_SAMPLE_RECORDS = 10;
+
+/**
+ * Characters of *scorable* records a candidate may be scored on.
+ *
+ * A candidate whose quoting never closes would otherwise have no sample and no end, which for
+ * a stream means buffering the whole input before emitting anything. Blank and comment records
+ * do not consume this budget — they are skipped, not scored — so a long comment prefix still
+ * reaches the first data record. Both sides stop at the same record boundary.
+ */
+export const DELIMITER_DETECTION_SAMPLE_CHARS = 65536;
+
+/**
+ * Whether a record can contribute to a delimiter candidate's score.
+ *
+ * Shared with `CsvParserStream` so that a stream waits for exactly the records the batch
+ * detector scores; a private copy of this rule on either side reopens the gap it closes.
+ */
+export function isScorableDetectionRecord(raw: string, comment?: string): boolean {
+  if (comment && raw.startsWith(comment)) {
+    return false;
+  }
+  return raw.trim() !== "";
+}
+
+/** Parse at most `DELIMITER_DETECTION_SAMPLE_RECORDS` meaningful records for one candidate. */
+function sampleFieldCounts(
   input: string,
-  maxLines: number,
+  delimiter: string,
   quote: string,
-  comment?: string,
-  skipEmptyLines?: boolean | "greedy"
-): string[] {
-  const lines: string[] = [];
-  let start = 0;
-  let inQuotes = false;
-  const len = input.length;
+  comment: string | undefined,
+  options: { escape?: string; relaxQuotes?: boolean; lineEnding?: string } | undefined
+): number[] {
+  const config = {
+    delimiter,
+    quote,
+    escape: options?.escape ?? quote,
+    quoteEnabled: quote !== "",
+    relaxQuotes: options?.relaxQuotes ?? false
+  };
+  const counts: number[] = [];
+  let offset = 0;
 
-  for (let i = 0; i < len && lines.length < maxLines; i++) {
-    const char = input[i];
+  let scoredChars = 0;
 
-    if (quote && char === quote) {
-      // Toggle quote state, but handle escaped quotes ("" inside quoted field)
-      if (inQuotes && input[i + 1] === quote) {
-        i++; // Skip escaped quote
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (!inQuotes && (char === "\n" || char === "\r")) {
-      const line = input.slice(start, i);
+  while (
+    offset < input.length &&
+    counts.length < DELIMITER_DETECTION_SAMPLE_RECORDS &&
+    scoredChars < DELIMITER_DETECTION_SAMPLE_CHARS
+  ) {
+    let raw: string;
+    let fields: string[];
+    let next: number;
 
-      // Skip comment lines
-      if (comment && line.startsWith(comment)) {
-        // skip
-      } else {
-        // For delimiter detection, whitespace-only lines are never useful.
-        const trimmed = line.trim();
-        const shouldDrop = line.length === 0 || (skipEmptyLines && trimmed === "");
-        if (!shouldDrop && trimmed !== "") {
-          lines.push(line);
-        }
-      }
-
-      // Skip \r\n
-      if (char === "\r" && input[i + 1] === "\n") {
-        i++;
-      }
-      start = i + 1;
+    if (options?.lineEnding) {
+      const at = input.indexOf(options.lineEnding, offset);
+      const end = at === -1 ? input.length : at;
+      raw = input.slice(offset, end);
+      fields = scanRow(raw, 0, config, true).fields;
+      next = at === -1 ? input.length : end + options.lineEnding.length;
+    } else {
+      const row = scanRow(input, offset, config, true);
+      raw = input.slice(row.rawStart, row.rawEnd);
+      fields = row.fields;
+      next = row.endPos;
     }
+
+    if (next <= offset) {
+      break;
+    }
+    offset = next;
+
+    if (!isScorableDetectionRecord(raw, comment)) {
+      continue;
+    }
+    counts.push(fields.length);
+    scoredChars += raw.length;
   }
 
-  // Add last line if exists
-  if (start < len && lines.length < maxLines) {
-    const line = input.slice(start);
-    if (!comment || !line.startsWith(comment)) {
-      const trimmed = line.trim();
-      const shouldDrop = line.length === 0 || (skipEmptyLines && trimmed === "");
-      if (!shouldDrop && trimmed !== "") {
-        lines.push(line);
-      }
-    }
-  }
-
-  return lines;
+  return counts;
 }
 
 /**
@@ -321,12 +392,8 @@ function getSampleLines(
  *
  * Higher score = more fields per row with consistent counts
  */
-function scoreDelimiter(
-  lines: string[],
-  delimiter: string,
-  quote: string
-): { avgFieldCount: number; delta: number } {
-  if (lines.length === 0) {
+function scoreFieldCounts(fieldCounts: number[]): { avgFieldCount: number; delta: number } {
+  if (fieldCounts.length === 0) {
     return { avgFieldCount: 0, delta: Number.POSITIVE_INFINITY };
   }
 
@@ -334,8 +401,7 @@ function scoreDelimiter(
   let avgFieldCount = 0;
   let prevFieldCount: number | undefined;
 
-  for (const line of lines) {
-    const fieldCount = countDelimiters(line, delimiter, quote) + 1;
+  for (const fieldCount of fieldCounts) {
     avgFieldCount += fieldCount;
 
     if (prevFieldCount === undefined) {
@@ -348,40 +414,7 @@ function scoreDelimiter(
     prevFieldCount = fieldCount;
   }
 
-  avgFieldCount /= lines.length;
+  avgFieldCount /= fieldCounts.length;
 
   return { avgFieldCount, delta };
-}
-
-/**
- * Count delimiters in a line, respecting quoted fields
- */
-function countDelimiters(line: string, delimiter: string, quote: string): number {
-  let count = 0;
-  let inQuotes = false;
-  const len = line.length;
-  const delimLen = delimiter.length;
-
-  for (let i = 0; i < len; i++) {
-    if (quote && line[i] === quote) {
-      // Toggle quote state, but handle escaped quotes ("" inside quoted field)
-      if (inQuotes && line[i + 1] === quote) {
-        i++; // Skip escaped quote
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (!inQuotes) {
-      // Check for delimiter match (supports multi-char delimiters)
-      if (delimLen === 1) {
-        if (line[i] === delimiter) {
-          count++;
-        }
-      } else if (line.startsWith(delimiter, i)) {
-        count++;
-        i += delimLen - 1;
-      }
-    }
-  }
-
-  return count;
 }

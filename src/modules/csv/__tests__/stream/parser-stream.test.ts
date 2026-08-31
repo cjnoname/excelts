@@ -14,6 +14,7 @@
  * - Error handling
  */
 
+import { CsvError } from "@csv/errors";
 import { Csv } from "@csv/index";
 import { CsvParserStream } from "@csv/stream";
 import type { ChunkMeta, Row } from "@csv/types";
@@ -921,5 +922,737 @@ describe("CsvParserStream - info.offset", () => {
     expect(rows[0].info.offset).toBe(0);
     expect(rows[1].info.offset).toBe(5); // "a,b||" = 5 characters
     expect(rows[2].info.offset).toBe(10); // "a,b||1,2||" = 10 characters
+  });
+});
+
+// =============================================================================
+// Chunk-Boundary Scan Complexity
+// =============================================================================
+
+/**
+ * Streaming buffers a partial row until more data arrives, and everything already
+ * buffered used to be re-examined on each chunk. A row shorter than a chunk hides that —
+ * the re-examined tail is one short row — but a row *longer* than a chunk was re-read from
+ * its start every chunk, so it cost O(chunks x rowBytes), orders of magnitude more than
+ * parsing the same bytes once.
+ *
+ * There were two independent reasons per chunk, and both are gone:
+ *
+ * 1. The row was re-*parsed*. Standard mode now waits for a row terminator before
+ *    scanning again, and fastMode records how far it has already searched.
+ * 2. The buffer was re-*copied*. `buffer += chunk` only builds a rope, but any string
+ *    operation on that rope flattens it, so merely looking for a terminator copied every
+ *    byte buffered so far. Both modes now search
+ *    the arriving chunk instead and leave the buffer untouched until there is something to
+ *    find.
+ *
+ * Together those make the cost of a row independent of how the row was delivered, which is
+ * what the gates below assert: the same input delivered whole and in small pieces, where
+ * only the chunk count differs. Both sides parse identical bytes into identical rows, so
+ * they allocate alike and a GC pause is as likely in either — which an earlier version of
+ * these gates got wrong by comparing against a *different* shape of input, where the
+ * smaller measurement inflated far more than the larger one and hid the bug.
+ */
+describe("CsvParserStream - Chunk-Boundary Scan Complexity", () => {
+  function feedInChunks(csv: string, chunkSize: number, options = {}): Promise<any[]> {
+    const chunks: string[] = [];
+    for (let i = 0; i < csv.length; i += chunkSize) {
+      chunks.push(csv.slice(i, i + chunkSize));
+    }
+    const parser = new CsvParserStream(options);
+    const collected = collectRows(parser);
+    Readable.from(chunks).pipe(parser);
+    return collected;
+  }
+
+  async function msToParse(csv: string, chunkSize: number, options = {}) {
+    const start = performance.now();
+    const rows = await feedInChunks(csv, chunkSize, options);
+    return { rows, ms: performance.now() - start };
+  }
+
+  /**
+   * Best of `attempts`, since these are wall-clock numbers in the tens of milliseconds and
+   * a single GC pause is a large fraction of one. Both sides of every ratio below use this,
+   * so neither is the noisier one.
+   */
+  async function bestMsToParse(csv: string, chunkSize: number, options = {}, attempts = 3) {
+    let best = Infinity;
+    let rows: any[] = [];
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const run = await msToParse(csv, chunkSize, options);
+      best = Math.min(best, run.ms);
+      rows = run.rows;
+    }
+    return { rows, ms: best };
+  }
+
+  /**
+   * One long row delivered whole against the same row in 8 KB pieces. Delivered whole there
+   * is nothing that could be re-examined, so it is the cost of parsing this row once; in
+   * pieces, any cost that grew with the chunk count shows up against it.
+   *
+   * The bound is deliberately two orders of magnitude looser than the effect it looks for.
+   * Correct implementations are insensitive to the chunk count; broken ones differ by well
+   * over an order of magnitude. An earlier version of this gate chose chunk sizes that
+   * produced only a single-digit effect and then
+   * tried to resolve it against a threshold — which failed in both directions, because a
+   * measurement of a few tens of milliseconds taken while the rest of the suite runs in
+   * parallel varies by about that much. A wall clock cannot reliably resolve a small multiple
+   * under that noise; an order-of-magnitude gap needs no resolving.
+   *
+   * The floor on the denominator is what keeps the bound above that noise rather than
+   * proportional to a tiny baseline. It makes this partly an absolute budget, which is worth
+   * naming, but leaves generous room for a correct implementation while the defect remains
+   * comfortably beyond it.
+   */
+  /** One row whose single quoted field is `mb` megabytes of `unit` repeated. */
+  function oneQuotedField(mb: number, unit: string): string {
+    return `a,"${unit.repeat(Math.round((mb * 1048576) / unit.length))}",z\n`;
+  }
+
+  /** One row of `fields` unquoted 500-character fields. */
+  function oneLongRow(fields: number, ending: string): string {
+    return Array.from({ length: fields }, (_, c) => "x".repeat(500) + c).join(",") + ending;
+  }
+
+  it.each([
+    // Sized per case so that a regression fails quickly but by a wide margin.
+    ["standard mode", {}, () => oneLongRow(2000, "\n")],
+    ["fastMode", { fastMode: true }, () => oneLongRow(8000, "\n")],
+    [
+      "fastMode with a multi-character lineEnding",
+      { fastMode: true, lineEnding: "||" },
+      () => oneLongRow(16000, "||")
+    ],
+    // A quoted field holds row terminators without being ended by them, so the wait cannot be
+    // for a terminator. Reverting it to one leaves this case, and only this case, quadratic.
+    ["a quoted field holding newlines", {}, () => oneQuotedField(2, `${"y".repeat(79)}\n`)],
+    // And it holds quote characters without being ended by them either. Waking on any quote
+    // rather than on an odd run of them leaves this case, and only this case, quadratic — the
+    // two together are what pin the condition to run parity.
+    ["a quoted field holding escaped quotes", {}, () => oneQuotedField(2, '{""k"":""v""},')],
+    [
+      "a quoted field holding a distinct escape",
+      { escape: "\\" },
+      () => oneQuotedField(2, 'abcdefgh\\"')
+    ],
+    [
+      "a relaxed quoted field holding interior quotes and newlines",
+      { relaxQuotes: true },
+      () => oneQuotedField(2, 'abcdefgh"x\n')
+    ],
+    [
+      "a relaxed quoted field with a distinct escape",
+      { escape: "\\", relaxQuotes: true },
+      () => oneQuotedField(2, 'abcdefgh\\"x\n')
+    ],
+    [
+      "a row holding many quoted fields",
+      {},
+      () => `${Array.from({ length: 8000 }, () => '"x"').join(",")}\n`
+    ],
+    [
+      "delimiter detection through an initial multi-line quoted record",
+      { delimiter: "" },
+      () => `"${`${"x".repeat(63)}\n`.repeat(2000)}tail",b\n`
+    ]
+  ])("costs the same however the row is chunked (%s)", async (_label, options, build) => {
+    const csv = build();
+
+    const whole = await bestMsToParse(csv, csv.length, options, 2);
+    const chunked = await bestMsToParse(csv, 8 * 1024, options, 2);
+
+    expect(whole.rows).toHaveLength(1);
+    expect(chunked.rows).toEqual(whole.rows);
+    expect(chunked.ms).toBeLessThan(Math.max(whole.ms, 60) * 10);
+  });
+
+  /**
+   * Auto-detection must not re-score its candidates once per record it skips. These shapes
+   * starve the sample — a comment never joins it, and an unterminated quoted record has no
+   * boundary yet — so the skip loop runs once per line, which is where a rescan compounds.
+   *
+   * Compared against a smaller input of the same shape rather than against a different
+   * chunking, because the defect is quadratic in the number of records and shows up whether
+   * the input arrives whole or in pieces. Measured on the broken form the larger input is over
+   * fifty times the smaller; correct, it is under twice.
+   */
+  it.each([
+    [
+      "a long comment prefix",
+      { delimiter: "", comment: "#" },
+      (n: number) => `${`#${"x".repeat(60)}\n`.repeat(n)}a;b\n1;2\n`
+    ],
+    [
+      "a long multi-line first quoted record",
+      { delimiter: "" },
+      (n: number) => `"${`${"x".repeat(63)}\n`.repeat(n)}tail";b\n1;2\n`
+    ]
+  ])(
+    "detects the delimiter in time linear in the skipped prefix (%s)",
+    async (_l, options, build) => {
+      const small = await bestMsToParse(build(500), 64 * 1024, options, 2);
+      const large = await bestMsToParse(build(4000), 64 * 1024, options, 2);
+
+      // Whatever the detector concludes, a streamed parse must conclude the same as a batch
+      // one, and must not take longer because the skipped prefix is longer.
+      expect(small.rows).toEqual(Csv.parse(build(500), options));
+      expect(large.rows).toEqual(Csv.parse(build(4000), options));
+      expect(large.ms).toBeLessThan(Math.max(small.ms, 60) * 10);
+    }
+  );
+
+  for (const fastMode of [false, true]) {
+    const mode = fastMode ? "fastMode" : "standard mode";
+
+    // The mark held across chunks must not swallow a line ending that straddles it.
+    it(`finds a CRLF split across the chunk boundary (${mode})`, async () => {
+      const rows = await feedInChunks("a,b\r\nc,d\r\ne,f\r\n", 4, { fastMode });
+
+      expect(rows).toEqual([
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"]
+      ]);
+    });
+
+    it(`finds a lone CR at a chunk boundary (${mode})`, async () => {
+      const rows = await feedInChunks("a,b\rc,d\re,f\r", 4, { fastMode });
+
+      expect(rows).toEqual([
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"]
+      ]);
+    });
+
+    it(`parses one character at a time (${mode})`, async () => {
+      const rows = await feedInChunks("a,b\r\nc,d\ne,f\rg,h", 1, { fastMode });
+
+      expect(rows).toEqual([
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"],
+        ["g", "h"]
+      ]);
+    });
+
+    it(`parses a row longer than the chunk one character at a time (${mode})`, async () => {
+      const rows = await feedInChunks(`${"a".repeat(40)},${"b".repeat(40)}\r\n`, 1, {
+        fastMode
+      });
+
+      expect(rows).toEqual([["a".repeat(40), "b".repeat(40)]]);
+    });
+  }
+
+  // A multi-character lineEnding can straddle the mark by more than one character, so
+  // fastMode has to back the mark off by the whole ending less one.
+  it.each([2, 3, 5, 7])(
+    "finds a multi-character lineEnding split across a %i-character chunk (fastMode)",
+    async chunkSize => {
+      const rows = await feedInChunks("a,b||c,d||e,f||", chunkSize, {
+        fastMode: true,
+        lineEnding: "||"
+      });
+
+      expect(rows).toEqual([
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"]
+      ]);
+    }
+  );
+
+  it.each([
+    [
+      "||",
+      ["a,b|||", "c,d||"],
+      [
+        ["a", "b"],
+        ["|c", "d"]
+      ]
+    ],
+    ["aa", ["xaaa", "yaa"], [["x"], ["ay"]]],
+    ["abab", ["xababab", "yabab"], [["x"], ["aby"]]]
+  ])(
+    "keeps the unmatched prefix of a self-overlapping lineEnding (%s)",
+    async (lineEnding, chunks, expected) => {
+      const parser = new CsvParserStream({ fastMode: true, lineEnding });
+      const collected = collectRows(parser);
+      Readable.from(chunks).pipe(parser);
+
+      expect(await collected).toEqual(expected);
+    }
+  );
+
+  it("keeps a trailing CR as data with a custom lineEnding", async () => {
+    const parser = new CsvParserStream({
+      fastMode: true,
+      lineEnding: "||",
+      info: true,
+      raw: true
+    });
+    const collected = collectRows(parser);
+    Readable.from(["a,b\r"]).pipe(parser);
+
+    expect(await collected).toEqual([
+      {
+        record: ["a", "b\r"],
+        info: expect.objectContaining({ line: 1, offset: 0, raw: "a,b\r" })
+      }
+    ]);
+  });
+
+  it("does not count CR or LF content as lines with a custom lineEnding", async () => {
+    const parser = new CsvParserStream({
+      fastMode: true,
+      lineEnding: "||",
+      info: true,
+      raw: true,
+      toLine: 2
+    });
+    const collected = collectRows(parser);
+    Readable.from(["a\rb||c\nd||"]).pipe(parser);
+
+    const rows = await collected;
+    expect(rows.map(row => row.record)).toEqual([["a\rb"], ["c\nd"]]);
+    expect(rows.map(row => row.info.line)).toEqual([1, 2]);
+    expect(rows.map(row => row.info.raw)).toEqual(["a\rb", "c\nd"]);
+  });
+
+  it("waits for a complete first data line before auto-detecting the delimiter", async () => {
+    const parser = new CsvParserStream({ fastMode: true, delimiter: "" });
+    const collected = collectRows(parser);
+    Readable.from(["a", ";b;c\n", "1;2;3\n"]).pipe(parser);
+
+    expect(await collected).toEqual([
+      ["a", "b", "c"],
+      ["1", "2", "3"]
+    ]);
+  });
+
+  it("does not mistake the continuation of a split comment for a data line", async () => {
+    const parser = new CsvParserStream({ fastMode: true, delimiter: "", comment: "#" });
+    const collected = collectRows(parser);
+    Readable.from(["# a long com", "ment\na", ";b;c\n", "1;2;3\n"]).pipe(parser);
+
+    expect(await collected).toEqual([
+      ["a", "b", "c"],
+      ["1", "2", "3"]
+    ]);
+  });
+
+  it("does not auto-detect from a newline inside the first quoted field", async () => {
+    const parser = new CsvParserStream({ delimiter: "" });
+    const collected = collectRows(parser);
+    Readable.from(['"a\n', 'b";c;d\n', "1;2;3\n"]).pipe(parser);
+
+    expect(await collected).toEqual([
+      ["a\nb", "c", "d"],
+      ["1", "2", "3"]
+    ]);
+  });
+
+  /**
+   * Streaming and `Csv.parse` must not disagree, which for auto-detection means the stream
+   * cannot commit on a smaller sample than the batch detector scores. These are the shapes
+   * where a prefix and the whole input point at different delimiters.
+   */
+  it.each([
+    ['a,b;"x\ny";c;d\n1;2;3;4\n', ";"],
+    ['a,"x;b;c\n1;2;3\n', ";"],
+    ["a;b\n1;2\n", ";"],
+    ["a,b\n1,2\n", ","]
+  ])("agrees with Csv.parse about the delimiter for %j", async (input, expectedDelimiter) => {
+    const options = { delimiter: "", delimitersToGuess: [",", ";"] };
+    const sync = Csv.parse(input, options) as string[][];
+
+    const parser = new CsvParserStream(options);
+    let detected = "";
+    parser.on("delimiter", value => {
+      detected = value;
+    });
+    const collected = collectRows(parser);
+    Readable.from(input.split("")).pipe(parser);
+
+    expect(await collected).toEqual(sync);
+    expect(detected).toBe(expectedDelimiter);
+  });
+
+  it("does not spin on an input whose records are all blank with a custom lineEnding", async () => {
+    // The detection loop used to trim its own input while holding a stale length bound.
+    const options = { delimiter: "", fastMode: true, lineEnding: "||" };
+    for (const input of ["||", "\n||", "a||"]) {
+      expect(await feedInChunks(input, input.length, options)).toEqual(Csv.parse(input, options));
+      expect(await feedInChunks(input, 1, options)).toEqual(Csv.parse(input, options));
+    }
+  });
+
+  it("releases the detection sample once the delimiter is committed", async () => {
+    // A candidate whose quoting never closes must not hold the stream until end of input.
+    const header = 'h1;h2,"x;h3;h4';
+    const csv = `${header}\n${Array.from({ length: 40000 }, (_, i) => `a${i};b${i};c${i};d${i}`).join("\n")}\n`;
+    let firstRowAfter = -1;
+    let fed = 0;
+
+    const parser = new CsvParserStream({ delimiter: "" });
+    parser.on("data", () => {
+      if (firstRowAfter === -1) {
+        firstRowAfter = fed;
+      }
+    });
+    const collected = collectRows(parser);
+    const chunks: string[] = [];
+    for (let i = 0; i < csv.length; i += 8192) {
+      chunks.push(csv.slice(i, i + 8192));
+    }
+    Readable.from(
+      (function* () {
+        for (const chunk of chunks) {
+          fed += chunk.length;
+          yield chunk;
+        }
+      })()
+    ).pipe(parser);
+
+    expect(await collected).toEqual(Csv.parse(csv, { delimiter: "" }));
+    expect(firstRowAfter).toBeGreaterThan(0);
+    // Bounded by the detection sample, not by the file: it used to be the whole input.
+    expect(firstRowAfter).toBeLessThan(csv.length / 4);
+  });
+
+  // Same options must mean the same thing to Csv.parse and to a stream. An empty candidate list
+  // once meant "no candidates, fall back to comma" to one and "not configured, use the
+  // defaults" to the other, so both the agreement and the chosen delimiter are asserted.
+  it("reads an empty delimitersToGuess as unset, like Csv.parse", async () => {
+    const options = { delimiter: "", delimitersToGuess: [] as string[] };
+    const input = "a;b\n1;2\n";
+    const expected = [
+      ["a", "b"],
+      ["1", "2"]
+    ];
+
+    expect(Csv.parse(input, options)).toEqual(expected);
+    expect(await feedInChunks(input, input.length, options)).toEqual(expected);
+    expect(await feedInChunks(input, 3, options)).toEqual(expected);
+  });
+
+  // A CR at end of input terminates a record under the default grammar, so the batch splitter
+  // yields the empty record after it. The stream used to drop the CR and emit nothing.
+  it.each(["a\n\r", "a\r", "\r", "a\n\r\n", "a,b\rc,d\r"])(
+    "ends fastMode input on a trailing CR the same way as Csv.parse (%j)",
+    async input => {
+      const options = { fastMode: true };
+      const expected = Csv.parse(input, options);
+
+      expect(await feedInChunks(input, input.length, options)).toEqual(expected);
+      expect(await feedInChunks(input, 1, options)).toEqual(expected);
+    }
+  );
+
+  describe("first-chunk preprocessing matches Csv.parse", () => {
+    it("rejects a beforeFirstChunk return value that is not a string", async () => {
+      const options = { beforeFirstChunk: (() => 123) as never };
+
+      expect(() => Csv.parse("a,b\n", options)).toThrow(CsvError);
+      await expect(feedInChunks("a,b\n", 4, options)).rejects.toThrow(CsvError);
+    });
+
+    it("runs the hook even when the stream carries no data", async () => {
+      const options = { delimiter: ";", beforeFirstChunk: () => "a;b\n" };
+
+      expect(await feedInChunks("", 1, options)).toEqual(Csv.parse("", options));
+    });
+
+    it("strips a BOM the hook leaves behind, after the hook has run", async () => {
+      const options = { beforeFirstChunk: (chunk: string) => `\uFEFF${chunk}` };
+      const input = "a,b\n";
+
+      expect(await feedInChunks(input, 2, options)).toEqual(Csv.parse(input, options));
+    });
+  });
+
+  it("uses every candidate delimiter to classify quotes before auto-detection", async () => {
+    const parser = new CsvParserStream({ delimiter: "" });
+    const collected = collectRows(parser);
+    // The comma before the quote makes a temporary comma scanner see the quote mid-field,
+    // while the real semicolon delimiter makes it the start of a quoted field.
+    Readable.from(['a,b;"x\n', 'y";c;d\n1;2;3;4\n']).pipe(parser);
+
+    expect(await collected).toEqual([
+      ["a,b", "x\ny", "c", "d"],
+      ["1", "2", "3", "4"]
+    ]);
+  });
+
+  it("keeps delimiter detection chunk-independent with a custom lineEnding", async () => {
+    const options = {
+      delimiter: "",
+      fastMode: true,
+      lineEnding: "||",
+      delimitersToGuess: [",", ";"]
+    };
+    const input = "a,b,c,d;e||x;y||p;q||m;n||";
+    const expected = [
+      ["a,b,c,d", "e"],
+      ["x", "y"],
+      ["p", "q"],
+      ["m", "n"]
+    ];
+
+    expect(await feedInChunks(input, input.length, options)).toEqual(expected);
+    expect(await feedInChunks(input, 12, options)).toEqual(expected);
+  });
+
+  // Detection commits once it holds the sample the batch detector reads, without waiting for
+  // end of input. A custom lineEnding counts records by its own separator, which is the part
+  // that was structurally unable to advance at all.
+  it("emits once the detection sample is complete, without waiting for EOF", () => {
+    const parser = new CsvParserStream({
+      delimiter: "",
+      fastMode: true,
+      lineEnding: "||",
+      delimitersToGuess: [",", ";"]
+    });
+    const rows: string[][] = [];
+    parser.on("data", row => rows.push(row as string[]));
+
+    parser.write(`${Array.from({ length: 10 }, (_, i) => `a${i};b${i}`).join("||")}||`);
+
+    expect(rows.length).toBeGreaterThanOrEqual(10);
+    expect(rows[0]).toEqual(["a0", "b0"]);
+  });
+
+  it.each([
+    [
+      "a distinct escape",
+      '"a\\",,x";b;c\n"a\\",,x";d;e\n',
+      { escape: "\\" },
+      [
+        ['a",,x', "b", "c"],
+        ['a",,x', "d", "e"]
+      ]
+    ],
+    [
+      "relaxed quotes",
+      '"a"x,,y";b;c\n"a"x,,y";d;e\n',
+      { relaxQuotes: true },
+      [
+        ['a"x,,y', "b", "c"],
+        ['a"x,,y', "d", "e"]
+      ]
+    ]
+  ])(
+    "uses the parser's actual quote semantics when detecting with %s",
+    async (_, input, extra, expected) => {
+      const options = { delimiter: "", delimitersToGuess: [",", ";"], ...extra };
+
+      expect(await feedInChunks(input, input.length, options)).toEqual(expected);
+      expect(await feedInChunks(input, 7, options)).toEqual(expected);
+    }
+  );
+
+  it("uses the custom lineEnding to decide when auto-detection has a complete record", async () => {
+    const parser = new CsvParserStream({ delimiter: "", fastMode: true, lineEnding: "||" });
+    const collected = collectRows(parser);
+    Readable.from(["a\rb", ";c|", "|1;2;3||"]).pipe(parser);
+
+    expect(await collected).toEqual([
+      ["a\rb", "c"],
+      ["1", "2", "3"]
+    ]);
+  });
+
+  it("applies beforeFirstChunk to the first decoded text, not an empty UTF-8 fragment", async () => {
+    const seen: string[] = [];
+    const parser = new CsvParserStream({
+      beforeFirstChunk(chunk) {
+        seen.push(chunk);
+        return chunk.replace("€", "currency");
+      }
+    });
+    const collected = collectRows(parser);
+    parser.write(new Uint8Array([0xe2]));
+    parser.end(new Uint8Array([0x82, 0xac, 0x2c, 0x78, 0x0a]));
+
+    expect(await collected).toEqual([["currency", "x"]]);
+    expect(seen).toEqual(["€,x\n"]);
+  });
+
+  it("applies beforeFirstChunk when the decoder produces its first text at EOF", async () => {
+    const seen: string[] = [];
+    const parser = new CsvParserStream({
+      beforeFirstChunk(chunk) {
+        seen.push(chunk);
+        return chunk.replace("�", "replacement");
+      }
+    });
+    const collected = collectRows(parser);
+    parser.end(new Uint8Array([0xe2]));
+
+    expect(await collected).toEqual([["replacement"]]);
+    expect(seen).toEqual(["�"]);
+  });
+
+  // A quoted field may hold row terminators, so finding one does not mean the row is
+  // complete. Standard mode must not mistake it for one.
+  it("parses a quoted field holding newlines across chunk boundaries", async () => {
+    const embedded = "line1\nline2\r\nline3\rline4";
+    const rows = await feedInChunks(`a,"${embedded}",z\nb,c,d\n`, 3);
+
+    expect(rows).toEqual([
+      ["a", "line1\nline2\nline3\nline4", "z"],
+      ["b", "c", "d"]
+    ]);
+  });
+
+  it("parses a quoted field longer than the chunk", async () => {
+    const big = "y".repeat(200_000);
+    const rows = await feedInChunks(`a,"${big}"\n`, 4096);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0][1]).toBe(big);
+  });
+});
+
+// =============================================================================
+// Chunking Equivalence
+// =============================================================================
+
+/**
+ * Chunking must not change the answer. That is a claim worth testing exhaustively rather
+ * than by example, because the streaming scanner now *waits* rather than re-reading the
+ * buffer on every chunk, and what it waits for depends on why it stalled: a row terminator
+ * normally, but a closing quote while a quoted field is open.
+ *
+ * The quote case is decided by run parity — under RFC 4180 a quote is literal only as half
+ * of a `""` pair, so an odd-length run of quotes closes the field — and the run may be split
+ * across a chunk boundary. That is exactly the kind of rule that is right for every input
+ * someone thought of and wrong for the one they did not, and its failure mode is the bad
+ * one: a wait that never ends holds the row back to end of input rather than corrupting it
+ * visibly.
+ *
+ * So every shape below is fed at every chunk size from one character upward, and compared
+ * against the same input delivered whole. One character at a time is the case that splits
+ * every run, every CRLF and every escape.
+ */
+describe("CsvParserStream - Chunking Equivalence", () => {
+  const cases: Array<[string, string, object, string[][]]> = [
+    [
+      "plain",
+      "a,b\nc,d\n",
+      {},
+      [
+        ["a", "b"],
+        ["c", "d"]
+      ]
+    ],
+    ["escaped quote", '"a""b",c\n', {}, [['a"b', "c"]]],
+    ["empty quoted", '"",""\n', {}, [["", ""]]],
+    ["quoted mixed newlines", 'a,"b\nc\r\nd\re",f\n', {}, [["a", "b\nc\nd\ne", "f"]]],
+    [
+      "JSON-like quoted content",
+      'id,payload\n1,"{\n  ""k"": ""v""\n}"\n',
+      {},
+      [
+        ["id", "payload"],
+        ["1", '{\n  "k": "v"\n}']
+      ]
+    ],
+    ["unterminated quote", '"abc', {}, [["abc"]]],
+    ["relaxed interior quote", '"a"b",c\n', { relaxQuotes: true }, [['a"b', "c"]]],
+    [
+      "relaxed quote before a split multi-character delimiter",
+      '"a"||b\n',
+      { relaxQuotes: true, delimiter: "||" },
+      [["a", "b"]]
+    ],
+    [
+      "distinct escape",
+      '"a\\"b",c\n"d\\\\e",f\n',
+      { escape: "\\" },
+      [
+        ['a"b', "c"],
+        ["d\\e", "f"]
+      ]
+    ],
+    [
+      "relaxed distinct escape",
+      '"a\\"b"c",d\n',
+      { escape: "\\", relaxQuotes: true },
+      [['a"b"c', "d"]]
+    ],
+    ["custom quote", "'a,b',c\n", { quote: "'" }, [["a,b", "c"]]],
+    ["quoting disabled", '"a,b",c\n', { quote: null }, [['"a', 'b"', "c"]]],
+    ["multi-character delimiter", "a||b|c||d\n", { delimiter: "||" }, [["a", "b|c", "d"]]],
+    ["fastMode", '"a,b",c\n', { fastMode: true }, [['"a', 'b"', "c"]]],
+    [
+      "no trailing newline",
+      "a,b\nc,d",
+      {},
+      [
+        ["a", "b"],
+        ["c", "d"]
+      ]
+    ],
+    [
+      "empty fields",
+      "a,,b\n,,\n",
+      {},
+      [
+        ["a", "", "b"],
+        ["", "", ""]
+      ]
+    ]
+  ];
+
+  function feed(csv: string, chunkSize: number, options: object): Promise<any[]> {
+    const chunks: string[] = [];
+    for (let i = 0; i < csv.length; i += chunkSize) {
+      chunks.push(csv.slice(i, i + chunkSize));
+    }
+    const parser = new CsvParserStream(options);
+    const collected = collectRows(parser);
+    Readable.from(chunks.length > 0 ? chunks : [""]).pipe(parser);
+    return collected;
+  }
+
+  it.each(cases)(
+    "%s parses correctly at every chunk size",
+    async (_name, csv, options, expected) => {
+      const whole = await feed(csv, csv.length || 1, options);
+      expect(whole).toEqual(expected);
+
+      for (let chunkSize = 1; chunkSize <= Math.min(csv.length, 12); chunkSize++) {
+        expect(await feed(csv, chunkSize, options)).toEqual(whole);
+      }
+      for (const chunkSize of [16, 64, 1024]) {
+        expect(await feed(csv, chunkSize, options)).toEqual(whole);
+      }
+    }
+  );
+
+  /**
+   * A quote run split across a boundary is the state the wait carries between chunks, so it
+   * is driven directly at every run length, every offset and every chunk size.
+   *
+   * The offset matters as much as the length, which is the part a first attempt at this test
+   * missed: with the run always starting at the same index, no chunk size ever produced a
+   * chunk made *entirely* of quotes with a partial run already carried into it. That is the
+   * one shape where the carry has to be added rather than replaced, and mutating the code to
+   * replace it passed a suite of thousands of chunk-size comparisons.
+   */
+  it("handles a quote run of any length at any offset split at any point", async () => {
+    for (let runLength = 0; runLength <= 6; runLength++) {
+      for (let prefixLength = 0; prefixLength <= 4; prefixLength++) {
+        const csv = `"${"a".repeat(prefixLength)}${'"'.repeat(runLength)}b",z\n`;
+        const whole = await feed(csv, csv.length, {});
+        for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
+          expect(await feed(csv, chunkSize, {})).toEqual(whole);
+        }
+      }
+    }
   });
 });

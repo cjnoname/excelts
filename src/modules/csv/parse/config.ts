@@ -6,16 +6,15 @@
  */
 
 import { DEFAULT_LINEBREAK_REGEX } from "@csv/constants";
-import { CsvError } from "@csv/errors";
 import { createOnSkipHandler } from "@csv/parse/helpers";
 import type { ScannerConfig } from "@csv/parse/scanner";
 import type { CsvParseOptions } from "@csv/types";
 import {
+  applyFirstChunkPreprocessing,
   normalizeQuoteOption,
   normalizeEscapeOption,
   detectDelimiter,
-  detectLinebreak,
-  stripBom
+  detectLinebreak
 } from "@csv/utils/detect";
 
 // =============================================================================
@@ -145,21 +144,7 @@ export function createParseConfig(opts: CreateParseConfigOptions): ParseConfigRe
   if (input !== undefined) {
     processedInput = input;
 
-    // Apply beforeFirstChunk if provided
-    if (beforeFirstChunk) {
-      const result = beforeFirstChunk(processedInput);
-      if (typeof result === "string") {
-        processedInput = result;
-      } else if (result !== undefined && result !== null) {
-        // Validate return type - must be string or void/undefined
-        throw new CsvError(
-          `beforeFirstChunk must return a string or undefined, got ${typeof result}`
-        );
-      }
-    }
-
-    // Strip BOM
-    processedInput = stripBom(processedInput);
+    processedInput = applyFirstChunkPreprocessing(processedInput, beforeFirstChunk);
   }
 
   const shouldSkipEmpty = skipEmptyLines;
@@ -168,6 +153,16 @@ export function createParseConfig(opts: CreateParseConfigOptions): ParseConfigRe
   const { enabled: quoteEnabled, char: quote } = normalizeQuoteOption(quoteOption);
   const escapeNormalized = normalizeEscapeOption(escapeOption, quote);
   const escape = escapeNormalized.enabled ? escapeNormalized.char || quote : "";
+
+  // Determine linebreak
+  const linebreak =
+    lineEndingOption || (processedInput !== undefined ? detectLinebreak(processedInput) : "\n");
+
+  // Pre-compile linebreak regex for fast mode
+  const linebreakRegex =
+    linebreak && linebreak !== "\n" && linebreak !== "\r\n" && linebreak !== "\r"
+      ? linebreak
+      : DEFAULT_LINEBREAK_REGEX;
 
   // Determine delimiter
   let delimiter: string;
@@ -181,7 +176,15 @@ export function createParseConfig(opts: CreateParseConfigOptions): ParseConfigRe
       quote || '"',
       delimitersToGuess,
       comment,
-      shouldSkipEmpty
+      shouldSkipEmpty,
+      {
+        escape,
+        relaxQuotes,
+        // Matches CsvParserStream: only fastMode actually ends records at a configured
+        // separator, so only then may the sampler use it. Standard mode always ends records
+        // at CR/LF.
+        lineEnding: fastMode && linebreakRegex !== DEFAULT_LINEBREAK_REGEX ? linebreak : undefined
+      }
     );
   } else if (delimiterOption === "") {
     // Streaming mode with auto-detect - use default, will be updated later
@@ -189,16 +192,6 @@ export function createParseConfig(opts: CreateParseConfigOptions): ParseConfigRe
   } else {
     delimiter = delimiterOption;
   }
-
-  // Determine linebreak
-  const linebreak =
-    lineEndingOption || (processedInput !== undefined ? detectLinebreak(processedInput) : "\n");
-
-  // Pre-compile linebreak regex for fast mode
-  const linebreakRegex =
-    linebreak && linebreak !== "\n" && linebreak !== "\r\n" && linebreak !== "\r"
-      ? linebreak
-      : DEFAULT_LINEBREAK_REGEX;
 
   const config: ParseConfig = {
     delimiter,

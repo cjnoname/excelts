@@ -32,6 +32,15 @@ import type {
 import { isReadableStreamLike, readableStreamToAsyncIterable } from "@stream/utils.base";
 import { toError } from "@utils/errors";
 
+/**
+ * Rows buffered for the generator's consumer before the parser is paused.
+ *
+ * Small enough that a slow consumer cannot accumulate the whole input, large enough that a
+ * fast one is never throttled between pulls.
+ */
+const ROW_QUEUE_HIGH_WATER_MARK = 1024;
+const ROW_QUEUE_LOW_WATER_MARK = 256;
+
 type AsyncInput = AsyncIterable<string | Uint8Array>;
 
 /**
@@ -304,6 +313,7 @@ export async function* parseCsvRows(
   let ended = false;
   let streamError: unknown = null;
   let aborted = false;
+  let paused = false;
 
   const pushEvent = (ev: StreamEvent): void => {
     if (pendingResolve) {
@@ -315,8 +325,27 @@ export async function* parseCsvRows(
     queue.push(ev);
   };
 
+  // A `data` listener puts the parser in flowing mode, so without this the parser would read
+  // the whole input into `queue` no matter how slowly the consumer of this generator pulls.
+  // Pausing hands that backpressure through to the writer loop below, which already waits for
+  // `drain`.
+  const applyBackpressure = (): void => {
+    if (!paused && queue.length >= ROW_QUEUE_HIGH_WATER_MARK) {
+      paused = true;
+      parser.pause();
+    }
+  };
+
+  const releaseBackpressure = (): void => {
+    if (paused && queue.length <= ROW_QUEUE_LOW_WATER_MARK) {
+      paused = false;
+      parser.resume();
+    }
+  };
+
   const onData = (value: ParsedRow): void => {
     pushEvent({ type: "data", value });
+    applyBackpressure();
   };
   const onEnd = (): void => {
     ended = true;
@@ -364,6 +393,7 @@ export async function* parseCsvRows(
     while (true) {
       if (queue.length > 0) {
         const ev = queue.shift()!;
+        releaseBackpressure();
         if (ev.type === "data") {
           yield ev.value;
           continue;
@@ -396,6 +426,11 @@ export async function* parseCsvRows(
     }
   } finally {
     aborted = true;
+    if (paused) {
+      // Let the writer loop finish rather than leaving it blocked behind a paused parser.
+      paused = false;
+      parser.resume();
+    }
     // Ensure stream stops as soon as possible.
     parser.destroy();
     // Release the writer if it is waiting for drain (destroy does not emit drain).

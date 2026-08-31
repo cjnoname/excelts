@@ -150,6 +150,8 @@ const REPO_PRIVATE_MEMBER_TYPES = new Set([
   "ParseConfig @ modules/csv/parse/config.ts",
   "ParseState @ modules/csv/parse/state.ts",
   "Scanner @ modules/csv/parse/scanner/types.ts",
+  "DetectionCandidate @ modules/csv/stream/parser.ts",
+  "DetectionCandidateProgress @ modules/csv/stream/parser.ts",
   "FormatConfig @ modules/csv/format/config.ts",
   "FormatRowOptions @ modules/csv/format/config.ts",
   // archive — private state on ArchiveFile / WorkerPool

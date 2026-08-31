@@ -501,6 +501,34 @@ describe("parseCsvRows", () => {
       ["4", "5", "6"]
     ]);
   });
+
+  // A `data` listener puts the parser in flowing mode, so a slow consumer used to have the
+  // whole input read into an unbounded queue behind it.
+  it("stops reading ahead when the consumer stops pulling", async () => {
+    const total = 20000;
+    let produced = 0;
+    async function* generateChunks() {
+      for (let i = 0; i < total; i++) {
+        produced++;
+        yield `${i},x\n`;
+      }
+    }
+
+    const iterator = Csv.parseRows(generateChunks())[Symbol.asyncIterator]();
+    await iterator.next();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const readAhead = produced;
+    await iterator.return?.(undefined);
+
+    expect(readAhead).toBeGreaterThan(0);
+    expect(readAhead).toBeLessThan(total / 4);
+
+    let consumed = 0;
+    for await (const _row of Csv.parseRows(generateChunks())) {
+      consumed++;
+    }
+    expect(consumed).toBe(total);
+  });
 });
 
 // =============================================================================
