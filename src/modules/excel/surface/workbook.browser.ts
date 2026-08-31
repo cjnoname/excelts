@@ -2,9 +2,9 @@
  * `Workbook` namespace surface — browser entry.
  *
  * Same as the Node `surface/workbook.ts` but IO comes from
- * `@excel/xlsx-io` (cross-platform `toBuffer` / `read` / streaming only — no
+ * `@excel/xlsx-io` (cross-platform XLSX/XLSB buffer and stream IO — no
  * Node file-path `readFile` / `writeFile`). The `.browser` same-name swap
- * selects the browser xlsx binding.
+ * selects the browser binding.
  */
 export {
   createWorkbook as create,
@@ -42,7 +42,15 @@ export {
 } from "@excel/core/workbook.browser";
 
 export { toBuffer, toStream, read, readStream, writeStream, getXlsxIo } from "@excel/core/xlsx-io";
-export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
+export type {
+  XlsxReadable,
+  XlsxWritable,
+  XlsxStreamOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions
+} from "@excel/core/xlsx-io";
 
 /** A workbook handle (opaque to consumers). */
 export type { WorkbookData as Handle } from "@excel/core/workbook-core";

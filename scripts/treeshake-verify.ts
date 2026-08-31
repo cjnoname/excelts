@@ -205,7 +205,7 @@ function chartNs(platform?: "browser" | "node"): Scenario {
 
 const scenarios: Scenario[] = [
   // ===========================================================================
-  // /excel subpath — ALL 20 namespaces. Per the layer rules, excel may reach
+  // /excel subpath — ALL 21 namespaces. Per the layer rules, excel may reach
   // formula / archive / xml / csv / markdown / stream, but NEVER pdf or word.
   // Measured legitimate lower-layer reach is encoded per-namespace below.
   // ===========================================================================
@@ -236,6 +236,8 @@ const scenarios: Scenario[] = [
     "modules/formula/"
   ]),
   ns("excel", "Worksheet", []),
+  // xlsb package = workbook model + zip + XML relationships/content types + streams
+  ns("excel", "Xlsb", ["modules/archive/", "modules/xml/", "modules/stream/", "modules/formula/"]),
 
   // ===========================================================================
   // /word subpath — ALL 19 namespaces. word may reach formula / archive / xml /
@@ -446,6 +448,12 @@ const scenarios: Scenario[] = [
     "browser"
   ),
   ns("excel", "Worksheet", [], "browser"),
+  ns(
+    "excel",
+    "Xlsb",
+    ["modules/archive/", "modules/xml/", "modules/stream/", "modules/formula/"],
+    "browser"
+  ),
 
   ns("word", "Build", ["modules/xml/"], "browser"),
   ns("word", "Convert", ["modules/archive/", "modules/xml/", "modules/stream/"], "browser"),

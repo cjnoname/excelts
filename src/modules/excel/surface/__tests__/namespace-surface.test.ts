@@ -34,14 +34,15 @@ describe("documonster/excel namespace surface", () => {
       "Table",
       "Watermark",
       "Workbook",
-      "Worksheet"
+      "Worksheet",
+      "Xlsb"
     ];
     /**
      * Constant lookup objects (not namespaces): each doubles as its own type,
      * e.g. `Cell.getType(ws, "A1") === ValueType.Number`.
      */
     const CONSTANTS = ["ErrorValue", "FormulaType", "PaperSize", "ValueType"];
-    // Object exports — must be exactly the 22 namespaces plus the lookups.
+    // Object exports — must be exactly the namespaces plus the lookups.
     const objectKeys = Object.keys(Excel)
       .filter(k => typeof (Excel as Record<string, unknown>)[k] === "object")
       .sort();
@@ -84,6 +85,22 @@ describe("documonster/excel namespace surface", () => {
       "writeFile"
     ]) {
       expect(typeof (Excel.Workbook as Record<string, unknown>)[m], `Workbook.${m}`).toBe(
+        "function"
+      );
+    }
+  });
+
+  it("Xlsb namespace exposes the Node IO surface as functions", () => {
+    for (const member of [
+      "toBuffer",
+      "toStream",
+      "read",
+      "readFile",
+      "writeFile",
+      "readStream",
+      "writeStream"
+    ]) {
+      expect(typeof (Excel.Xlsb as Record<string, unknown>)[member], `Xlsb.${member}`).toBe(
         "function"
       );
     }

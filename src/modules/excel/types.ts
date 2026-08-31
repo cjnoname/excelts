@@ -168,7 +168,7 @@ export interface FillGradientAngle {
 export interface FillGradientPath {
   type: "gradient";
   gradient: "path";
-  center: { left: number; top: number };
+  center: { left: number; top: number; right?: number; bottom?: number };
   stops: GradientStop[];
 }
 
@@ -275,6 +275,9 @@ export interface PageSetup {
   firstPageNumber?: number;
   /** Whether the source explicitly enables `firstPageNumber`. */
   useFirstPageNumber?: boolean;
+  /** Use printer-driver defaults instead of the explicit orientation. */
+  usePrinterDefaults?: boolean;
+  copies?: number;
   horizontalCentered: boolean;
   verticalCentered: boolean;
   rowBreaks?: RowBreak[];
@@ -305,6 +308,9 @@ export interface HeaderFooter {
 // Worksheet View Types
 // ============================================================================
 export interface WorksheetViewCommon {
+  /** Zero-based workbook view this sheet view is associated with. */
+  workbookViewId?: number;
+  tabSelected?: boolean;
   rightToLeft?: boolean;
   activeCell?: string;
   showRuler?: boolean;

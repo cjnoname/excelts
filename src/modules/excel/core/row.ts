@@ -279,7 +279,11 @@ export function rowGetModel(r: RowData): RowModel | null {
     }
   });
 
-  return r.height != null || cells.length
+  return r.height != null ||
+    cells.length > 0 ||
+    rowHidden(r) ||
+    rowOutlineLevel(r) > 0 ||
+    Object.keys(r.style).length > 0
     ? {
         cells,
         number: r.number,

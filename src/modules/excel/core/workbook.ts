@@ -2,7 +2,7 @@
  * Workbook - Node.js entry point.
  *
  * Re-exports the platform-independent workbook surface (record + flat
- * functions) from `workbook.browser`, plus the Node xlsx IO (cross-platform
+ * functions) from `workbook.browser`, plus the canonical Node workbook IO (cross-platform
  * `read` / `toBuffer` / `readStream` / `writeStream` together with the
  * Node-only file-path `readFile` / `writeFile`) from `xlsx-io`. The
  * browser/Node split keeps Node-only `fs` and stream code out of browser
@@ -16,8 +16,8 @@ import { WorkbookWriter } from "@excel/stream/workbook-writer";
 
 export * from "@excel/core/workbook.browser";
 
-// Cross-platform + Node-only xlsx IO (read / readFile / writeFile / toBuffer /
-// readStream / writeStream + getXlsxIo). Node binding via xlsx-io.ts.
+// Cross-platform + Node-only XLSX/XLSB IO (read / readFile / writeFile /
+// toBuffer / readStream / writeStream + the XLSX-specific getXlsxIo handle).
 export {
   toBuffer,
   toStream,
@@ -28,7 +28,15 @@ export {
   writeStream,
   getXlsxIo
 } from "@excel/core/xlsx-io";
-export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
+export type {
+  XlsxReadable,
+  XlsxWritable,
+  XlsxStreamOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions
+} from "@excel/core/xlsx-io";
 
 /**
  * Node streaming workbook writer factory (accepts `{ filename }`).

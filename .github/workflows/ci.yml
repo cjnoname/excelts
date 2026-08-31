@@ -331,19 +331,23 @@ jobs:
         env:
           CI: true
 
+      - name: Run XLSX/XLSB IO benchmark
+        run: pnpm benchmark:xlsb
+        env:
+          CI: true
+
   chart-oracle:
-    # Opt-in real-file validation: install LibreOffice on Linux and run
-    # the `chart-oracle.integration.node.test.ts` suite with the env flags
-    # that enable real binary round-trips. The test file skips every
-    # `it` when the flags are unset, so the rest of the matrix (which
-    # doesn't install LibreOffice) keeps working unchanged.
+    # Opt-in real-file validation: install LibreOffice on Linux and run the
+    # chart and XLSB oracle suites with the env flags that enable real binary
+    # round-trips. The test files skip every `it` when the flags are unset, so
+    # the rest of the matrix (which doesn't install LibreOffice) stays fast.
     #
     # We gate on a single Linux runner — LibreOffice is slow to install
     # (~200MB of apt packages) and the goal is catching open-validation
     # regressions, not multiplying across OS/Node variants.
     needs: should-run
     timeout-minutes: 20
-    name: Chart real-file oracle (LibreOffice)
+    name: Office real-file oracle (LibreOffice)
     runs-on: ubuntu-latest
 
     steps:
@@ -367,13 +371,14 @@ jobs:
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
 
-      - name: Run chart-oracle tests
-        run: pnpm exec vitest run src/modules/excel/chart/__tests__/chart-oracle.integration.node.test.ts src/modules/excel/chart/__tests__/workbook-chart-roundtrip.integration.node.test.ts
+      - name: Run LibreOffice oracle tests
+        run: pnpm exec vitest run src/modules/excel/chart/__tests__/chart-oracle.integration.node.test.ts src/modules/excel/chart/__tests__/workbook-chart-roundtrip.integration.node.test.ts src/modules/excel/xlsb/__tests__/xlsb-oracle.node.test.ts
         env:
           CI: true
           LIBREOFFICE_BIN: soffice
           DOCUMONSTER_LIBREOFFICE_VISUAL_ORACLE: "1"
           DOCUMONSTER_LIBREOFFICE_OPEN_VALIDATION: "1"
+          DOCUMONSTER_XLSB_LIBREOFFICE_VALIDATION: "1"
           # Optional enterprise corpus — only fires when the private
           # directory is mounted into the runner (via repository
           # secret + setup action). Safe to leave unset on public PRs.

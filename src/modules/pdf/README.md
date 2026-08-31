@@ -200,14 +200,14 @@ const url = URL.createObjectURL(blob);
 window.open(url);
 ```
 
-### Read XLSX, Export PDF
+### Read XLSX or XLSB, Export PDF
 
 ```typescript
 import { Workbook } from "documonster/excel";
 import { Pdf } from "documonster/pdf";
 
 const workbook = Workbook.create();
-await Workbook.readFile(workbook, "report.xlsx");
+await Workbook.readFile(workbook, "report.xlsb"); // .xlsx works through the same API
 
 const pdf = await Pdf.fromExcel(workbook, {
   showGridLines: true,

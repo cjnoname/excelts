@@ -79,6 +79,54 @@ describe("sheet_write", () => {
     ]);
   });
 
+  it("writes XLSB rows, formulas, styles and views through the atomic path", async () => {
+    const fx = await fixture();
+    await write(fx, {
+      path: "out.xlsb",
+      sheets: [
+        {
+          name: "Data",
+          rows: [
+            ["amount", "gross"],
+            [125.5, null]
+          ],
+          formulas: { B2: "=A2*1.2" },
+          freezeRows: 1,
+          styles: [{ range: "A2:B2", style: { numFmt: "#,##0.00", bold: true } }]
+        }
+      ]
+    });
+
+    // Reading by the .xlsb path proves the atomic temporary kept the requested
+    // serializer format rather than producing an XLSX with a binary extension.
+    const wb = await reopen(fx, "out.xlsb");
+    const ws = Workbook.getWorksheet(wb, "Data")!;
+    expect(Cell.getFormula(ws, "B2")).toBe("A2*1.2");
+    expect(Cell.getResult(ws, "B2")).toBe(150.6);
+    expect(Cell.getNumFmt(ws, "A2")).toBe("#,##0.00");
+    expect(Cell.getStyle(ws, "A2").font?.bold).toBe(true);
+    expect(ws.views[0]).toMatchObject({ state: "frozen", ySplit: 1 });
+  });
+
+  it("rejects charts for XLSB instead of failing after partial output", async () => {
+    const fx = await fixture();
+    await expect(
+      sheetWriteTool.handler(
+        {
+          path: "charted.xlsb",
+          sheets: [
+            {
+              name: "Data",
+              rows: [["value"], [1]],
+              charts: [{ type: "column", categories: "A2:A2", values: "A2:A2" }]
+            }
+          ]
+        },
+        { config: fx.config }
+      )
+    ).rejects.toThrow(/cannot create charts in XLSB/);
+  });
+
   it("creates the parent directory rather than failing", async () => {
     // A model writes "reports/q3.xlsx" without checking that reports/ exists.
     const fx = await fixture();

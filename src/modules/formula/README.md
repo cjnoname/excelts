@@ -69,7 +69,7 @@ console.log(Cell.getResult(ws, "A4")); // 60
 
 ### Recalculating a loaded workbook
 
-Load an XLSX with the excel module, then recalculate its formulas
+Load an XLSX or XLSB workbook with the excel module, then recalculate its formulas
 functionally. There is no install or registration step.
 
 ```typescript
@@ -93,7 +93,7 @@ const ast = Formula.parse(tokens); // throws on syntax errors
 ## Why separate subpaths?
 
 The formula engine is ~200 KB minified. Most callers of `documonster`
-only read and write XLSX files and let Excel recalculate on open — pulling
+only read and write workbook files and let Excel recalculate on open — pulling
 the engine into those bundles unconditionally would be a large, invisible
 cost.
 
@@ -176,14 +176,14 @@ after every write operation succeeds.
 
 From `documonster/excel/formula`. Captures an immutable snapshot, runs the
 engine, and writes results back into the real cells. This is the sole public
-evaluation entry, including for workbooks loaded from XLSX.
+evaluation entry, including for workbooks loaded from XLSX or XLSB.
 
 ### PDF export recalculation
 
 `Pdf.fromExcel` does not depend on the formula engine. To recompute
 formulas before rendering, inject `calculateFormulas` via the
 `recalculate` option — only opt-in callers pull the ~200 KB engine into
-their bundle. Without it, the cached XLSX results are used (the safe
+their bundle. Without it, the cached workbook results are used (the safe
 default for files written by Excel itself).
 
 ```typescript
@@ -226,8 +226,9 @@ removes the override and restores any shadowed built-in.
 
 When the excel module loads an XLSX, it classifies defined names using a
 built-in syntax probe that reuses this engine's `tokenize` + `parse`.
-This is automatic — no setup required, and a `Workbook` that never loads
-XLSX never pulls the tokenizer/parser in. To override classification per
+This is automatic — no setup required. XLSB defined names are decoded from
+their BIFF12 formula tokens instead, so a `Workbook` that only loads XLSB (or
+never loads XLSX) never pulls this tokenizer/parser in. To override classification per
 instance (e.g. for a custom host), pass your own probe — a
 `(text: string) => boolean` — to `Workbook.create({ formulaSyntaxProbe })`.
 You can build one from this module's primitives:

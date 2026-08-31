@@ -42,6 +42,15 @@ export * as Watermark from "@excel/surface/watermark";
 export * as HeaderFooterImage from "@excel/surface/header-footer-image";
 export * as Format from "@excel/surface/format";
 
+export type {
+  XlsbInputStream,
+  XlsbReadable,
+  XlsbWritable,
+  XlsbReadOptions,
+  XlsbStreamOptions,
+  XlsbWriteOptions
+} from "@excel/core/xlsb-io";
+
 // ---------------------------------------------------------------------------
 // Public types (platform-independent)
 //
@@ -278,7 +287,14 @@ export type {
   WorkbookProtection,
   WorkbookView
 } from "@excel/types";
-export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/core/xlsx-io";
+export type {
+  XlsxReadOptions,
+  XlsxWriteOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions
+} from "@excel/core/xlsx-io";
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 export type {
@@ -308,6 +324,7 @@ export {
   RowOutOfBoundsError,
   MergeConflictError,
   InvalidValueTypeError,
+  XlsbParseError,
   ExcelNotSupportedError,
   ExcelFileError,
   ExcelStreamStateError,

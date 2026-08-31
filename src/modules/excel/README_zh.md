@@ -2,11 +2,12 @@
 
 [English](README.md)
 
-现代化的 TypeScript Excel 工作簿管理器 —— 零运行时依赖，读取、操作并写入 XLSX 与 JSON 电子表格。
+现代化的 TypeScript Excel 工作簿管理器 —— 零运行时依赖，读取、操作并写入 XLSX、XLSB 与 JSON 电子表格。
 
 ## 特性
 
 - **创建、读取并修改 XLSX 文件** —— 完整的 Open XML 支持
+- **读取并写入 XLSB 文件** —— 跨平台支持 BIFF12 单元格、公式、样式、表格、筛选、备注、保护与页面设置
 - **多工作表支持** —— 添加、删除、重排、复制
 - **单元格样式** —— 字体、颜色、边框、填充、对齐、数字格式
 - **单元格合并与格式化** —— 合并区域、富文本、超链接
@@ -84,6 +85,87 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
   console.log("Row " + rowNumber + " = " + JSON.stringify(Row.values(worksheet, rowNumber)));
 });
 ```
+
+### XLSB 文件
+
+XLSB 与 XLSX 共用相同的工作簿、工作表、行、列、单元格模型以及规范的
+`Workbook` IO 接口。缓冲区读取会自动检测包格式；Node 路径方法根据 `.xlsb`
+扩展名选择 XLSB；缓冲区和流写入则接受 `format: "xlsb"`。也可以直接使用
+`Xlsb` 命名空间：
+
+```typescript
+import { Cell, Workbook, Xlsb } from "documonster/excel";
+
+const workbook = Workbook.create();
+const sheet = Workbook.addWorksheet(workbook, "Data");
+Cell.setValue(sheet, "A1", "binary workbook");
+
+// Node.js file paths
+await Workbook.writeFile(workbook, "report.xlsb");
+await Workbook.readFile(Workbook.create(), "report.xlsb");
+
+// Node.js and browsers
+const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+const parsed = Workbook.create();
+await Workbook.read(parsed, bytes); // autodetects XLSB
+
+// Pull-based streaming uses the canonical Workbook IO contract.
+for await (const chunk of Xlsb.toStream(workbook)) {
+  // upload or persist chunk
+}
+```
+
+`XlsbReadOptions` 控制 base64 输入、行列限制、公式处理以及空单元格的实体化。
+`blankCells` 默认为 `"keep"`，与既有行为一样保留无值但带样式的单元格。对于包含
+大面积已格式化空白区域的文件，可以使用 `blankCells: "skip"`：空白 BIFF12 单元格
+记录不会进入内存模型，也不会扩大物理行数；带值单元格及其样式不受影响。
+
+跳过带样式空白单元格属于明确的有损模型视图。未修改的已加载工作簿仍会逐字节写回
+原始 XLSB；一旦编辑，严格写入会抛出 `ExcelNotSupportedError` 并报告跳过数量，只有
+`unsupported: "ignore"` 才明确允许丢弃这些格式。`XlsbWriteOptions` 还控制 ZIP
+元数据，格式错误的 BIFF12 数据会抛出 `XlsbParseError`。
+
+#### 不受信任工作簿的安全读取
+
+`maxRows` 和 `maxCols` 按固定的 BIFF12 物理坐标停止读取；如果事先不知道数据范围，
+它们可能连带省略有值单元格。对于 Excel 生成的带样式空白尾部，
+`blankCells: "skip"` 是更合适的内存优化：它只移除无值单元格，并保留所有值、公式、
+日期以及带值单元格的样式。该选项是新增的显式选择；省略或使用 `"keep"` 时保持历史行为。
+
+显式命名空间提供完整的格式专用 IO 接口：
+
+| 方法                                          | Node.js  | 浏览器       | 用途                                       |
+| --------------------------------------------- | -------- | ------------ | ------------------------------------------ |
+| `Xlsb.read(workbook, data, options?)`         | 是       | 是           | 读取 XLSB 字节或可选的 base64 编码字符串。 |
+| `Xlsb.toBuffer(workbook, options?)`           | `Buffer` | `Uint8Array` | 将工作簿序列化为 XLSB 字节。               |
+| `Xlsb.readStream(workbook, source, options?)` | 是       | 是           | 消费同步或异步的字节块 iterable。          |
+| `Xlsb.writeStream(workbook, sink, options?)`  | 是       | 是           | 将 XLSB 包推送到支持背压的 archive sink。  |
+| `Xlsb.toStream(workbook, options?)`           | 是       | 是           | 返回由消费者拉取的 XLSB 可读字节流。       |
+| `Xlsb.readFile(workbook, path, options?)`     | 是       | —            | 读取 XLSB 文件路径。                       |
+| `Xlsb.writeFile(workbook, path, options?)`    | 是       | —            | 写入 XLSB 文件路径。                       |
+
+规范的 `Workbook` 方法接受 `WorkbookReadOptions`、`WorkbookWriteOptions` 和
+`WorkbookStreamOptions`。`Workbook.read` 根据包字节检测 XLSB，`readFile`/
+`writeFile` 根据 `.xlsb` 扩展名选择格式；流式 IO 需要 `format: "xlsb"`，因为
+流不会被预先打开以检查包内容。显式 `Xlsb` 方法不需要格式标志。可移植流契约命名为
+`XlsbInputStream`、`XlsbReadable` 和 `XlsbWritable`。
+
+当前实现覆盖标量与富文本值、错误、日期、完整单元格样式、行列属性、工作簿与
+工作表视图、合并单元格、超链接、传统备注、数据验证、保护、页面设置、定义名称、
+表格、结构化引用、AutoFilter 条件以及经典 BIFF12 公式，包括共享公式与传统数组公式。
+默认保留公式表达式；可以用 `formulas: "cached"` 进行明确的有损读取，或用
+`formulas: "error"` 拒绝公式单元格。绘图、图表、数据透视表、外部链接、条件格式和
+动态数组在编辑后的严格写入中仍会失败，而不会被静默丢弃。未修改的已加载工作簿会
+逐字节原样返回，包括宏及不透明包部件。
+
+维护者可运行 `pnpm verify:xlsb-corpus` 验证固定的 Calamine、Apache POI 与 `jsxlsb`
+互操作语料库，并运行 `pnpm benchmark:xlsb` 比较同一工作簿的 XLSX/XLSB IO。设置
+`XLSB_BENCHMARK_TRAILING_BLANK_ROWS` 可使用带样式空白尾部比较普通 XLSB 读取与
+`blankCells: "skip"` 读取。
+语料库还固定验证工作表名称、日期与日期系统、公式、备注、超链接、Unicode、合并单元格
+以及一次编辑后的 XLSB 往返。缓存、离线、刷新、私有语料库和基准规模选项记录在
+[`xlsb/README.md`](xlsb/README.md) 中。可运行的创建、写入、读取、编辑与验证示例见
+[`examples/xlsb.ts`](examples/xlsb.ts)。
 
 ### 读取区域
 
@@ -197,7 +279,7 @@ DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRan
 ```
 
 设置公式只是存下公式,并不会求值。要计算结果,从 `documonster/excel/formula`
-subpath 导入计算引擎(单独拆开,好让约 200 KB 的引擎不进入只读写 XLSX 的
+subpath 导入计算引擎(单独拆开,好让约 200 KB 的引擎不进入只读写工作簿的
 bundle — 无需任何安装或注册步骤):
 
 ```typescript
@@ -1514,7 +1596,17 @@ import type {
   ConditionalFormattingOptions,
   TableProperties,
   WorksheetModel,
-  XlsxWriteOptions
+  XlsxWriteOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions,
+  XlsbReadOptions,
+  XlsbWriteOptions,
+  XlsbStreamOptions,
+  XlsbInputStream,
+  XlsbReadable,
+  XlsbWritable
 } from "documonster/excel";
 
 // 样式值可以被声明，因此样式能够组合与复用。
@@ -1623,6 +1715,7 @@ try {
 参见[示例目录](examples/)，其中包含覆盖所有特性的可运行代码：
 
 - 工作簿的创建、读取和复制
+- XLSB 创建、自动检测、编辑及严格保真的往返验证
 - 单元格样式、字体、边框、填充
 - 公式、数据验证、条件格式
 - 图片（JPEG、PNG）、超链接、批注

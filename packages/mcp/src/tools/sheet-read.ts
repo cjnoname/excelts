@@ -12,6 +12,7 @@ import { z } from "zod";
 
 import { toolError } from "../errors.js";
 import { resolveInRoot } from "../sandbox.js";
+import { requireSpreadsheetFormat } from "./document.js";
 import { assertReadableSize } from "./fs-helpers.js";
 import { textResult } from "./result.js";
 import { describeSheetImages } from "./sheet-image.js";
@@ -38,7 +39,7 @@ export const sheetReadTool = defineTool({
   group: "excel",
   title: "Read spreadsheet cells",
   description:
-    "Read a bounded window of an .xlsx/.xlsm sheet as a Markdown table with column letters and row numbers, so cells can be referenced by address afterwards. Call doc_inspect first to learn the sheet names. Reads at most 50 rows unless maxRows says otherwise, and always reports what was omitted.",
+    "Read a bounded window of an .xlsx, .xlsm, or .xlsb sheet as a Markdown table with column letters and row numbers, so cells can be referenced by address afterwards. Call doc_inspect first to learn the sheet names. Reads at most 50 rows unless maxRows says otherwise, and always reports what was omitted.",
   inputSchema: {
     path: z.string().min(1).describe("Workbook path, relative to the server root."),
     sheet: z
@@ -73,6 +74,7 @@ export const sheetReadTool = defineTool({
   mutates: false,
   handler: async (args, context) => {
     const { config } = context;
+    requireSpreadsheetFormat(args.path, "path");
     const resolved = await resolveInRoot(config, args.path, { mustExist: true });
     await assertReadableSize(config, resolved, args.path);
 
@@ -82,7 +84,7 @@ export const sheetReadTool = defineTool({
     } catch (cause) {
       throw toolError.unsupported(
         `could not read ${args.path} as a workbook`,
-        "Run doc_inspect to confirm the file really is an .xlsx package.",
+        "Run doc_inspect to confirm the file really is an XLSX, XLSM, or XLSB package.",
         { cause }
       );
     }

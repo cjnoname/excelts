@@ -20,9 +20,11 @@ Documonster is a zero-dependency TypeScript toolkit for spreadsheets and documen
 
 Documonster is organized into nine standalone modules. Each module has its own documentation and runnable examples.
 
-### Excel — XLSX/JSON Workbook Manager
+### Excel — XLSX/XLSB/JSON Workbook Manager
 
-Create, read, and modify Excel spreadsheets with full styling, formulas, images, and streaming support.
+Create, read, and modify Excel spreadsheets with full XLSX styling, formulas,
+images, and streaming support, plus zero-dependency XLSB cells, styles,
+formulas, streaming, autodetection, and strict fidelity safeguards.
 
 - [Documentation](src/modules/excel/README.md) | [中文](src/modules/excel/README_zh.md)
 - [Examples](src/modules/excel/examples/)
@@ -36,7 +38,7 @@ Read, write, and manipulate DOCX files with a full builder, reader, and converte
 
 ### Formula — Excel-Compatible Calculation Engine
 
-448-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write XLSX.
+448-function calculation engine with tokenizer, parser, dependency graph, dynamic-array spill, and `LAMBDA`/`LET`/`MAP`/`REDUCE` support. Recalculate XLSX or XLSB workbooks with `calculateFormulas()` from `documonster/excel/formula`; tokenize and parse syntax with `Formula` from `documonster/formula`. There is no install step, and the engine stays out of bundles that only read/write workbooks.
 
 - [Documentation](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [Examples](src/modules/formula/examples/)
@@ -126,6 +128,8 @@ const sheet = Workbook.addWorksheet(workbook, "Sheet1");
 Worksheet.addRow(sheet, ["Name", "Age"]);
 Worksheet.addRow(sheet, ["Alice", 30]);
 await Workbook.writeFile(workbook, "output.xlsx");
+// Use a .xlsb path to select the binary workbook writer.
+await Workbook.writeFile(workbook, "output.xlsb");
 
 // Read
 const wb = Workbook.create();

@@ -68,7 +68,7 @@ console.log(Cell.getResult(ws, "A4")); // 60
 
 ### 重算已加载的工作簿
 
-用 excel 模块加载 XLSX,然后函数式地重算它的公式。没有任何安装或注册步骤。
+用 excel 模块加载 XLSX 或 XLSB 工作簿，然后函数式地重算它的公式。没有任何安装或注册步骤。
 
 ```typescript
 import { Workbook } from "documonster/excel";
@@ -90,7 +90,7 @@ const ast = Formula.parse(tokens); // 语法错误时抛异常
 
 ## 为什么分成多个 subpath?
 
-公式引擎 minified 后约 200 KB。大多数 `documonster` 用户只读写 XLSX、让 Excel 自己重算 — 无条件把引擎打进这些 bundle 是一笔看不见的巨大成本。
+公式引擎 minified 后约 200 KB。大多数 `documonster` 用户只读写工作簿文件、让 Excel 自己重算 — 无条件把引擎打进这些 bundle 是一笔看不见的巨大成本。
 
 这些 subpath 给你如下 tree-shaking 结果:
 
@@ -157,11 +157,11 @@ pnpm example --filter formula-pdf-integration
 
 ### `calculateFormulas(workbook: Workbook.Handle): void`
 
-来自 `documonster/excel/formula`。捕获不可变 snapshot,运行引擎,再把结果写回真实单元格。这是唯一公开的求值入口,也适用于从 XLSX 加载的 workbook。
+来自 `documonster/excel/formula`。捕获不可变 snapshot，运行引擎，再把结果写回真实单元格。这是唯一公开的求值入口，也适用于从 XLSX 或 XLSB 加载的 workbook。
 
 ### PDF 导出重算
 
-`Pdf.fromExcel` 不依赖公式引擎。要在渲染前重算公式,通过 `recalculate` 选项注入 `calculateFormulas` — 只有主动选用的调用方才会把约 200 KB 的引擎打进 bundle。不传时使用缓存在 XLSX 里的结果(对 Excel 自己写出的文件而言是安全的默认行为)。
+`Pdf.fromExcel` 不依赖公式引擎。要在渲染前重算公式，通过 `recalculate` 选项注入 `calculateFormulas` — 只有主动选用的调用方才会把约 200 KB 的引擎打进 bundle。不传时使用工作簿中缓存的结果（对 Excel 自己写出的文件而言是安全的默认行为）。
 
 ```typescript
 import { Pdf } from "documonster/pdf";
@@ -199,7 +199,7 @@ Workbook.registerFunction(
 
 ### 定义名称的语法分类
 
-excel 模块加载 XLSX 时,会用一个内置 syntax probe 对定义名称分类,该 probe 复用本引擎的 `tokenize` + `parse`。这是自动的 — 无需任何设置,而且从不加载 XLSX 的 `Workbook` 永远不会把 tokenizer/parser 拉进来。要按实例覆盖分类行为(例如自定义宿主),把你自己的 probe —— 一个 `(text: string) => boolean` —— 传给 `Workbook.create({ formulaSyntaxProbe })`。你可以用本模块的原语构造一个:
+excel 模块加载 XLSX 时，会用一个内置 syntax probe 对定义名称分类，该 probe 复用本引擎的 `tokenize` + `parse`。这是自动的，无需任何设置。XLSB 定义名称直接从 BIFF12 公式 token 解码，因此只加载 XLSB（或从不加载 XLSX）的 `Workbook` 不会把该 tokenizer/parser 拉进来。要按实例覆盖分类行为（例如自定义宿主），把你自己的 probe —— 一个 `(text: string) => boolean` —— 传给 `Workbook.create({ formulaSyntaxProbe })`。你可以用本模块的原语构造一个：
 
 ```typescript
 import { Workbook } from "documonster/excel";

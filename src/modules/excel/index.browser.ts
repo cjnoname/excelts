@@ -11,3 +11,4 @@ export * from "@excel/index.base";
 
 export * as Workbook from "@excel/surface/workbook.browser";
 export * as Stream from "@excel/surface/stream.browser";
+export * as Xlsb from "@excel/surface/xlsb.browser";

@@ -18,7 +18,20 @@ import { toolError } from "../errors.js";
  * this file really", while this answers "what has the caller asked for", which
  * for a write target is a question about the extension alone.
  */
-export type DocFormat = "docx" | "pdf" | "md" | "html" | "txt" | "xlsx" | "csv" | "odt" | "mermaid";
+export type DocFormat =
+  | "docx"
+  | "pdf"
+  | "md"
+  | "html"
+  | "txt"
+  | "xlsx"
+  | "xlsb"
+  | "csv"
+  | "odt"
+  | "mermaid";
+
+/** Spreadsheet package formats handled by the workbook tools. */
+export type SpreadsheetFormat = Extract<DocFormat, "xlsx" | "xlsb">;
 
 const EXTENSION_FORMATS: Readonly<Record<string, DocFormat>> = {
   ".docx": "docx",
@@ -31,6 +44,7 @@ const EXTENSION_FORMATS: Readonly<Record<string, DocFormat>> = {
   ".txt": "txt",
   ".xlsx": "xlsx",
   ".xlsm": "xlsx",
+  ".xlsb": "xlsb",
   ".csv": "csv",
   ".odt": "odt",
   // Recognised so the document tools can *route* a diagram source rather than
@@ -62,10 +76,22 @@ export function requireFormat(filePath: string, field: string): DocFormat {
   return format;
 }
 
+/** Require an XLSX/XLSM or XLSB path and return the serializer format. */
+export function requireSpreadsheetFormat(filePath: string, field: string): SpreadsheetFormat {
+  const format = requireFormat(filePath, field);
+  if (format === "xlsx" || format === "xlsb") {
+    return format;
+  }
+  throw toolError.invalidInput(
+    `${field} must name an Excel workbook: ${JSON.stringify(filePath)}`,
+    "Use an .xlsx, .xlsm, or .xlsb path."
+  );
+}
+
 /**
  * Reject macro-enabled extensions for newly generated output.
  *
- * The writer produces ordinary DOCX/XLSX content. Naming that package `.docm`
+ * The writer produces ordinary DOCX/XLSX/XLSB content. Naming that package `.docm`
  * or `.xlsm` does not make it macro-enabled; worse, rewriting an existing macro
  * file through a path that cannot prove VBA preservation risks silent macro
  * loss. Read operations may still inspect such files.

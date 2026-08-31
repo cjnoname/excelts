@@ -47,7 +47,8 @@ const ROUTES: Readonly<Record<string, readonly DocFormat[]>> = {
   odt: ["docx", "md", "pdf"],
   md: ["docx", "pdf"],
   xlsx: ["csv", "pdf"],
-  csv: ["xlsx"]
+  xlsb: ["csv", "pdf"],
+  csv: ["xlsx", "xlsb"]
 };
 
 export const docConvertTool = defineTool({
@@ -55,7 +56,7 @@ export const docConvertTool = defineTool({
   group: ["word", "pdf", "excel"],
   title: "Convert a document",
   description:
-    "Convert a document between formats: docx→md/html/pdf/txt/odt, odt→docx/md/pdf, md→docx/pdf, xlsx→csv/pdf, csv→xlsx. The output extension chooses the target. PDF is a terminal format — there is no PDF→Word, because no faithful conversion exists.",
+    "Convert a document between formats: docx→md/html/pdf/txt/odt, odt→docx/md/pdf, md→docx/pdf, xlsx/xlsb→csv/pdf, csv→xlsx/xlsb. The output extension chooses the target. PDF is a terminal format — there is no PDF→Word, because no faithful conversion exists.",
   inputSchema: {
     from: z.string().min(1).describe("Source path, relative to the server root."),
     to: z
@@ -67,7 +68,7 @@ export const docConvertTool = defineTool({
     sheet: z
       .union([z.string(), z.number().int().positive()])
       .optional()
-      .describe("xlsx→csv only: which sheet to export. Defaults to the first."),
+      .describe("xlsx/xlsb→csv only: which sheet to export. Defaults to the first."),
     diagrams: z
       .boolean()
       .optional()
@@ -229,7 +230,7 @@ async function convert(
     throw unreachable(from, to);
   }
 
-  if (from === "xlsx") {
+  if (from === "xlsx" || from === "xlsb") {
     const wb = Workbook.create();
     await Workbook.readFile(wb, source).catch((cause: unknown) => {
       throw toolError.unsupported(
@@ -263,11 +264,11 @@ async function convert(
     throw unreachable(from, to);
   }
 
-  if (from === "csv" && to === "xlsx") {
+  if (from === "csv" && (to === "xlsx" || to === "xlsb")) {
     const wb = Workbook.create();
     const ws = await readCsvFile(wb, source);
     Worksheet.setModel(ws, { ...Worksheet.getModel(ws), name: "Sheet1" });
-    await replaceAtomically(target, temporary => Workbook.writeFile(wb, temporary));
+    await replaceAtomically(target, temporary => Workbook.writeFile(wb, temporary, { format: to }));
     return [`- ${Worksheet.actualRowCount(ws)} row(s) imported into sheet "Sheet1"`];
   }
 

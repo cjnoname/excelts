@@ -122,8 +122,8 @@ server root with an untrusted local account or process while the server runs.
 | `doc_inspect`           | Identify a file (type, size, sheet list, CSV dialect, extension mismatches) or list a directory. Always first.                                                   |
 | **Spreadsheets**        |                                                                                                                                                                  |
 | `sheet_read`            | Read a bounded window as a Markdown table with column letters and row numbers. Paginates; reports what it omitted.                                               |
-| `sheet_write`           | Create an `.xlsx` from a declarative spec. `fromCsv` pulls source data in server-side; `images` places pictures.                                                 |
-| `sheet_edit`            | Patch an existing `.xlsx` — cells, ranges, formulas, rows, styles, sheets, images. Atomic, backed up, `dryRun` available.                                        |
+| `sheet_write`           | Create an `.xlsx` or `.xlsb` from a declarative spec. `fromCsv` pulls source data server-side; `images` places pictures. Charts require XLSX.                    |
+| `sheet_edit`            | Patch an existing `.xlsx`, `.xlsm`, or `.xlsb` — cells, formulas, rows, styles, sheets, images. Atomic, backed up, `dryRun` available. Charts require XLSX.      |
 | `formula_evaluate`      | Evaluate a formula against supplied values using the real engine (~450 functions). Touches no files.                                                             |
 | **Documents**           |                                                                                                                                                                  |
 | `doc_read`              | Read `.docx` / `.pdf` / `.md` / `.txt` / `.mmd`. Word returns Markdown; PDFs page by page; a Markdown file's mermaid fences are indexed.                         |
@@ -131,7 +131,7 @@ server root with an untrusted local account or process while the server runs.
 | `doc_edit`              | Find and replace text in a `.docx`, including matches Word split across runs. Formatting preserved.                                                              |
 | `doc_search`            | Find text, or find text **by its formatting** — "which text is red", "what is highlighted".                                                                      |
 | `doc_paginate`          | Real page count and per-heading page numbers without Word installed; optionally refresh fields and the TOC.                                                      |
-| `doc_convert`           | `docx`→`md`/`html`/`pdf`/`txt`, `md`→`docx`/`pdf`, `xlsx`→`csv`/`pdf`, `csv`→`xlsx`. Lossy conversions state their loss.                                         |
+| `doc_convert`           | `docx`→`md`/`html`/`pdf`/`txt`, `md`→`docx`/`pdf`, `xlsx`/`xlsb`→`csv`/`pdf`, `csv`→`xlsx`/`xlsb`. Loss is reported.                                             |
 | `pdf_edit`              | Watermark, page numbers, stamps, a Mermaid diagram drawn as vectors, rotate, delete/keep pages, append another PDF. Overlays never rewrite the original content. |
 | **Forms and templates** |                                                                                                                                                                  |
 | `template_inspect`      | List a template's placeholders and print the JSON shape needed to fill it.                                                                                       |
@@ -159,6 +159,13 @@ sheet_write   { "path": "out/summary.xlsx",
                              "formulas": { "D2": "=B2*C2" } }] }
 sheet_read    { "path": "@output/out/summary.xlsx" }           // verify
 ```
+
+Use an `.xlsb` path in the same `sheet_write`, `sheet_read`, and `sheet_edit`
+calls to work with Excel Binary Workbooks. XLSB writes are strict: if an edit
+would discard an unsupported feature, the tool rejects the operation and leaves
+the original untouched. Charts currently require XLSX output. `doc_inspect`
+recognises `xl/workbook.bin`, and `doc_convert` supports XLSB→CSV/PDF and
+CSV→XLSB.
 
 **Documents** — fill a template, deliver a PDF:
 

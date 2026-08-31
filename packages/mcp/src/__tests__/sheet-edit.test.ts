@@ -17,6 +17,7 @@ import { Cell, Workbook, Worksheet } from "documonster/excel";
 import { resolveConfig, type ServerConfig } from "../config.js";
 import { McpToolError } from "../errors.js";
 import { sheetEditTool } from "../tools/sheet-edit.js";
+import { sheetWriteTool } from "../tools/sheet-write.js";
 
 interface Fixture {
   readonly config: ServerConfig;
@@ -76,6 +77,27 @@ describe("sheet_edit — operations", () => {
 
     const wb = await reopen(fx, file);
     expect(Cell.getValue(Workbook.getWorksheet(wb, "Data")!, "B2")).toBe(99);
+  });
+
+  it("edits XLSB atomically and preserves formulas, styles and other sheets", async () => {
+    const fx = await fixture();
+    const file = await makeWorkbook(fx, "book.xlsb");
+    await edit(fx, {
+      path: file,
+      ops: [
+        { op: "set_cell", ref: "D1", value: "revenue" },
+        { op: "set_formula", range: "D2:D4", formula: "=B2*C2" },
+        { op: "set_style", range: "D2:D4", numFmt: "#,##0.00", bold: true }
+      ]
+    });
+
+    const wb = await reopen(fx, file);
+    const data = Workbook.getWorksheet(wb, "Data")!;
+    expect(Cell.getFormula(data, "D2")).toBe("B2*C2");
+    expect(Cell.getResult(data, "D2")).toBe(255);
+    expect(Cell.getNumFmt(data, "D2")).toBe("#,##0.00");
+    expect(Cell.getStyle(data, "D2").font?.bold).toBe(true);
+    expect(Worksheet.toAoa(Workbook.getWorksheet(wb, "Notes")!)).toEqual([["do not touch"]]);
   });
 
   it("sets a range from row-major values", async () => {
@@ -251,6 +273,44 @@ describe("sheet_edit — safety", () => {
     ).rejects.toThrow(/is not a cell address/);
 
     expect(await readFile(path.join(fx.root, file))).toEqual(before);
+  });
+
+  it("rejects a lossy XLSB edit and leaves no partial output", async () => {
+    const fx = await fixture();
+    await sheetWriteTool.handler(
+      {
+        path: "charted.xlsx",
+        sheets: [
+          {
+            name: "Data",
+            rows: [
+              ["label", "value"],
+              ["A", 1]
+            ],
+            charts: [{ type: "column", categories: "A2:A2", values: "B2:B2" }]
+          }
+        ]
+      },
+      { config: fx.config }
+    );
+
+    await expect(
+      sheetEditTool.handler(
+        {
+          path: "charted.xlsx",
+          out: "charted.xlsb",
+          ops: [{ op: "set_cell", ref: "B2", value: 2 }]
+        },
+        { config: fx.config }
+      )
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof McpToolError &&
+        error.code === "unsupported" &&
+        error.message.includes("without discarding unsupported workbook state"),
+      "expected a strict XLSB fidelity error"
+    );
+    await expect(stat(path.join(fx.root, "charted.xlsb"))).rejects.toThrow();
   });
 
   it("takes a backup by default and can be told not to", async () => {

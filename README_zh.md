@@ -20,9 +20,10 @@ Documonster 是一个零依赖的 TypeScript 电子表格和文档工具包：
 
 Documonster 由九个独立模块组成,每个模块都有自己的文档和可运行示例。
 
-### Excel — XLSX/JSON 工作簿管理器
+### Excel — XLSX/XLSB/JSON 工作簿管理器
 
-创建、读取和修改 Excel 电子表格,完整支持样式、公式、图片和流式处理。
+创建、读取和修改 Excel 电子表格，完整支持 XLSX 样式、公式、图片和流式处理，
+并提供零依赖的 XLSB 单元格、样式、公式、流式处理、自动检测和严格保真保护。
 
 - [文档](src/modules/excel/README.md) | [中文](src/modules/excel/README_zh.md)
 - [示例](src/modules/excel/examples/)
@@ -36,7 +37,7 @@ Documonster 由九个独立模块组成,每个模块都有自己的文档和可�
 
 ### Formula — Excel 兼容公式引擎
 
-448 函数计算引擎,包含 tokenizer、parser、依赖图、动态数组 spill,支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 workbook;用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤,且引擎不会进入只读写 XLSX 的 bundle。
+448 函数计算引擎，包含 tokenizer、parser、依赖图、动态数组 spill，支持 `LAMBDA`/`LET`/`MAP`/`REDUCE`。用 `documonster/excel/formula` 的 `calculateFormulas()` 重算 XLSX 或 XLSB 工作簿；用 `documonster/formula` 的 `Formula` 检查语法。无需任何安装步骤，且引擎不会进入只读写工作簿的 bundle。
 
 - [文档](src/modules/formula/README.md) | [中文](src/modules/formula/README_zh.md)
 - [示例](src/modules/formula/examples/)
@@ -126,6 +127,8 @@ const sheet = Workbook.addWorksheet(workbook, "Sheet1");
 Worksheet.addRow(sheet, ["姓名", "年龄"]);
 Worksheet.addRow(sheet, ["Alice", 30]);
 await Workbook.writeFile(workbook, "output.xlsx");
+// Use a .xlsb path to select the binary workbook writer.
+await Workbook.writeFile(workbook, "output.xlsb");
 
 // 读取
 const wb = Workbook.create();

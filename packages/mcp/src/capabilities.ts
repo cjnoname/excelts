@@ -96,7 +96,7 @@ Do not read a whole large sheet. If a read reports omitted rows, narrow the rang
           sources: z
             .string()
             .describe("The data files or archive to use, as a comma-separated list."),
-          out: z.string().describe("Output .xlsx path."),
+          out: z.string().describe("Output .xlsx or .xlsb path."),
           goal: z.string().describe("What the report should show.")
         }
       },

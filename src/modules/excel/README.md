@@ -2,11 +2,12 @@
 
 [中文](README_zh.md)
 
-Modern TypeScript Excel Workbook Manager — read, manipulate, and write XLSX and JSON spreadsheets with zero runtime dependencies.
+Modern TypeScript Excel Workbook Manager — read, manipulate, and write XLSX, XLSB, and JSON spreadsheets with zero runtime dependencies.
 
 ## Features
 
 - **Create, read, and modify XLSX files** — full Open XML support
+- **Read and write XLSB files** — cross-platform BIFF12 cells, formulas, styles, tables, filters, notes, protection, and page setup
 - **Multiple worksheet support** — add, remove, reorder, copy
 - **Cell styling** — fonts, colors, borders, fills, alignment, number formats
 - **Cell merging and formatting** — merge ranges, rich text, hyperlinks
@@ -85,6 +86,101 @@ Worksheet.eachRow(worksheet, (row, rowNumber) => {
   console.log("Row " + rowNumber + " = " + JSON.stringify(Row.values(worksheet, rowNumber)));
 });
 ```
+
+### XLSB files
+
+XLSB uses the same workbook, worksheet, row, column, cell, and canonical
+`Workbook` IO surface as XLSX. Buffer reads autodetect the package; Node path
+methods select XLSB from the `.xlsb` extension, and buffer/stream writes accept
+`format: "xlsb"`. The explicit `Xlsb` namespace remains available:
+
+```typescript
+import { Cell, Workbook, Xlsb } from "documonster/excel";
+
+const workbook = Workbook.create();
+const sheet = Workbook.addWorksheet(workbook, "Data");
+Cell.setValue(sheet, "A1", "binary workbook");
+
+// Node.js file paths
+await Workbook.writeFile(workbook, "report.xlsb");
+await Workbook.readFile(Workbook.create(), "report.xlsb");
+
+// Node.js and browsers
+const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+const parsed = Workbook.create();
+await Workbook.read(parsed, bytes); // autodetects XLSB
+
+// Pull- and push-based streaming use the canonical Workbook IO contracts.
+for await (const chunk of Xlsb.toStream(workbook)) {
+  // upload or persist chunk
+}
+```
+
+`XlsbReadOptions` controls base64 input, row and column limits, formula handling,
+and blank-cell materialization. `blankCells` defaults to `"keep"`, preserving
+value-less styled cells exactly as before. Use `blankCells: "skip"` for files
+with large formatted-but-empty regions: blank BIFF12 cell records are not
+materialized, so they do not extend physical row counts or retain their styles
+in memory. Value cells and their styles are unaffected.
+
+Skipping styled blanks is an explicitly lossy model view. An unchanged loaded
+workbook still writes the original XLSB bytes byte-for-byte. After an edit, a
+strict write throws `ExcelNotSupportedError` with the number of skipped cells;
+`unsupported: "ignore"` explicitly opts into dropping that formatting.
+`XlsbWriteOptions` also controls ZIP metadata. Malformed BIFF12 data throws
+`XlsbParseError`.
+
+#### Untrusted workbook security
+
+`maxRows` and `maxCols` stop reading at fixed physical BIFF12 coordinates and
+can therefore omit value cells when the data extent is not known in advance.
+`blankCells: "skip"` is the safer memory optimization for Excel-generated XLSB
+files with styled blank tails: it removes only value-less cells while retaining
+all value, formula, date, and styled-value records. The option is additive and
+opt-in; omitted or `"keep"` retains the historical behavior.
+
+The explicit namespace exposes the complete format-specific IO surface:
+
+| Method                                        | Node.js  | Browser      | Purpose                                                    |
+| --------------------------------------------- | -------- | ------------ | ---------------------------------------------------------- |
+| `Xlsb.read(workbook, data, options?)`         | Yes      | Yes          | Read XLSB bytes or an optionally base64-encoded string.    |
+| `Xlsb.toBuffer(workbook, options?)`           | `Buffer` | `Uint8Array` | Serialize the workbook to XLSB bytes.                      |
+| `Xlsb.readStream(workbook, source, options?)` | Yes      | Yes          | Consume a sync or async iterable of byte chunks.           |
+| `Xlsb.writeStream(workbook, sink, options?)`  | Yes      | Yes          | Push an XLSB package to a backpressure-aware archive sink. |
+| `Xlsb.toStream(workbook, options?)`           | Yes      | Yes          | Return a pull-driven readable XLSB byte stream.            |
+| `Xlsb.readFile(workbook, path, options?)`     | Yes      | —            | Read an XLSB file path.                                    |
+| `Xlsb.writeFile(workbook, path, options?)`    | Yes      | —            | Write an XLSB file path.                                   |
+
+The canonical `Workbook` methods accept `WorkbookReadOptions`,
+`WorkbookWriteOptions`, and `WorkbookStreamOptions`. `Workbook.read` detects
+XLSB from package bytes, `readFile`/`writeFile` use the `.xlsb` extension, and
+stream IO requires `format: "xlsb"` because a stream is not opened ahead of
+time for package inspection. The explicit `Xlsb` methods never need a format
+flag. Portable stream contracts are named `XlsbInputStream`, `XlsbReadable`,
+and `XlsbWritable`.
+
+The XLSB implementation covers scalar and rich values, errors, dates, full cell
+styles, rows and columns, workbook and sheet views, merges, hyperlinks, legacy
+notes, data validation, protection, page setup, defined names, tables,
+structured references, AutoFilter criteria, and classic BIFF12 formulas,
+including shared and legacy array formulas. Formula expressions are preserved
+by default; use `formulas: "cached"` for an explicitly lossy read or
+`formulas: "error"` to reject formula cells. Drawings, charts, pivots, external
+links, conditional formatting, and dynamic arrays still fail edited strict
+writes instead of being silently discarded. An unchanged loaded workbook is
+returned byte-for-byte, including macros and opaque package parts.
+
+Maintainers can run `pnpm verify:xlsb-corpus` for the pinned Calamine, Apache
+POI, and `jsxlsb` interoperability corpus, and `pnpm benchmark:xlsb` for the
+same-workbook XLSX/XLSB IO comparison. Set
+`XLSB_BENCHMARK_TRAILING_BLANK_ROWS` to compare normal and
+`blankCells: "skip"` XLSB reads with a styled blank tail. The corpus also pins semantic probes for
+sheet names, dates and epochs, formulas, comments, hyperlinks, Unicode, merges,
+and one edited XLSB round-trip. Cache, offline, refresh, private-corpus, and
+benchmark sizing options are documented in
+[`xlsb/README.md`](xlsb/README.md).
+See [`examples/xlsb.ts`](examples/xlsb.ts) for a runnable create, write, read,
+edit, and verify round-trip.
 
 ### Reading a Range
 
@@ -213,7 +309,7 @@ DefinedNames.add(Workbook.getDefinedNames(workbook), "Sheet1!$A$1:$B$10", "MyRan
 Setting a formula stores it; it does not evaluate it. To compute results,
 import the calculation engine from the `documonster/excel/formula` subpath
 (kept separate so the ~200 KB engine stays out of bundles that only read and
-write XLSX — there is no install or registration step):
+write workbooks — there is no install or registration step):
 
 ```typescript
 import { Workbook, Cell } from "documonster/excel";
@@ -1546,7 +1642,17 @@ import type {
   ConditionalFormattingOptions,
   TableProperties,
   WorksheetModel,
-  XlsxWriteOptions
+  XlsxWriteOptions,
+  WorkbookFormat,
+  WorkbookReadOptions,
+  WorkbookWriteOptions,
+  WorkbookStreamOptions,
+  XlsbReadOptions,
+  XlsbWriteOptions,
+  XlsbStreamOptions,
+  XlsbInputStream,
+  XlsbReadable,
+  XlsbWritable
 } from "documonster/excel";
 
 // Style values are now declarable, so styles can be composed and shared.
@@ -1658,6 +1764,7 @@ try {
 See the [examples directory](examples/) for runnable code covering all features:
 
 - Workbook creation, reading, and copying
+- XLSB creation, autodetection, editing, and strict-fidelity round-trips
 - Cell styling, fonts, borders, fills
 - Formulas, data validation, conditional formatting
 - Images (JPEG, PNG), hyperlinks, comments

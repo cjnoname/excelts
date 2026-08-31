@@ -1,19 +1,49 @@
 import type { Readable } from "node:stream";
 
 /**
- * Node xlsx IO handle accessor and the canonical public IO surface (Node).
+ * Node XLSX handle accessor and the canonical workbook IO surface.
  *
  * Same shape as `xlsx-io.browser.ts`, but binds the Node `XLSX` serializer
  * (which adds file-path `readFile` / `writeFile` and true-streaming `read`)
- * and layers the Node-only file-path free functions on top. Selected over the
- * browser variant via the `.browser` same-name swap at build/test time.
+ * and dispatches to XLSB when requested or detected. It layers the Node-only
+ * file-path functions on top and is selected over the browser variant via the
+ * `.browser` same-name swap at build/test time.
  */
+import { ZipParser } from "@archive/unzip/zip-parser";
 import type { WorkbookData } from "@excel/core/workbook-core";
+import {
+  read as readXlsb,
+  readFile as readXlsbFile,
+  readStream as readXlsbStream,
+  toBuffer as toXlsbBuffer,
+  toStream as toXlsbStream,
+  writeFile as writeXlsbFile,
+  writeStream as writeXlsbStream
+} from "@excel/core/xlsb-io";
+import type {
+  XlsbInputStream,
+  XlsbReadOptions,
+  XlsbStreamOptions,
+  XlsbWriteOptions
+} from "@excel/core/xlsb-io";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
-import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
 import { XLSX } from "@excel/xlsx/xlsx";
 import type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser";
+import { base64ToUint8Array } from "@utils/utils";
+
+/** Workbook package formats supported by the canonical IO surface. */
+export type WorkbookFormat = "xlsx" | "xlsb";
+/** Read options shared by XLSX and XLSB, with an optional explicit format. */
+export type WorkbookReadOptions = XlsxReadOptions & XlsbReadOptions & { format?: WorkbookFormat };
+/** Write options shared by XLSX and XLSB, with an optional explicit format. */
+export type WorkbookWriteOptions = XlsxWriteOptions &
+  Omit<XlsbWriteOptions, "zip"> & {
+    format?: WorkbookFormat;
+    zip?: XlsxWriteOptions["zip"] & XlsbWriteOptions["zip"];
+  };
+/** Canonical workbook write options plus readable-stream queue configuration. */
+export type WorkbookStreamOptions = WorkbookWriteOptions & XlsbStreamOptions;
 
 /** Get (or lazily create) the Node xlsx IO handle bound to a workbook. */
 export function getXlsxIo(wb: WorkbookData): XLSX {
@@ -29,32 +59,38 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // =============================================================================
 
 /**
- * Serialize a workbook to xlsx bytes.
+ * Serialize a workbook to XLSX bytes, or XLSB when `options.format` requests it.
  *
  * Returns a `Buffer` on Node — the same nominal type `fs.writeFile`, `res.end`,
  * and SDK upload bodies ask for — so callers do not need the defensive
  * `Buffer.from(bytes)` that a `Uint8Array` declaration invites, and which really
  * does copy the whole package.
  *
- * The guarantee is structural, not a re-label: `StreamBuf.read()` already hands
- * back a `Buffer` view on Node, so the common path returns that value untouched,
- * and the fallback wraps the existing memory (`Buffer.from(buffer, byteOffset,
- * byteLength)` is a view, never a copy). Either way no bytes are duplicated, and
- * the declared type cannot silently drift from the runtime one.
+ * The guarantee is structural, not a re-label: the XLSX `StreamBuf.read()` path
+ * already hands back a `Buffer` view, while the XLSB and fallback paths wrap the
+ * existing memory (`Buffer.from(buffer, byteOffset, byteLength)` is a view,
+ * never a copy). No bytes are duplicated, and the declared type cannot silently
+ * drift from the runtime one.
  */
-export async function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Buffer> {
+export async function toBuffer(wb: WorkbookData, options?: WorkbookWriteOptions): Promise<Buffer> {
+  if (options?.format === "xlsb") {
+    return toXlsbBuffer(wb, xlsbWriteOptions(options));
+  }
   const bytes = await getXlsxIo(wb).writeBuffer(options);
   return Buffer.isBuffer(bytes)
     ? bytes
     : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
-/** Read xlsx bytes into a workbook (mutates and returns `wb`). */
-export function read(
+/** Read XLSX or XLSB bytes into a workbook, mutating and returning `wb`. */
+export async function read(
   wb: WorkbookData,
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbInput(data, options))) {
+    return readXlsb(wb, data, options);
+  }
   return getXlsxIo(wb).load(data, options);
 }
 
@@ -62,8 +98,11 @@ export function read(
 export function readStream(
   wb: WorkbookData,
   stream: unknown,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb") {
+    return readXlsbStream(wb, stream as XlsbInputStream, options);
+  }
   return getXlsxIo(wb).read(stream as never, options);
 }
 
@@ -109,8 +148,11 @@ export function readStream(
 export function writeStream(
   wb: WorkbookData,
   stream: XlsxWritable,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
+  if (options?.format === "xlsb") {
+    return writeXlsbStream(wb, stream as never, xlsbWriteOptions(options));
+  }
   return getXlsxIo(wb)
     .write(stream, options)
     .then(() => undefined);
@@ -139,6 +181,10 @@ export function writeStream(
  * still assignable to `XlsxReadable`, which is identical in both builds, so
  * cross-platform code written against that name keeps compiling while Node code
  * gets the nominal `stream.Readable`.
+ *
+ * With `format: "xlsb"`, this delegates to the XLSB serializer and applies
+ * `XlsbStreamOptions`. The XLSX entry-buffering details below apply only to the
+ * default XLSX path.
  *
  * {@link XlsxStreamOptions.highWaterMark} is not a hard memory bound:
  * backpressure is sampled after each ZIP entry, and a worksheet is rendered as
@@ -198,7 +244,13 @@ export function writeStream(
  * a portable way to tell "the consumer stopped" from "serialization failed" —
  * track that yourself if the same code runs on both platforms.
  */
-export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable & Readable {
+export function toStream(
+  wb: WorkbookData,
+  options?: WorkbookStreamOptions
+): XlsxReadable & Readable {
+  if (options?.format === "xlsb") {
+    return toXlsbStream(wb, options) as XlsxReadable & Readable;
+  }
   const io = getXlsxIo(wb);
   // `createXlsxByteStream` is shared with the browser build, so it is typed as
   // the portable `XlsxReadable`. On Node the stream it builds is a real
@@ -217,23 +269,63 @@ export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 
 // =============================================================================
-// Node-only xlsx file-path IO.
+// Node-only workbook file-path IO.
 // =============================================================================
 
-/** Node-only: read a workbook from an xlsx file path (mutates and returns `wb`). */
+/** Node-only: read an XLSX or XLSB file, mutating and returning `wb`. */
 export function readFile(
   wb: WorkbookData,
   filename: string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbFilename(filename))) {
+    return readXlsbFile(wb, filename, options);
+  }
   return getXlsxIo(wb).readFile(filename, options);
 }
 
-/** Node-only: write a workbook to an xlsx file path. */
+/** Node-only: write an XLSX or XLSB file, inferred from the extension or options. */
 export function writeFile(
   wb: WorkbookData,
   filename: string,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
+  if (options?.format === "xlsb" || (options?.format !== "xlsx" && isXlsbFilename(filename))) {
+    return writeXlsbFile(wb, filename, xlsbWriteOptions(options ?? {}));
+  }
   return getXlsxIo(wb).writeFile(filename, options);
+}
+
+function isXlsbInput(
+  data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
+  options: WorkbookReadOptions | undefined
+): boolean {
+  try {
+    const bytes =
+      typeof data === "string"
+        ? options?.base64
+          ? base64ToUint8Array(data)
+          : undefined
+        : data instanceof Uint8Array
+          ? data
+          : data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return bytes
+      ? new ZipParser(bytes)
+          .getEntries()
+          .some(entry => entry.path.toLowerCase() === "xl/workbook.bin")
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+function isXlsbFilename(filename: string): boolean {
+  return filename.toLowerCase().endsWith(".xlsb");
+}
+
+function xlsbWriteOptions(options: WorkbookWriteOptions): XlsbWriteOptions {
+  const { format: _format, ...writeOptions } = options;
+  return writeOptions;
 }

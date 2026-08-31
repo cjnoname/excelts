@@ -168,10 +168,15 @@ const REPO_PRIVATE_MEMBER_TYPES = new Set([
 
 /**
  * Namespace members that legitimately exist only in the Node build. The
- * `Workbook` namespace is assembled per platform: Node adds file-path IO, which
- * the browser cannot provide.
+ * `Workbook` and `Xlsb` namespaces are assembled per platform: Node adds
+ * file-path IO, which the browser cannot provide.
  */
-const REPO_NODE_ONLY_NAMESPACE_MEMBERS = new Set(["Workbook.readFile", "Workbook.writeFile"]);
+const REPO_NODE_ONLY_NAMESPACE_MEMBERS = new Set([
+  "Workbook.readFile",
+  "Workbook.writeFile",
+  "Xlsb.readFile",
+  "Xlsb.writeFile"
+]);
 
 const REPO_ALIASES: Record<string, string> = {
   "@excel": "src/modules/excel",

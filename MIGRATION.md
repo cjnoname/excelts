@@ -4,6 +4,16 @@ Breaking changes for `documonster` will be documented here as they occur.
 
 ## Unreleased
 
+### XLSB reads can opt out of materializing styled blank cells
+
+`XlsbReadOptions` and the canonical `WorkbookReadOptions` now accept
+`blankCells: "skip"`. It skips value-less BIFF12 cells and otherwise-default
+rows, substantially reducing memory for workbooks with formatted blank tails.
+The option is additive and defaults to `"keep"`, so existing reads are
+unchanged. An unchanged loaded XLSB still writes byte-for-byte; after an edit,
+strict writing reports the skipped count unless `unsupported: "ignore"` opts
+into dropping the blank-cell formatting.
+
 ### `Pdf.fromExcel` now honors the worksheet's print settings (behavior change)
 
 The PDF bridge forwarded only a handful of `pageSetup` fields, so most of Excel's

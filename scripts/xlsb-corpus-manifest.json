@@ -1,0 +1,251 @@
+{
+  "version": 1,
+  "sources": {
+    "calamine": {
+      "repository": "https://github.com/tafia/calamine",
+      "revision": "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d",
+      "license": "MIT",
+      "urlTemplate": "https://raw.githubusercontent.com/tafia/calamine/{revision}/{path}",
+      "encoding": "binary"
+    },
+    "apache-poi": {
+      "repository": "https://apache.googlesource.com/poi",
+      "revision": "87cdef57b0f714369c391e625180a59507a24576",
+      "license": "Apache-2.0",
+      "urlTemplate": "https://apache.googlesource.com/poi/+/{revision}/{path}?format=TEXT",
+      "encoding": "base64"
+    },
+    "jsxlsb": {
+      "repository": "https://github.com/itcraft-cn/jsxlsb",
+      "revision": "6101fbf80a567da777071ecdea8e4e5fcf96399a",
+      "license": "Apache-2.0",
+      "urlTemplate": "https://raw.githubusercontent.com/itcraft-cn/jsxlsb/{revision}/{path}",
+      "encoding": "binary"
+    }
+  },
+  "fixtures": [
+    {
+      "source": "calamine",
+      "path": "tests/any_sheets.xlsb",
+      "sha256": "ad645571475f1e30875610fc51ad7726d8b7af296850135bc593e15ead0e28c6",
+      "expect": {
+        "worksheets": ["Visible", "Hidden", "VeryHidden"]
+      }
+    },
+    {
+      "source": "calamine",
+      "path": "tests/date.xlsb",
+      "sha256": "68d36adf4d4de3890209e786eeb89a98778d25158628f83e96587e652fbb4eca",
+      "expect": {
+        "date1904": false,
+        "worksheets": ["Sheet1"],
+        "cells": [
+          {
+            "sheet": "Sheet1",
+            "address": "A1",
+            "date": "2021-01-01T00:00:00.000Z"
+          },
+          { "sheet": "Sheet1", "address": "B1", "value": 15 },
+          {
+            "sheet": "Sheet1",
+            "address": "A3",
+            "date": "1900-01-09T15:10:10.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "source": "calamine",
+      "path": "tests/date_1904.xlsb",
+      "sha256": "afc2478a94822c624c44291c8455c172d6d45cc7828849f0168950b9230cb7d8",
+      "expect": {
+        "date1904": true,
+        "worksheets": ["Sheet1"],
+        "cells": [
+          {
+            "sheet": "Sheet1",
+            "address": "A1",
+            "date": "2021-01-01T00:00:00.000Z"
+          },
+          {
+            "sheet": "Sheet1",
+            "address": "A3",
+            "date": "1904-01-11T15:10:10.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue127.xlsb",
+      "sha256": "7a1eebd5b6d8f560a91babd3831f1133d964b1b094b848dd00c933d905ca0e09"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue_182.xlsb",
+      "sha256": "c34351496e7e2874504e272a696f3919da54c33939e78cafc877f1976a25a562",
+      "expect": {
+        "worksheets": ["formula_vals"],
+        "cells": [
+          {
+            "sheet": "formula_vals",
+            "address": "A1",
+            "formula": "1+2",
+            "result": 3
+          },
+          {
+            "sheet": "formula_vals",
+            "address": "A2",
+            "formula": "_xlfn.CONCAT(\"A\",\"b\")",
+            "result": "Ab"
+          },
+          {
+            "sheet": "formula_vals",
+            "address": "A3",
+            "formula": "ISERROR(1)",
+            "result": false
+          }
+        ]
+      }
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue_186.xlsb",
+      "sha256": "c0b99eb23c7031a6af7d295c64f291fa807551c59adb433a54562cc95a3d443d"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue_419.xlsb",
+      "sha256": "ac265de7165e4c1af712d44f23f43b04bc0ffcb705de478813e3d13819993f4a"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue_666_lost_sheets.xlsb",
+      "sha256": "7cdde22f11a823309ac2cbd663580c70d834b54f527239b8790dea4477a3b32f"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issue_666_panic.xlsb",
+      "sha256": "466bbc38d665e16b7d5446b908e3b414faaafd1666c0f13512ba9ef5da20684b"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/issues.xlsb",
+      "sha256": "06c648de5529e022ef399a2b6ebc227040e9fdf71a0780e19e614f556bdb53d7"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/pass_protected.xlsb",
+      "sha256": "f790bbce8ccad2a6f3d58f85b830d625a46924d49e356ac51d862bc18d3a938d",
+      "expectedError": "input is not a valid ZIP package"
+    },
+    {
+      "source": "calamine",
+      "path": "tests/picture.xlsb",
+      "sha256": "978d13b99eab37eb644df007d04237c59528dac50c002b060f3558b39e50772b"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/51519.xlsb",
+      "sha256": "53ebff181db309ae9b602780591836515678db7590aeb59942f9c3348fe61192"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/62815.xlsb",
+      "sha256": "2c1da74896f383b8cb33cb128bfeef20783572b81ca48410229bb098ac5c3565"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/Simple.xlsb",
+      "sha256": "41b0c82bfa682f968d69e05e23137232d6c89ea4f24439786f0b779be319929b",
+      "expect": {
+        "worksheets": ["Sheet1", "Sheet2", "Sheet3"],
+        "cells": [
+          {
+            "sheet": "Sheet1",
+            "address": "A1",
+            "value": "This is an example spreadsheet created with Microsoft Excel 2007 Beta 2."
+          }
+        ]
+      }
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/WithTextBox.xlsb",
+      "sha256": "019fcd1672d45d557fcc4e2de334c8685a49c07c132075a3618c83db832f08b4"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/bug66682.xlsb",
+      "sha256": "490f0430a6bd44bdf697c7a41a898bce632ce2b775797c3b8c1517764c0900b3"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/comments.xlsb",
+      "sha256": "d22daaebbc2a18d29cc3d6f1bb257cad1d880a32311a7def0b288f795b6340d6",
+      "expect": {
+        "worksheets": ["Sheet1", "Sheet2", "Sheet3"],
+        "cells": [
+          { "sheet": "Sheet1", "address": "B1", "value": "row1" },
+          {
+            "sheet": "Sheet1",
+            "address": "A2",
+            "comment": {
+              "author": "Allison, Timothy B.",
+              "text": "Allison, Timothy B.:\ncomment row2 (index1)"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/date.xlsb",
+      "sha256": "fbb969989aabed2e057b2ddfc4cfd10ef1f6ebe9b7697c3755283515158d5b09"
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/hyperlink.xlsb",
+      "sha256": "6675f4bde45d1291e1d56783b7abe2857f56837ca674c7877dfc125fb49a4724",
+      "expect": {
+        "worksheets": ["Sheet1"],
+        "cells": [
+          {
+            "sheet": "Sheet1",
+            "address": "A1",
+            "text": "http://tika.apache.org",
+            "hyperlink": "http://tika.apache.org/"
+          }
+        ]
+      }
+    },
+    {
+      "source": "apache-poi",
+      "path": "test-data/spreadsheet/sample.xlsb",
+      "sha256": "8cf995ace93f9d0e3bf34b6bdb1355ff46db2d418f6f3fb7943fdc4ca1db4d1b"
+    },
+    {
+      "source": "jsxlsb",
+      "path": "examples/templates/demo_template.xlsb",
+      "sha256": "818c02da0cfc25589865d26517e26dcd7ab4a13371969759558895ac185a49a7",
+      "expect": {
+        "worksheets": ["Sheet1"],
+        "cells": [
+          { "sheet": "Sheet1", "address": "I11", "value": "部门人员统计" },
+          { "sheet": "Sheet1", "address": "I12", "value": "姓名" },
+          { "sheet": "Sheet1", "address": "J12", "value": "籍贯" },
+          { "sheet": "Sheet1", "address": "K12", "value": "年龄" },
+          { "sheet": "Sheet1", "address": "L12", "value": "性别" },
+          { "sheet": "Sheet1", "address": "I13", "value": "${data}" }
+        ],
+        "merges": [{ "sheet": "Sheet1", "ranges": ["I11:L11"] }],
+        "mutation": {
+          "sheet": "Sheet1",
+          "address": "M13",
+          "value": "documonster corpus mutation",
+          "unsupported": "ignore"
+        }
+      }
+    }
+  ]
+}

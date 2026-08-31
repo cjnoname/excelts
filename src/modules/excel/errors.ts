@@ -129,6 +129,21 @@ export class XlsxParseError extends ExcelError {
 }
 
 /**
+ * Error thrown when XLSB (BIFF12) parsing encounters malformed binary data.
+ */
+export class XlsbParseError extends ExcelError {
+  override name = "XlsbParseError";
+
+  constructor(
+    public readonly context: string,
+    details?: string,
+    options?: BaseErrorOptions
+  ) {
+    super(details ?? `Unexpected BIFF12 content in ${context}`, options);
+  }
+}
+
+/**
  * Error thrown when an operation is not supported.
  */
 export class ExcelNotSupportedError extends ExcelError {
