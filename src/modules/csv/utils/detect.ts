@@ -15,7 +15,7 @@
  */
 
 import { CsvError } from "@csv/errors";
-import { scanRow } from "@csv/parse/scanner";
+import { detectDelimiterFor } from "@csv/parse/delimiter-detector";
 
 // =============================================================================
 // Utility Functions
@@ -66,31 +66,6 @@ export function normalizeEscapeOption(
 // =============================================================================
 // Constants
 // =============================================================================
-
-/**
- * Common CSV delimiters to try during auto-detection
- * Order matters - comma is most common, then semicolon (European), tab, pipe
- */
-export const AUTO_DETECT_DELIMITERS = [",", ";", "\t", "|"] as const;
-
-/**
- * Candidates a detector will weigh.
- *
- * Shared with `CsvParserStream` because the two must agree: an empty list once meant "no
- * candidates, fall back to comma" here and "not configured, use the defaults" there, so the
- * same options produced different delimiters from `Csv.parse` and a streamed parse. An empty
- * list is read as "unset", which is what a caller passing one is asking for.
- */
-export function delimiterCandidates(delimitersToGuess?: readonly string[]): readonly string[] {
-  return delimitersToGuess && delimitersToGuess.length > 0
-    ? delimitersToGuess
-    : AUTO_DETECT_DELIMITERS;
-}
-
-/**
- * Default delimiter when auto-detection fails
- */
-const DEFAULT_DELIMITER = ",";
 
 /**
  * Characters that trigger formula escaping (CSV injection prevention).
@@ -256,165 +231,8 @@ export function detectDelimiter(
   // Accepted for call-site compatibility and deliberately unused: a record that is empty or
   // only whitespace is never scored, whatever this says, because it cannot indicate a
   // delimiter. See isScorableDetectionRecord.
-  skipEmptyLines?: boolean | "greedy",
-  scannerOptions?: { escape?: string; relaxQuotes?: boolean; lineEnding?: string }
+  skipEmptyLines?: boolean | "greedy"
 ): string {
   void skipEmptyLines;
-  const delimiters = delimiterCandidates(delimitersToGuess);
-  const defaultDelimiter = delimiters[0] ?? DEFAULT_DELIMITER;
-
-  let bestDelimiter = defaultDelimiter;
-  let bestDelta: number | undefined;
-  let bestAvgFieldCount: number | undefined;
-
-  for (const delimiter of delimiters) {
-    // Quote recognition depends on field boundaries, and field boundaries depend on the
-    // candidate delimiter. Parse each candidate with the real scanner rather than first
-    // splitting lines with a delimiter-independent quote toggle; the latter mistakes a
-    // mid-field quote for an opening quote under one candidate and not another.
-    const fieldCounts = sampleFieldCounts(input, delimiter, quote, comment, scannerOptions);
-    const { avgFieldCount, delta } = scoreFieldCounts(fieldCounts);
-
-    // Require at least ~2 fields on average
-    if (avgFieldCount <= 1.99) {
-      continue;
-    }
-
-    if (
-      bestDelta === undefined ||
-      delta < bestDelta ||
-      (delta === bestDelta &&
-        (bestAvgFieldCount === undefined || avgFieldCount > bestAvgFieldCount))
-    ) {
-      bestDelta = delta;
-      bestAvgFieldCount = avgFieldCount;
-      bestDelimiter = delimiter;
-    }
-  }
-
-  return bestDelimiter;
-}
-
-/**
- * Records each delimiter candidate is scored on.
- *
- * Shared with `CsvParserStream`, which must wait for the same sample before committing so a
- * streamed parse and `Csv.parse` cannot disagree about the delimiter.
- */
-export const DELIMITER_DETECTION_SAMPLE_RECORDS = 10;
-
-/**
- * Characters of *scorable* records a candidate may be scored on.
- *
- * A candidate whose quoting never closes would otherwise have no sample and no end, which for
- * a stream means buffering the whole input before emitting anything. Blank and comment records
- * do not consume this budget — they are skipped, not scored — so a long comment prefix still
- * reaches the first data record. Both sides stop at the same record boundary.
- */
-export const DELIMITER_DETECTION_SAMPLE_CHARS = 65536;
-
-/**
- * Whether a record can contribute to a delimiter candidate's score.
- *
- * Shared with `CsvParserStream` so that a stream waits for exactly the records the batch
- * detector scores; a private copy of this rule on either side reopens the gap it closes.
- */
-export function isScorableDetectionRecord(raw: string, comment?: string): boolean {
-  if (comment && raw.startsWith(comment)) {
-    return false;
-  }
-  return raw.trim() !== "";
-}
-
-/** Parse at most `DELIMITER_DETECTION_SAMPLE_RECORDS` meaningful records for one candidate. */
-function sampleFieldCounts(
-  input: string,
-  delimiter: string,
-  quote: string,
-  comment: string | undefined,
-  options: { escape?: string; relaxQuotes?: boolean; lineEnding?: string } | undefined
-): number[] {
-  const config = {
-    delimiter,
-    quote,
-    escape: options?.escape ?? quote,
-    quoteEnabled: quote !== "",
-    relaxQuotes: options?.relaxQuotes ?? false
-  };
-  const counts: number[] = [];
-  let offset = 0;
-
-  let scoredChars = 0;
-
-  while (
-    offset < input.length &&
-    counts.length < DELIMITER_DETECTION_SAMPLE_RECORDS &&
-    scoredChars < DELIMITER_DETECTION_SAMPLE_CHARS
-  ) {
-    let raw: string;
-    let fields: string[];
-    let next: number;
-
-    if (options?.lineEnding) {
-      const at = input.indexOf(options.lineEnding, offset);
-      const end = at === -1 ? input.length : at;
-      raw = input.slice(offset, end);
-      fields = scanRow(raw, 0, config, true).fields;
-      next = at === -1 ? input.length : end + options.lineEnding.length;
-    } else {
-      const row = scanRow(input, offset, config, true);
-      raw = input.slice(row.rawStart, row.rawEnd);
-      fields = row.fields;
-      next = row.endPos;
-    }
-
-    if (next <= offset) {
-      break;
-    }
-    offset = next;
-
-    if (!isScorableDetectionRecord(raw, comment)) {
-      continue;
-    }
-    counts.push(fields.length);
-    scoredChars += raw.length;
-  }
-
-  return counts;
-}
-
-/**
- * Score a delimiter candidate based on consistency and field count
- *
- * Returns 0 if:
- * - Delimiter not found in any line
- * - Field counts are inconsistent across lines
- *
- * Higher score = more fields per row with consistent counts
- */
-function scoreFieldCounts(fieldCounts: number[]): { avgFieldCount: number; delta: number } {
-  if (fieldCounts.length === 0) {
-    return { avgFieldCount: 0, delta: Number.POSITIVE_INFINITY };
-  }
-
-  let delta = 0;
-  let avgFieldCount = 0;
-  let prevFieldCount: number | undefined;
-
-  for (const fieldCount of fieldCounts) {
-    avgFieldCount += fieldCount;
-
-    if (prevFieldCount === undefined) {
-      prevFieldCount = fieldCount;
-      continue;
-    }
-
-    // Allow variability but prefer consistent counts
-    delta += Math.abs(fieldCount - prevFieldCount);
-    prevFieldCount = fieldCount;
-  }
-
-  avgFieldCount /= fieldCounts.length;
-
-  return { avgFieldCount, delta };
+  return detectDelimiterFor(input, { quote, comment, delimitersToGuess });
 }

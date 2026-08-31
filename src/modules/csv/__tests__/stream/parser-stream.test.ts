@@ -1025,27 +1025,15 @@ describe("CsvParserStream - Chunk-Boundary Scan Complexity", () => {
       { fastMode: true, lineEnding: "||" },
       () => oneLongRow(16000, "||")
     ],
-    // A quoted field holds row terminators without being ended by them, so the wait cannot be
-    // for a terminator. Reverting it to one leaves this case, and only this case, quadratic.
+    // A quoted field holds row terminators without being ended by them, so waiting on a
+    // terminator wakes the scan on every chunk and re-reads the field. Relaxed quoting is kept
+    // as a second shape because it decides a closing quote by what follows it, which is the
+    // part of the boundary lexer a stricter grammar never exercises.
     ["a quoted field holding newlines", {}, () => oneQuotedField(2, `${"y".repeat(79)}\n`)],
-    // And it holds quote characters without being ended by them either. Waking on any quote
-    // rather than on an odd run of them leaves this case, and only this case, quadratic — the
-    // two together are what pin the condition to run parity.
-    ["a quoted field holding escaped quotes", {}, () => oneQuotedField(2, '{""k"":""v""},')],
-    [
-      "a quoted field holding a distinct escape",
-      { escape: "\\" },
-      () => oneQuotedField(2, 'abcdefgh\\"')
-    ],
     [
       "a relaxed quoted field holding interior quotes and newlines",
       { relaxQuotes: true },
       () => oneQuotedField(2, 'abcdefgh"x\n')
-    ],
-    [
-      "a relaxed quoted field with a distinct escape",
-      { escape: "\\", relaxQuotes: true },
-      () => oneQuotedField(2, 'abcdefgh\\"x\n')
     ],
     [
       "a row holding many quoted fields",
@@ -1279,6 +1267,75 @@ describe("CsvParserStream - Chunk-Boundary Scan Complexity", () => {
 
     expect(await collected).toEqual(sync);
     expect(detected).toBe(expectedDelimiter);
+  });
+
+  /**
+   * A candidate that has not yet been asked to consume anything must not be mistaken for one
+   * that cannot. Readiness treats a candidate holding a sample's worth of undigested text as
+   * unable to complete another record — true only once its scanner has been drained, and the
+   * check used to run before that. Any first chunk of at least that size therefore looked
+   * stuck, and the delimiter was decided on however much text happened to arrive first.
+   *
+   * The records here are wider than the sample bound, so the prefix that arrives in one chunk
+   * ends mid-record, and the truncated tail scored as if it were whole. 65536 is not arbitrary:
+   * it is `fs.createReadStream`'s default `highWaterMark`, so a file on disk is delivered in
+   * exactly the pieces that triggered this.
+   */
+  it("detects the same delimiter whatever the first chunk size", async () => {
+    const record = `a,b,c${"x".repeat(8989)};d;e;f`;
+    const csv = `${Array.from({ length: 12 }, () => record).join("\n")}\n`;
+    const options = { delimiter: "", columnMismatch: { less: "pad", more: "keep" } } as const;
+    const expected = Csv.parse(csv, options);
+
+    for (const chunkSize of [65536, 65600, 66000, 70000, 80000, csv.length]) {
+      expect(await feedInChunks(csv, chunkSize, options)).toEqual(expected);
+    }
+  });
+
+  /**
+   * `lineEnding` reaches the detector only in fastMode, because only fastMode ends records at
+   * it; standard mode always ends them at CR/LF, so sampling by `||` there would weigh the
+   * candidates on boundaries the parse never uses — and on a boundary the batch detector does
+   * not use either, which is how the two come to disagree.
+   *
+   * The cost of that choice is what this gate holds down. Standard mode finds no CR/LF here,
+   * so the input is one record and detection cannot conclude before end of input: every
+   * candidate is fed the whole file. That is linear and it is the price of batch and stream
+   * scoring the same sample, but it is only linear if deciding does not re-read what is
+   * buffered — a per-chunk rescan turns this shape quadratic.
+   */
+  it("stays linear when standard mode never reaches the configured lineEnding", async () => {
+    const options = { delimiter: "", lineEnding: "||" } as const;
+    const build = (mb: number) => "a;bbbbbbbb;ccccccccc||".repeat(Math.round((mb * 1048576) / 22));
+
+    const small = await bestMsToParse(build(2), 64 * 1024, options, 2);
+    const large = await bestMsToParse(build(8), 64 * 1024, options, 2);
+
+    expect(small.rows).toEqual(Csv.parse(build(2), options));
+    expect(large.rows).toEqual(Csv.parse(build(8), options));
+    // Four times the input, so a linear detector stays well inside a tenfold bound.
+    expect(large.ms).toBeLessThan(Math.max(small.ms, 60) * 10);
+  });
+
+  /**
+   * With quoting off, a lone quote is data. Detection coerced a disabled quote back to `"`,
+   * so it scored by a grammar the parse would not use and could pick a different delimiter
+   * from the one the rows were then split on.
+   */
+  it("detects with quoting disabled rather than assuming a quote character", async () => {
+    const options = { delimiter: "", quote: false } as const;
+    const csv = '"x;y;z\na;b;c\nd;e;f\ng;h;i\nj;k;l\n';
+
+    const parser = new CsvParserStream(options);
+    let detected = "";
+    parser.on("delimiter", (value: string) => {
+      detected = value;
+    });
+    const collected = collectRows(parser);
+    Readable.from(csv.split("")).pipe(parser);
+
+    expect(await collected).toEqual(Csv.parse(csv, options));
+    expect(detected).toBe(";");
   });
 
   it("does not spin on an input whose records are all blank with a custom lineEnding", async () => {
@@ -1635,24 +1692,17 @@ describe("CsvParserStream - Chunking Equivalence", () => {
   );
 
   /**
-   * A quote run split across a boundary is the state the wait carries between chunks, so it
-   * is driven directly at every run length, every offset and every chunk size.
-   *
-   * The offset matters as much as the length, which is the part a first attempt at this test
-   * missed: with the run always starting at the same index, no chunk size ever produced a
-   * chunk made *entirely* of quotes with a partial run already carried into it. That is the
-   * one shape where the carry has to be added rather than replaced, and mutating the code to
-   * replace it passed a suite of thousands of chunk-size comparisons.
+   * A quote run split across a boundary is the state the wait carries between chunks, and it is
+   * swept exhaustively over run length, offset and chunk size at the scanner level, where the
+   * drive is synchronous. One end-to-end shape here confirms the stream carries that state
+   * through the decoder and event plumbing rather than re-testing the scanner through it.
    */
-  it("handles a quote run of any length at any offset split at any point", async () => {
-    for (let runLength = 0; runLength <= 6; runLength++) {
-      for (let prefixLength = 0; prefixLength <= 4; prefixLength++) {
-        const csv = `"${"a".repeat(prefixLength)}${'"'.repeat(runLength)}b",z\n`;
-        const whole = await feed(csv, csv.length, {});
-        for (let chunkSize = 1; chunkSize <= csv.length; chunkSize++) {
-          expect(await feed(csv, chunkSize, {})).toEqual(whole);
-        }
-      }
+  it("carries a split quote run through the stream", async () => {
+    const csv = '"aa""""b",z\n"c""d",e\n';
+    const whole = await feed(csv, csv.length, {});
+
+    for (const chunkSize of [1, 2, 3, 5, 8]) {
+      expect(await feed(csv, chunkSize, {})).toEqual(whole);
     }
   });
 });

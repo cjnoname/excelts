@@ -9,6 +9,8 @@ import { DEFAULT_LINEBREAK_REGEX, getUtf8ByteLength } from "@csv/constants";
 // Import shared core functionality from parse/
 import type { ParseConfig } from "@csv/parse/config";
 import { createParseConfig, toScannerConfig } from "@csv/parse/config";
+import type { DelimiterDetector } from "@csv/parse/delimiter-detector";
+import { createDelimiterDetector } from "@csv/parse/delimiter-detector";
 import { convertRowToObject, filterValidHeaders } from "@csv/parse/helpers";
 import { splitLinesWithEndings } from "@csv/parse/lines";
 import {
@@ -33,31 +35,9 @@ import type {
   CsvRecordError
 } from "@csv/types";
 import { isSyncTransform, isSyncValidate } from "@csv/types";
-import {
-  applyFirstChunkPreprocessing,
-  DELIMITER_DETECTION_SAMPLE_CHARS,
-  DELIMITER_DETECTION_SAMPLE_RECORDS,
-  delimiterCandidates,
-  detectDelimiter,
-  isScorableDetectionRecord
-} from "@csv/utils/detect";
+import { applyFirstChunkPreprocessing } from "@csv/utils/detect";
 import { applyDynamicTypingToRow, applyDynamicTypingToArrayRow } from "@csv/utils/dynamic-typing";
 import { Transform } from "@stream";
-
-/** How much of the detection sample one delimiter candidate has accumulated. */
-interface DetectionCandidateProgress {
-  /** Records that can be scored, so neither blank nor comment. */
-  records: number;
-  /** Characters of those scorable records. */
-  scoredChars: number;
-  /** Characters of every record consumed, scorable or not. */
-  consumedChars: number;
-}
-
-/** A candidate's progress plus the scanner producing its records. */
-interface DetectionCandidate extends DetectionCandidateProgress {
-  scanner: Scanner;
-}
 
 /**
  * Transform stream that parses CSV data row by row
@@ -124,30 +104,12 @@ export class CsvParserStream extends Transform {
   private fastModeNoLineEndBefore = 0;
 
   /**
-   * Detection-only text since the last confirmed empty/comment record. Keeping it separate
-   * lets those records be dropped as they arrive, so readiness never re-scans or flattens the
-   * full buffered prefix.
-   */
-  private delimiterDetectionProbe = "";
-  /**
-   * Per-candidate incremental scanners counting complete records in the probe.
+   * Incremental delimiter detector, built on first use because it needs the resolved config.
    *
-   * Detection must commit on content, never on how that content was chunked, and it must
-   * see the same sample the batch detector uses. Every candidate therefore counts its own
-   * records; committing happens once they all have a full sample, or at end of input.
+   * All of the sampling, candidate bookkeeping and scoring lives in it, shared with the batch
+   * path, so a streamed parse and `Csv.parse` cannot weigh candidates differently.
    */
-  private delimiterDetectionCandidateRecords = new Map<string, DetectionCandidate>();
-  /**
-   * Progress for a configured non-CR/LF separator, where records are split the same way for
-   * every candidate, so one counter stands in for all of them.
-   */
-  private delimiterDetectionSeparatorProgress: DetectionCandidateProgress = {
-    records: 0,
-    scoredChars: 0,
-    consumedChars: 0
-  };
-  /** Text of the record currently being accumulated for the separator counter. */
-  private delimiterDetectionCandidateTail = "";
+  private delimiterDetectorInstance: DelimiterDetector | undefined;
 
   private decoder: TextDecoder;
   private scanner: Scanner; // Scanner instance for efficient batch scanning
@@ -321,8 +283,7 @@ export class CsvParserStream extends Transform {
       this.buffer += data;
       this.noteFastModeAppend(data);
       if (this.autoDetectDelimiter && !this.delimiterDetected) {
-        this.delimiterDetectionProbe += data;
-        this.feedDelimiterDetectionCandidates(data);
+        this.delimiterDetector.feed(data);
       }
 
       this.prepareFirstTextChunk();
@@ -358,8 +319,7 @@ export class CsvParserStream extends Transform {
         this.buffer += remainingDecoded;
         this.noteFastModeAppend(remainingDecoded);
         if (this.autoDetectDelimiter && !this.delimiterDetected) {
-          this.delimiterDetectionProbe += remainingDecoded;
-          this.feedDelimiterDetectionCandidates(remainingDecoded);
+          this.delimiterDetector.feed(remainingDecoded);
         }
       }
 
@@ -413,8 +373,7 @@ export class CsvParserStream extends Transform {
     // Clear buffers
     this.buffer = "";
     this.chunkBuffer = [];
-    this.delimiterDetectionProbe = "";
-    this.resetDelimiterDetectionCandidate();
+    this.delimiterDetectorInstance?.release();
     this.resetFastModeLineEndTracking();
 
     // Reset scanner if present
@@ -694,216 +653,41 @@ export class CsvParserStream extends Transform {
     this.buffer = prepared;
     this.resetFastModeLineEndTracking();
     if (this.autoDetectDelimiter && !this.delimiterDetected) {
-      this.delimiterDetectionProbe = prepared;
-      this.resetDelimiterDetectionCandidate();
-      this.feedDelimiterDetectionCandidates(prepared);
+      this.delimiterDetector.reset(prepared);
     }
   }
 
-  private resetDelimiterDetectionCandidate(): void {
-    this.delimiterDetectionCandidateRecords = new Map();
-    this.delimiterDetectionSeparatorProgress = { records: 0, scoredChars: 0, consumedChars: 0 };
-    this.delimiterDetectionCandidateTail = "";
-  }
-
-  /**
-   * Advance every candidate's record count over the arriving data only, so the accumulated
-   * probe is never re-scanned and the counts cannot depend on chunk boundaries.
-   */
-  private feedDelimiterDetectionCandidates(data: string): void {
-    if (data === "") {
-      return;
-    }
-
-    if (this.parseConfig.linebreakRegex !== DEFAULT_LINEBREAK_REGEX) {
-      const separator = this.parseConfig.linebreak;
-      if (separator === "") {
-        return;
-      }
-      // The whole record is kept, not a `separator.length - 1` tail: whether a record can be
-      // scored depends on all of its text, so judging a truncated piece let a comment longer
-      // than that tail count towards the sample and made the choice chunk-dependent.
-      let pending = this.delimiterDetectionCandidateTail + data;
-      let at = pending.indexOf(separator);
-      while (at !== -1) {
-        const record = pending.slice(0, at);
-        const progress = this.delimiterDetectionSeparatorProgress;
-        if (this.isScorable(record)) {
-          progress.records++;
-          progress.scoredChars += record.length;
-        }
-        progress.consumedChars += at + separator.length;
-        pending = pending.slice(at + separator.length);
-        at = pending.indexOf(separator);
-      }
-      this.delimiterDetectionCandidateTail = pending;
-      return;
-    }
-
-    for (const delimiter of this.delimiterDetectionCandidates()) {
-      let entry = this.delimiterDetectionCandidateRecords.get(delimiter);
-      if (!entry) {
-        entry = {
-          scanner: createScanner({ ...toScannerConfig(this.parseConfig), delimiter }),
-          records: 0,
-          scoredChars: 0,
-          consumedChars: 0
-        };
-        this.delimiterDetectionCandidateRecords.set(delimiter, entry);
-      }
-      entry.scanner.feed(data);
-      let row = entry.scanner.nextRow();
-      while (row !== null && !this.candidateSampleComplete(entry)) {
-        const raw = row.raw ?? "";
-        entry.consumedChars += raw.length + (row.newline?.length ?? 0);
-        if (this.isScorable(raw)) {
-          entry.records++;
-          entry.scoredChars += raw.length;
-        }
-        row = entry.scanner.nextRow();
-      }
-    }
-  }
-
-  private isScorable(raw: string): boolean {
-    return isScorableDetectionRecord(raw, this.options.comment);
-  }
-
-  /**
-   * The record separator only reaches the sampler when the parse itself will use it, which is
-   * fastMode with a configured string. Standard mode always ends records at CR/LF, so passing
-   * it there would sample on boundaries the parser never uses — and did so on one side only.
-   */
-  private detectionLineEnding(): string | undefined {
-    return this.parseConfig.fastMode && this.parseConfig.linebreakRegex !== DEFAULT_LINEBREAK_REGEX
-      ? this.parseConfig.linebreak
-      : undefined;
-  }
-
-  private delimiterDetectionCandidates(): readonly string[] {
-    return delimiterCandidates(this.options.delimitersToGuess);
-  }
-
-  /**
-   * Whether the probe holds the whole sample the batch detector would look at.
-   *
-   * Requiring it of *every* candidate is what makes a stream agree with `Csv.parse`: the
-   * winning candidate is chosen by comparing all of their field counts, so a candidate whose
-   * quoting still needs more text could otherwise be scored on less of the input than the
-   * batch detector scores it on.
-   */
-  private candidateSampleComplete(entry: DetectionCandidateProgress): boolean {
-    if (
-      entry.records >= DELIMITER_DETECTION_SAMPLE_RECORDS ||
-      entry.scoredChars >= DELIMITER_DETECTION_SAMPLE_CHARS
-    ) {
-      return true;
-    }
-    // A candidate whose quoting never closes completes no record at all, so neither bound
-    // above can ever be reached and the stream would buffer to end of input before emitting
-    // anything. Once it is sitting on this much undigested text, score it with what it has.
-    return (
-      this.delimiterDetectionProbe.length - entry.consumedChars >= DELIMITER_DETECTION_SAMPLE_CHARS
-    );
-  }
-
-  private hasFullDelimiterDetectionSample(): boolean {
-    if (this.parseConfig.linebreakRegex !== DEFAULT_LINEBREAK_REGEX) {
-      return this.candidateSampleComplete(this.delimiterDetectionSeparatorProgress);
-    }
-    const candidates = this.delimiterDetectionCandidates();
-    for (const delimiter of candidates) {
-      const entry = this.delimiterDetectionCandidateRecords.get(delimiter);
-      if (!entry || !this.candidateSampleComplete(entry)) {
-        return false;
-      }
-    }
-    return candidates.length > 0;
+  private get delimiterDetector(): DelimiterDetector {
+    this.delimiterDetectorInstance ??= createDelimiterDetector({
+      // `quoteEnabled` is false for `quote: false`, where `parseConfig.quote` is "". Coercing that
+      // back to a quote made detection score by a grammar the parse does not use.
+      quote: this.parseConfig.quoteEnabled ? this.parseConfig.quote : "",
+      escape: this.parseConfig.escape,
+      relaxQuotes: this.parseConfig.relaxQuotes,
+      comment: this.options.comment,
+      delimitersToGuess: this.options.delimitersToGuess,
+      // Only fastMode actually ends records at a configured separator; standard mode always
+      // ends them at CR/LF, so sampling there must not use it.
+      lineEnding:
+        this.parseConfig.fastMode && this.parseConfig.linebreakRegex !== DEFAULT_LINEBREAK_REGEX
+          ? this.parseConfig.linebreak
+          : undefined
+    });
+    return this.delimiterDetectorInstance;
   }
 
   private detectDelimiterIfReady(isEof: boolean): boolean {
-    const comment = this.options.comment;
-    let start = 0;
-    const candidateDelimiters = this.delimiterDetectionCandidates();
-
-    // Commit on content, not on arrival: wait for the same sample the batch detector reads,
-    // unless end of input settles it. Anything less makes the chosen delimiter — and so the
-    // rows — depend on where the chunk boundaries happened to fall.
-    if (!isEof && !this.hasFullDelimiterDetectionSample()) {
+    // Commit on content, not on arrival: the detector waits for the same sample the batch path
+    // reads, so the chosen delimiter — and therefore the rows — cannot depend on where the
+    // chunk boundaries happened to fall.
+    const delimiter = isEof
+      ? this.delimiterDetector.decideAtEof()
+      : this.delimiterDetector.decide();
+    if (delimiter === undefined) {
       return false;
     }
-
-    // Scored once, not once per skipped record: the sample the detector reads does not change
-    // as this loop walks past leading blank and comment records, and re-running it per record
-    // made a long comment prefix quadratic.
-    const detected = detectDelimiter(
-      this.delimiterDetectionProbe,
-      this.parseConfig.quote || '"',
-      [...candidateDelimiters],
-      comment,
-      this.options.skipEmptyLines,
-      {
-        escape: this.parseConfig.escape,
-        relaxQuotes: this.parseConfig.relaxQuotes,
-        lineEnding: this.detectionLineEnding()
-      }
-    );
-    const recordScanner =
-      this.parseConfig.linebreakRegex === DEFAULT_LINEBREAK_REGEX
-        ? createScanner({ ...toScannerConfig(this.parseConfig), delimiter: detected })
-        : undefined;
-
-    // The probe is only walked, never trimmed: trimming it here made the loop bound stale —
-    // an input whose records are all blank or comments then spun forever — and left the
-    // committed delimiter scored on different text than `Csv.parse` sees.
-    while (start < this.delimiterDetectionProbe.length) {
-      let end: number;
-      let next: number;
-      if (recordScanner) {
-        // Delimiter choice can affect whether a quote is at a field start, which in turn
-        // determines whether a following newline is inside that field, so the record this
-        // loop skips over must be read with the selected candidate's semantics.
-        const row = recordScanner.scanRow(this.delimiterDetectionProbe, start, isEof);
-        if (!row.complete) {
-          return false;
-        }
-
-        end = row.rawEnd;
-        next = row.endPos;
-      } else {
-        const separator = this.parseConfig.linebreak;
-        const separatorAt =
-          separator === "" ? -1 : this.delimiterDetectionProbe.indexOf(separator, start);
-        if (separatorAt === -1) {
-          if (!isEof) {
-            return false;
-          }
-          end = this.delimiterDetectionProbe.length;
-          next = end;
-        } else {
-          end = separatorAt;
-          next = separatorAt + separator.length;
-        }
-      }
-
-      if (this.isScorable(this.delimiterDetectionProbe.slice(start, end))) {
-        this.commitDetectedDelimiter(detected);
-        return true;
-      }
-
-      if (next <= start) {
-        break;
-      }
-      start = next;
-    }
-
-    // At EOF an empty/comment-only input still needs a settled configuration so the
-    // ordinary flush path can finish it consistently.
-    if (isEof) {
-      this.commitDetectedDelimiter(this.parseConfig.delimiter);
-      return true;
-    }
-    return false;
+    this.commitDetectedDelimiter(delimiter);
+    return true;
   }
 
   private commitDetectedDelimiter(delimiter: string): void {
@@ -913,8 +697,7 @@ export class CsvParserStream extends Transform {
     this.scanner = createScanner(toScannerConfig(this.parseConfig));
     // The detection sample is no longer needed; holding it would pin the prefix for the rest
     // of the stream.
-    this.delimiterDetectionProbe = "";
-    this.resetDelimiterDetectionCandidate();
+    this.delimiterDetector.release();
   }
 
   /**

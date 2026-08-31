@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_LINEBREAK_REGEX } from "@csv/constants";
+import { detectDelimiterFor } from "@csv/parse/delimiter-detector";
 import { createOnSkipHandler } from "@csv/parse/helpers";
 import type { ScannerConfig } from "@csv/parse/scanner";
 import type { CsvParseOptions } from "@csv/types";
@@ -13,7 +14,6 @@ import {
   applyFirstChunkPreprocessing,
   normalizeQuoteOption,
   normalizeEscapeOption,
-  detectDelimiter,
   detectLinebreak
 } from "@csv/utils/detect";
 
@@ -170,22 +170,19 @@ export function createParseConfig(opts: CreateParseConfigOptions): ParseConfigRe
     // Use externally detected delimiter (streaming mode)
     delimiter = detectedDelimiter;
   } else if (delimiterOption === "" && processedInput !== undefined) {
-    // Auto-detect from input (batch mode)
-    delimiter = detectDelimiter(
-      processedInput,
-      quote || '"',
-      delimitersToGuess,
+    // Auto-detect from input (batch mode). The same detector a stream uses, fed in one go, so
+    // the two cannot weigh the candidates differently.
+    delimiter = detectDelimiterFor(processedInput, {
+      // "" when quoting is disabled, so detection scores by the grammar the parse will use.
+      quote: quoteEnabled ? quote : "",
+      escape,
+      relaxQuotes,
       comment,
-      shouldSkipEmpty,
-      {
-        escape,
-        relaxQuotes,
-        // Matches CsvParserStream: only fastMode actually ends records at a configured
-        // separator, so only then may the sampler use it. Standard mode always ends records
-        // at CR/LF.
-        lineEnding: fastMode && linebreakRegex !== DEFAULT_LINEBREAK_REGEX ? linebreak : undefined
-      }
-    );
+      delimitersToGuess,
+      // Only fastMode actually ends records at a configured separator; standard mode always
+      // ends them at CR/LF, so sampling there must not use it.
+      lineEnding: fastMode && linebreakRegex !== DEFAULT_LINEBREAK_REGEX ? linebreak : undefined
+    });
   } else if (delimiterOption === "") {
     // Streaming mode with auto-detect - use default, will be updated later
     delimiter = ",";
