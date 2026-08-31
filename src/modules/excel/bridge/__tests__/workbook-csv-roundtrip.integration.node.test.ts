@@ -40,7 +40,7 @@ describe("Workbook", () => {
       Cell.setValue(ws, "A6", "Hello");
       Cell.setValue(ws, "B6", "World");
       Cell.setValue(ws, "C6", {
-        formula: "CONCATENATE(A6,', ',B6,'!')",
+        formula: 'CONCATENATE(A6,", ",B6,"!")',
         result: "Hello, World!"
       });
 

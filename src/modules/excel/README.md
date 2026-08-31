@@ -1289,6 +1289,308 @@ await writeMarkdownFile(workbook, "output.md");
 const bytes = writeMarkdownBuffer(workbook);
 ```
 
+## Excel Binary Workbook (`.xlsb`)
+
+`.xlsb` is a format choice on the canonical workbook functions, not a second API:
+
+```typescript
+import { Workbook } from "documonster/excel";
+
+// The extension selects the format.
+await Workbook.writeFile(workbook, "report.xlsb");
+
+// Reads detect it from the package contents.
+const reopened = Workbook.create();
+await Workbook.readFile(reopened, "report.xlsb");
+
+// Bytes and streams take it explicitly, because there is no filename to read it from.
+const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+for await (const chunk of Workbook.toStream(workbook, { format: "xlsb" })) {
+  // consume
+}
+```
+
+Coverage is partial and the boundary is stated below rather than discovered. What exists is the
+framework the format needs before a reader can be trusted, plus a reader and writer for the
+record set whose encoding has been established.
+
+The order is deliberate. A BIFF12 record stream is opaque, and Excel's diagnostic for a
+malformed one is "we found a problem with some content" — no part, no offset, no reason. So
+the first things built were the two that make the rest debuggable:
+
+- **A validator** (`utils/xlsb-validator/`) that answers "would Excel refuse this?" — package
+  structure, record framing, `Begin`/`End` balance, record ordering, cell coordinates, and
+  indexes into the shared-string and cell-format tables.
+- **A disassembler** (`src/test/biff-dump.ts`) that renders a part as indented, diffable text.
+
+Both derive from one record table (`xlsb/spec/records.ts`), which is data rather than code:
+identifier, name, scope role, and payload layout. Nothing keeps a private copy, and
+`spec.test.ts` checks the table on its own.
+
+### What round-trips today
+
+Strings (via a shared-string table), numbers, booleans, dates and blanks, across multiple
+sheets. Numbers use the compact `RkNumber` encoding where it is exact and a full double
+otherwise — never a rounded approximation.
+
+**Formulas**, as text and as their cached result. BIFF12 stores an expression as a
+reverse-polish token stream rather than as text, so this module owns the token mapping and
+`documonster/formula` owns the text: `Formula.tokenize` + `Formula.parse` one way,
+`Formula.print` the other. Sharing that is not convenience — precedence and parenthesisation
+are decided in one place, and a second implementation would not fail loudly. `=-2^2` is `4` in
+Excel and `-4` almost everywhere else.
+
+Absolute and relative references, sheet-qualified references, defined names, reference unions
+and intersections all survive.
+
+**The workbook's date epoch.** A workbook saved with the 1904 system round-trips as one, and its
+dates read back as the instants they are rather than four years early.
+
+**Alignment and cell protection** — horizontal, vertical, wrap, shrink-to-fit, indent, reading
+order, text rotation, locked and hidden. The six bytes carrying these were previously written as a
+constant `0x1010` with a comment saying the fields were "left at their defaults", which was true and
+concealed that the defaults are not zero: `alcV = 0` is _top_, so zeroing the byte would have moved
+every cell's text.
+
+**Page setup** — margins, paper size, scale, orientation, resolution, fit-to-page and first page
+number — and the sheet's **default row height and column width**.
+
+**The sheet's tab colour and VBA code name.** The code name matters because the VBA project is now
+preserved: macros address sheets by it, so dropping it while keeping `vbaProject.bin` would produce
+a workbook whose code no longer resolves its own sheets.
+
+**Row and column formatting.** `BrtRowHdr` and `BrtColInfo` have always carried a format index and
+this writer always wrote zero into it, because the field it read from was declared and never
+populated — so `Row.setStyle` and `Column.setStyle` had no path into the file at all.
+
+**Cross-sheet references and defined names, as expressions.** A `PtgRef3d` carries an index into
+`BrtExternSheet` and a `PtgName` an index into the `BrtName` records; neither table was written, so
+every such reference pointed into nothing. A round trip could not see it, because it read back the
+_cached result_ rather than the formula — which is the exact failure mode the rest of this section
+exists to prevent, found in this library's own output.
+
+**Every part this reader does not interpret** — the theme, images, drawings, charts, printer
+settings, a VBA project. Losing the theme is not cosmetic: a `{ theme: 1 }` colour resolves through
+it.
+
+**Fonts** — name, size, bold, italic, underline, strikethrough, colour, family, charset and theme
+scheme — and **pattern fills**, including solid fills with a real colour. A `BrtFont` has no
+optional fields, so a cell that asks only for bold reads back as Calibri 11 bold; that is what
+Excel does with such a cell too.
+
+**Borders are deliberately absent, and that is a finding rather than a gap in effort.** All nine Excel-authored
+reference workbooks contain exactly one `BrtBorder`, byte-identical in every file: the default
+"no borders" entry. One sample of a 51-byte structure establishes that it is 51 bytes and nothing
+else — no edge, no line style, no colour is ever exercised — so there is nothing to read off. The
+fonts, by contrast, vary across fifteen samples in five languages, which is why they are here.
+
+**Sheet visibility**, **merged ranges**, **column widths** and **row heights**. Each layout was
+established from Excel's own output, and two were confirmed by a value that could not be a
+coincidence: a workbook whose three sheets are named `Visible`, `Hidden` and `VeryHidden` carries
+0, 1 and 2, and a default column carries 2742 — which is 10.71 characters in the 1/256ths this
+format uses, the width of a default Calibri 11 column.
+
+A column or row that never had a size set does not acquire one, and a custom size is flagged so
+Excel keeps it rather than recomputing from the font.
+
+**Number formats**, and with them dates. BIFF12 stores a date as a serial number and says so
+only through the format, so `iFmt` is the difference between `2016-10-07` and `42650` — the one
+kind of fidelity loss a user notices immediately. The format strings and the "is this a date
+format" test are the ones the XLSX path uses, so the same workbook cannot read back differently
+depending on which container it arrived in. Formats are interned, so fifty cells sharing one
+format produce one entry.
+
+**Images** — the bytes in `xl/media/`, the placement in `xl/drawings/drawingN.xml`, the sheet's own
+`.rels`. All of it is the same XML an XLSX carries, produced by the same code; only the reference is
+binary, a twelve-byte `BrtDrawing` holding a relationship id. The three forms `ImageData` accepts —
+`buffer`, `base64` and `filename` — all embed, and an external `link` is written as a linked picture
+with no bytes in the package.
+
+### Nothing is dropped quietly
+
+A cell needing something the writer cannot express is written as a blank and **reported by address**,
+so its position survives. A sheet feature this container has no record for is reported **by sheet**,
+and a defined name that could not keep its meaning is reported **by name**. By default any of them
+refuses the write outright:
+
+```typescript
+await Workbook.toBuffer(workbook, { format: "xlsb" });
+// ExcelNotSupportedError: 3 item(s) carry content this writer cannot express:
+//   Sheet1!A1: formula, Sheet1: table, Sheet1: border (12).
+//   Pass { unsupported: "ignore" } to write the workbook without them.
+```
+
+The thrown error carries the full list on `items`, so a converter reporting "these need attention"
+does not have to parse the message.
+
+Reading has the same option and the **opposite default**, plus a third form for the case neither
+covers — read it _and_ inspect what was lost:
+
+```typescript
+await Workbook.read(workbook, bytes); // reads it, quietly, losing what it cannot decode
+await Workbook.read(workbook, bytes, { unsupported: "error" }); // or refuse and say what was lost
+
+const report = await Workbook.readWithDiagnostics(workbook, bytes);
+report.lost; // ["Sheet1: 1 cell(s) in BrtShortReal", …]
+report.unknownRecords; // record ids with no name here — not losses, see below
+```
+
+`unknownRecords` is deliberately **not** part of `lost`. A record this library has no name for is
+usually a newer schema's extension rather than missing content — every workbook in the reference
+corpus has some — so counting them as losses would make `unsupported: "error"` reject ordinary files
+and teach callers to switch it off. They are reported separately for anyone who wants them.
+
+That asymmetry is deliberate. A workbook being _written_ is in memory and complete, so a loss is this
+library's limitation and stopping costs the caller nothing they had. A workbook being _read_ was
+written by someone else and the loss already happened; a reader that refuses a real file because
+seven of its cells use a record whose layout is unestablished is a reader nobody can use. `"error"`
+is there for the caller who would rather stop than convert something incomplete.
+
+**Reading replaces the workbook, and does so atomically.** `Workbook.read` into a workbook that
+already has sheets discards them, exactly as the XLSX reader does — and if the package turns out to be
+malformed part-way through, the target is left as it was rather than holding half a file. That holds
+for a _refusal_ too: `{ unsupported: "error" }` evaluates the losses before anything is applied, so a
+rejected read leaves the workbook untouched rather than replacing it and then reporting failure.
+
+### What it cannot do yet
+
+Everything in this list is **reported** when a workbook needs it, so the gap is visible at the point
+it costs something rather than discovered later in Excel.
+
+- Array constants, structured references and whole-row/whole-column references inside a
+  formula. Each is refused by name rather than encoded as something else.
+- Shared formulas: a `PtgExp` deferral is reported on read and refused on write.
+- Borders. See the finding above: the corpus establishes the record's size and not one of its
+  fields.
+- Frozen and split panes (`BrtPane`), tables, auto filters, data validation, conditional
+  formatting, page breaks, comments, shapes, charts, sparklines, form controls, configured sheet
+  protection, print areas and print titles. None of their records appear in any reference
+  workbook, so their layouts are not established — and this module does not guess an offset.
+  Establishing them needs an Excel-authored `.xlsb` that uses the feature;
+  `DOCUMONSTER_XLSB_CORPUS_DIR` is where such a file goes.
+- Error values, on both sides. `BrtCellError` and `BrtFmlaError` have a declared shape — a cell then
+  a one-byte code — and **no workbook in the corpus contains either record**, so the mapping from
+  `#DIV/0!` to a code is unobserved. On read the cell becomes a blank and the address is reported;
+  on write the formula is kept with an unevaluated cached value, because Excel recalculates on open
+  and dropping the expression to protect a value that is about to be replaced would be the worse
+  trade.
+- Chartsheets. Read as an empty worksheet so nothing after them shifts, and reported.
+- Cell comments, row and column hidden/grouped/collapsed state, best-fit columns, workbook
+  protection, workbook and worksheet view settings, named cell styles, and the page-setup fields
+  outside the established subset. Each is reported, by sheet or by workbook.
+- Formatting runs on a rich shared string. The text survives — dropping the string because it was
+  bold would be worse — and the runs are reported on read.
+
+Document properties, by contrast, **are** preserved: `docProps/core.xml` and `docProps/app.xml` are
+read and written, so the creator, title, company and dates survive a round trip. So does the
+workbook's default font — written to font index 0, and recovered from it on read — and the theme, which
+is written from the model on an XLSX→XLSB conversion and preserved verbatim on an XLSB one.
+
+A reference across a span of sheets (`SUM(Sheet1:Sheet3!A1)`) is written as a span. That needed a
+`BrtExternSheet` entry whose `itabFirst` and `itabLast` differ: the entry layout is established from
+Excel's output, the differing pair is an inferred _value_, and it is registered as one. The alternative
+was what this used to do — emit the first sheet's entry, turning the formula into `SUM(Sheet1!A1)`, which
+is not a fidelity loss but a different answer.
+
+**A sheet has at most one drawing**, so adding a picture to a sheet whose existing pictures came from an
+XLSB read is refused rather than written: a second drawing part would leave the sheet naming only one of
+the two, and the other's pictures would vanish. Under `unsupported: "ignore"` the pictures that were
+already there win.
+
+- Some _values_ are written into an established layout without ever having been observed. Every
+  font in the corpus is regular weight with `grbit` = 0, so `BrtFont`'s bold and italic **fields**
+  are established while their "on" state is not — those values come from the documented
+  convention the XLSX form of the same attribute uses. An offset read off Excel's own bytes and a
+  value taken from a convention are different kinds of claim, so they are kept apart: the
+  inferences live in one register (`INFERRED_VALUES` in `xlsb/spec/records.ts`) and
+  `spec.test.ts` pins each of them against the table, so a value cannot be added without one. A single workbook
+  with one bold and one italic cell would settle all eight.
+- Seven cell records — `BrtShortBlank`, `BrtShortRk`, `BrtShortError`, `BrtShortBool`,
+  `BrtShortReal`, `BrtShortSt`, `BrtShortIsst` — have no established payload layout. They did
+  not appear in **any** of nine Excel-authored reference workbooks, all of which used the full
+  `BrtCell*` forms, so the practical gap is much narrower than their prominence suggests. The
+  reader recognises them, counts them and reports them rather than guessing an offset or dropping
+  the cell; the writer never emits them. `spec.test.ts` asserts that every name on that list really
+  is a cell record with no declared layout, so the gap cannot be closed by deleting the list.
+
+### Runnable examples
+
+```bash
+pnpm example --filter xlsb-round-trip   # values, dates, formulas, defined names, cross-sheet refs
+pnpm example --filter xlsb-formatting   # fonts, fills, alignment, protection, page setup, tab colour
+pnpm example --filter xlsb-fidelity     # what is preserved, what is reported, and the 1904 epoch
+```
+
+The second of these found a bug the test suite did not: a header row styled as a row, plus one cell
+in it wanting a rotation, is a shape that does not arise when you write tests a feature at a time.
+Row formatting was being applied _after_ the cells, so it overwrote what each cell had declared for
+itself — inverting the format's own rule, in which a cell's `iStyleRef` wins over its row's `ixfe`.
+
+### What the reference corpus actually is
+
+Eleven `.xlsb` files, of which **nine are Excel's own output** and two — `issue_666_lost_sheets` and
+`issue_666_panic` — are hand-reduced bug reports. Every layout claim in this module rests on the
+nine; the two reduced files corroborate nothing the nine do not already establish, and the
+distinction matters because the whole method here is "read it off Excel's output rather than assume
+it".
+
+The two are worth keeping. They are a five-part skeleton with a 31-byte worksheet that declares no
+view — which is, almost exactly, the shape this library used to write. So they are simultaneously
+evidence that a reduced package is readable and evidence of what an _unopenable_ one looks like,
+which is why `record-missing-required` is a warning rather than an error: refusing them would be
+refusing files this library reads correctly.
+
+### Bugs the reference corpus found
+
+Four silent correctness bugs were in this library's own output, and each was invisible to a round
+trip for the same reason: the reader and the writer agreed with each other.
+
+| Bug                                                                                                   | Why no test saw it                                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A formula naming a defined name wrote a `PtgName` index into a `BrtName` table that was never emitted | Reading it back returned the cached _result_, so the value was right and the formula was gone                                                                                             |
+| Every cross-sheet reference wrote an `ixti` into a `BrtExternSheet` table that was never emitted      | Same — and 3D references are far more common than defined names                                                                                                                           |
+| `ixti` was resolved as a sheet index rather than through the table                                    | Self-consistent between reader and writer. In `issues.xlsb` the table's second entry names the _third_ sheet, so `OneRange` read as `issue2!$A$1` where Excel means `Sheet1!$A$1`         |
+| Workbook relationships were written to `xl/_rels/workbook.xml.rels`                                   | OPC looks for `workbook.bin.rels`, so the sheets were unreachable through the only mechanism that reaches them — and the reader found them anyway by computing their paths arithmetically |
+
+A fifth was found by the same means but is a fidelity gap rather than a break: a chartsheet makes
+the worksheet part numbering non-contiguous, so resolving a sheet's part by position puts one
+sheet's data on another. `any_sheets.xlsb` has its chartsheet last, where the error costs nothing;
+one in the middle silently misplaces every sheet after it.
+
+### Checked against Excel's own output
+
+Every layout was established from Excel-authored workbooks — nine of them — rather than
+assumed, and three were pinned by a value that could not be a coincidence: format id 14 on a date
+cell, 2742 on a default column, and 0/1/2 on three sheets named `Visible`, `Hidden` and
+`VeryHidden`.
+
+That corpus also found a bug no synthetic test would have: two otherwise-identical workbooks, one
+saved with the 1904 date system, read four years apart. `BrtWbProp` carries the epoch in bit 0 of
+its flags, and a reader that ignores it is wrong by exactly 1462 days — a plausible-looking date
+rather than an error, so nothing downstream notices.
+
+The declared layouts were confirmed against those workbooks: `BrtCellRk` is
+twelve bytes, `BrtCellIsst` twelve, `BrtCellBlank` eight, exactly as the table says. Doing that
+also found four false positives that fifty-odd hand-built tests had missed, all of them the
+same mistake — treating `.bin` as a format:
+
+| Part                                      | What it actually is                        |
+| ----------------------------------------- | ------------------------------------------ |
+| `xl/vbaProject.bin`                       | an OLE2 compound document                  |
+| `xl/printerSettings/printerSettings1.bin` | a DEVMODE struct                           |
+| `xl/worksheets/binaryIndex1.bin`          | a record stream, but not a worksheet       |
+| `xl/workbook.bin`                         | declared by a `Default`, not an `Override` |
+
+A part's identity comes from its content type, so that is what the validator reads. The shapes
+are pinned by `utils/__tests__/xlsb-validator/real-world-shapes.test.ts`, as synthetic packages
+rather than vendored binaries; point `DOCUMONSTER_XLSB_CORPUS_DIR` at a directory of `.xlsb`
+files to run the same checks against real ones.
+
+That last point is the whole posture of this module: a layout that has not been established is
+recorded as unestablished. Guessing an offset produces a reader and a writer that agree with
+each other and disagree with Excel, which no round-trip test can detect because both sides
+share the mistake.
+
 ## Streaming API
 
 ### Streaming Reader

@@ -66,7 +66,13 @@ export interface DrawingModel {
   rels: DrawingRel[];
 }
 
-interface ImageMedium {
+/**
+ * One placed picture, as {@link buildDrawingAnchorsAndRels} takes it.
+ *
+ * Exported because both container writers hand it this shape, and a caller that has to cast into an
+ * unexported parameter type loses the only check that its own model still matches.
+ */
+export interface ImageMedium {
   imageId: string | number;
   range: DrawingRange;
   hyperlinks?: { hyperlink?: string; tooltip?: string };

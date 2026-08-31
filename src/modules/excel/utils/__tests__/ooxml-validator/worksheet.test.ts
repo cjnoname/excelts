@@ -252,3 +252,73 @@ describe("ooxml-validator / worksheet — shared formula", () => {
     ).toBe(false);
   });
 });
+
+describe("ooxml-validator / worksheet — formulas", () => {
+  /**
+   * A single invalid formula makes Excel refuse to open the workbook — not with "the format is not
+   * valid" but with "we found a problem with some content", and its repair log says exactly
+   * `Removed Records: Formula from /xl/worksheets/sheet1.xml part`.
+   *
+   * Every other check in this validator passed the file that produced that log: the XML was
+   * well-formed, the cell references valid, the style indices in range. A formula is a string, and
+   * nothing here was reading it. Two of this repository's own examples shipped one, and so did a
+   * committed fixture — `CONCATENATE(A6,', ',B6,'!')`, where single quotes delimit a *sheet name* in
+   * a formula and never a string.
+   */
+  const cell = (formula: string): string =>
+    `<sheetData><row r="6"><c r="C6" t="str"><f>${formula}</f><v>x</v></c></row></sheetData>`;
+
+  it("reports a formula its own parser rejects", async () => {
+    const report = await validateXlsxBuffer(
+      buildPackage({
+        ...baseParts(),
+        "xl/worksheets/sheet1.xml": sheetXml(
+          cell("CONCATENATE(A6,&apos;, &apos;,B6,&apos;!&apos;)")
+        )
+      })
+    );
+    const problems = report.problems.filter(
+      problem => problem.kind === "sheet-formula-unparseable"
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems[0]!.message).toContain('r="C6"');
+  });
+
+  it("accepts the same formula written with double quotes", async () => {
+    const report = await validateXlsxBuffer(
+      buildPackage({
+        ...baseParts(),
+        "xl/worksheets/sheet1.xml": sheetXml(
+          cell("CONCATENATE(A6,&quot;, &quot;,B6,&quot;!&quot;)")
+        )
+      })
+    );
+    expect(report.problems.filter(p => p.kind === "sheet-formula-unparseable")).toEqual([]);
+  });
+
+  it("accepts a formula written with the leading equals sign a user types", async () => {
+    // Four formulas in five carry it, measured across every workbook the examples produce. Treating
+    // it as a syntax error would condemn almost every real file.
+    const report = await validateXlsxBuffer(
+      buildPackage({
+        ...baseParts(),
+        "xl/worksheets/sheet1.xml": sheetXml(cell("=B5+B6"))
+      })
+    );
+    expect(report.problems.filter(p => p.kind === "sheet-formula-unparseable")).toEqual([]);
+  });
+
+  it("says nothing about an empty formula element", async () => {
+    // A shared formula's dependent cells carry `<f t="shared" si="0"/>` with no text, and so do the
+    // covered cells of an array formula. There is nothing to parse and nothing wrong.
+    const report = await validateXlsxBuffer(
+      buildPackage({
+        ...baseParts(),
+        "xl/worksheets/sheet1.xml": sheetXml(
+          '<sheetData><row r="6"><c r="C6"><f t="shared" si="0"/><v>1</v></c></row></sheetData>'
+        )
+      })
+    );
+    expect(report.problems.filter(p => p.kind === "sheet-formula-unparseable")).toEqual([]);
+  });
+});

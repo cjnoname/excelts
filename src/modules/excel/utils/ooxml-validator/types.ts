@@ -64,6 +64,13 @@ export type WorkbookKind =
 // -----------------------------------------------------------------------------
 
 export type WorksheetKind =
+  /**
+   * A formula this library's own parser rejects, and Excel therefore will too.
+   *
+   * Excel does not refuse the file outright for this: it offers to repair, and its log names
+   * `Removed Records: Formula`. Every other check here passed the workbook that produced that log.
+   */
+  | "sheet-formula-unparseable"
   | "sheet-missing-rels"
   | "sheet-child-out-of-order"
   | "sheet-legacyDrawing-after-controls"

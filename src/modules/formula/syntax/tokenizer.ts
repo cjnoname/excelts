@@ -398,9 +398,25 @@ function readBracketedItem(formula: string, pos: number): { value: string; end: 
 // Tokenizer
 // ============================================================================
 
+/**
+ * Tokenise formula text, with or without the leading `=` a user types.
+ *
+ * **Both spellings occur and neither is wrong.** A spreadsheet UI shows `=B5+B6`, an OOXML `<f>`
+ * element holds `B5+B6`, and a caller of this library writes whichever they were thinking of — so
+ * formula text arriving here has a leading `=` about four times out of five, measured across every
+ * workbook the examples produce (205 of 252).
+ *
+ * Rejecting those was not a small inconvenience. The XLSB writer tokenises before it can emit a
+ * token stream, so every one of those formulas was refused, reported as inexpressible and written as
+ * a blank — two hundred valid formulas silently degraded because of one character. Handling it in
+ * the tokeniser rather than at each call site is what stops the next consumer from rediscovering it.
+ */
 export function tokenize(formula: string): Token[] {
   const tokens: Token[] = [];
-  let i = 0;
+  // Leading whitespace then an optional `=`, which is notation rather than an operator: nothing in
+  // the grammar below can begin with one, so there is no ambiguity to resolve.
+  const start = /^\s*=/.exec(formula);
+  let i = start === null ? 0 : start[0].length;
   const len = formula.length;
 
   // Track whether previous token could produce a value

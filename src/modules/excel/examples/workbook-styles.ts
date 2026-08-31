@@ -245,7 +245,7 @@ Cell.setValue(ws, "C5", { formula: "A5+B5", result: 3 });
 Cell.setValue(ws, "A6", "Hello");
 Cell.setValue(ws, "B6", "World");
 Cell.setValue(ws, "C6", {
-  formula: "CONCATENATE(A6,', ',B6,'!')",
+  formula: 'CONCATENATE(A6,", ",B6,"!")',
   result: "Hello, World!"
 });
 Cell.setStyle(ws, "C6", { border: borders.thickRainbow });

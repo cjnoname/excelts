@@ -223,7 +223,7 @@ Stream.commitRow(ws.getRow(5));
 Stream.setCellValue(ws.getCell("A6"), "Hello");
 Stream.setCellValue(ws.getCell("B6"), "World");
 Stream.setCellValue(ws.getCell("C6"), {
-  formula: "CONCATENATE(A6,', ',B6,'!')",
+  formula: 'CONCATENATE(A6,", ",B6,"!")',
   result: "Hello, World!"
 });
 Stream.setCellBorder(ws.getCell("C6"), borders.thickRainbow);

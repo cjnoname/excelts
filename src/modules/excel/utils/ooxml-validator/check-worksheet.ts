@@ -33,6 +33,8 @@ import {
   findChildrenLocal,
   matchesLocal
 } from "@excel/utils/ooxml-validator/xml-utils";
+import { parse } from "@formula/syntax/parser";
+import { tokenize } from "@formula/syntax/tokenizer";
 import { textContent } from "@xml/dom";
 import type { XmlElement } from "@xml/types";
 
@@ -448,6 +450,37 @@ function checkCell(
       path
     );
   }
+  // The formula, parsed rather than pattern-matched.
+  //
+  // This check exists because a single invalid formula makes Excel refuse to open the workbook —
+  // "we found a problem with some content", and its repair log says `Removed Records: Formula from
+  // /xl/worksheets/sheet1.xml part`. Nothing else here noticed: the XML is well-formed, the cell
+  // reference is valid, the style index is in range, and the formula is a string like any other.
+  //
+  // Parsed with this library's own parser rather than checked against a pattern, because the
+  // question is exactly "would a spreadsheet accept this", and the parser is the only thing here
+  // that can answer it. The example that produced the file above wrote
+  // `CONCATENATE(A6,', ',B6,'!')` — single quotes delimit a *sheet name* in a formula, never a
+  // string, so that is a syntax error rather than a stylistic choice.
+  for (const formula of findChildrenLocal(cell, "f")) {
+    const text = textContent(formula).trim();
+    // A shared formula's dependent cells carry an empty `<f t="shared" si="…"/>`, and an array
+    // formula's covered cells the same — nothing to parse, and nothing wrong.
+    if (text.length === 0) {
+      continue;
+    }
+    try {
+      parse(tokenize(text));
+    } catch (cause) {
+      ctx.reporter.error(
+        "sheet-formula-unparseable",
+        `Cell r="${ref}" has a formula Excel will reject: ${text.length > 60 ? `${text.slice(0, 60)}…` : text}` +
+          ` (${cause instanceof Error ? cause.message : String(cause)})`,
+        path
+      );
+    }
+  }
+
   // Style index.
   const styleAttr = attrByLocalName(cell, "s");
   if (styleAttr !== undefined && counts.cellXfs !== undefined) {

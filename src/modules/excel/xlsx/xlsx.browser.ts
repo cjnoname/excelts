@@ -5493,11 +5493,36 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     }
   }
 
+  /**
+   * Refuse a binary workbook that reached the XML reader.
+   *
+   * A `.xlsb` read as XLSX produces an *empty* workbook rather than an error: none of the parts this
+   * reader knows are present, so nothing loads and nothing complains. `read()` guards against it by
+   * sniffing the bytes before choosing a loader, but that guard is bypassed whenever the format was not
+   * inferred from them — `readFile` on a misnamed `.xlsx`, or any caller passing `format: "xlsx"`
+   * explicitly. Both loaders below therefore ask this, because they are the two places that have seen
+   * the part names.
+   */
+  protected assertNotBinaryWorkbook(sawBinaryWorkbook: boolean, sawXmlWorkbook: boolean): void {
+    if (!sawBinaryWorkbook || sawXmlWorkbook) {
+      return;
+    }
+    throw new ExcelFileError(
+      "<input>",
+      "read",
+      `the package contains xl/workbook.bin and no ${OOXML_PATHS.xlWorkbook}, so it is XLSB and not ` +
+        `XLSX. Reading it here would return an empty workbook rather than fail. Omit the format to ` +
+        `detect it, or pass format: "xlsb".`
+    );
+  }
+
   protected async loadFromZipEntries(
     entries: AsyncIterable<ZipEntryLike>,
     options?: XlsxOptions
   ): Promise<TWorkbook> {
     const model: any = this.createEmptyModel();
+    let sawBinaryWorkbook = false;
+    let sawXmlWorkbook = false;
 
     for await (const entry of entries) {
       let drained = false;
@@ -5515,6 +5540,8 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       }
 
       const entryName = normalizeZipPath(entry.name);
+      sawBinaryWorkbook ||= entryName === "xl/workbook.bin";
+      sawXmlWorkbook ||= entryName === OOXML_PATHS.xlWorkbook;
       const stream = entry.stream;
 
       try {
@@ -5538,6 +5565,7 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       }
     }
 
+    this.assertNotBinaryWorkbook(sawBinaryWorkbook, sawXmlWorkbook);
     await this.reconcile(model, options);
     setWorkbookModel(this.workbook, model);
     return this.workbook;
@@ -6663,6 +6691,11 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       dir: name.endsWith("/"),
       data: zipData[name]
     }));
+
+    this.assertNotBinaryWorkbook(
+      entries.some(entry => normalizeZipPath(entry.name) === "xl/workbook.bin"),
+      entries.some(entry => normalizeZipPath(entry.name) === OOXML_PATHS.xlWorkbook)
+    );
 
     for (const entry of entries) {
       if (!entry.dir) {

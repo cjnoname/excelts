@@ -7,11 +7,33 @@
  * `.browser` same-name swap at build/test time.
  */
 import type { WorkbookData } from "@excel/core/workbook-core";
+import {
+  resolveReadFormat,
+  normalizeBytes,
+  readXlsbInto,
+  writeXlsbBytes
+} from "@excel/core/workbook-format";
+import { createXlsbReadable, writeBytesToSink } from "@excel/core/workbook-format-stream";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
-import type { XlsxReadOptions, XlsxWriteOptions, IParseStream } from "@excel/xlsx/xlsx.browser";
+import { commitXlsbRead, parseXlsbPackage } from "@excel/xlsb/read/package";
+import type { XlsxReadOptions, IParseStream } from "@excel/xlsx/xlsx.browser";
 import { XLSX } from "@excel/xlsx/xlsx.browser";
+
+export type {
+  WorkbookDiagnosticReadOptions,
+  WorkbookReadOptions,
+  WorkbookReadReport,
+  WorkbookWriteOptions
+} from "@excel/core/workbook-io-types";
+
+import type {
+  WorkbookDiagnosticReadOptions,
+  WorkbookReadOptions,
+  WorkbookReadReport,
+  WorkbookWriteOptions
+} from "@excel/core/workbook-io-types";
 
 /** Get (or lazily create) the xlsx IO handle bound to a workbook. */
 export function getXlsxIo(wb: WorkbookData): XLSX {
@@ -26,17 +48,59 @@ export function getXlsxIo(wb: WorkbookData): XLSX {
 // =============================================================================
 
 /** Serialize a workbook to xlsx bytes. */
-export function toBuffer(wb: WorkbookData, options?: XlsxWriteOptions): Promise<Uint8Array> {
-  return getXlsxIo(wb).writeBuffer(options);
+export async function toBuffer(
+  wb: WorkbookData,
+  options?: WorkbookWriteOptions
+): Promise<Uint8Array> {
+  if (options?.format === "xlsb") {
+    return await writeXlsbBytes(wb, options);
+  }
+  // Inlined: the wrapper this replaced had one caller, isolated no platform difference and narrowed
+  // nothing — it was a name standing in for a method call.
+  return await getXlsxIo(wb).writeBuffer(options);
 }
 
 /** Read xlsx bytes into a workbook (mutates and returns `wb`). */
-export function read(
+export async function read(
   wb: WorkbookData,
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
-  options?: XlsxReadOptions
+  options?: WorkbookReadOptions
 ): Promise<WorkbookData> {
-  return getXlsxIo(wb).load(data, options);
+  const bytes = normalizeBytes(data, options?.base64);
+  const format = resolveReadFormat(bytes, options?.format);
+  if (format === "xlsb" && bytes) {
+    return readXlsbInto(wb, bytes, undefined, options);
+  }
+  return getXlsxIo(wb).load(bytes ?? data, options);
+}
+
+/**
+ * Read a workbook and return what could not be recovered alongside it.
+ *
+ * `read` throws away the diagnostics and `{ unsupported: "error" }` turns them into a rejection; this
+ * is the third combination, and the one a converter actually wants — read the file, then report. The
+ * workbook is replaced exactly as `read` replaces it.
+ */
+export async function readWithDiagnostics(
+  wb: WorkbookData,
+  data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
+  options?: WorkbookDiagnosticReadOptions
+): Promise<WorkbookReadReport> {
+  const bytes = normalizeBytes(data, options?.base64);
+  if (bytes !== undefined && resolveReadFormat(bytes, options?.format) === "xlsb") {
+    const parsed = await parseXlsbPackage(bytes);
+    commitXlsbRead(wb, parsed);
+    wb.sourceFilePath = undefined;
+    return { workbook: wb, ...parsed.diagnostics };
+  }
+  return {
+    workbook: await read(wb, data, options),
+    lost: [],
+    unreadRecords: new Map(),
+    undecodedFormulas: [],
+    sharedFormulaCells: [],
+    unknownRecords: new Map()
+  };
 }
 
 /** Read a workbook from a parse stream (mutates and returns `wb`). */
@@ -87,14 +151,16 @@ export function readStream(
  * A sink that errors, or that closes before serialization finishes, rejects this
  * promise instead of hanging.
  */
-export function writeStream(
+export async function writeStream(
   wb: WorkbookData,
   stream: XlsxWritable,
-  options?: XlsxWriteOptions
+  options?: WorkbookWriteOptions
 ): Promise<void> {
-  return getXlsxIo(wb)
-    .write(stream, options)
-    .then(() => undefined);
+  if (options?.format === "xlsb") {
+    await writeBytesToSink(stream, await writeXlsbBytes(wb, options));
+    return;
+  }
+  await getXlsxIo(wb).write(stream, options);
 }
 
 /**
@@ -137,7 +203,13 @@ export function writeStream(
  * therefore not a portable way to distinguish "the consumer stopped" from
  * "serialization failed"; track that yourself if the same code runs on both.
  */
-export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxReadable {
+export function toStream(
+  wb: WorkbookData,
+  options?: XlsxStreamOptions & WorkbookWriteOptions
+): XlsxReadable {
+  if (options?.format === "xlsb") {
+    return createXlsbReadable(() => writeXlsbBytes(wb, options), options);
+  }
   const io = getXlsxIo(wb);
   return createXlsxByteStream((sink, writeOptions) => io.write(sink, writeOptions), options);
 }
@@ -145,3 +217,4 @@ export function toStream(wb: WorkbookData, options?: XlsxStreamOptions): XlsxRea
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/xlsx/xlsx.browser";
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
+export type { WorkbookFormat } from "@excel/core/workbook-format";

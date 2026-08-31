@@ -284,6 +284,7 @@
     "example": "node scripts/run-examples.ts",
     "verify:examples": "node scripts/run-examples.ts",
     "generate:csv-worker": "node scripts/generate-csv-worker-script.ts",
+    "generate:themed-xlsb": "node --import @oxc-node/core/register scripts/generate-themed-xlsb.ts",
     "check": "pnpm build:esm && concurrently --raw \"pnpm type\" \"pnpm lint\" \"pnpm format\" \"pnpm verify:layers\" \"pnpm verify:public-types\" \"pnpm verify:packages\" \"pnpm verify:types-versions\" \"pnpm verify:doc-examples\" \"pnpm verify:doc-links\"",
     "test": "vitest run && pnpm build:esm && pnpm test:packages && pnpm test:browser --",
     "test:all": "pnpm test",

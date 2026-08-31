@@ -193,6 +193,15 @@ export interface WorksheetData {
    * reordering or renaming sheets cannot detach a part from the one that owns it.
    */
   _opaqueRels?: OpaqueRelationship[];
+  /**
+   * Relationship id of the drawing this sheet already pointed at, from an XLSB read.
+   *
+   * XLSB stores the *reference* as a binary record while the drawing itself is XML this library keeps
+   * as an opaque part, so the reference is the one piece a rewrite must reproduce. Nothing else uses
+   * it: the XLSX writer rebuilds the reference from the modelled drawing, and a workbook that never
+   * came from XLSB does not have one.
+   */
+  _xlsbDrawingRelationshipId?: string;
   /** Additional root namespace declarations needed by preserved worksheet XML. */
   _worksheetNamespaceAttributes?: Record<string, string>;
   _worksheetMcIgnorable?: string;

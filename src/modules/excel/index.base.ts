@@ -281,6 +281,14 @@ export type {
 export type { XlsxReadOptions, XlsxWriteOptions } from "@excel/core/xlsx-io";
 export type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 export type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
+// Format-aware IO. `WorkbookFormat` is the choice; the option bags are what carry it.
+export type { WorkbookFormat } from "@excel/core/workbook-format";
+export type {
+  WorkbookDiagnosticReadOptions,
+  WorkbookReadOptions,
+  WorkbookReadReport,
+  WorkbookWriteOptions
+} from "@excel/core/xlsx-io";
 export type {
   ExternalLinkCachedSheet,
   ExternalLinkModel,
@@ -316,5 +324,8 @@ export {
   ChartOptionsError,
   TableError,
   ImageError,
-  MaxItemsExceededError
+  MaxItemsExceededError,
+  // Thrown by the XLSB reader for a malformed record stream, and reachable now that
+  // `Workbook.read` dispatches to it.
+  XlsbParseError
 } from "@excel/errors";

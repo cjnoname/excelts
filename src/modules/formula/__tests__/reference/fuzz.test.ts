@@ -21,6 +21,8 @@
 
 import { calculateFormulas } from "@excel/core/formula-adapter";
 import { Cell, Workbook } from "@excel/index";
+import type { Rng } from "@test/rng";
+import { createRng } from "@test/rng";
 import { describe, expect, it } from "vitest";
 
 const KNOWN_ERRORS = new Set([
@@ -40,31 +42,6 @@ const KNOWN_ERRORS = new Set([
   "#FIELD!",
   "#BUSY!"
 ]);
-
-interface Rng {
-  next(): number;
-  pick<T>(arr: readonly T[]): T;
-  int(min: number, max: number): number;
-  bool(p?: number): boolean;
-}
-
-/** Deterministic mulberry32 RNG for reproducible fuzz. */
-function mkRng(seed: number): Rng {
-  let state = seed | 0;
-  const next = () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  return {
-    next,
-    pick: arr => arr[Math.floor(next() * arr.length)],
-    int: (min, max) => Math.floor(next() * (max - min + 1)) + min,
-    bool: (p = 0.5) => next() < p
-  };
-}
 
 const FUNCTIONS: [string, number, number][] = [
   // [name, minArity, maxArity]
@@ -253,7 +230,7 @@ describe("fuzz: random formulas produce well-typed results", () => {
 
   for (const seed of SEEDS) {
     it(`seed ${seed}: ${PER_SEED} formulas`, () => {
-      const rng = mkRng(seed);
+      const rng = createRng(seed);
       for (let i = 0; i < PER_SEED; i++) {
         const depth = rng.int(1, 4);
         const f = genFormula(rng, depth);

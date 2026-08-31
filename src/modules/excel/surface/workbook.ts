@@ -45,6 +45,7 @@ export {
   toBuffer,
   toStream,
   read,
+  readWithDiagnostics,
   readFile,
   writeFile,
   readStream,

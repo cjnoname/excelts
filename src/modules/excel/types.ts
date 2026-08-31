@@ -344,6 +344,15 @@ export type WorksheetView = WorksheetViewCommon &
 // ============================================================================
 export interface WorksheetProperties {
   tabColor: Partial<Color>;
+  /**
+   * The sheet's VBA code name — how a macro refers to it, independent of its visible name.
+   *
+   * Optional because most sheets have none, and because a workbook with no VBA project has no use
+   * for one. It matters when there *is* a project: the macros address sheets by this name, so a
+   * read-modify-write that preserved `vbaProject.bin` and dropped the code names would produce a
+   * workbook whose macros no longer resolve their own sheets.
+   */
+  codeName?: string;
   outlineLevelCol: number;
   outlineLevelRow: number;
   outlineProperties: {

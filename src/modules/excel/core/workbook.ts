@@ -22,13 +22,23 @@ export {
   toBuffer,
   toStream,
   read,
+  readWithDiagnostics,
   readFile,
   writeFile,
   readStream,
   writeStream,
   getXlsxIo
 } from "@excel/core/xlsx-io";
-export type { XlsxReadable, XlsxWritable, XlsxStreamOptions } from "@excel/core/xlsx-io";
+export type {
+  XlsxReadable,
+  XlsxWritable,
+  XlsxStreamOptions,
+  WorkbookFormat,
+  WorkbookDiagnosticReadOptions,
+  WorkbookReadOptions,
+  WorkbookReadReport,
+  WorkbookWriteOptions
+} from "@excel/core/xlsx-io";
 
 /**
  * Node streaming workbook writer factory (accepts `{ filename }`).

@@ -134,12 +134,23 @@ export class XlsxParseError extends ExcelError {
 export class ExcelNotSupportedError extends ExcelError {
   override name = "ExcelNotSupportedError";
 
+  /**
+   * What could not be expressed or recovered, one entry per item.
+   *
+   * Present so a caller does not have to parse `message` to find out. The message truncates at ten
+   * entries because an error is read by a human; this does not, because it is read by code — a
+   * converter reporting "these 340 cells need attention" is a reasonable thing to build, and
+   * scraping a sentence to build it is not.
+   */
+  readonly items: readonly string[];
+
   constructor(
     public readonly operation: string,
     public readonly reason?: string,
-    options?: BaseErrorOptions
+    options?: BaseErrorOptions & { readonly items?: readonly string[] }
   ) {
     super(reason ? `${operation}: ${reason}` : `${operation} is not supported`, options);
+    this.items = options?.items ?? [];
   }
 }
 
@@ -235,5 +246,24 @@ export class MaxItemsExceededError extends ExcelError {
     options?: BaseErrorOptions
   ) {
     super(`Max ${itemType} count (${maxItems}) exceeded`, options);
+  }
+}
+
+/**
+ * Error thrown when a BIFF12 (`.xlsb`) record stream is malformed.
+ *
+ * Carries the part it came from as well as the message, because a record stream
+ * offset is meaningless without knowing which `.bin` it indexes into — and a
+ * package has one per worksheet.
+ */
+export class XlsbParseError extends ExcelError {
+  override name = "XlsbParseError";
+
+  constructor(
+    public readonly part: string,
+    detail: string,
+    options?: BaseErrorOptions
+  ) {
+    super(`${part}: ${detail}`, options);
   }
 }

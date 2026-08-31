@@ -195,6 +195,8 @@ export interface WorksheetModel {
    * model. See `WorksheetData._opaqueRels`.
    */
   opaqueRels?: OpaqueRelationship[];
+  /** See `WorksheetData._xlsbDrawingRelationshipId`. */
+  xlsbDrawingRelationshipId?: string;
   worksheetNamespaceAttributes?: Record<string, string>;
   worksheetMcIgnorable?: string;
   sortStateAutoFilterRef?: string;
@@ -2493,6 +2495,7 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
     autoFilterCriteria: ws._autoFilterCriteria,
     sortStateXml: ws._sortStateXml,
     opaqueRels: ws._opaqueRels,
+    xlsbDrawingRelationshipId: ws._xlsbDrawingRelationshipId,
     worksheetNamespaceAttributes: ws._worksheetNamespaceAttributes,
     worksheetMcIgnorable: ws._worksheetMcIgnorable,
     sortStateAutoFilterRef: ws._sortStateAutoFilterRef,
@@ -2628,6 +2631,7 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws._autoFilterCriteria = value.autoFilterCriteria;
   ws._sortStateXml = value.sortStateXml;
   ws._opaqueRels = value.opaqueRels;
+  ws._xlsbDrawingRelationshipId = value.xlsbDrawingRelationshipId;
   ws._worksheetNamespaceAttributes = value.worksheetNamespaceAttributes;
   ws._worksheetMcIgnorable = value.worksheetMcIgnorable;
   ws._sortStateAutoFilterRef = value.sortStateAutoFilterRef;
