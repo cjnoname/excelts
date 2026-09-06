@@ -6,7 +6,7 @@
  * never widen its own permissions: `--root` and `--readonly` are invisible to it.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -67,6 +67,16 @@ export interface ServerConfig {
   readonly maxFileSize: number;
   /** Truncate tool output beyond this many characters. */
   readonly maxOutputChars: number;
+  /**
+   * Absolute path to a TrueType font every PDF this server writes embeds.
+   *
+   * Unset, PDF text outside WinAnsi — CJK, Cyrillic, Greek — depends on the host
+   * having a usable face installed, and a host that has none renders `.notdef`
+   * boxes. That is a property of the machine, not of the document, so the same
+   * Markdown produces a readable PDF on a laptop and a boxed one in a container.
+   * Naming a font here removes the host from the answer.
+   */
+  readonly pdfFont?: string;
 }
 
 export class ConfigError extends Error {
@@ -102,6 +112,7 @@ export function resolveConfig(
         enable: { type: "string" },
         "max-file-size": { type: "string" },
         "max-output-chars": { type: "string" },
+        "pdf-font": { type: "string" },
         help: { type: "boolean", short: "h", default: false },
         version: { type: "boolean", short: "v", default: false }
       },
@@ -147,6 +158,8 @@ export function resolveConfig(
     );
   }
 
+  const pdfFont = resolvePdfFont(values["pdf-font"], cwd);
+
   return {
     root,
     outputRoot,
@@ -158,8 +171,47 @@ export function resolveConfig(
       values["max-output-chars"],
       "--max-output-chars",
       DEFAULT_MAX_OUTPUT_CHARS
-    )
+    ),
+    ...(pdfFont === undefined ? {} : { pdfFont })
   };
+}
+
+/**
+ * Resolve and vet `--pdf-font`, failing at startup rather than per conversion.
+ *
+ * A font that cannot be embedded is worth rejecting here for the same reason a
+ * missing `--root` is: the alternative is a server that starts, accepts work, and
+ * produces boxed PDFs while the operator believes they configured a font. The
+ * check is the sfnt magic, which is what separates the two OpenType flavours —
+ * `OTTO` marks CFF outlines, which the subsetting embedder cannot use, and that
+ * covers the fonts an operator is most likely to reach for by mistake (macOS
+ * PingFang, the official Noto Sans CJK `.otf` release).
+ */
+function resolvePdfFont(input: string | undefined, cwd: string): string | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+  const absolute = path.resolve(cwd, input);
+  let head: Buffer;
+  try {
+    head = readFileSync(absolute).subarray(0, 4);
+  } catch (cause) {
+    throw new ConfigError(`--pdf-font does not exist or is not readable: ${input}`, { cause });
+  }
+  const magic = head.toString("latin1");
+  if (magic === "OTTO") {
+    throw new ConfigError(
+      `--pdf-font is a CFF-flavoured OpenType font, which cannot be embedded: ${input}. ` +
+        `Use a TrueType build (.ttf with glyf outlines) — for CJK, Noto Sans SC ships one.`
+    );
+  }
+  const version = head.readUInt32BE(0);
+  if (version !== 0x00010000 && magic !== "true" && magic !== "ttcf") {
+    throw new ConfigError(
+      `--pdf-font is not a TrueType font: ${input}. Expected a .ttf or .ttc file.`
+    );
+  }
+  return absolute;
 }
 
 function containsPath(parent: string, child: string): boolean {
@@ -240,6 +292,11 @@ Options:
                               Default: all.
   --max-file-size <bytes>     Reject larger input documents. Default: ${DEFAULT_MAX_FILE_SIZE}.
   --max-output-chars <n>      Truncate tool output. Default: ${DEFAULT_MAX_OUTPUT_CHARS}.
+  --pdf-font <file>           TrueType font (.ttf/.ttc) embedded in every PDF
+                              this server writes. Without it, text outside
+                              WinAnsi (CJK, Cyrillic, Greek) depends on the
+                              host having a usable face installed; a host with
+                              none renders .notdef boxes.
   -h, --help                  Show this help.
   -v, --version               Show version.
 

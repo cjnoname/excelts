@@ -71,6 +71,42 @@ No install needed — point your MCP client at `npx`.
 | `--enable <groups>`       | all          | Comma-separated tool groups: `core`, `excel`, `word`, `pdf`, `forms`, `archive`, `diagram`. `core` is always on. |
 | `--max-file-size <bytes>` | 67108864     | Reject larger input documents.                                                                                   |
 | `--max-output-chars <n>`  | 40000        | Truncate tool output — a token budget in disguise.                                                               |
+| `--pdf-font <file>`       | none         | TrueType font embedded in every PDF written. See [PDF fonts](#pdf-fonts).                                        |
+
+### PDF fonts
+
+Text outside WinAnsi — CJK, Cyrillic, Greek — needs a font that has glyphs for
+it. Without `--pdf-font` the server borrows one from the host, which makes the
+result a property of the machine: a laptop with a CJK face produces a readable
+PDF, and a container with none produces a page of `.notdef` boxes from the same
+Markdown. Every PDF-writing tool now reports which of the two happened, so the
+degradation is visible rather than discovered by opening the file.
+
+Naming a font removes the host from the answer:
+
+```json
+{
+  "mcpServers": {
+    "documonster": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@documonster/mcp",
+        "--root",
+        "/path/to/documents",
+        "--pdf-font",
+        "/path/to/NotoSansSC-Regular.ttf"
+      ]
+    }
+  }
+}
+```
+
+It must be a TrueType font — `.ttf` or `.ttc` with `glyf` outlines. A
+CFF-flavoured `.otf` is rejected at startup rather than at conversion time,
+because the subsetting embedder cannot use CFF outlines: that rules out macOS
+PingFang and Hiragino, and the official Noto Sans CJK `.otf`/`.otc` releases, so
+reach for Noto Sans SC's `.ttf` build instead.
 
 ## Security
 

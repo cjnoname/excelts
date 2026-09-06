@@ -21,6 +21,7 @@ import { renderToHtml } from "documonster/word/html";
 import { markdownToDocx, renderToMarkdown } from "documonster/word/markdown";
 import { z } from "zod";
 
+import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, outputDisplay, resolveInRoot, resolveOutputPath } from "../sandbox.js";
 import { prepareMarkdownDiagrams } from "./diagram-markdown.js";
@@ -31,6 +32,7 @@ import {
   writeFileAtomic,
   writeWithPolicy
 } from "./fs-helpers.js";
+import { pdfFontOptions } from "./pdf-fonts.js";
 import { formatBytes, textResult } from "./result.js";
 import { requireSheet, sheetName } from "./spreadsheet.js";
 import { defineTool } from "./types.js";
@@ -147,7 +149,8 @@ export const docConvertTool = defineTool({
     await writeWithPolicy(target, args.overwrite === true, async temporary => {
       note = await convert(fromFormat, toFormat, source, temporary, {
         ...args,
-        renderDiagrams: args.diagrams ?? config.groups.has("diagram")
+        renderDiagrams: args.diagrams ?? config.groups.has("diagram"),
+        config
       });
     });
     const size = (await stat(target)).size;
@@ -172,7 +175,11 @@ async function convert(
   to: DocFormat,
   source: string,
   target: string,
-  args: { readonly sheet?: string | number; readonly renderDiagrams?: boolean }
+  args: {
+    readonly sheet?: string | number;
+    readonly renderDiagrams?: boolean;
+    readonly config: ServerConfig;
+  }
 ): Promise<string[]> {
   if (from === "docx") {
     const doc = await readWord(source);
@@ -196,8 +203,9 @@ async function convert(
         return ["- **formatting discarded** — plain text only"];
       }
       case "pdf": {
-        await writeFileAtomic(target, await Pdf.fromDocx(doc));
-        return ["- paginated by the Word layout engine, so page breaks are real"];
+        const fonts = pdfFontOptions(args.config);
+        await writeFileAtomic(target, await Pdf.fromDocx(doc, fonts.options));
+        return ["- paginated by the Word layout engine, so page breaks are real", ...fonts.notes()];
       }
       case "odt": {
         await writeFileAtomic(target, await Convert.writeOdt(doc));
@@ -227,8 +235,9 @@ async function convert(
       return ["- structure preserved as Markdown"];
     }
     if (to === "pdf") {
-      await writeFileAtomic(target, await Pdf.fromDocx(doc));
-      return ["- rendered via the Word layout engine"];
+      const fonts = pdfFontOptions(args.config);
+      await writeFileAtomic(target, await Pdf.fromDocx(doc, fonts.options));
+      return ["- rendered via the Word layout engine", ...fonts.notes()];
     }
     throw unreachable(from, to);
   }
@@ -249,8 +258,13 @@ async function convert(
       return ["- Markdown structure mapped to Word styles", ...prepared.notes];
     }
     if (to === "pdf") {
-      await writeFileAtomic(target, await Pdf.fromDocx(doc));
-      return ["- rendered via Word layout, so pagination is real", ...prepared.notes];
+      const fonts = pdfFontOptions(args.config);
+      await writeFileAtomic(target, await Pdf.fromDocx(doc, fonts.options));
+      return [
+        "- rendered via Word layout, so pagination is real",
+        ...prepared.notes,
+        ...fonts.notes()
+      ];
     }
     throw unreachable(from, to);
   }
@@ -292,10 +306,15 @@ async function convert(
     }
     if (to === "pdf") {
       // Inject the calculation engine so stale cached values are not printed.
-      await writeFileAtomic(target, await Pdf.fromExcel(wb, { recalculate: calculateFormulas }));
+      const fonts = pdfFontOptions(args.config);
+      await writeFileAtomic(
+        target,
+        await Pdf.fromExcel(wb, { ...fonts.options, recalculate: calculateFormulas })
+      );
       return [
         `- all ${Workbook.getWorksheets(wb).length} sheet(s) rendered, honouring each sheet's print setup`,
-        "- formulas recalculated before rendering"
+        "- formulas recalculated before rendering",
+        ...fonts.notes()
       ];
     }
     if (to === "xlsx" || to === "xlsb") {

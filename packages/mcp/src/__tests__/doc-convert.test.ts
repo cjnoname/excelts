@@ -317,6 +317,25 @@ describe("doc_convert", () => {
     expect(parsed.pages[0]?.text).toContain("Quarterly Report");
   });
 
+  it("reports the font decisions a PDF conversion made", async () => {
+    // Issue #218. The boxes were never the whole defect: `Pdf.fromDocx` was called with
+    // no `onWarning`, so a PDF whose every ideograph drew as `.notdef` was reported as a
+    // plain success. The tool tells the caller to verify by opening the file, and this
+    // server cannot read its own PDF output structurally — so the writer's warning is
+    // the only signal there is, and it was being dropped on the floor.
+    //
+    // Asserted on text outside WinAnsi rather than on a specific outcome, because the
+    // outcome is a property of the host: a machine with a CJK face auto-embeds it and a
+    // bare container cannot, and the point here is that *either* is now reported. Which
+    // wording each gets is `collectFontWarnings`' own test.
+    const fx = await fixture();
+    await writeFile(path.join(fx.root, "in.md"), "# 季度报表\n\n中文正文。\n", "utf8");
+
+    const report = await run(docConvertTool, fx, { from: "in.md", to: "out.pdf" });
+
+    expect(report).toMatch(/- (font|\*\*font coverage\*\*):/);
+  });
+
   it("converts xlsx to csv, naming the sheet and warning about the rest", async () => {
     const fx = await fixture();
     const source = await makeWorkbook(fx);

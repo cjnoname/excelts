@@ -20,6 +20,7 @@ import { assertWritable, outputDisplay, resolveOutputPath } from "../sandbox.js"
 import { prepareMarkdownDiagrams } from "./diagram-markdown.js";
 import { assertNonMacroOutput, requireFormat } from "./document.js";
 import { writeWithPolicy } from "./fs-helpers.js";
+import { pdfFontOptions } from "./pdf-fonts.js";
 import { formatBytes, textResult } from "./result.js";
 import { defineTool } from "./types.js";
 
@@ -98,6 +99,7 @@ export const docWriteTool = defineTool({
       );
     });
 
+    const fonts = pdfFontOptions(config);
     let size: number;
     if (format === "docx") {
       await writeWithPolicy(target, args.overwrite === true, temporary =>
@@ -105,7 +107,7 @@ export const docWriteTool = defineTool({
       );
       size = (await stat(target)).size;
     } else {
-      const bytes = await Pdf.fromDocx(doc);
+      const bytes = await Pdf.fromDocx(doc, fonts.options);
       await writeWithPolicy(target, args.overwrite === true, temporary =>
         writeFile(temporary, bytes)
       );
@@ -120,6 +122,7 @@ export const docWriteTool = defineTool({
           ? "- rendered through the Word layout engine, so pagination and line breaking are real"
           : "- Markdown structure preserved as Word styles",
         ...prepared.notes,
+        ...fonts.notes(),
         "",
         "Read the returned @output path with doc_read to verify before reporting success."
       ].join("\n")

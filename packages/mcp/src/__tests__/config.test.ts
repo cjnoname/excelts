@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -88,5 +88,58 @@ describe("resolveConfig", () => {
     const cwd = await makeRoot();
     expect(() => resolveConfig(["--max-file-size", "0"], { cwd })).toThrow(/positive integer/);
     expect(() => resolveConfig(["--max-file-size", "1.5"], { cwd })).toThrow(/positive integer/);
+  });
+});
+
+describe("resolveConfig --pdf-font", () => {
+  it("is absent unless asked for", async () => {
+    expect(resolveConfig([], { cwd: await makeRoot() }).pdfFont).toBeUndefined();
+  });
+
+  it("resolves a relative path against the cwd", async () => {
+    const cwd = await makeRoot();
+    const font = path.join(cwd, "face.ttf");
+    // A bare sfnt version is all the startup check reads.
+    await writeFile(font, Buffer.from([0x00, 0x01, 0x00, 0x00, 0x00, 0x00]));
+
+    expect(resolveConfig(["--pdf-font", "face.ttf"], { cwd }).pdfFont).toBe(font);
+  });
+
+  it("accepts a TrueType collection", async () => {
+    const cwd = await makeRoot();
+    const font = path.join(cwd, "faces.ttc");
+    await writeFile(font, Buffer.from("ttcf\u0000\u0001\u0000\u0000", "latin1"));
+
+    expect(resolveConfig(["--pdf-font", "faces.ttc"], { cwd }).pdfFont).toBe(font);
+  });
+
+  it("rejects a CFF-flavoured OpenType font by name", async () => {
+    // The mistake worth catching at startup: an operator configuring PingFang or the
+    // official Noto Sans CJK `.otf` gets a server that starts, accepts work, and
+    // writes boxed PDFs while they believe a font is configured.
+    const cwd = await makeRoot();
+    await writeFile(
+      path.join(cwd, "cff.otf"),
+      Buffer.from("OTTO\u0000\u0000\u0000\u0000", "latin1")
+    );
+
+    expect(() => resolveConfig(["--pdf-font", "cff.otf"], { cwd })).toThrow(ConfigError);
+    expect(() => resolveConfig(["--pdf-font", "cff.otf"], { cwd })).toThrow(/CFF-flavoured/);
+  });
+
+  it("rejects a file that is not a font at all", async () => {
+    const cwd = await makeRoot();
+    await writeFile(path.join(cwd, "notes.txt"), "not a font");
+
+    expect(() => resolveConfig(["--pdf-font", "notes.txt"], { cwd })).toThrow(
+      /not a TrueType font/
+    );
+  });
+
+  it("rejects a path that does not exist", async () => {
+    const cwd = await makeRoot();
+    expect(() => resolveConfig(["--pdf-font", "missing.ttf"], { cwd })).toThrow(
+      /does not exist or is not readable/
+    );
   });
 });
