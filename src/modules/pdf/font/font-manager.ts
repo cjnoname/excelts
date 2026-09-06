@@ -676,7 +676,14 @@ export class FontManager {
         i++; // skip low surrogate
       }
       this.usedCodePoints.add(cp);
-      if (!isWinAnsiCodePoint(cp)) {
+      // `usedCodePoints` keeps the controls, because the embedder registers each
+      // one as part of its cluster's sequence and the subset must carry them.
+      // `type3CodePoints` must not: it is the set of characters wanting a *drawn*
+      // glyph, and a control has none. Counting them here spent a Type3 slot on an
+      // invisible character and — worse — reported it through `onWarning` as a
+      // character that "will render as a .notdef box", sending the reader after a
+      // font to cover U+FE0F.
+      if (!isWinAnsiCodePoint(cp) && !isGlyphlessControl(cp)) {
         this.type3CodePoints.add(cp);
       }
     }
@@ -940,6 +947,13 @@ export class FontManager {
       return false;
     }
     if (isWinAnsiCodePoint(codePoint)) {
+      return false;
+    }
+    // A control draws nothing, so there is no glyph for Type3 to supply. The
+    // renderer already strips it from a Type1 run and folds it into an embedded
+    // face's cluster; saying it needs a Type3 glyph would ask for a drawing of an
+    // invisible character, which resolves to `.notdef`.
+    if (isGlyphlessControl(codePoint)) {
       return false;
     }
     if (!this.embeddedFont) {

@@ -858,6 +858,27 @@ describe("auto-discovered fallback fonts", () => {
     expect(joined).not.toContain("no glyph in any available font");
   });
 
+  it("says nothing at all about a glyphless control", async () => {
+    // Issue #218. A variation selector draws nothing — the embedder folds it into the
+    // preceding glyph's sequence and the renderer strips it from a Type1 run — so it is
+    // not a coverage gap. Counting it spent a Type3 slot on an invisible character and
+    // told the reader that `U+FE0F` "will render as a .notdef box", which no font they
+    // could install would have fixed.
+    const manager = new FontManager();
+    manager.registerFallbackFont(arrowFont());
+    const plain = manager.resolveFont("Helvetica", false, false);
+    manager.trackText("A\uFE0F\u200D\uFE0E", plain);
+    await manager.prepare();
+
+    const warnings: string[] = [];
+    manager.reportDiagnostics(message => warnings.push(message));
+    const joined = warnings.join(" ");
+
+    expect(joined).not.toContain("no glyph in any available font");
+    expect(joined).not.toContain("Variation Selectors");
+    expect(manager.needsType3(0xfe0f)).toBe(false);
+  });
+
   it("still reports tofu when no face is embedded at all", async () => {
     const manager = new FontManager();
     const plain = manager.resolveFont("Helvetica", false, false);

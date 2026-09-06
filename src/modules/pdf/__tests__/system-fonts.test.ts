@@ -1144,6 +1144,61 @@ describe("Type3 repertoire drives the coverage requirement", () => {
     expect(findSystemFontForCodePoints(wanted, [], "zh-Hans")!.familyName).toBe("Arial Unicode MS");
   });
 
+  it("keeps a regional face that lacks a variation selector", () => {
+    // Issue #218. `⚠️` is U+26A0 followed by U+FE0F, and the Type3 repertoire is a set
+    // of *drawings*, so it has no entry for a variation selector — which made U+FE0F
+    // "essential" and demanded a glyph for it. Practically no CJK face carries one, so
+    // every font on the machine was disqualified, discovery returned null, and a whole
+    // document of Chinese fell to Type3 and rendered as `.notdef` boxes. One invisible
+    // code point lost every visible one.
+    _setCandidatesForTest([face("Songti SC", [...HAN, 0x26a0])]);
+
+    const wanted = new Set([...HAN, 0x26a0, 0xfe0f]);
+    expect(findSystemFontForCodePoints(wanted, [], "zh-Hans")!.familyName).toBe("Songti SC");
+  });
+
+  it("ignores a variation selector no face carries, rather than refusing every face", () => {
+    // The same rule with nothing to fall back on: a lone face that covers the text
+    // must still win. Asserting only the first case would pass on a candidate list
+    // where some *other* face happened to carry U+FE0F.
+    _setCandidatesForTest([face("Songti SC", HAN), face("Heiti SC", HAN)]);
+
+    const wanted = new Set([...HAN, 0x200d, 0xfe0f, 0xe0101]);
+    expect(findSystemFontForCodePoints(wanted, [], "zh-Hans")).not.toBeNull();
+  });
+
+  it("prefers a face that draws most of the text over no face at all", () => {
+    // A real emoji is not substitutable — Type3 has no glyph for U+1F389 — and no
+    // TrueType CJK face carries one, so requiring total coverage returned null and
+    // sent 500 ideographs to Type3 because of one party popper. Partial coverage is
+    // strictly better: the emoji alone becomes a box, the prose stays readable.
+    _setCandidatesForTest([face("Songti SC", HAN)]);
+
+    const wanted = new Set([...HAN, 0x1f389]);
+    expect(findSystemFontForCodePoints(wanted, [], "zh-Hans")!.familyName).toBe("Songti SC");
+  });
+
+  it("prefers the face covering more of the text when none covers all of it", () => {
+    _setCandidatesForTest([
+      face("Songti SC", [HAN[0]]),
+      face("Arial Unicode MS", [...HAN, ...CYRILLIC])
+    ]);
+
+    // Nothing carries the emoji, so both are partial and the wider one wins — even
+    // though the narrower one outranks it regionally.
+    const wanted = new Set([...HAN, ...CYRILLIC, 0x1f389]);
+    expect(findSystemFontForCodePoints(wanted, [], "zh-Hans")!.familyName).toBe("Arial Unicode MS");
+  });
+
+  it("still refuses a face that draws nothing the text needs", () => {
+    // Degrading to partial coverage must not degrade to *no* coverage: a Latin-only
+    // face has no claim on a page of Chinese, and returning it would put the whole
+    // document in a face that draws none of it.
+    _setCandidatesForTest([face("Helvetica Clone", [0x41, 0x42])]);
+
+    expect(findSystemFontForCodePoints(new Set(HAN), [], "zh-Hans")).toBeNull();
+  });
+
   it("matches the Type3 glyph tables code point for code point", async () => {
     // The ranges in `system-fonts.ts` describe a repertoire that lives in 27,000 lines
     // of glyph tables it deliberately does not import. This is what stops the two from

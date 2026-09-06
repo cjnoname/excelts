@@ -18,6 +18,7 @@ import type {
 } from "@pdf/font/font-config";
 import { getCharWidth, getFontAscent, getFontDescent } from "@pdf/font/metrics";
 import type { TtfFont } from "@pdf/font/ttf-parser";
+import { isGlyphlessControl } from "@utils/cjk";
 import { graphemeClusters } from "@utils/grapheme";
 
 export interface TextIntent {
@@ -462,18 +463,19 @@ function isCompiledConfig(value: object): value is CompiledPdfFontConfig {
   return "default" in value && "families" in value && "fallbackFamilies" in value;
 }
 
+/**
+ * Whether a missing glyph for this code point is no gap at all.
+ *
+ * The set is {@link isGlyphlessControl}: a joiner or a variation selector shapes
+ * its neighbours and is never drawn, so a face cannot be faulted for lacking one.
+ * This was a private copy of that predicate, which is how the auto-discovery path
+ * came to disagree with this one and reject every CJK face on the machine over a
+ * single `U+FE0F`.
+ *
+ * Combining marks are deliberately not included: they are visible glyphs in this
+ * scalar renderer. Keeping the grapheme together is not enough — the selected face
+ * must carry the mark or the accent would silently disappear.
+ */
 function isCoverageIgnorable(codePoint: number): boolean {
-  if (codePoint === 0x200c || codePoint === 0x200d) {
-    return true;
-  }
-  if (
-    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
-    (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
-  ) {
-    return true;
-  }
-  // Combining marks are visible glyphs in this scalar renderer. Keeping the
-  // grapheme together is not enough: the selected face must carry the mark or
-  // the accent would silently disappear.
-  return false;
+  return isGlyphlessControl(codePoint);
 }

@@ -33,6 +33,7 @@ import { countTtfFaces, parseTtf } from "@pdf/font/ttf-parser";
 import type { TtfFont } from "@pdf/font/ttf-parser";
 import { requiresEmbeddedFace } from "@pdf/font/type3-repertoire";
 import type { CjkLanguage } from "@utils/cjk";
+import { isGlyphlessControl } from "@utils/cjk";
 import { readFileBytesSync, traverseDirectorySync } from "@utils/fs";
 import type { FileEntry } from "@utils/fs";
 
@@ -983,10 +984,17 @@ export function discoverSystemFont(): SystemFontCandidate | null {
  * and the built-in order applies — this steers a best-effort search rather than
  * constraining it. Use `embedFonts()` when a face is a requirement.
  *
- * Returns `null` when `codePoints` is empty or nothing suitable is installed — the
- * caller then falls back to Type3 glyphs (and should warn, since uncovered code
- * points render as NOTDEF boxes). Code points the returned face lacks take the
- * same Type3 route; `FontManager.getUncoveredFallbackCodePoints` reports them.
+ * Returns `null` only when `codePoints` is empty or nothing installed can draw any
+ * of them — the caller then falls back to Type3 glyphs (and should warn, since
+ * uncovered code points render as NOTDEF boxes). Code points the returned face
+ * lacks take the same Type3 route; `FontManager.getUncoveredFallbackCodePoints`
+ * reports them.
+ *
+ * **Partial coverage wins over no coverage.** A face that draws most of the text is
+ * returned when none draws all of it, because the alternative is not "a better font"
+ * but *no* font: every character goes to Type3 and a page of Chinese becomes boxes
+ * because of the one emoji no installed face carries. Only a face that covers
+ * nothing essential is refused.
  */
 export function findSystemFontForCodePoints(
   codePoints: ReadonlySet<number>,
@@ -1013,7 +1021,10 @@ function selectSystemFont(
   const requestedFamilies = preferredFamilies
     .map(name => name.trim().toLowerCase())
     .filter(name => name.length > 0);
-  const covers = (ttf: TtfFont): boolean => wanted.every(cp => ttf.cmap.has(cp));
+  // A glyphless control is never asked of a face, here or anywhere else. See
+  // `essential` below for what demanding one cost.
+  const covers = (ttf: TtfFont): boolean =>
+    wanted.every(cp => isGlyphlessControl(cp) || ttf.cmap.has(cp));
 
   /**
    * The code points that decide whether a face is usable at all.
@@ -1029,8 +1040,29 @@ function selectSystemFont(
    *
    * The symbols never needed the face: Type3 draws them. So coverage of East
    * Asian text is the requirement, and coverage of the rest is a preference.
+   *
+   * **A glyphless control is excluded, and leaving it in was catastrophic.** The
+   * Type3 repertoire is a set of *drawings*, so it has no entry for U+FE0F — which
+   * made a variation selector "essential" and demanded a glyph for it. Practically
+   * no CJK face carries one, so a single `⚠️` disqualified every font on the
+   * machine, this function returned `null`, and a whole document of Chinese fell to
+   * Type3 and rendered as `.notdef` boxes. One invisible code point therefore lost
+   * every visible one. `isGlyphlessControl` is the same set the embedder folds into
+   * the preceding glyph and the renderer strips before drawing — it is not a glyph,
+   * so no face can be judged by it.
    */
-  const essential = wanted.filter(requiresEmbeddedFace);
+  const essential = wanted.filter(cp => requiresEmbeddedFace(cp) && !isGlyphlessControl(cp));
+
+  /** Essential code points `ttf` cannot draw. Zero means it qualifies outright. */
+  const missingEssential = (ttf: TtfFont): number => {
+    let missing = 0;
+    for (const cp of essential) {
+      if (!ttf.cmap.has(cp)) {
+        missing++;
+      }
+    }
+    return missing;
+  };
 
   /**
    * Whether `ttf` can draw everything that only a font can draw.
@@ -1040,7 +1072,7 @@ function selectSystemFont(
    * otherwise the first candidate would win while covering nothing at all.
    */
   const coversEssential = (ttf: TtfFont): boolean =>
-    essential.length === 0 ? covers(ttf) : essential.every(cp => ttf.cmap.has(cp));
+    essential.length === 0 ? covers(ttf) : missingEssential(ttf) === 0;
 
   const parse = (candidate: SystemFontCandidate): TtfFont | null => {
     try {
@@ -1135,11 +1167,26 @@ function selectSystemFont(
   let regionalBest: TtfFont | null = null;
   let regionalRank = regional.length;
   let firstCovering: TtfFont | null = null;
+  /**
+   * The best face that draws *some* of the text, used only when none draws all of it.
+   *
+   * Returning `null` because no face is perfect is the worst available outcome: it
+   * sends every character to Type3, so a document loses the 500 ideographs a face
+   * had glyphs for because of the one emoji it did not. Nothing regional is at
+   * stake either — a partial face is only consulted once every full candidate has
+   * failed — so more coverage simply wins, and a tie is broken the way every other
+   * comparison here is, by regional rank and then by weight.
+   */
+  let partialBest: { ttf: TtfFont; missing: number; rank: number } | null = null;
 
   for (const candidate of iterateSystemFontCandidates(language)) {
     if (!candidate.preferred && (regionalBest !== null || firstCovering !== null)) {
       break; // the sweep begins here and we already have an answer
     }
+    // A merely *partial* face is deliberately not an answer for this test. It is a
+    // fallback for having found nothing, so it is worth the sweep to look for a face
+    // that covers the text properly — a cost paid only by a document that would
+    // otherwise have rendered as boxes.
     // Skip a face that cannot change the answer, using what an earlier search
     // already learned about it.
     //
@@ -1170,7 +1217,25 @@ function selectSystemFont(
       }
     }
     const ttf = parse(candidate);
-    if (ttf === null || !coversEssential(ttf)) {
+    if (ttf === null) {
+      continue;
+    }
+    if (!coversEssential(ttf)) {
+      // Not good enough to win, but better than nothing if nothing else qualifies.
+      const missing = missingEssential(ttf);
+      const rank = regional.indexOf(ttf.familyName.trim().toLowerCase());
+      const rankOf = (value: number): number => (value < 0 ? regional.length : value);
+      if (
+        missing < essential.length &&
+        (partialBest === null ||
+          missing < partialBest.missing ||
+          (missing === partialBest.missing &&
+            (rankOf(rank) < rankOf(partialBest.rank) ||
+              (rankOf(rank) === rankOf(partialBest.rank) &&
+                isCloserToRegular(ttf, partialBest.ttf)))))
+      ) {
+        partialBest = { ttf, missing, rank };
+      }
       continue;
     }
     if (regional.length > 0) {
@@ -1199,7 +1264,7 @@ function selectSystemFont(
     }
   }
 
-  return regionalBest ?? firstCovering;
+  return regionalBest ?? firstCovering ?? partialBest?.ttf ?? null;
 }
 
 /**
