@@ -10,7 +10,7 @@
 
 import { XlsbParseError } from "@excel/errors";
 import type { XlsbReporter } from "@excel/utils/xlsb-validator/reporter";
-import { iterateBiffRecords, type BiffRecord } from "@excel/xlsb/binary";
+import { iterateInterpretableRecords, type BiffRecord } from "@excel/xlsb/binary";
 import { OBSERVED_PAYLOAD_SIZES, recordSpec } from "@excel/xlsb/spec/records";
 
 export interface FramedPart {
@@ -36,7 +36,7 @@ export function checkFraming(bytes: Uint8Array, part: string, reporter: XlsbRepo
   const records: BiffRecord[] = [];
   let unknownRecordCount = 0;
   try {
-    for (const record of iterateBiffRecords(bytes, part)) {
+    for (const record of iterateInterpretableRecords(bytes, part)) {
       records.push(record);
       const spec = recordSpec(record.id);
       if (!spec) {

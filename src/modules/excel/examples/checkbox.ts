@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Column, Row, Workbook } from "@excel/index";
 import type { Fill, Alignment } from "@excel/types";
 
@@ -67,7 +68,7 @@ async function main(): Promise<void> {
   Cell.getStyle(ws, "B1").alignment = centered;
   Cell.setValue(ws, "C1", "Priority");
 
-  await Workbook.writeFile(wb, outputPath);
+  await writeBothFormats(wb, outputPath);
 
   console.log(`Wrote: ${outputPath}`);
 }

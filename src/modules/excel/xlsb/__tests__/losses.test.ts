@@ -16,7 +16,7 @@ import { extractAll } from "@archive/unzip/extract";
 import { Cell, DefinedNames, Workbook, type Worksheet } from "@excel";
 import { expectValidXlsb } from "@excel/__tests__/helpers/expect-valid-xlsb";
 import { ExcelNotSupportedError } from "@excel/errors";
-import { iterateBiffRecords } from "@excel/xlsb/binary";
+import { iterateBiffRecords, iterateInterpretableRecords } from "@excel/xlsb/binary";
 import { recordSpec } from "@excel/xlsb/spec/records";
 import { workbookLosses, worksheetLosses } from "@excel/xlsb/write/losses";
 import { writeXlsbPackage } from "@excel/xlsb/write/package";
@@ -42,49 +42,45 @@ function sheetWith(mutate: (sheet: Worksheet.Handle) => void): Workbook.Handle {
  */
 describe("worksheetLosses", () => {
   it.each([
-    ["data validation", { dataValidations: { A1: { type: "list", formulae: ['"a,b"'] } } }],
-    ["conditional formatting", { conditionalFormattings: [{ ref: "A1", rules: [] }] }],
-    ["table", { tables: [{ name: "Sales" }] }],
-    ["pivot table", { pivotTables: [{ name: "P" }] }],
-    ["auto filter", { autoFilter: "A1:B2" }],
-    ["sheet protection", { sheetProtection: { sheet: true } }],
-    ["row page break", { rowBreaks: [{ id: 4 }] }],
-    ["column page break", { colBreaks: [{ id: 2 }] }],
-    ["shape", { shapes: [{ type: "rect" }] }],
-    ["chart", { charts: [{ name: "c" }] }],
-    ["sparkline group", { sparklineGroups: [{ ref: "A1" }] }],
-    ["form control", { formControls: [{ ref: "A1" }] }],
-    ["ignored error", { ignoredErrors: [{ sqref: "A1" }] }],
-    ["threaded comment", { threadedComments: [{ ref: "A1", comment: {} }] }],
-    ["watermark", { watermark: { text: "DRAFT" } }],
-    ["frozen or split pane", { views: [{ state: "frozen", ySplit: 1 }] }],
-    ["print area", { pageSetup: { printArea: "A1:B2" } }],
-    ["print titles", { pageSetup: { printTitlesRow: "1:1" } }]
+    // Every criterion kind the XLSX reader preserves — values, date group items, custom comparisons, top-N,
+    // dynamic, colour and icon — now has a record, so the fixture has to be something the schema allows
+    // inside a filter column and this writer has none for: an `extLst` extension. The XML shape matters
+    // here: criteria arrive as raw XML on `autoFilterCriteria`, not as a structured `filterColumns` on the
+    // `autoFilter`, which is the field this check read at first and which the model does not have.
+    [
+      "auto filter criteria",
+      {
+        autoFilterCriteria: {
+          ref: "A1:B2",
+          xml: '<filterColumn colId="0"><extLst><ext uri="{x}"/></extLst></filterColumn>'
+        }
+      }
+    ]
   ])("names %s", (expected, model) => {
     expect(worksheetLosses(model)).toEqual([expected]);
   });
 
   it.each([
-    ["cell comment", { rows: [{ number: 1, cells: [{ address: "A1", comment: { texts: [] } }] }] }],
-    ["hidden row", { rows: [{ number: 1, hidden: true, cells: [] }] }],
-    ["grouped row", { rows: [{ number: 1, outlineLevel: 2, cells: [] }] }],
-    ["collapsed row", { rows: [{ number: 1, collapsed: true, cells: [] }] }],
-    ["hidden column", { cols: [{ min: 1, max: 1, hidden: true }] }],
-    ["grouped column", { cols: [{ min: 1, max: 1, outlineLevel: 1 }] }],
-    ["collapsed column", { cols: [{ min: 1, max: 1, collapsed: true }] }],
-    ["best-fit column", { cols: [{ min: 1, max: 1, bestFit: true }] }],
-    ["background image", { media: [{ type: "background" }] }],
-    ["header image", { media: [{ type: "headerImage" }] }],
-    ["watermark image", { media: [{ type: "watermark" }] }],
-    ["outline level", { properties: { outlineLevelRow: 2 } }],
-    ["worksheet view setting", { views: [{ state: "normal", zoomScale: 150 }] }],
-    ["worksheet view setting", { views: [{ state: "normal", rightToLeft: true }] }],
-    ["worksheet view setting", { views: [{ state: "normal", style: "pageLayout" }] }],
     ["page setup draft", { pageSetup: { draft: true } }],
-    ["page setup horizontalCentered", { pageSetup: { horizontalCentered: true } }],
     ["page setup pageOrder", { pageSetup: { pageOrder: "overThenDown" } }]
   ])("names %s", (expected, model) => {
     expect(worksheetLosses(model)).toEqual([expected]);
+  });
+
+  it.each([
+    ["horizontalCentered", { pageSetup: { horizontalCentered: true } }],
+    ["verticalCentered", { pageSetup: { verticalCentered: true } }],
+    ["showGridLines", { pageSetup: { showGridLines: true } }],
+    ["showRowColHeaders", { pageSetup: { showRowColHeaders: true } }]
+  ])("no longer reports %s, because BrtPrintOptions carries it", (_name, model) => {
+    // **These four were listed as losses and are not lost.** `BrtPrintOptions` holds them in four bits that this
+    // module wrote as a fixed `0x0010` and never interpreted — the caution was reasonable (the pinned corpus
+    // disagrees with itself about this record) and the consequence was that four print options vanished from
+    // every binary workbook. Excel's own output across fifteen references settled it: `0x0011` for the one whose
+    // XML says `horizontalCentered="1"`, `0x0010` for the rest.
+    //
+    // Asserted as an empty list rather than deleted, so putting a name back here has to be deliberate.
+    expect(worksheetLosses(model)).toEqual([]);
   });
 
   /**
@@ -120,8 +116,16 @@ describe("worksheetLosses", () => {
   it("counts rather than listing every occurrence", () => {
     // A sheet with four hundred conditionally formatted ranges should produce one line, not four
     // hundred that bury everything else in the report.
-    const many = { conditionalFormattings: Array.from({ length: 7 }, () => ({ ref: "A1" })) };
-    expect(worksheetLosses(many)).toEqual(["conditional formatting (7)"]);
+    const many = {
+      conditionalFormattings: []
+    };
+    // Seven sheets' worth is not a thing a single sheet can carry for most checks, so the count is exercised
+    // with the one remaining loss that is per-*occurrence*: a filter column this writer has no record for.
+    (many as { autoFilterCriteria?: unknown }).autoFilterCriteria = {
+      ref: "A1:B2",
+      xml: '<filterColumn colId="0"><extLst><ext uri="{x}"/></extLst></filterColumn>'.repeat(7)
+    };
+    expect(worksheetLosses(many)).toEqual(["auto filter criteria"]);
   });
 
   it("says nothing for a sheet whose features this writer does emit", () => {
@@ -145,7 +149,11 @@ describe("worksheetLosses", () => {
     expect(worksheetLosses({ sheetProtection: null })).toEqual([]);
   });
 
-  it("counts a border wherever it sits", () => {
+  it("no longer counts a border, because borders are written", () => {
+    // This asserted three owners. `BrtBorder`'s layout is established now — the corpus gave its *size*
+    // and MS-XLSB 2.4.314 its fields — so a border on a cell, a row or a column is carried rather than
+    // counted. Inverted rather than deleted: the count firing again would mean the border table stopped
+    // being written.
     const border = { border: { top: { style: "thin" } } };
     expect(
       worksheetLosses({
@@ -155,55 +163,65 @@ describe("worksheetLosses", () => {
         ],
         cols: [{ min: 3, max: 3, style: border }]
       })
-    ).toEqual(["border (owner) (3)"]);
+    ).toEqual([]);
   });
 });
 
 describe("a dropped sheet feature is refused by default", () => {
-  it("reports a border rather than removing it silently", async () => {
+  it("writes a border instead of refusing it", async () => {
     const workbook = sheetWith(sheet => {
       Cell.setStyle(sheet, "A1", { border: { top: { style: "thin" } } } as never);
     });
-    await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
-      /S1: border \(owner\)/
-    );
-    // And the opt-out still produces a valid package — the border is gone, nothing else is.
-    await expectValidXlsb(
-      await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
-    );
+    // No rejection under the default, which is the behaviour that changed when the layout was
+    // established — and the package is still valid.
+    await expectValidXlsb(await Workbook.toBuffer(workbook, { format: "xlsb" }));
   });
 
-  it("reports a frozen pane", async () => {
+  it("no longer refuses a frozen pane, because it now writes one", async () => {
+    // This asserted a rejection until `BrtPane` was implemented. Kept, inverted, rather than deleted:
+    // the default is `unsupported: "error"`, so a feature moving off the loss list changes what a plain
+    // `toBuffer` does, and that is the behaviour worth pinning.
     const workbook = Workbook.create();
     const sheet = Workbook.addWorksheet(workbook, "S1", {
       views: [{ state: "frozen", xSplit: 0, ySplit: 1 }]
     });
     Cell.setValue(sheet, "A1", 1);
-    await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
-      /S1: frozen or split pane/
-    );
-    await expectValidXlsb(
-      await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
-    );
+    await expectValidXlsb(await Workbook.toBuffer(workbook, { format: "xlsb" }));
   });
 
   it("names the sheet the loss belongs to", async () => {
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "Plain"), "A1", 1);
-    const second = Workbook.addWorksheet(workbook, "Frozen", {
-      views: [{ state: "frozen", xSplit: 1, ySplit: 1 }]
-    });
+    const second = Workbook.addWorksheet(workbook, "Noted");
     Cell.setValue(second, "A1", 1);
-    await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(/Frozen: frozen/);
+    // Through the model: `addWorksheet` does not take `pivotTables`, and a workbook that silently ignored
+    // the option would make this test pass for the wrong reason.
+    const model = Workbook.getModel(workbook);
+    (
+      model.worksheets[1] as { autoFilterCriteria?: { ref: string; xml: string } }
+    ).autoFilterCriteria = {
+      ref: "A1",
+      xml: '<filterColumn colId="0"><extLst><ext uri="{x}"/></extLst></filterColumn>'
+    };
+    Workbook.setModel(workbook, model);
+    await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
+      /Noted: auto filter criteria/
+    );
   });
 });
 
 describe("workbookLosses", () => {
   it.each([
-    ["chartsheet", { chartsheets: [{ name: "Chart1" }] }],
-    ["workbook protection", { protection: { lockStructure: true } }],
-    ["workbook view", { views: [{ x: 0, y: 0 }] }],
-    ["named cell style", { cellStyles: { Heading1: { font: { bold: true } } } }]
+    // One `BrtBookView` is written, so the *second* view is what has nowhere to go.
+    [
+      "additional workbook view",
+      {
+        views: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 }
+        ]
+      }
+    ]
   ])("names %s", (expected, model) => {
     expect(workbookLosses(model as never)).toEqual([expected]);
   });
@@ -221,24 +239,31 @@ describe("defined names report what they could not carry", () => {
    * elsewhere is exactly such a door.
    */
   it.each([
-    // A structured reference needs `PtgList`, which no corpus workbook establishes — so this is a
-    // definition the encoder genuinely refuses rather than one contrived to fail.
-    [{ name: "Broken", ranges: ["Table1[Amount]"] }, "Broken: defined name definition"],
-    [{ name: "Two", ranges: ["S1!$A$1", "S1!$C$1"] }, "Two: defined name with 2 ranges"],
-    [
-      // `localSheetId`, which is what `DefinedNameModel` actually carries. The first version of this
-      // case used `sheetName` — a field the model does not have — so it passed while every real
-      // sheet-local name was silently promoted to workbook scope.
-      { name: "Local", ranges: ["S1!$A$1"], localSheetId: 0 },
-      "Local: sheet-local defined name scope"
-    ],
-    [{ name: "Quiet", ranges: ["S1!$A$1"], hidden: true }, "Quiet: hidden defined name flag"]
+    // A structured reference needs `PtgList`, which nothing here implements — so this is a definition
+    // the encoder genuinely refuses rather than one contrived to fail.
+    [{ name: "Broken", ranges: ["Table1[Amount]"] }, "Broken: defined name definition"]
   ])("reports %o", (name, expected) => {
     const written = writeWorkbookPart([{ name: "S1" }], {
       definedNames: [name],
       formulaContext: { sheetNames: ["S1"], definedNames: [name.name] }
     });
     expect(written.unsupported).toContain(expected);
+  });
+
+  it.each([
+    // These three *were* reported losses and are now written. Kept as tests, inverted, because each was
+    // a silent narrowing before it was a reported one: a multi-range name came back truncated, a
+    // sheet-local name came back visible to the whole workbook, and a hidden name came back visible.
+    // Asserting they are no longer reported is what stops a regression putting any of them back.
+    { name: "Two", ranges: ["S1!$A$1", "S1!$C$1"] },
+    { name: "Local", ranges: ["S1!$A$1"], localSheetId: 0 },
+    { name: "Quiet", ranges: ["S1!$A$1"], hidden: true }
+  ])("writes %o without reporting a loss", name => {
+    const written = writeWorkbookPart([{ name: "S1" }], {
+      definedNames: [name],
+      formulaContext: { sheetNames: ["S1"], definedNames: [name.name] }
+    });
+    expect(written.unsupported).toEqual([]);
   });
 
   it("keeps the slot of a name it could not encode", () => {
@@ -257,16 +282,20 @@ describe("defined names report what they could not carry", () => {
     expect(describeBiffStream(written.bytes).match(/BrtName/g)).toHaveLength(2);
   });
 
-  it("reports a multi-range name end to end", async () => {
+  it("round-trips a multi-range name end to end", async () => {
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", 1);
     const names = Workbook.getDefinedNames(workbook);
-    // Non-adjacent, or the surface merges them into one range and there is nothing to lose.
+    // Non-adjacent, so the surface keeps them as two ranges rather than merging them into one.
     DefinedNames.add(names, "S1!$A$1", "Two");
     DefinedNames.add(names, "S1!$C$1", "Two");
-    await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
-      /Two: defined name with 2 ranges/
-    );
+    // A union, and the parentheses are what make it one — a bare `A1,C1` is not a union in Excel's
+    // grammar and this library's parser rejects it, which is why every multi-range name used to fail.
+    const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+    const reopened = Workbook.create();
+    await Workbook.read(reopened, bytes);
+    const back = Workbook.getModel(reopened).definedNames.find(entry => entry.name === "Two");
+    expect(back?.ranges).toHaveLength(2);
   });
 });
 
@@ -282,7 +311,17 @@ describe("the loss report is data, not just a sentence", () => {
     const workbook = Workbook.create();
     const sheet = Workbook.addWorksheet(workbook, "S1");
     Cell.setValue(sheet, "A1", 1);
-    Cell.setStyle(sheet, "A1", { border: { top: { style: "thin" } } } as never);
+    // A feature still on the loss list, so the mechanism is exercised by something real rather than by
+    // whatever happened to be unsupported when this was written. Set through the model, read back and
+    // handed to `setModel` — `getModel` returns a snapshot, so mutating it in place changes nothing.
+    const model = Workbook.getModel(workbook);
+    (
+      model.worksheets[0] as { autoFilterCriteria?: { ref: string; xml: string } }
+    ).autoFilterCriteria = {
+      ref: "A1",
+      xml: '<filterColumn colId="0"><extLst><ext uri="{x}"/></extLst></filterColumn>'
+    };
+    Workbook.setModel(workbook, model);
     let thrown: unknown;
     try {
       await Workbook.toBuffer(workbook, { format: "xlsb" });
@@ -290,7 +329,7 @@ describe("the loss report is data, not just a sentence", () => {
       thrown = error;
     }
     expect(thrown).toBeInstanceOf(ExcelNotSupportedError);
-    expect((thrown as ExcelNotSupportedError).items).toEqual(["S1: border (owner)"]);
+    expect((thrown as ExcelNotSupportedError).items).toEqual(["S1: auto filter criteria"]);
   });
 
   it("truncates the message and not the items", async () => {
@@ -346,7 +385,10 @@ describe("calculation properties", () => {
     throw new Error("no BrtCalcProp was written");
   });
 
-  it("reports the iteration flag it cannot express", async () => {
+  it("sets fIter, which used to be the one bit it could not express", async () => {
+    // The count and the delta were written because their offsets were established from Excel's output;
+    // the *switch* sat in a flags word every corpus workbook leaves off, so it was reported rather than
+    // guessed. MS-XLSB 2.4.318 names it: bit 2.
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", 1);
     const model = Workbook.getModel(workbook);
@@ -354,12 +396,53 @@ describe("calculation properties", () => {
       ...model,
       calcProperties: { iterate: true }
     } as never);
-    expect(written.unsupported).toEqual(["iterative calculation"]);
+    expect(written.unsupported).toEqual([]);
+    for (const record of iterateInterpretableRecords(
+      (await extractAll(written.bytes)).get("xl/workbook.bin")!.data,
+      "w"
+    )) {
+      if (recordSpec(record.id)?.name !== "BrtCalcProp") {
+        continue;
+      }
+      // Past `recalcID`, `fAutoRecalc`, `cCalcCount`, `xnumDelta` and `cUserThreadCount`: 4+4+4+8+4 = 24.
+      const flags = new DataView(record.payload.buffer, record.payload.byteOffset).getUint16(
+        24,
+        true
+      );
+      expect(flags & (1 << 2)).not.toBe(0);
+      return;
+    }
+    throw new Error("no BrtCalcProp was written");
   });
 
   it("says nothing when the workbook set none", async () => {
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", 1);
     expect((await writeXlsbPackage(Workbook.getModel(workbook))).unsupported).toEqual([]);
+  });
+
+  it.each([
+    ["hidden", { number: 1, hidden: true, cells: [] }],
+    ["grouped", { number: 1, outlineLevel: 2, cells: [] }],
+    ["collapsed", { number: 1, collapsed: true, cells: [] }]
+  ])("no longer reports a %s row", (_name, row) => {
+    // These three were on the loss list not because `BrtRowHdr` has no room for them but because the
+    // record's *two* flag bytes were declared as a single `u16`. The one flag the writer set therefore
+    // landed in `fExtraDsc` at offset 10 instead of `fUnsynced` at offset 11 — and `iOutLevel`,
+    // `fCollapsed` and `fDyZero`, which share that second byte, were unaddressable. The record always
+    // carried them; the field description was wrong.
+    expect(worksheetLosses({ rows: [row] } as never)).toEqual([]);
+  });
+
+  it.each([
+    ["hidden", { min: 1, max: 1, hidden: true }],
+    ["grouped", { min: 1, max: 1, outlineLevel: 1 }],
+    ["collapsed", { min: 1, max: 1, collapsed: true }],
+    ["best-fit", { min: 1, max: 1, bestFit: true }]
+  ])("no longer reports a %s column", (_name, column) => {
+    // `BrtColInfo`'s flag word *was* declared correctly — unlike `BrtRowHdr`'s — and the writer simply set
+    // `fUserSet` and nothing else. Four features were reported as unsupported because one `writeUint16(0x02)`
+    // never grew the other four bits.
+    expect(worksheetLosses({ cols: [column] } as never)).toEqual([]);
   });
 });

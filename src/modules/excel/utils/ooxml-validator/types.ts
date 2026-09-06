@@ -143,6 +143,7 @@ export type ChartKind =
   // and `__tests__/ooxml-validator/chart.test.ts` for negative
   // samples.
   | "chart-child-out-of-order"
+  | "chart-child-not-permitted"
   | "chart-missing-required-child"
   | "chart-wrong-child-count"
   | "chart-invalid-enum-value"
@@ -194,6 +195,7 @@ export type ChartKind =
 export type DrawingKind =
   | "drawing-graphicFrame-missing-chart"
   | "drawing-anchor-missing"
+  | "drawing-anchor-attribute"
   | "drawing-anchor-invalid-coords"
   // ChartEx-specific drawing-shape wrappers. Every cx:chart reference
   // must live inside an `<mc:AlternateContent>` with a non-empty

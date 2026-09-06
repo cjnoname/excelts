@@ -305,6 +305,10 @@ export type {
   OpaqueRelationship,
   OpaqueSourceRelationship
 } from "@excel/core/opaque-part";
+// Reachable from `WorksheetModel.styledBlankRanges`, for the same reason: the field is public on `getModel`/`setModel`, so
+// a caller that reads or builds one needs to be able to name it. It was `readonly unknown[]`, which is why both writers
+// carried their own cast and their shapes drifted apart.
+export type { StyledBlankRangeModel } from "@excel/core/styled-blanks";
 
 // --- Errors (extend BaseError; consistent with every other module's entry) ---
 export {
@@ -327,5 +331,11 @@ export {
   MaxItemsExceededError,
   // Thrown by the XLSB reader for a malformed record stream, and reachable now that
   // `Workbook.read` dispatches to it.
-  XlsbParseError
+  XlsbParseError,
+  // **Promised by `WorkbookReadOptions.formulas: "error"` and previously unreachable.**
+  //
+  // The option's documentation tells a caller to expect this type, and its own tests use `instanceof` — but the class was
+  // only exported from the internal `@excel/errors` path, so a consumer of `documonster/excel` could not name it and had
+  // to match on the message. An error a public option promises has to be part of the public surface.
+  XlsbFormulaDecodeError
 } from "@excel/errors";

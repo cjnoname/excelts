@@ -14,6 +14,20 @@ export type XlsbPackageKind =
   | "package-missing-workbook"
   | "package-missing-content-types"
   | "package-missing-part"
+  /**
+   * A relationship naming a part the package does not contain.
+   *
+   * The fault is in the space *between* parts, which is why every per-part check passed while Excel discarded a
+   * drawing whose relationship pointed at a `chartEx` part the XLSB writer never wrote.
+   */
+  | "package-dangling-relationship"
+  /**
+   * A relationship type differing from a known one only by case.
+   *
+   * Type URIs are compared case-sensitively while part names are not, and that asymmetry is what made a
+   * hand-written `chartex` (for `chartEx`) cost a whole drawing part.
+   */
+  | "package-relationship-type-case"
   | "package-wrong-content-type"
   | "package-unreadable";
 
@@ -44,7 +58,21 @@ export type XlsbOrderingKind =
 export type XlsbIndexKind =
   | "index-shared-string-out-of-range"
   | "index-style-out-of-range"
-  | "index-count-mismatch";
+  | "index-count-mismatch"
+  /**
+   * A conditional-formatting rule naming a differential format the styles part does not declare.
+   *
+   * Cross-part, like a dangling relationship: the rule is in a worksheet and the table it indexes is in
+   * `styles.bin`, so neither part alone is wrong. Excel reports `Repaired Records: Conditional formatting`.
+   */
+  | "index-dxf-out-of-range"
+  /**
+   * A `BrtXF` in the style-XF collection declaring a parent.
+   *
+   * `ixfParent` indexes that same collection, so a style XF must be a root (0xFFFF). Excel discards every named
+   * style in the workbook otherwise — and reports the Styles collection, not the XFs.
+   */
+  | "index-style-xf-has-parent";
 
 /** Problems with a cell coordinate or a declared range. */
 export type XlsbCoordinateKind =

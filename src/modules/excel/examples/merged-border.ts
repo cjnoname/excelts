@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Workbook, Worksheet } from "@excel/index";
 
 const outDir = path.resolve(
@@ -56,7 +57,7 @@ Cell.setStyle(ws, "H3", { border: borders.doubleRed });
 Cell.setStyle(ws, "I3", { border: borders.doubleRed });
 
 try {
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("Done.");
 } catch (error) {
   console.log(error.message);

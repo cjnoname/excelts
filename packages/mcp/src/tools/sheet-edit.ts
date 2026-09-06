@@ -15,7 +15,7 @@
 
 import { stat } from "node:fs/promises";
 
-import { Cell, Workbook, Worksheet } from "documonster/excel";
+import { Cell, ExcelNotSupportedError, Workbook, Worksheet } from "documonster/excel";
 import { calculateFormulas } from "documonster/excel/formula";
 import { z } from "zod";
 
@@ -23,6 +23,7 @@ import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, resolveEditTarget, resolveInRoot } from "../sandbox.js";
 import { addChart, chartSchema } from "./chart.js";
+import { requireFormat } from "./document.js";
 import {
   assertUnchanged,
   backupOnce,
@@ -245,13 +246,36 @@ export const sheetEditTool = defineTool({
     // Written to a sibling and renamed: the in-memory application above is only
     // half of "atomic" — writing straight to the path would truncate the user's
     // file before the new bytes are complete.
-    await replaceAtomically(writeTarget.path, temporary => Workbook.writeFile(wb, temporary));
+    // **The container follows the file, not the default.** `Workbook.writeFile` produces XLSX unless told
+    // otherwise, so editing an `.xlsb` in place would have replaced it with an XLSX package behind the
+    // same name — which Excel opens, so nothing would have complained. The format comes from whichever
+    // path is being written: `out` when the caller redirected the result, the source otherwise.
+    const format = requireFormat(args.out ?? args.path, args.out === undefined ? "path" : "out");
+    const container = format === "xlsb" ? "xlsb" : "xlsx";
+    // What the container cannot carry, from the writer's own report. Only meaningful for XLSB, and only
+    // worth two write attempts because the alternative is a user's workbook quietly losing a feature.
+    const dropped: string[] =
+      container === "xlsb"
+        ? await Workbook.toBuffer(wb, { format: container }).then(
+            () => [],
+            (cause: unknown): string[] =>
+              cause instanceof ExcelNotSupportedError ? [...cause.items] : []
+          )
+        : [];
+    await replaceAtomically(writeTarget.path, temporary =>
+      Workbook.writeFile(wb, temporary, { format: container, unsupported: "ignore" })
+    );
 
     return textResult(
       config,
       [
         `Edited **${args.path}**, sheet ${JSON.stringify(target)} — ${applied.length} operation(s) applied.`,
         `- ${formulaNote}`,
+        ...(container === "xlsb" && dropped.length > 0
+          ? [
+              `- **dropped** (XLSB cannot carry these): ${dropped.slice(0, 10).join(", ")}${dropped.length > 10 ? ", …" : ""}`
+            ]
+          : []),
         ...(backupPath === undefined
           ? ["- no backup was taken (backup: false)"]
           : describeBackup(writeTarget.display, backupPath)),

@@ -1,4 +1,9 @@
-import { rangeCreate, rangeTl } from "@excel/core/range";
+// The derived formulas live in `core/conditional-formula.ts` so the XLSB writer can reach them too — it
+// emitted these rules with no formula at all while this one had them, which is a rule that never fires.
+import {
+  textRuleFormula as getTextFormula,
+  timePeriodRuleFormula as getTimePeriodFormula
+} from "@excel/core/conditional-formula";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { CompositeXform } from "@excel/xlsx/xform/composite-xform";
 import { ColorScaleXform } from "@excel/xlsx/xform/sheet/cf/color-scale-xform";
@@ -13,62 +18,6 @@ const extIcons = {
   "3Stars": true,
   "5Boxes": true
 };
-
-function getTextFormula(model) {
-  if (model.formulae && model.formulae[0]) {
-    return model.formulae[0];
-  }
-
-  const range = rangeCreate(model.ref);
-  const tl = rangeTl(range);
-  switch (model.operator) {
-    case "containsText":
-      return `NOT(ISERROR(SEARCH("${model.text}",${tl})))`;
-    case "containsBlanks":
-      return `LEN(TRIM(${tl}))=0`;
-    case "notContainsBlanks":
-      return `LEN(TRIM(${tl}))>0`;
-    case "containsErrors":
-      return `ISERROR(${tl})`;
-    case "notContainsErrors":
-      return `NOT(ISERROR(${tl}))`;
-    default:
-      return undefined;
-  }
-}
-
-function getTimePeriodFormula(model) {
-  if (model.formulae && model.formulae[0]) {
-    return model.formulae[0];
-  }
-
-  const range = rangeCreate(model.ref);
-  const tl = rangeTl(range);
-  switch (model.timePeriod) {
-    case "thisWeek":
-      return `AND(TODAY()-ROUNDDOWN(${tl},0)<=WEEKDAY(TODAY())-1,ROUNDDOWN(${tl},0)-TODAY()<=7-WEEKDAY(TODAY()))`;
-    case "lastWeek":
-      return `AND(TODAY()-ROUNDDOWN(${tl},0)>=(WEEKDAY(TODAY())),TODAY()-ROUNDDOWN(${tl},0)<(WEEKDAY(TODAY())+7))`;
-    case "nextWeek":
-      return `AND(ROUNDDOWN(${tl},0)-TODAY()>(7-WEEKDAY(TODAY())),ROUNDDOWN(${tl},0)-TODAY()<(15-WEEKDAY(TODAY())))`;
-    case "yesterday":
-      return `FLOOR(${tl},1)=TODAY()-1`;
-    case "today":
-      return `FLOOR(${tl},1)=TODAY()`;
-    case "tomorrow":
-      return `FLOOR(${tl},1)=TODAY()+1`;
-    case "last7Days":
-      return `AND(TODAY()-FLOOR(${tl},1)<=6,FLOOR(${tl},1)<=TODAY())`;
-    case "lastMonth":
-      return `AND(MONTH(${tl})=MONTH(EDATE(TODAY(),0-1)),YEAR(${tl})=YEAR(EDATE(TODAY(),0-1)))`;
-    case "thisMonth":
-      return `AND(MONTH(${tl})=MONTH(TODAY()),YEAR(${tl})=YEAR(TODAY()))`;
-    case "nextMonth":
-      return `AND(MONTH(${tl})=MONTH(EDATE(TODAY(),0+1)),YEAR(${tl})=YEAR(EDATE(TODAY(),0+1)))`;
-    default:
-      return undefined;
-  }
-}
 
 function opType(attributes) {
   const { type, operator } = attributes;
@@ -250,11 +199,21 @@ class CfRuleXform extends CompositeXform {
     // where "containsBlanks" is not a member of the operator enum, which made
     // strict readers reject the whole worksheet.
     const ruleType = model.operator;
+    const carriesText = ruleType === "containsText" || ruleType === "notContainsText";
     xmlStream.openNode(this.tag, {
       type: ruleType,
       dxfId: model.dxfId,
       priority: model.priority,
-      operator: ruleType === "containsText" ? "containsText" : undefined
+      operator: ruleType === "containsText" ? "containsText" : undefined,
+      // **The search string itself.** CT_CfRule carries it on `text`; the `<formula>` written below is the
+      // *evaluation* of the rule, not its statement, and Excel reads the attribute rather than the formula.
+      // Omitting it made Excel discard the rule outright — converting a workbook written here to XLSB kept
+      // four of five rules and dropped this one — so the rule looked fine in this library and did not exist
+      // once Excel had seen it.
+      //
+      // Only the two "contains text" spellings have a string; the blanks and errors variants share this path
+      // (see `opType`) and have none.
+      text: carriesText ? model.text : undefined
     });
 
     const formula = getTextFormula(model);

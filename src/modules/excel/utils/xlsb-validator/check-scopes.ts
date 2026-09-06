@@ -22,12 +22,12 @@ import { recordSpec, type BiffRecordSpec } from "@excel/xlsb/spec/records";
 /**
  * Delimiters that may wrap anything, at any depth.
  *
- * `BrtBeginFutureRecord` and `BrtBeginAlternateContent` are how the format carries
+ * `BrtFRTBegin` and `BrtACBegin` are how the format carries
  * things a given consumer may not understand, so they legitimately appear inside
  * records that are not otherwise containers. Treating them like structural scopes
  * would make every file that uses a newer feature look mis-nested.
  */
-const TRANSPARENT_SCOPES = new Set(["BrtBeginFutureRecord", "BrtBeginAlternateContent"]);
+const TRANSPARENT_SCOPES = new Set(["BrtFRTBegin", "BrtACBegin"]);
 
 export interface ScopeResult {
   /** The outermost scope's name, e.g. `Sheet`, or undefined when there was none. */

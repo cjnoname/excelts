@@ -1,10 +1,13 @@
 import type { ImageModel } from "@excel/core/image";
+import { StyledBlankRuns } from "@excel/core/styled-blanks";
 import type { ConditionalFormattingRule } from "@excel/types";
+import { decodeCol, encodeCol } from "@excel/utils/address";
 import { colCache } from "@excel/utils/col-cache";
 import {
   buildDrawingAnchorsAndRels,
-  buildImageRel,
-  isExternalImage,
+  buildWatermarkOverlayAnchors,
+  buildFormControlAnchors,
+  buildShapeAnchors,
   resolveMediaTarget
 } from "@excel/utils/drawing-utils";
 import {
@@ -142,6 +145,145 @@ function mergeConditionalFormattings(
   return model;
 }
 
+/** Whether the parsed rows already hold a cell at `address`. */
+function hasCellAt(
+  rows:
+    | readonly (
+        | { readonly cells?: readonly ({ readonly address?: string } | undefined)[] }
+        | undefined
+      )[]
+    | undefined,
+  address: string
+): boolean {
+  for (const row of rows ?? []) {
+    for (const cell of row?.cells ?? []) {
+      if (cell?.address === address) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Turn a collapsed read's rectangles back into one `<c s="N"/>` per cell.
+ *
+ * A cell the model already has wins: the rectangles cover cells that held nothing when they were read, but a caller may
+ * have written into one since, and a blank must not overwrite a value.
+ *
+ * The rows are re-sorted after insertion because a rectangle may reach columns left of ones the model already had, and
+ * the row xform derives its `spans` from the order it is handed.
+ */
+/** A collapsed rectangle as the model carries it: the source index, and the style it resolved to. */
+interface StyledBlankRangeModel {
+  readonly firstRow: number;
+  readonly lastRow: number;
+  readonly firstColumn: number;
+  readonly lastColumn: number;
+  readonly styleIndex: number;
+  /** Filled in by `reconcile`, where the style table is reachable. */
+  readonly style?: unknown;
+}
+
+function expandStyledBlanks(model: {
+  rows?: { number: number; cells?: unknown[] }[];
+  styledBlankRanges?: readonly unknown[];
+}): void {
+  const ranges = model.styledBlankRanges as readonly StyledBlankRangeModel[] | undefined;
+  if (ranges === undefined || ranges.length === 0) {
+    return;
+  }
+  const rows = (model.rows ??= []);
+  const byNumber = new Map(rows.map(row => [row.number, row]));
+  for (const range of ranges) {
+    for (let row = range.firstRow; row <= range.lastRow; row++) {
+      let target = byNumber.get(row + 1);
+      if (target === undefined) {
+        target = { number: row + 1, cells: [] };
+        rows.push(target);
+        byNumber.set(row + 1, target);
+      }
+      const cells = (target.cells ??= []) as { address?: string; style?: unknown }[];
+      const before = cells.length;
+      for (let column = range.firstColumn; column <= range.lastColumn; column++) {
+        const address = `${encodeCol(column)}${row + 1}`;
+        if (cells.some(cell => cell?.address === address)) {
+          continue;
+        }
+        // The resolved style, not the source index — see the note in `reconcile`. An unresolved range still produces a
+        // cell, because losing the cell would shrink the sheet; it just carries no formatting.
+        cells.push({ address, style: range.style ?? {} } as never);
+      }
+      cells.sort((left, right) =>
+        (left.address ?? "").length === (right.address ?? "").length
+          ? (left.address ?? "").localeCompare(right.address ?? "")
+          : (left.address ?? "").length - (right.address ?? "").length
+      );
+      // **`spans` has to be restated, and this is the last thing that made the round trip lossy.**
+      //
+      // A row's `spans` is read off the file into the row model during parse; a row whose cells were collapsed away has
+      // none, and one synthesised here never had one. Without it the row is written as `<row r="4">` where it arrived as
+      // `<row r="4" spans="1:3">` — every cell identical, and the file still not the one that was read. Recomputed only
+      // when this rectangle actually added something, so a row that already had its own span keeps it.
+      if (cells.length !== before) {
+        const columns = cells
+          .map(cell => spanColumn(cell.address))
+          .filter((column): column is number => column !== undefined);
+        if (columns.length > 0) {
+          // **`min`/`max`, not `spans`.** The row xform renders the attribute from those two numbers; a `spans` string
+          // set here is a field nothing reads, which is exactly what the first attempt produced — cells byte-identical
+          // and the row tag still missing its attribute.
+          const row = target as { min?: number; max?: number };
+          row.min = row.min === undefined ? Math.min(...columns) : Math.min(row.min, ...columns);
+          row.max = row.max === undefined ? Math.max(...columns) : Math.max(row.max, ...columns);
+        }
+      }
+    }
+  }
+  rows.sort((left, right) => left.number - right.number);
+  // **The dimension has to grow with them.** It is computed from the cells that existed when the workbook was committed,
+  // so a collapsed read reported `A1:H200` for a sheet whose formatting reached H8000 and the written file said so.
+  // Excel treats the dimension as advisory, which is exactly why a wrong one is easy to ship unnoticed.
+  const dimensions = (
+    model as {
+      dimensions?: { top: number; left: number; bottom: number; right: number };
+    }
+  ).dimensions;
+  if (dimensions !== undefined) {
+    for (const range of ranges) {
+      dimensions.top = Math.min(dimensions.top, range.firstRow + 1);
+      dimensions.left = Math.min(dimensions.left, range.firstColumn + 1);
+      dimensions.bottom = Math.max(dimensions.bottom, range.lastRow + 1);
+      dimensions.right = Math.max(dimensions.right, range.lastColumn + 1);
+    }
+  }
+  // Consumed. Leaving it would make a second `prepare` — which `writeBothFormats` does, once per container — expand
+  // the same rectangles onto cells that already exist, and that is a silent doubling rather than an error.
+  delete model.styledBlankRanges;
+}
+
+/**
+ * The one-based column of an `"A4"`-style address, for a row's `spans`.
+ *
+ * `decodeCol` plus one rather than a private base-26 loop: this file held two such loops — one decoding to a *one*-based
+ * column and one encoding from a *zero*-based one — which made them look like they disagreed about the base when they
+ * were simply serving callers that use different ones. Sharing the parser leaves the `+ 1` as the only difference, which
+ * is the thing that is actually true here, and brings the upper-bound check with it.
+ */
+function spanColumn(address: string | undefined): number | undefined {
+  const match = address === undefined ? null : /^([A-Z]+)/i.exec(address);
+  if (match === null) {
+    return undefined;
+  }
+  try {
+    return decodeCol(match[1]!.toUpperCase()) + 1;
+  } catch {
+    // A column past the sheet's last is not a span this row can state. `spans` is a hint Excel recomputes, so omitting
+    // it costs nothing — where writing `XFE` into it would be a value no reader accepts.
+    return undefined;
+  }
+}
+
 class WorkSheetXform extends BaseXform {
   declare public map: Record<string, BaseXform>;
   declare private ignoreNodes: string[];
@@ -157,10 +299,25 @@ class WorkSheetXform extends BaseXform {
     "mc:Ignorable": "x14ac"
   };
 
-  constructor(options?: { maxRows?: number; maxCols?: number; ignoreNodes?: string[] }) {
+  /**
+   * Styled blank cells this sheet collapsed, when the read asked for it.
+   *
+   * Accumulated as rectangles by `StyledBlankRuns` and handed to the model in `parseClose`, where both writers expand
+   * them again. Created eagerly so the row xform can hold a reference to the collector rather than reach back through
+   * this class for one.
+   */
+  declare private styledBlanks?: StyledBlankRuns;
+
+  constructor(options?: {
+    maxRows?: number;
+    maxCols?: number;
+    ignoreNodes?: string[];
+    blankCells?: "keep" | "collapse";
+  }) {
     super();
 
-    const { maxRows, maxCols, ignoreNodes } = options || {};
+    const { maxRows, maxCols, ignoreNodes, blankCells } = options || {};
+    this.styledBlanks = blankCells === "collapse" ? new StyledBlankRuns() : undefined;
 
     this.ignoreNodes = ignoreNodes ?? [];
 
@@ -178,7 +335,17 @@ class WorkSheetXform extends BaseXform {
         tag: "sheetData",
         count: false,
         empty: true,
-        childXform: new RowXform({ maxItems: maxCols }),
+        childXform: new RowXform({
+          maxItems: maxCols,
+          ...(blankCells === undefined ? {} : { blankCells }),
+          ...(this.styledBlanks === undefined
+            ? {}
+            : {
+                collectStyledBlank: (row: number, column: number, styleId: number): void => {
+                  this.styledBlanks!.add(row, column, styleId);
+                }
+              })
+        }),
         maxItems: maxRows
       }),
       autoFilter: new AutoFilterXform(),
@@ -228,6 +395,16 @@ class WorkSheetXform extends BaseXform {
         model.views = [{ workbookViewId: 0 }];
       }
     }
+
+    // **The collapsed styled blanks, put back before anything is written.**
+    //
+    // This is the half that makes `blankCells: "collapse"` lossless in *this* container. The XLSB writer expands the
+    // same rectangles in `sheetRowsFromModel`; doing it here means a formatted region survives a round trip through
+    // either one, and that an option's fidelity does not depend on which container a workbook came from.
+    //
+    // Done in `prepare` rather than during render because the cells have to exist before the row xform counts them,
+    // assigns spans and resolves styles — the same reason every other derived cell is materialised here.
+    expandStyledBlanks(model);
 
     options.formulae = {};
     options.siFormulae = 0;
@@ -659,39 +836,23 @@ class WorkSheetXform extends BaseXform {
         });
       }
 
-      for (const medium of watermarkMedia) {
-        const bookImage = options.media[medium.imageId];
-        if (!bookImage) {
-          continue;
-        }
-        const isExternal = isExternalImage(bookImage);
-        const rIdImage = nextRid(drawing.rels);
-        drawing.rels.push(buildImageRel(rIdImage, bookImage));
-        // Convert opacity (0-1) to OOXML percentage (0-100000), clamped
-        const rawOpacity = medium.opacity !== undefined ? medium.opacity : 0.15;
-        const clampedOpacity = Math.max(0, Math.min(1, rawOpacity));
-        const alphaModFix = Math.round(clampedOpacity * 100000);
-
-        // Compute coverage based on actual worksheet dimensions.
-        // Use the model's dimensions if available, otherwise use generous defaults.
-        const dims = model.dimensions;
-        const maxCol = dims ? Math.max(dims.model?.right ?? 100, 100) : 100;
-        const maxRow = dims ? Math.max(dims.model?.bottom ?? 200, 200) : 200;
-
-        drawing.anchors.push({
-          picture: {
-            rId: rIdImage,
-            alphaModFix,
-            ...(isExternal ? { external: true } : {})
+      // `buildWatermarkOverlayAnchors` rather than the arithmetic inline, because the XLSB writer needs
+      // the identical picture and had nothing of the sort — it wrote an overlay watermark into the
+      // header/footer VML instead.
+      drawing.anchors.push(
+        ...buildWatermarkOverlayAnchors(
+          watermarkMedia as { imageId: string | number; opacity?: number }[],
+          {
+            getBookImage: id => options.media[id as number],
+            nextRId: () => nextRid(drawing!.rels),
+            extent: {
+              right: model.dimensions?.model?.right,
+              bottom: model.dimensions?.model?.bottom
+            }
           },
-          // Cover the full data area with extra margin
-          range: {
-            editAs: "absolute",
-            tl: { nativeCol: 0, nativeColOff: 0, nativeRow: 0, nativeRowOff: 0 },
-            br: { nativeCol: maxCol, nativeColOff: 0, nativeRow: maxRow, nativeRowOff: 0 }
-          }
-        });
-      }
+          drawing.rels
+        )
+      );
     }
 
     // Handle user-drawn shapes — anchored drawing parts with no media/rel.
@@ -713,54 +874,9 @@ class WorkSheetXform extends BaseXform {
         });
       }
 
-      for (const shape of shapes) {
-        const anchorRange = shape.anchorRange;
-        if (!anchorRange) {
-          continue;
-        }
-        // Mirror the three image anchoring modes. `getAnchorType` (drawing
-        // xform) dispatches on `pos`/`br`: absolute when `pos` is present,
-        // two-cell when `br` is present, one-cell otherwise (needs `ext`).
-        let range:
-          | { pos: unknown; ext: unknown; editAs: "absolute" }
-          | { tl: unknown; br: unknown; editAs: string }
-          | { tl: unknown; ext: unknown; editAs: string };
-        if (anchorRange.pos) {
-          range = { pos: anchorRange.pos, ext: anchorRange.ext, editAs: "absolute" };
-        } else if (anchorRange.br) {
-          range = {
-            tl: anchorRange.tl,
-            br: anchorRange.br,
-            editAs: anchorRange.editAs ?? "oneCell"
-          };
-        } else {
-          range = {
-            tl: anchorRange.tl,
-            ext: anchorRange.ext,
-            editAs: anchorRange.editAs ?? "oneCell"
-          };
-        }
-
-        // Allocate a cNvPr id from the same monotonic space as the anchor's
-        // position in the drawing so it never collides with image/chart ids
-        // (which derive from the anchor index).
-        const cNvPrId = drawing.anchors.length + 1;
-        drawing.anchors.push({
-          range,
-          shape: {
-            kind: "userShape",
-            cNvPrId,
-            name: shape.name ?? `Shape ${cNvPrId}`,
-            shapeType: shape.shapeType,
-            fill: shape.fillColor ? { color: shape.fillColor } : undefined,
-            line:
-              shape.lineColor !== undefined || shape.lineWidth !== undefined
-                ? { color: shape.lineColor, width: shape.lineWidth }
-                : undefined,
-            text: shape.text
-          }
-        });
-      }
+      // Through `buildShapeAnchors`, which the XLSB writer also calls. Sixty inline lines here was the
+      // reason that writer had no shapes: the anchoring arithmetic had one home and it was this file.
+      drawing.anchors.push(...buildShapeAnchors(shapes, drawing.anchors.length));
     }
 
     if (headerImageMedia.length > 0) {
@@ -866,16 +982,10 @@ class WorkSheetXform extends BaseXform {
         });
       }
 
-      // Add hidden DrawingML shapes that bridge to the VML shape ids.
-      // This mirrors what Excel writes when it "repairs" legacy form controls.
-      const toNativePos = (p: { col: number; colOff: number; row: number; rowOff: number }) => ({
-        nativeCol: p.col,
-        nativeColOff: p.colOff,
-        nativeRow: p.row,
-        nativeRowOff: p.rowOff
-      });
-
-      // Add ctrlProp relationships for each form control
+      // Add ctrlProp relationships for each form control, then the hidden DrawingML anchors that
+      // bridge to their VML shapes. The anchors come from `buildFormControlAnchors`, which the XLSB
+      // writer also calls — the `spid` link between an anchor and its VML shape is exactly the kind of
+      // detail two implementations get differently.
       for (const control of model.formControls) {
         const globalCtrlPropId = options.formControlRefs.length + 1;
         control.ctrlPropId = globalCtrlPropId;
@@ -887,24 +997,8 @@ class WorkSheetXform extends BaseXform {
           Target: ctrlPropRelTargetFromWorksheet(globalCtrlPropId)
         });
         options.formControlRefs.push(globalCtrlPropId);
-
-        const defaultName = `Check Box ${Math.max(1, control.shapeId - 1024)}`;
-        drawing.anchors.push({
-          range: {
-            editAs: "absolute",
-            tl: toNativePos(control.tl),
-            br: toNativePos(control.br)
-          },
-          alternateContent: { requires: "a14" },
-          shape: {
-            cNvPrId: control.shapeId,
-            name: control.name || defaultName,
-            hidden: true,
-            spid: `_x0000_s${control.shapeId}`,
-            text: control.text
-          }
-        });
       }
+      drawing.anchors.push(...buildFormControlAnchors(model.formControls, drawing.anchors.length));
     }
 
     // prepare ext items
@@ -1178,6 +1272,11 @@ class WorkSheetXform extends BaseXform {
           dimensions: this.map.dimension.model,
           cols: this.map.cols.model,
           rows: this.map.sheetData.model,
+          // The rectangles this sheet's styled blanks collapsed into, closed here because a rectangle is only final once
+          // no further row can extend it. Absent unless the read asked for the collapse.
+          ...(this.styledBlanks === undefined
+            ? {}
+            : { styledBlankRanges: this.styledBlanks.ranges() }),
           mergeCells: this.map.mergeCells.model,
           hyperlinks: this.map.hyperlinks.model,
           dataValidations: this.map.dataValidations.model,
@@ -1189,6 +1288,12 @@ class WorkSheetXform extends BaseXform {
           drawing: this.map.drawing.model,
           legacyDrawingHF: this.map.legacyDrawingHF.model,
           tables: this.map.tableParts.model,
+          // The sparkline extension, reached the same way `x14:conditionalFormattings` is. Without this the
+          // block was parsed and then thrown away at the last step, which is the same defect one level up from
+          // the one in `ext-lst-xform.ts`.
+          ...(this.map.extLst.model?.sparklineGroups === undefined
+            ? {}
+            : { sparklineGroups: this.map.extLst.model.sparklineGroups }),
           conditionalFormattings,
           rowBreaks: this.map.rowBreaks.model ?? [],
           colBreaks: this.map.colBreaks.model ?? [],
@@ -1330,8 +1435,60 @@ class WorkSheetXform extends BaseXform {
       model.rows = [];
     }
 
+    // **A style index is only meaningful against the table it came from.**
+    //
+    // The rectangles were collected during parse, where only the `s` attribute is available — and the style table is
+    // rebuilt on write, so index 1 in the source can mean something else in the output. Worse, a style no cell in the
+    // model references is never registered at all: the rebuilt `styles.xml` came out with `<fills count="2">` where the
+    // source had 3, and the blank cells pointed at whatever landed at that index.
+    //
+    // Resolved here because `options.styles` exists here, into the same shape the XLSB reader stores. That path never
+    // had this problem precisely because it resolved to a style *object* at read time; making the two agree is the whole
+    // reason the representation is shared.
+    const ranges = (model as { styledBlankRanges?: readonly StyledBlankRangeModel[] })
+      .styledBlankRanges;
+    if (ranges !== undefined) {
+      const styles = options.styles as { getStyleModel(id: number): unknown } | undefined;
+      (model as { styledBlankRanges?: readonly StyledBlankRangeModel[] }).styledBlankRanges =
+        ranges.map(range => ({ ...range, style: styles?.getStyleModel(range.styleIndex) }));
+    }
+
     this.map.cols.reconcile(model.cols, options);
     this.map.sheetData.reconcile(model.rows, options);
+
+    // **A comment on an empty cell needs a cell to live on.**
+    //
+    // Comments are attached during cell reconcile, so a comment whose `ref` has no `<c>` element in the sheet was
+    // dropped — and a `<c>` is not required for one: `comments1.xml` keys them by address and Excel shows a comment
+    // on an empty cell perfectly well. Three of `poi-comments.xlsb`'s four notes were lost this way when it was
+    // converted to XLSX, and the one that survived was the only one whose cell also held a value.
+    //
+    // Found by the cross-container check in `verify-xlsb-corpus`, which is worth saying because an XLSX round trip
+    // never showed it: a workbook this library *wrote* put values in those cells, so the comment always had one.
+    for (const [address, comment] of Object.entries(
+      (options.commentsMap ?? {}) as Record<string, unknown>
+    )) {
+      if (hasCellAt(model.rows, address)) {
+        continue;
+      }
+      const rowNumber = Number(/\d+$/.exec(address)?.[0] ?? "0");
+      if (rowNumber === 0) {
+        continue;
+      }
+      let row = model.rows.find(
+        (candidate: { number: number } | undefined) => candidate?.number === rowNumber
+      );
+      if (row === undefined) {
+        row = { number: rowNumber, cells: [] };
+        model.rows.push(row);
+        model.rows.sort(
+          (left: { number: number }, right: { number: number }) => left.number - right.number
+        );
+      }
+      // `ValueType.Null` — a real cell holding nothing, which is what a comment-only cell is. Omitting the type
+      // reaches `rowSetModel` as a cell of unknown kind and throws.
+      row.cells = [...(row.cells ?? []), { address, type: 0, comment }];
+    }
     this.map.conditionalFormatting.reconcile(model.conditionalFormattings, options);
 
     model.media = [];

@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Column, Form, Row, Workbook, Worksheet } from "@excel/index";
 
 async function main(): Promise<void> {
@@ -102,7 +103,7 @@ async function main(): Promise<void> {
   Cell.setValue(ws, "A21", "Note: Click checkboxes in Excel to update linked cell values.");
   Cell.setStyle(ws, "A21", { font: { italic: true, color: { argb: "FF666666" } } });
 
-  await Workbook.writeFile(wb, outputPath);
+  await writeBothFormats(wb, outputPath);
 
   console.log(`Wrote: ${outputPath}`);
   console.log("");

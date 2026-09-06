@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Sparkline, Workbook, Worksheet } from "@excel/index";
 
 const outDir = path.resolve(
@@ -69,5 +70,5 @@ console.log("groups after remove(index):", Sparkline.list(ws).length); // 1
 // 5. remove — out-of-range index returns false
 console.log("remove(99) ->", Sparkline.remove(ws, 99)); // false
 
-await Workbook.writeFile(wb, filename);
+await writeBothFormats(wb, filename);
 console.log(`Done. Wrote ${filename}`);

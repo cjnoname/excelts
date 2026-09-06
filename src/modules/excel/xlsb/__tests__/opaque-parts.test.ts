@@ -15,6 +15,7 @@ import { extractAll } from "@archive/unzip/extract";
 import { ZipArchive } from "@archive/zip";
 import { Cell, Workbook } from "@excel";
 import { readXlsbPackage } from "@excel/xlsb/read/package";
+import { theme1Xml } from "@excel/xlsx/xml/theme1";
 import { biff, rowHeader } from "@test/biff-fixture";
 import { describe, expect, it } from "vitest";
 
@@ -271,13 +272,100 @@ describe("parts both writers author are not preserved as opaque", () => {
     }
   });
 
-  it("still preserves a part no writer here authors", async () => {
-    // The rule is about who *writes* a part, not about who reads it — so the theme, which nothing
-    // here authors, must still survive.
+  it("still preserves a part no writer here authors verbatim", async () => {
+    // The rule is about who *writes* a part, not about who reads it. The theme is the sharpest case
+    // now that this writer has a built-in default (see the `built-in theme` block below): a preserved
+    // theme must come back with its own bytes rather than being replaced by that default.
     const workbook = Workbook.create();
     await Workbook.read(workbook, await packageWithExtraParts());
     const preserved = (Workbook.getModel(workbook).opaqueParts ?? []).map(part => part.path);
     expect(preserved).toContain("xl/theme/theme1.xml");
+  });
+});
+
+/**
+ * A workbook built from scratch still gets a theme.
+ *
+ * This is the one theme path that is neither preserved nor converted, and it was missing: every
+ * from-scratch XLSB this library wrote omitted `xl/theme/theme1.xml` while still *referencing* theme
+ * slots — 62 of the 69 example outputs, and the reason Excel repaired them. The XLSX writer had always
+ * defaulted (`model.themes || { theme1: theme1Xml }`), so the same model written to the two formats
+ * disagreed about whether the part exists.
+ *
+ * The assertions are deliberately about the three places a part has to appear to *be* a part — the
+ * archive, the content types and a relationship — because declaring only some of them is exactly the
+ * failure mode that produces a repair rather than a missing file.
+ */
+describe("built-in theme", () => {
+  async function scratchXlsb(): Promise<Map<string, { data: Uint8Array }>> {
+    const workbook = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(workbook, "S"), "A1", 1);
+    return await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+  }
+
+  it("writes the part", async () => {
+    expect([...(await scratchXlsb()).keys()]).toContain("xl/theme/theme1.xml");
+  });
+
+  it("declares its content type", async () => {
+    const parts = await scratchXlsb();
+    const types = new TextDecoder().decode(parts.get("[Content_Types].xml")!.data);
+    expect(types).toContain("application/vnd.openxmlformats-officedocument.theme+xml");
+  });
+
+  it("reaches it from the workbook relationships", async () => {
+    const parts = await scratchXlsb();
+    const rels = new TextDecoder().decode(parts.get("xl/_rels/workbook.bin.rels")!.data);
+    expect(rels).toContain("theme/theme1.xml");
+  });
+
+  it("agrees with the xlsx writer about whether a theme exists", async () => {
+    // The defect was an asymmetry between two writers over one model, so the gate compares them
+    // rather than pinning a path — a future disagreement fails here whichever writer moves.
+    const workbook = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(workbook, "S"), "A1", 1);
+    const themes = async (format: "xlsx" | "xlsb") =>
+      [...(await extractAll(await Workbook.toBuffer(workbook, { format }))).keys()]
+        .filter(path => path.startsWith("xl/theme/"))
+        .sort();
+    expect(await themes("xlsb")).toEqual(await themes("xlsx"));
+  });
+
+  it("writes exactly one theme when a preserved one is present", async () => {
+    const workbook = Workbook.create();
+    await Workbook.read(workbook, await packageWithExtraParts());
+    const parts = await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+    expect([...parts.keys()].filter(p => p.startsWith("xl/theme/"))).toEqual([
+      "xl/theme/theme1.xml"
+    ]);
+  });
+
+  it("falls back when a preserved theme is no longer reachable", async () => {
+    // Renaming the part without repointing the relationship leaves it unreachable, so the reachability
+    // filter drops it. The interesting part is what happens next: suppressing the fallback for a part
+    // that is about to be dropped would ship a package with *no* theme and 252 dangling references to
+    // one, so the fallback has to fire — and the bytes are how the test tells which theme won.
+    const workbook = Workbook.create();
+    await Workbook.read(workbook, await packageWithExtraParts());
+    const model = Workbook.getModel(workbook);
+    Workbook.setModel(workbook, {
+      ...model,
+      opaqueParts: (model.opaqueParts ?? []).map(part =>
+        part.path === "xl/theme/theme1.xml" ? { ...part, path: "xl/theme/theme2.xml" } : part
+      )
+    });
+    const parts = await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+    expect([...parts.keys()].filter(p => p.startsWith("xl/theme/"))).toEqual([
+      "xl/theme/theme1.xml"
+    ]);
+    expect(new TextDecoder().decode(parts.get("xl/theme/theme1.xml")!.data)).toBe(theme1Xml);
+  });
+
+  it("keeps a preserved theme's own bytes", async () => {
+    const workbook = Workbook.create();
+    await Workbook.read(workbook, await packageWithExtraParts());
+    const parts = await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+    expect(parts.get("xl/theme/theme1.xml")!.data).toEqual(THEME);
   });
 });
 
@@ -372,6 +460,11 @@ describe("preserved parts reached from the package root", () => {
   it("promotes a preserved part's conflicting bin Default to an Override", async () => {
     const workbook = Workbook.create();
     await Workbook.read(workbook, await packageWithRootRelationship());
+    // **Edited on purpose, to reach the writer at all.** An unmodified XLSB is now returned as the bytes it arrived
+    // as — which is the right answer for a caller and the wrong one for this test, whose subject is what the
+    // *writer* does with a `Default` that clashes with its own. Touching one cell is the smallest thing that makes
+    // the package be rebuilt.
+    Cell.setValue(Workbook.getWorksheets(workbook)[0], "Z99", 1);
     const written = await extractAll(
       await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
     );
@@ -472,5 +565,52 @@ describe("opaque reachability follows what this write actually emits", () => {
     expect(written.has("xl/drawings/drawing9.xml")).toBe(true);
     const rels = new TextDecoder().decode(written.get("xl/worksheets/_rels/sheet2.bin.rels")!.data);
     expect(rels).toContain("drawing9");
+  });
+});
+
+describe("a part this reader parses is not also preserved", () => {
+  /** An XLSB carrying comments, read back and written as the other container. */
+  async function crossWritten() {
+    const source = Workbook.create();
+    const sheet = Workbook.addWorksheet(source, "S");
+    Cell.setValue(sheet, "A1", 1);
+    Cell.setComment(sheet, "A1", { texts: [{ text: "note" }] });
+    const handle = Workbook.create();
+    await Workbook.read(handle, await Workbook.toBuffer(source, { format: "xlsb" }));
+    return extractAll(await Workbook.toBuffer(handle, { format: "xlsx", validate: false }));
+  }
+
+  it("describes the comments once, in the target container's form", async () => {
+    // The defect this pins: the comments part was parsed *and* kept verbatim, so an XLSB written back as XLSX
+    // contained `comments1.xml` and `comments1.bin` both — with the sheet's relationship pointing at the `.bin`,
+    // which is why it surfaced as `rels-type-target-mismatch` rather than as anything about duplication.
+    const parts = await crossWritten();
+    expect([...parts.keys()].filter(path => /comments\d*\.xml$/i.test(path))).toHaveLength(1);
+    expect([...parts.keys()].filter(path => /comments\d*\.bin$/i.test(path))).toEqual([]);
+  });
+
+  it("leaves no relationship pointing into the source container's form", async () => {
+    // The observable symptom, asserted separately: a reader that skipped the part but left the rel would pass
+    // the test above and still produce a package Excel repairs.
+    const parts = await crossWritten();
+    for (const [path, file] of parts) {
+      if (!path.endsWith(".rels")) {
+        continue;
+      }
+      expect(new TextDecoder().decode(file.data), path).not.toMatch(
+        /Target="[^"]*comments\d*\.bin"/i
+      );
+    }
+  });
+
+  it("still writes a validator-clean package", async () => {
+    const source = Workbook.create();
+    const sheet = Workbook.addWorksheet(source, "S");
+    Cell.setValue(sheet, "A1", 1);
+    Cell.setComment(sheet, "A1", { texts: [{ text: "note" }] });
+    const handle = Workbook.create();
+    await Workbook.read(handle, await Workbook.toBuffer(source, { format: "xlsb" }));
+    // `validate` left on: this is the self-check that found the defect in the first place.
+    await expect(Workbook.toBuffer(handle, { format: "xlsx" })).resolves.toBeInstanceOf(Uint8Array);
   });
 });

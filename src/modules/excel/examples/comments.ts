@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Workbook } from "@excel/index";
 
 const inputFile = fileURLToPath(new URL("./data/comments.xlsx", import.meta.url));
@@ -102,7 +103,7 @@ Workbook.getXlsxIo(wb)
       });
     });
 
-    return Workbook.writeFile(wb, outputFile);
+    return writeBothFormats(wb, outputFile);
   })
   .then(() => {
     console.log("Wrote", outputFile);

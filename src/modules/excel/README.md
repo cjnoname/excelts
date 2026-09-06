@@ -1310,6 +1310,38 @@ for await (const chunk of Workbook.toStream(workbook, { format: "xlsb" })) {
 }
 ```
 
+#### Two read options this container adds
+
+A BIFF12 file makes two choices a caller can reasonably want to overrule, and both are public on
+`Workbook.read` / `readFile` / `readWithDiagnostics`.
+
+```ts
+import { Workbook, XlsbFormulaDecodeError } from "documonster/excel";
+
+// Formatting-only cells past the data. Excel writes a `BrtCellBlank` for every cell of a formatted
+// region, so a sheet with a formatted column carries one per row to the sheet's end — measured at
+// 186 MB of retained heap and 16,379 physical rows against 253 rows of real data.
+await Workbook.readFile(workbook, "wide.xlsb", { blankCells: "collapse" });
+
+// A formula cell holds two things: the value Excel computed and the tokens that computed it. The
+// value always decodes; the token stream is where this codec can be defeated.
+await Workbook.readFile(workbook, "book.xlsb", { formulas: "cached" }); // values only, no expressions
+try {
+  await Workbook.readFile(workbook, "book.xlsb", { formulas: "error" }); // refuse rather than degrade
+} catch (error) {
+  if (error instanceof XlsbFormulaDecodeError) {
+    console.error(error.sheet, error.addresses);
+  }
+}
+```
+
+`blankCells: "collapse"` is **lossless in both containers** — the rectangles describe exactly the
+cells they came from, so writing the workbook back reproduces them byte for byte. `formulas` has
+three settings: `"preserve"` (the default) keeps every expression it can decode and the cached
+value where it cannot, listing the addresses under `diagnostics.undecodedFormulas`; `"cached"`
+decodes none of them, which makes it immune to a token stream this codec cannot read and means the
+workbook writes back as literals; `"error"` throws `XlsbFormulaDecodeError` on the first failure.
+
 Coverage is partial and the boundary is stated below rather than discovered. What exists is the
 framework the format needs before a reader can be trusted, plus a reader and writer for the
 record set whose encoding has been established.
@@ -1378,11 +1410,15 @@ scheme — and **pattern fills**, including solid fills with a real colour. A `B
 optional fields, so a cell that asks only for bold reads back as Calibri 11 bold; that is what
 Excel does with such a cell too.
 
-**Borders are deliberately absent, and that is a finding rather than a gap in effort.** All nine Excel-authored
-reference workbooks contain exactly one `BrtBorder`, byte-identical in every file: the default
-"no borders" entry. One sample of a 51-byte structure establishes that it is 51 bytes and nothing
-else — no edge, no line style, no colour is ever exercised — so there is nothing to read off. The
-fonts, by contrast, vary across fifteen samples in five languages, which is why they are here.
+**Borders, whose write-up here used to say they were deliberately absent.** That was true and is no longer:
+all nine Excel-authored reference workbooks contain exactly one `BrtBorder`, byte-identical in every
+file — 51 zero bytes, the default "no borders" entry — so the corpus established the record's _size_
+and not one of its fields. What changed is where the fields came from: `1 + 5 × 10 = 51` is exactly
+the specification's `flags` byte plus five ten-byte `Blxf` structures, so the observed length
+corroborates the documented layout rather than being the only evidence for it. Reading them off the
+specification and checking the arithmetic against the one sample is a different position from having
+no evidence at all, and borders now round-trip — see `xlsb/border.ts`, which also records why the
+edge order is top, bottom, left, right and not the CSS one.
 
 **Sheet visibility**, **merged ranges**, **column widths** and **row heights**. Each layout was
 established from Excel's own output, and two were confirmed by a value that could not be a
@@ -1400,11 +1436,44 @@ format" test are the ones the XLSX path uses, so the same workbook cannot read b
 depending on which container it arrived in. Formats are interned, so fifty cells sharing one
 format produce one entry.
 
+**Hyperlinks.** `BrtHLink` carries a range and a relationship id; the destination is a
+`TargetMode="External"` entry in the sheet's own `.rels`, so neither half is useful without the other.
+The layout is MS-XLSB 2.4.693 and is confirmed by two corpus fixtures that carry one. A link with no
+label is the one lossy case — the cell model classifies a value as a hyperlink only when it has non-empty
+text, so reading one back puts the destination there and says so.
+
 **Images** — the bytes in `xl/media/`, the placement in `xl/drawings/drawingN.xml`, the sheet's own
 `.rels`. All of it is the same XML an XLSX carries, produced by the same code; only the reference is
 binary, a twelve-byte `BrtDrawing` holding a relationship id. The three forms `ImageData` accepts —
 `buffer`, `base64` and `filename` — all embed, and an external `link` is written as a linked picture
 with no bytes in the package.
+
+### One model, two writers
+
+The defect this container has produced most often is not a misread field. It is **two writers deciding one fact
+independently and disagreeing**, where only one of the two answers is the one Excel accepts. Each is invisible
+from inside either writer, and an XLSB round trip through this library's own reader confirms the wrong answer
+happily. Six found so far:
+
+| Fact                              | XLSX said                           | XLSB said                             |
+| --------------------------------- | ----------------------------------- | ------------------------------------- |
+| a theme part exists               | `theme1.xml` written                | nothing — 252 dangling references     |
+| the default font's colour         | `<color theme="1"/>`                | automatic, palette index 64           |
+| a `containsText` rule's formula   | `NOT(ISERROR(SEARCH("…",A2)))`      | no formula — the rule matched nothing |
+| the data field's place on an axis | `colFields` gets `x="-2"`           | column axis omitted entirely          |
+| where a pivot body starts         | anchor + one row per filter + a gap | the anchor row itself                 |
+| whether to recalculate on load    | a real `calcId` and no request      | `recalcID = 0`, which forces one      |
+
+`__tests__/writer-agreement.test.ts` compares the two containers rather than either against a constant, because
+a constant can drift with both writers at once. Where the two genuinely spell a fact differently — a theme index
+in XML against a `BrtColor` kind in binary — the test translates one into the other and says so.
+
+The `containsText` case is the sharpest, because the formula is not decoration: several rule types are
+_specified_ in terms of a formula the file must carry even though the caller expressed the intent another way.
+`core/conditional-formula.ts` now holds those derivations — eight text operators and ten time periods — and both
+writers read it. Fixing it exposed two more faults in the binary path: the references were `PtgRef` positions
+where a rule needs `PtgRefN` **offsets** from its range's top-left (so a rule on `A2:A4` tested `A2` three
+times), and the operand class was `reference` where a value was wanted.
 
 ### Nothing is dropped quietly
 
@@ -1452,22 +1521,682 @@ malformed part-way through, the target is left as it was rather than holding hal
 for a _refusal_ too: `{ unsupported: "error" }` evaluates the losses before anything is applied, so a
 rejected read leaves the workbook untouched rather than replacing it and then reporting failure.
 
+### A field description that cost three features
+
+`BrtRowHdr` has **three** flag bytes. This module's record table declared the first two as one `u16`:
+
+```
+offset 10   fExtraAsc, fExtraDsc, reserved1(6)
+offset 11   iOutLevel(3), fCollapsed, fDyZero, fUnsynced, fGhostDirty, fReserved
+offset 12   fPhShow, reserved2(7)
+```
+
+The writer's only flag was `fUnsynced` — "this height is the row's own rather than derived from the font",
+which is what makes a custom height stick. Written as `0x0002` into a `u16` at offset 10, little-endian put it
+in **offset 10 bit 1: `fExtraDsc`**, "pad the bottom of this row". The reader read the same wrong bit, so a
+custom height round-tripped through this library while Excel saw a row with no manual height and padding
+nobody asked for. The record's _length_ was right throughout — `u16` plus a byte is three bytes and so is a
+byte three times — which is precisely why nothing caught it: the framing validator compares record lengths
+against Excel's own, and this record was always the 25 bytes it should be. Only the bits inside were in the
+wrong places.
+
+**The consequence went well beyond the height.** `iOutLevel`, `fCollapsed` and `fDyZero` share the byte at
+offset 11, so hidden rows, grouped rows and collapsed rows were all reported as things XLSX could carry and
+XLSB could not. They were never missing from the record; three features were declared unsupported to describe
+a mistake in a field table. Splitting the bytes made all three work, and the loss list lost three entries
+without a single record being added.
+
+`INFERRED_VALUES.rowHeightUnsynced` moved out of the inferred register with it. Its comment had been honest
+about the uncertainty — "the flag's position is constrained by the fields either side of it but its use is not"
+— and the answer was in 2.4.770 the whole time.
+
+`xlsb/__tests__/row-header.test.ts` asserts every offset against the **specification** rather than against
+what the encoder produces, because the tests it replaces did the latter and passed on the wrong layout for as
+long as it stood. Restoring the old byte fails four of them.
+
+### A length table entry is a claim about every producer
+
+`OBSERVED_PAYLOAD_SIZES` holds sixty lengths read off Excel's own output, and the validator raises an
+**error** when a record does not match. That severity is what makes the table's contents consequential:
+an entry is not a note about the corpus, it is an assertion that no producer will ever write that record at
+any other length.
+
+One entry was not that. `BrtDrawing`'s payload is an `XLWideString` holding the sheet's drawing relationship
+id, so its length follows the id — `"rId2"` encodes to 12 bytes and `"rId10"` to 14. The table listed 12,
+read from a workbook whose sheets happened to have single-digit ids.
+
+**The result was the validator rejecting a file this library had just written.** Nine preserved relationships
+on a sheet push its drawing to `rId10`, and the check reported `BrtDrawing is 14 byte(s); every
+Excel-authored one is 12`. Nothing about the file was wrong.
+
+Removing the entry fixes it, and `check-records.ts` now refuses to let a record with a _declared_
+variable-width field into that table at all — the structural fact was already in the field list, unconsulted.
+
+That check caught one. Reading the rest against `[MS-XLSB]` caught two more, and they were invisible to it for
+the same reason: they have no field list to inspect. `BrtACBegin` is `cver` followed by that many
+`ACProductVersion` structures — six bytes when one application is named, twelve when two are. `BrtSel` ends in
+`sqrfx`, a counted array of sixteen-byte ranges, so 36 bytes is the length of a _single-range_ selection and
+ctrl-clicking a second range makes it 52.
+
+Neither had ever been hit, because no corpus workbook names two applications or selects two ranges. That is
+the shape of the whole category: **a length is constant across nine files for reasons that have nothing to do
+with the format**, and only reading what the record _is_ distinguishes the two. The check now enforces the
+structural half; the rest of the table was audited by hand and the reasoning pinned in a test, so a future
+entry has to argue with it rather than merely look plausible.
+
+### Emptying the inferred register
+
+`INFERRED_VALUES` is where this module records values it arrived at by reasoning rather than by reading — a
+bit whose position was deduced from the fields either side of it, a constant borrowed from a neighbouring
+format. Keeping them in one place makes the size of the guess visible. It held **seventeen** entries; it now
+holds **five**, and not one of the twelve was wrong. They were simply never checked against the published
+tables:
+
+| Entry                       | Where it turned out to be written down                                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Six `BrtFont` flag bits     | `FontFlags`, 2.5.53 — and the six are _not_ contiguous, so a table built by counting attributes in order misplaces every one from `fStrikeout` on                                          |
+| `fWrap`, `fShrinkToFit`     | `BrtXF`, 2.4.876 — and they are in **different bytes**, which is the trap: reading the pair as one sixteen-bit field puts `fShrinkToFit` where `fMergeCell` is, and cells come back merged |
+| `fFrozen`, `fFrozenNoSplit` | `BrtPane`, 2.4.755 — their own comment already cited the MUST that makes them exclusive                                                                                                    |
+| `fHidden` on a defined name | `BrtName`, 2.4.712 — and `binary.ts` already had the constant, so this was a duplicate as well as an inference                                                                             |
+| `fUnsynced`                 | `BrtRowHdr`, 2.4.770 — the one that was actively wrong, described [above](#a-field-description-that-cost-three-features)                                                                   |
+
+Each moved next to the code that uses it with the citation attached, rather than staying in a register that
+says "we worked this out". The five that remain are genuine: a bold font weight that appears in no corpus
+workbook and no published enumeration, a tint scale, an extern-sheet span, and two offsets.
+
+The register is smaller and more honest for it — an inference nobody rechecks eventually reads as a fact.
+
+### Enumerations, and a test that reads the specification rather than the code
+
+The tables that map a name to a number — fill patterns, border styles, the two alignments, reading order —
+were audited the same way and came out correct. What was wrong was three of their **comments**: `HorizAlign`,
+`VertAlign` and `ReadingOrder` each described their values as read off Excel's output and inferred from
+neighbours, when all three are published tables. Values arrived at by inference and values arrived at by
+citation deserve to be labelled differently, and here the label was simply out of date.
+
+`xlsb/__tests__/enumerations.test.ts` now pins them, and the way it does so is the point: the expected values
+are **transcribed from the specification by hand** rather than imported from the module. Every other test here
+reads the module's own table and checks the encoder agrees with it — which proves the two halves of this
+module are consistent and nothing at all about whether either matches Excel. A transcribed table fails against
+the document instead of against itself. Moving one entry of `FillPattern` by a single position turns it red.
+
+The count is asserted alongside the values for the same reason. A table that gains an entry shifts everything
+after it, and a generated test would shift with it.
+
+### The audit that mostly found nothing
+
+Two records had lost features to a mishandled flag word, so the remaining eight were read against the
+specification bit by bit. That is worth recording precisely because it came up almost empty: without a note,
+the next person has to repeat it to find that out.
+
+| Record                    | Verdict                                                                                                                                 |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `BrtWbProp`               | `f1904` is bit 0 — correct                                                                                                              |
+| `BrtPane`                 | `fFrozenNoSplit`, not `fFrozen`; the specification makes them mutually exclusive and the second is the "freeze panes" a person asks for |
+| `BrtDVal`                 | All ten packed fields sit where 2.4.353 puts them, including `mdImeMode` occupying bits 10–17 between two single flags                  |
+| `BrtName`                 | Three bit constants, kept separate                                                                                                      |
+| `BrtSSTItem`              | Its flags belong to the nested `RichStr`, not to a flag word of its own                                                                 |
+| `BrtColInfo`, `BrtRowHdr` | Fixed — see above                                                                                                                       |
+
+`BrtPane` is the one worth reading if only one is: `xnumXSplit` counts **rows** and `xnumYSplit` counts
+**columns** when the panes are frozen, which is the opposite of what XLSX's `xSplit`/`ySplit` mean. The module
+names its own fields `rows` and `columns` rather than carrying either convention through.
+
+The audit did find one thing, and it was not a bit position. **`WORKBOOK_FLAG_1904` was defined twice** — in
+`binary.ts` and in `defaults.ts` — and the two were free to disagree about which bit that is with nothing to
+notice. The reader imported the copy that had no other callers. Deleting it produced a compile error at the
+import, which is the only reason the duplication was visible at all.
+
+### The gate that compares two descriptions of the same bytes
+
+Two tables in this module describe every record's layout: the **field list**, and
+`OBSERVED_PAYLOAD_SIZES`, which holds lengths read off real Excel output. Nothing compared them, so a field
+list could drift from the record it described and only the tooling built on it would be wrong — which is the
+tooling every other check here runs on.
+
+The comparison is deliberately one-directional. Declaring **more** than the record holds is always an error:
+a decoder reads past the payload. Declaring **less** is a position this module takes often — a field is named
+once it is understood, and `BrtBorder` names none of its 51 bytes. So a short layout is allowed only for a
+record listed in `PARTIAL_LAYOUTS`, each entry carrying its reason, and the check catches a record that
+_lost_ its tail rather than one that never described it.
+
+It found two on its first run: `BrtWsFmtInfo` stopping two bytes short of `iOutLevelRw` and `iOutLevelCol`,
+and `BrtBeginColInfos` declaring a four-byte count where Excel writes an empty payload — the latter with the
+correct fact already written down in two other places in the same file.
+
+**What no length check can catch** is worth stating with it, because the temptation is to assume this gate
+subsumes the row-header defect above. It does not, and neither does `check-framing.ts`, which compares every
+_written_ record against Excel's own length. `BrtRowHdr` was the right length throughout: a `u16` plus a byte
+is three bytes and so is a byte three times. Only the bits inside were misplaced. A wrong layout of the right
+length is visible against the specification and nowhere else, which is why `__tests__/row-header.test.ts`
+asserts offsets rather than sizes.
+
+### The same defect, the other way round
+
+`BrtColInfo` cost four features — hidden, grouped, collapsed and best-fit columns — and its field table was
+**correct**. The flag word really is one `u16`, laid out with room for all of them:
+
+```text
+bit 0     fHidden          bits 4-7   reserved1
+bit 1     fUserSet         bits 8-10  iOutLevel
+bit 2     fBestFit         bit 11     unused
+bit 3     fPhonetic        bit 12     fCollapsed
+```
+
+The writer set one bit and stopped:
+
+```text
+.writeUint16(0x02)   // fUserSet, and nothing else — a fragment, not a statement
+```
+
+So `BrtRowHdr` lost three features to a wrong description and `BrtColInfo` lost four to a right one nobody
+filled in. Between them, **seven entries left the loss list without a single record being added.** Neither gap
+was in the format.
+
+Two details in the fix are worth keeping:
+
+- **`fUserSet` cannot be decided from whether a width exists.** `setModel` fills the default width into every
+  column it normalises, so by the time the writer runs, an author's width and a default are both numbers. The
+  model records the distinction as `isCustomWidth`, and claiming `fUserSet` without it pins a merely-hidden
+  column to the default width forever.
+- **A column with flags and no width used to be skipped outright**, so a hidden column with no width of its
+  own produced no `BrtColInfo` at all — the flags had nowhere to live, which is a large part of why the feature
+  looked unsupported.
+
+One thing that looked like a third bug and is not: **`collapsed` is derived, not stored.**
+`columnCollapsed` returns `outlineLevel >= worksheet.properties.outlineLevelCol`, and that property defaults to
+0 — so every grouped column reports itself collapsed unless the sheet declares an outline depth. That is the
+model's own long-standing semantics, with a test of its own, and the writer is faithfully reflecting it. The
+column tests raise the threshold to assert the outline level in isolation rather than "correcting" a model
+this module does not own.
+
+### Read/write symmetry, and the hole that had no name
+
+The list below reports what a **write** drops. There was no equivalent for reading, and that asymmetry hid a
+worse failure than any entry on it.
+
+A feature the writer emits but the reader does not model is written correctly the first time, comes back
+**absent from the model**, and is _deleted by the second write_ — with the loss report saying nothing, because
+from the writer's point of view the model it was handed genuinely had no such feature. Measured when this was
+first checked:
+
+```
+conditional formatting, first write:  4 records
+                        read, rewrite: 0 records
+                        loss report:  none
+```
+
+A read-modify-write deleted part of a workbook and reported success. Auto filter criteria did the same. Both
+have readers now, and `xlsb/__tests__/read-write-symmetry.test.ts` is the gate: it lists every feature as
+either surviving a round trip or not, fails if the two lists do not together account for every feature, and
+**asserts the defect** for anything in the second list — so a feature that gains a reader fails the test,
+which is the signal to move it. `LOSES_ON_READ` is empty today and kept for that shape.
+
+Three things that gate found, none of which a record count would have:
+
+- **A rule came back without its format.** `dxfId` is an index into `styles.bin`, which nothing parsed, so the
+  next write found a rule with no `style` and wrote "no format". The rule then fired and displayed nothing —
+  harder to notice than a missing rule, because Excel still lists it in the conditional-formatting dialog.
+  `readDxf` reverses the nine `XFProp` facets, and the index is resolved and then _dropped_: the model holds a
+  `style`, and an index into a table the next write rebuilds is a field nothing reads.
+- **An unterminated collection swallowed the rest of the sheet.** The criteria reader first collected
+  everything between `BrtBeginAFilter` and `BrtEndAFilter`; a file missing the end — which this writer cannot
+  produce but a reader must survive — lost the conditional formatting, validations and page setup that
+  followed. The cells escaped only because they come _earlier_ in the part, which is luck. It now collects the
+  thirteen records it understands and nothing else, so an unterminated collection costs the criteria alone.
+- **The inverse enumerations are derived from the forward ones**, not listed again. A reader with its own copy
+  of `CFOper` is a second place for "1 means between" to be wrong, and it would be wrong in a way no test
+  comparing reader against writer could see — both would agree. The same applies to `fAnd`, which is inverted
+  in the record: reading it as written turns every AND into an OR.
+
+One narrowing is real and named rather than hidden: a conditional-formatting rule comes back **without its
+`formulae`**. Decoding an `Rgce` token stream to formula text needs the reverse of `encodeParsedFormula`, which
+does not exist here. A `cellIs` rule therefore returns with its operator and no operand. Inventing a plausible
+one would be worse — the rule would look complete and evaluate differently.
+
+`priority` also does not come back as it went in, and that is deliberate: `iPri` MUST NOT duplicate another
+rule's anywhere in the workbook, so the writer assigns it. The rule keeps _a_ priority for the next write to
+renumber from.
+
 ### What it cannot do yet
 
 Everything in this list is **reported** when a workbook needs it, so the gap is visible at the point
 it costs something rather than discovered later in Excel.
 
-- Array constants, structured references and whole-row/whole-column references inside a
-  formula. Each is refused by name rather than encoded as something else.
-- Shared formulas: a `PtgExp` deferral is reported on read and refused on write.
-- Borders. See the finding above: the corpus establishes the record's size and not one of its
-  fields.
-- Frozen and split panes (`BrtPane`), tables, auto filters, data validation, conditional
-  formatting, page breaks, comments, shapes, charts, sparklines, form controls, configured sheet
-  protection, print areas and print titles. None of their records appear in any reference
-  workbook, so their layouts are not established — and this module does not guess an offset.
-  Establishing them needs an Excel-authored `.xlsb` that uses the feature;
-  `DOCUMONSTER_XLSB_CORPUS_DIR` is where such a file goes.
+- **Array constants** inside a formula. Refused by name rather than encoded as something else.
+
+  **Structured references and whole-row/whole-column references are no longer refused** — the first
+  needed `PtgList`, the second only a lowering step. Both are described below.
+
+- **Streaming writes, in both containers.** `Workbook.toBuffer`, `writeFile` and `toStream` accept
+  `format: "xlsb"`, `read`/`readWithDiagnostics` detect it, and `createStreamWriter` now takes
+  `format: "xlsb"` as well — rows are encoded and handed to the ZIP as they are committed, so
+  `pnpm benchmark:xlsb-scale` writes ten million cells to a 95 MB `.xlsb`.
+
+  **Two reasons were given here for why this could not be done, and both were wrong. They are recorded rather
+  than quietly replaced**, because each was believed for a while and the way each failed is the useful part.
+
+  The first was that the shared-string and style tables "are interned while the sheets are written and emitted
+  after them, which a single forward pass cannot do without buffering the sheet anyway". Both parts are written
+  at the _end_ of the package in either container, and the XLSX streaming writer already does exactly this. Never
+  the obstacle.
+
+  The second was `BrtWsDim`: it precedes the rows and states the used range, so a forward pass cannot fill it in.
+  That much is true. What was unobserved was whether Excel _needs_ it — it writes the record in all 67 worksheet
+  parts across the corpus, and this library's validator accepting a part without one proves nothing about Excel.
+  It was settled by building a package with the record removed from every sheet and opening it: Excel opens it
+  without a repair. So the streaming path omits it and nothing else, which
+  `stream/__tests__/streaming-xlsb.node.test.ts` asserts by comparing a streamed sheet part against a buffered
+  one record for record.
+
+  The third reason was real and was the actual work: `writeXlsbPackage` orchestrated content types, relationship
+  numbering, part numbering, drawings and pivot caches in one pass over a finished model. It now accepts
+  `streamed: { sheetPaths, strings, formats }` — the sheet parts a streaming caller has already written, and the
+  interning tables their records index into. So there is still one package writer, and a streamed workbook and a
+  buffered one differ in one record rather than in a hundred small ways.
+
+  **What is bounded and what is not.** Rows are: nothing is collected, and the measured live heap for a streamed
+  XLSB matches the streamed XLSX exactly (103 / 146 / 191 MB against 103 / 147 / 192 MB at 100k-row intervals).
+  Both grow by roughly 450 bytes per row, and the reason is the API rather than either writer — `Stream.commitRow`
+  is synchronous, so a producer in a tight loop outruns the disk and the difference queues in the output stream.
+  The shared-string and style tables are _not_ bounded, and are bounded by distinct values rather than by cells:
+  the same position the XLSX streaming writer is in. Distinct strings are the one thing XLSB cannot stream
+  unbounded, because `BrtCellIsst` reaches a string through the table; XLSB does define an inline-string cell
+  (`BrtCellSt`) and it is not used, because Excel writes it in none of the corpus's files.
+
+  A streamed XLSB write measures about 1.8× the time of a streamed XLSX write. That is a real characteristic
+  rather than a rounding difference, and `pnpm benchmark:xlsb` reports it rather than a workload chosen to hide
+  it.
+
+- **Streaming reads, in both containers.** `Stream.WorkbookReader` decodes `.bin` worksheet parts record by
+  record and yields the same `row` events the XML path does, so a caller writes one loop either way. It is a
+  subclass rather than a parallel reader: everything a caller touches is `WorksheetReader`'s and only `parse()`
+  differs.
+
+  Three things a streamed binary read does not surface, measured against the buffered reader rather than assumed:
+  a formula arrives as its **cached value** (decoding the tokens needs the workbook's names and table indices),
+  rich text arrives **flattened** (the runs live beside the text in the shared-string table), and everything
+  after `BrtEndSheetData` — merges, conditional formats, panes, page setup, hyperlinks, comments — is absent,
+  because a forward reader has already emitted the rows those records would attach to. A merged region's
+  continuation cells therefore stream as empty. The XML streaming reader has the same last limitation for the
+  same reason.
+
+- **Shared and array formulas are written**, and this is where a stale "cannot" cost the most. Two reasons had
+  been recorded for refusing them and both had expired:
+
+  - `PtgExp` "needs the master's address — information the flat cell model does not carry". The model carries
+    exactly that: `sharedFormula` _is_ the master's address.
+  - `BrtArrFmla` "does not appear in any reference workbook, so its layout is not established". True of the
+    nine-workbook corpus that was written against; the current one has `poi-bug66682.xlsb` with a `BrtArrFmla`
+    and `poi-62815.xlsb` with four `BrtShrFmla`, and both close to the byte against the field lists.
+
+  Fixing it surfaced a defect on the _read_ side that had been silent throughout: `PtgExp` was decoded as seven
+  bytes — token, four-byte row, two-byte column — and it is five. The column is a `PtgExtraCol` in `RgbExtra`,
+  which the reader never read at all. So every shared formula in every real file failed to decode and was
+  reported as "could not be decoded", and a test with a seven-byte fixture kept the pair self-consistent.
+
+  **The general lesson is worth more than the fix**: nothing re-examines a refusal when the evidence behind it
+  changes. Three of this container's "cannot" entries were expired at once — this, `BrtArrFmla`, and the `BErr`
+  table below — all because the corpus grew after they were written.
+
+- **Rich text is written.** A `RichStr` carries the runs, and each run's font is interned into the _styles_
+  part's `BrtFont` collection, which is what `ifnt` indexes. That reach was the real obstacle: the shared-string
+  table could not see the font table, so a run could only have named a font some cell happened to use.
+
+- **Error values are written.** `BErr` is an eight-value table (MS-XLSB 2.5.98.2) and Excel's own files confirm
+  four of them — `0x07` `#DIV/0!`, `0x17` `#REF!`, `0x1D` `#NAME?`, `0x2A` `#N/A`. What is still refused is an
+  error with no `BErr` code at all: `#SPILL!`, `#CALC!` and the rest of the dynamic-array family postdate the
+  enumeration, and substituting `#VALUE!` for one would be a different error rather than a reported loss.
+
+- **Future functions are written.** `XLOOKUP`, `TEXTJOIN`, `CONFIDENCE.T`, `LET`, `SEQUENCE` — anything the
+  `Ftab` has no id for is called the way Excel calls it: a `PtgName` naming a hidden `_xlfn.*` stub, then the
+  arguments, then `PtgFuncVar` with `tab = 0x00FF` and a `cparams` that **counts the name**. The stub itself is
+  a defined name with `fHidden | fFunc | fProc | fFutureFunction` and a body of `PtgErr(#NAME?)` — flags
+  `0x0002000b` and rgce `1c 1d`, byte-identical to Excel's. The `_xlfn.` prefix never reaches a caller: a read
+  gives back `XLOOKUP(…)`, which is what was written and what the XML container stores.
+
+  **Pivot tables are written — including ones read from an XLSX.** A pivot created through `Pivot.add` carries a
+  live source worksheet; one _read from a file_ does not, and `pivotParts` tested for that worksheet and returned
+  `undefined` without it. So every XLSX→XLSB conversion dropped its pivot tables, and the `continue` that did it
+  recorded nothing at all — `unsupported: "error"` did not even refuse. The reader already normalises the parsed
+  form into `cacheFields` and `cacheRecords`, which is the same information resolved, so the conversion needed no
+  new knowledge; it needed the writer to stop asking the wrong question.
+
+  A newly created pivot table becomes four things: `BrtBeginPivotCacheID` records
+  in the workbook binding each cache to its part, `pivotCacheDefinition{n}.bin` describing the source range and
+  its fields, `pivotCacheRecords{n}.bin` holding one record per source row, and `pivotTable{n}.bin` — the view,
+  with its pivot fields, axis membership and data items. Five parts on disk once the two `.rels` are counted, and
+  relationships at three levels: sheet → view → cache definition → records.
+
+The record order is **MS-XLSB section 3.8**, a fifty-seven step byte-level worked example. An earlier version of
+this document said no such authority existed for pivot tables while relying on section 3.4 — the filter example
+in the same chapter — three paragraphs earlier. That is recorded below rather than quietly fixed.
+
+**It could not be delivered in stages, and that shaped the work.** The specification requires one cache
+definition part _per_ `BrtBeginPivotCacheID` record in the workbook, so a package carrying the binding without
+the parts points at something that is not there. The four encoders were therefore built and unit-tested
+against the field tables first and wired into the package writer last, in one step.
+
+### Five cross-part invariants, each asserted end to end
+
+None of these can be checked from a single part, and none produces an error when broken — which is why they
+are the tests that matter most here:
+
+| Invariant                                                       | What breaking it does                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `idSx` (workbook) = `idCache` (view)                            | The view refers to a cache filed under another id; the table shows nothing                        |
+| `cRecords` (definition) = `BrtPCRRecord` count = records header | A reader stops early or runs past the collection                                                  |
+| `csxvds` (view) = `BrtBeginPCDField` count                      | Axis collections index into `BrtBeginSXVDs`, so every index after a gap points at the wrong field |
+| every cache-record index < its field's `citems`                 | A corrupt record, not a lossy one — the reader follows the index into whatever is at that offset  |
+| `citems` = the `BrtPCDI*` records written                       | Same                                                                                              |
+
+### Four layout traps
+
+- **`BrtBeginPivotCacheDef`'s `unused` tail exists _if and only if_ `fLoadRefreshedWho` is 0.** It reads as a
+  presence flag and behaves as padding, so omitting both leaves the record four bytes short and misaligns
+  every field after it. The test asserts the record's _length_, not the flag.
+- **`BrtBeginSXDI`'s field table does not add up.** Three consecutive rows are all called `ifmt` plus a
+  `reserved`; summing them gives 27 where the worked example declares `0x3B` for a 34-byte caption. The
+  `reserved` word is _inside_ the four-byte `PivotNumFmt`, not beside it — two bytes too many makes every
+  record after it in the part unreadable.
+- **Two of `BrtBeginSXView`'s presence flags are inverted.** `fDisplayData` says `irstData` _is_ present and
+  MUST be 1; `fEmptyDisplayErrorString` and `fEmptyDisplayNullString` say their strings are _absent_. Reading
+  the pair as ordinary "has a value" flags produces a record whose strings come out of what follows it.
+- **The aggregation enumeration is not the model's order.** `count` is 1 and `countNums` is 6 in the record,
+  which is not how OOXML's `ST_DataConsolidateFunction` lists them. A mapping by position swaps the two and the
+  pivot table quietly reports a different number. All eleven are asserted.
+
+Two deliberate choices worth knowing. The **shared-item flags are derived from the items**, not from the
+model's `containsNumber` and friends: those are preserved _XLSX_ attribute strings and may be absent, while
+`BrtPCRRecord` has no per-item tag and a reader types its inline values from exactly these flags. And the
+**pivot lines are a single grand-total line** rather than the full expansion — the layout is what Excel
+recomputes on refresh, and the cache is written with `fRefreshOnLoad` so it does. Enumerating them would mean
+reproducing Excel's subtotal and nesting rules to produce something it discards, which is what the XLSX writer
+avoids the same way with `<rowItems>`.
+
+### The mistake, recorded
+
+This document previously said the record order could not be known: the per-part ABNF grammar
+(`Biff12PivotTableGrammar.abnf`) ships with Microsoft's internal build rather than the specification, and no
+corpus workbook contains a pivot table — 0 of 23. Both facts are true and the conclusion was wrong, because
+section 3 is titled "Structure Examples" and contains ten byte-level walkthroughs, one of them for exactly
+this. **The absence was asserted about a document that was open at the time, without reading its table of
+contents** — and the filter records had already been built from section 3.4. Two conclusions of the form "the
+format cannot express this" were reached in this work and both were wrong, the other being the protection
+password; in both cases the evidence was one search away.
+
+A pivot table read from XLSB is still carried through as opaque bytes rather than modelled — this reader does
+not parse the binary pivot parts — so a read-modify-write preserves it byte for byte, which
+`xlsb/__tests__/pivot-preservation.node.test.ts` pins by injecting payloads this writer could not have
+synthesised.
+failing anything.
+failing anything.
+
+**Watermarks are written, both modes**, and the entry that said otherwise was wrong twice over. There is
+no _text_ watermark in this model to lose: `WatermarkOptions` requires an `imageId`, and text becomes a
+watermark upstream by being rasterised into a translucent image, so the loss list was naming a feature
+that does not exist — its fixture, `{ watermark: { text: "DRAFT" } }`, was the only place in the
+repository that shape ever appeared. Meanwhile a _header_-mode watermark had been written correctly all
+along and was still reported as lost, which told a caller to expect a missing picture that was in the
+file.
+
+The real defect was underneath: an **overlay** watermark was collected with the header pictures, so it
+was written into the header/footer VML. It came back as a `headerImage` in the centre of the page header
+with its opacity dropped — a picture behind the cells had become a page-header decoration. That is not a
+lossy write but a _different document_, and it was invisible precisely because the result was valid.
+`buildWatermarkOverlayAnchors` in `utils/drawing-utils.ts` now serves both writers, and the test compares
+the two containers' drawing parts rather than either one against itself: same `alphaModFix`, same
+absolute anchor, same image relationship.
+
+**Conditional formatting is complete** — the rules and the formatting they apply. A rule's format is a
+`BrtDXF`: a **differential** format, meaning a set of overrides rather than a complete style, encoded as a
+flag word and then an `XFProps` — a counted array of `XFProp`, each a type, a size and a blob whose shape
+the type decides. Fourteen of the thirty-eight types are written, which is everything a `Style` can
+express here: the fill pattern and both its colours, the text colour, the font name, bold, italic,
+strikethrough, the size, all four border edges plus the diagonal, and the two diagonal directions.
+
+Four details in that record fail silently and are asserted for it. **`cb` is the size of the whole
+`XFProp`, header included**: writing the blob length instead makes every property after the first land
+four bytes early, and a reader does not detect that — it reads a plausible type out of the middle of a
+colour, so the test asserts the walk _closes_ exactly on the payload length. **`Bold` is an enumeration**
+— `0x0190` normal, `0x02BC` bold — so the boolean the model holds cannot be written through; a `1` there
+is neither value and reads as a font weight of one. **`LongRGBA` is red-green-blue-alpha**, not the order
+the `argb` string spells, which is a channel rotation rather than a visible error. And an
+**`XFPropBorder`'s `dgBorder` comes from the same table a `BrtBorder` edge uses** (`borderStyleValue`),
+because two copies of those fourteen style names in two orders is how one of the two places ends up
+writing `medium` for a caller who asked for `thin`.
+
+Types `0x0B` and `0x0C` — a range's _internal_ borders — are deliberately never written, and `fNewBorder`
+stays clear to say so: they are gated by that flag and a cell style has no such thing. The properties are
+sorted by type, which the specification does not require (it constrains which types may _coexist_, not
+their sequence) but Excel does, and a needless deviation is one more thing a reader could be strict about.
+
+The rules themselves were worth the care. **A rule's shape is decided by a _pair_ of enumerations**:
+`iType` says how the formatting is drawn, `iTemplate` says what the condition is, and MS-XLSB lists the
+legal combinations with "other combinations MUST NOT be used". The model folds five conditions —
+`containsText`, `containsBlanks`, `containsErrors` and their negations — onto one type distinguished by
+an operator, where the record has five templates; and `CFOper` starts at **1**, so an off-by-one turns
+"greater than" into "not equal". Both are asserted against the specification's own table, because both
+fail silently. Three more details the same way: `fAbove` is derived from the template rather than read
+from the model, so the two cannot contradict each other; `rgce2` exists only for `between`/`notBetween`,
+and a second stream for any other operator makes a reader misparse everything after it; and `iPri` must
+be unique across the sheet, while the model's priorities are per block and routinely collide — so the
+writer hands them out.
+
+**Sparklines came off this list**, and they are the only feature here built entirely from _future
+records_. A future record opens with an `FRTHeader`: four flag bits saying which of four optional blocks
+follow — and for a sparkline the blocks _are_ the content, so the cell it occupies is an `FRTSqrefs` and
+the range it plots is an `FRTFormulas`. The nesting is where it goes wrong quietly: `FRTSqrefs` counts
+`FRTSqref`, and each `FRTSqref` holds an `UncheckedSqRfX` that counts ranges _again_ — two levels, both
+required to be 1, with `rwFirst == rwLast` because a sparkline occupies one cell.
+
+Two details are pinned by tests because each is silent. `fShowEmptyCellAsZero` is a **two-bit
+enumeration**, not a flag, so reading it as one bit turns "span" into "gap". And the data range must be a
+`PtgArea3d`: an unqualified `A1:C1` parses to a plain `PtgArea`, which this record does not accept, so
+the sheet name is added when the model leaves it off.
+
+**Charts came off this list**, and the estimate that kept them on it was wrong in an instructive way.
+`chart` appears 434 times in the XLSX writer, which reads like a subsystem to port — but a programmatic
+chart goes through `Chart.add` → `addChartEntry`, which puts a `{ chartNumber, model }` entry on the
+_workbook_, and one helper renders that entry to XML. The other 434 references are the reading path and
+the chart engine, neither of which a writer needs. Counting references was a proxy for difficulty and a
+bad one.
+
+A chart part is XML in **both** containers — `cal-any_sheets.xlsb` carries `xl/charts/chart1.xml`
+beside its `.bin` chartsheet — so nothing was translated, and a test asserts the two writers produce
+byte-identical chart XML. Two details are easy to get wrong and are pinned: an absolute chart anchor's
+position is **EMU in the model and pixels in the anchor** (`PosXform` multiplies by
+`EMU_PER_PIXEL_AT_96_DPI`, so passing EMU through overshoots by 9525×), and a chart's relationship comes
+from the **drawing** rather than the sheet, because the `graphicFrame` names it.
+
+**Chartsheets** followed immediately, and cheaply, because the chart parts were the expensive half. The
+sheet is ten records — asserted against `cal-any_sheets.xlsb`'s own stream, not against a field list —
+and everything else comes from the XLSX writer: the chart, the drawing and both sets of relationships.
+Two things had to be right and neither is obvious. The drawing uses an **absolute** anchor with concrete
+EMU extents, because a chartsheet has no cell grid and a cell-based anchor resolves to 0×0 — Excel then
+renders a blank canvas. And `BrtBundleSh` carries a **relationship id**, which this writer derived from
+the bundle position: a chartsheet follows the worksheets in that sequence, so every chartsheet pointed
+at a worksheet — a tab labelled "Chart1" whose contents were a grid.
+
+**Shapes and threaded comments came off this list**, and for opposite reasons that are worth
+contrasting. A threaded comment has no BIFF12 form _at all_ — the part is XML in both containers — so
+supporting it meant writing the XLSX renderer's output into the package and adding two relationships,
+with nothing translated. A shape needed no new record either, but because it is an _anchor in the
+sheet's existing drawing_: the writer had none only because `drawingForWorksheet` filtered for
+`type === "image"` and returned early, and the anchoring arithmetic lived inside the XLSX worksheet
+xform where nothing else could reach it. It is `buildShapeAnchors` now, and both writers call it.
+
+**Form controls** followed the same route and are worth a note of their own, because a control is
+_three_ parts: a hidden DrawingML anchor that bridges to a VML shape by `spid`, the VML that draws it,
+and an `xl/ctrlProps/ctrlPropN.xml` holding its properties. The VML is **shared with comments** — Excel
+writes one `vmlDrawing{N}.vml` per sheet holding both a note's box and a checkbox's shape, and the sheet
+has one `BrtLegacyDrawing` — so writing a second file would leave one of them unreachable. The mistake
+worth recording: the VML _relationship_ was emitted only when the sheet had comments, so a checkbox on a
+sheet with none reached Excel with its VML present and nothing pointing at it.
+
+Nothing narrower remains on the sheet side. Multiple worksheet and workbook views, chartsheets, auto
+filter criteria and **protection passwords** were all on this list and are now written.
+
+**The password is worth recording as a mistake, not as a feature.** This document claimed for some time
+that it was _physically impossible_: `protpwd` in `BrtSheetProtection` is a 16-bit verifier, the model
+holds a SHA-512 hash, and a hash cannot be reversed into the plaintext the verifier algorithm needs. Every
+one of those statements is true. The conclusion did not follow, because `protpwd` was never the only place
+a password can go — **`BrtSheetProtectionIso` and `BrtBookProtectionIso` exist precisely for the ISO/IEC
+29500 form** and carry the salt, the algorithm name, the hash bytes and the spin count _verbatim_. Nothing
+has to be reversed because nothing has to be computed: the hash is copied across.
+
+What makes it a mistake rather than an oversight is that the evidence was already in the repository. The
+868-entry record-name table in `xlsb/spec/record-names.ts` contains both records, and a single search for
+`Iso` finds them. The reasoning went from the one record that had already been implemented to a conclusion
+about the format — the same error as judging a feature's difficulty by counting how often a word appears in
+the source. A test asserted the wrong conclusion back for as long as it stood, which is what that kind of
+test is for and why it is worth naming here.
+
+The pairing is specified rather than guessed, which matters because no corpus workbook has a password: an
+Iso record **MUST be immediately followed** by its legacy record, whose verifier is 0 and whose sixteen
+permission Booleans are identical. Both facts are asserted — the ordering, and that all sixteen values
+match — and the permissions come from one shared table, because two copies of a sixteen-entry list with
+defaults attached is the reliable way to end up with two that disagree.
+
+One detail fails silently and is handled for it: the model stores the hash and salt the way OOXML does, as
+**base64 text**, while the records want the bytes. Writing the base64 characters would produce a hash of
+the right shape and the wrong value, which no reader can detect — the password would simply never match.
+
+**AutoFilter criteria** are worth a note, because what unblocked them was neither a new record nor a new
+sample. The range was always written; the criteria were declared unwritable because the model has no
+structured representation of one — the XLSX reader keeps the `<filterColumn>` elements as **raw XML** and
+the XLSX writer replays them verbatim, which is what makes that round trip byte-exact. The apparent fix
+was to model criteria in `core/`, which would have meant the XLSX writer re-serialising from that model
+and trading the fidelity of the format that already works for the sake of the one that did not. The actual
+fix was to notice that the XML _is_ the data: `xlsb/filter-criteria.ts` parses it and emits records, and
+the XLSX path is untouched. There is no public setter for a criterion — one only ever arrives from a read —
+so nothing is lost by treating the preserved XML as the source.
+
+The record order is not guessed either. **MS-XLSB section 3.4 is a byte-level worked example of this exact
+sequence** — `BrtBeginAFilter`, `BrtBeginFilterColumn`, `BrtBeginCustomFilters`, `BrtCustomFilter` and the
+matching ends — which is the authority pivot tables lack.
+
+All seven criterion kinds the XLSX reader can preserve are written: values, date group items, custom
+comparisons, top-N, dynamic, colour and icon. What remains reportable is a schema _extension_ — an
+`extLst` inside a filter column — and because the XML is parsed the loss report names the element it could
+not express instead of condemning every criterion the moment one appears. A column whose only criterion was
+declined is skipped rather than emitted empty, and the range survives regardless: dropping it would be a
+larger loss than the one being reported.
+
+Four more traps in the three dynamic kinds, each asserted:
+
+- **The dynamic filter enumeration has a hole in it.** `aboveAverage` and `belowAverage` are 1 and 2, and
+  the date periods resume at **8** — 3 through 7 are unassigned. An array indexed by position in the
+  schema's list gives `tomorrow` a value with no meaning and every period after it the wrong one.
+- **`cellColor` is absent-means-true**, like `showButton`. `<colorFilter dxfId="0"/>` filters by _fill_
+  colour, so reading it as a plain flag inverts every fill-colour filter into a font-colour one.
+- **An unmappable kind is declined, never approximated.** `CFTNIL`, a `KPINIL` icon set and a `dxfid` of
+  `0xFFFFFFFF` are all records that specify _no filter_ — writing one turns a reported loss into a filter
+  that silently does nothing.
+- **A date group item's field widths are not uniform**: `dom` is four bytes while `hour` is two. Assuming
+  otherwise shifts every field after it by two.
+
+A note on how this came to be written twice. An open pull request in this repository — a separate,
+independent XLSB implementation — already covered the ISO protection passwords and all seven filter kinds.
+This work did not know that, because it was researched against `[MS-XLSB]` and the corpus and never against
+the repository's own branches. The password claim in particular was contradicted by an open PR while this
+document called it physically impossible. The lesson is cheap to state and was expensive to learn: check
+what the project already has before deciding what the format can do.
+
+Two details in those records fail silently and are asserted for it. **`fAnd` is inverted**: MS-XLSB gives
+`0x00000000` for AND and `0x00000001` for OR, while the XML spells the same thing as `and="1"`, so passing
+the attribute through swaps AND for OR on every two-criterion filter — a filter that shows the wrong rows
+rather than a file that fails to open. And **`showButton` and `hiddenButton` have opposite defaults**:
+`hiddenButton` is absent-means-false but `showButton` is absent-means-**true**, so reading the second as a
+plain flag sets `fNoBtn` on every column and hides every dropdown button in the sheet — a filter that is
+in the file and cannot be reached from the interface. That one was a real bug, caught by decoding the
+bytes rather than by a test that agreed with the code.
+
+**Array constants** in formulas are still refused. **Structured references are not** — see below.
+
+Frozen and split panes (`BrtPane`), page breaks (`BrtBrk`) and data validation (`BrtDVal`) **were**
+on this list and are now written and read. What moved them was not a new sample but the realisation that `[MS-XLSB]`
+documents the layouts, and that the corpus is twenty-three _test fixtures_ rather than a sample of
+what people build: a frozen pane and a page break are things a person sets deliberately, so their
+absence from a fixture set says very little. Both carry a caveat worth knowing —
+`BrtPane`'s two `Xnum` fields are **crossed** relative to XLSX's `xSplit`/`ySplit`, and they hold a
+twip position for a split pane but a row or column count for a frozen one. A round trip through
+this library cannot check either fact, because the reader and the writer would agree with each
+other while both disagreed with Excel, so the tests assert the byte layout against the
+specification's field order and its own worked example instead.
+
+Data validation was the largest of the three, because the record is four parts and three are
+variable-length: a signed range count, four strings, and two token streams. Two details in it are
+worth knowing because both fail silently. `DValStrings` orders the **error** pair before the prompt
+pair, so swapping them puts a validation's tooltip in its error alert. And a validation's bounds are
+`Ptg` token streams rather than text — the first version of the reader returned them as an empty
+array and reported them unreadable, which was the wrong call twice over: the decoder already existed
+for cell formulas, and `{ type: "whole", operator: "between", formulae: [] }` is not a partial rule
+but a rule Excel accepts every entry against. A reader that produces one has quietly turned a
+constraint off, which is worse than admitting it dropped the validation.
+
+Comments went the other way, and are the one feature here **verified against Excel's own bytes**:
+`poi-comments.xlsb` and `poi-testVarious.xlsb` carry fourteen between them, so every layout claim —
+the deduplicated author table, the 36-byte anchor, the `RichStr` with its run table, the all-zero
+GUID, even the `application/vnd.ms-excel.comments` content type — was read out of a real file rather
+than taken from the specification alone. The tests assert the corpus cases directly, not only through
+a round trip, because a round trip cannot tell a correct reading from two matching mistakes.
+
+The thing that makes a comment bigger than its records: **it is three parts of the package, not
+one.** The text is in `comments{N}.bin`, the _box_ is legacy VML in `xl/drawings/vmlDrawing{N}.vml`,
+and the sheet needs a `BrtLegacyDrawing` naming the relationship to that VML. Write the records
+without the VML and Excel opens the file with the comment data present and nothing on screen. The
+VML is rendered through the XLSX writer's own xform rather than reimplemented, because legacy VML has
+no binary form and is byte-identical between the two containers. What does _not_ survive is a run's
+font: `ifnt` indexes the styles part, which is written after the comments, so the run _segmentation_
+is kept — where a byline ends and the body begins — and the formatting is reported as lost.
+
+Tables came last of the four and are their own _part_, `xl/tables/table{N}.bin`, reached by a
+relationship from the sheet — nothing in the worksheet's record stream names one. No corpus workbook
+has a `BrtBeginList`, but MS-XLSB carries a **worked byte-level example** for both records, which is
+better evidence than a field list: the example's `BrtBeginListCol` is 0x38 bytes and the arithmetic
+closes at `24 + 4 + 12 + 4 + 4 + 4 + 4`, pinning the field order and the four-byte width of a null
+`XLNullableWideString` together. Three traps, all silent: `ilta`'s enumeration order is **not** the
+model's (two pairs transposed, `sum` three places off, so an index-for-index mapping turns an average
+into a count); `stName` is NULL for a standard table and the header text lives in `stCaption`; and a
+`DXFId` of "none" is `0xFFFFFFFF`, because zero is a real index into the differential-format table.
+
+A table's _data_ is not in the table part — MS-XLSB 2.1.7.51 says it stays in the worksheet — so the
+reader rebuilds `rows` from the cells. It has to: `tableSetModel` reads a model with fewer rows than
+the sheet as a table that has **shrunk** and blanks the difference, so an empty `rows` deleted every
+cell in the data region. The parity suite caught that, and then caught the follow-on — counting the
+totals row as data made the table one row taller and stamped a second totals row over the cells
+below it.
+
+Then the run that emptied most of the list, and its lesson is worth more than any single feature:
+**most of what was "missing" was a record already being written with its fields hard-coded.**
+`BrtSheetProtection` was an opaque 66-byte blob — and the note beside it read "assembling it produced
+64 bytes where Excel writes 66", which is exactly the bug: the missing two are `protpwd`, a `u16` that
+comes _first_. `BrtBeginWsView` wrote a literal `0x039c` and reached the right length by a different
+route, with `icvHdr` as a `u32` where the specification has a `u8`; the bytes were identical to Excel's
+only because 64 and 100 happen to fit. `BrtWsFmtInfo`'s last two bytes were a zeroed `u16` and are
+`iOutLevelRw`/`iOutLevelCol`. `BrtCalcProp`'s `fIter` is bit 2. `BrtBorder` was 51 zero bytes.
+`BrtName` forced every name to workbook scope, which is why **print areas and print titles** were on
+the list at all — they are `_xlnm.*` defined names, not records, and were stuck behind that.
+
+Along the way: a multi-range defined name needs **parentheses** (`(A1:B2,C3:D4)`), because a bare comma
+is not a union in Excel's grammar; a whole-row reference needs no new token, only a lowering step to
+`PtgArea` with the other axis pinned — and reading it back as a range rather than as `$1:$1` produces
+something that computes the same and is _not a valid print title_; and `encodeColor(undefined)` writes
+the _automatic_ colour, which is right for a font and wrong for a border, where Excel writes zeros.
+
+**Structured references** (`Table1[Column]`) work now, which makes the tables above usable from a
+formula. `PtgList` carries an `idList` and column indices _relative to the table_, so the ids are
+assigned before any sheet is written — a formula on sheet 1 may name a table on sheet 3. One
+normalisation is visible to a caller and is asserted rather than hidden: `Table1[[Qty]:[Note]]` comes
+back as `Table1[[Qty],[Note]]`, because both parse to the same AST node and XLSB stores tokens where
+XLSX stores text.
+
+Two other things that run deeper than the feature list. Refusing a formula used to report a bare
+`A1: formula`; the encoder names the construct and that name was being **swallowed by a `catch`**, so
+every unencodable formula produced the same message. And `applyCellFormat` and `styleAt` assemble a
+cell's style _separately_ — which is how borders came to work on a row and not on a cell.
+
 - Error values, on both sides. `BrtCellError` and `BrtFmlaError` have a declared shape — a cell then
   a one-byte code — and **no workbook in the corpus contains either record**, so the mapping from
   `#DIV/0!` to a code is unobserved. On read the cell becomes a blank and the address is reported;
@@ -1506,12 +2235,16 @@ already there win.
   `spec.test.ts` pins each of them against the table, so a value cannot be added without one. A single workbook
   with one bold and one italic cell would settle all eight.
 - Seven cell records — `BrtShortBlank`, `BrtShortRk`, `BrtShortError`, `BrtShortBool`,
-  `BrtShortReal`, `BrtShortSt`, `BrtShortIsst` — have no established payload layout. They did
-  not appear in **any** of nine Excel-authored reference workbooks, all of which used the full
-  `BrtCell*` forms, so the practical gap is much narrower than their prominence suggests. The
-  reader recognises them, counts them and reports them rather than guessing an offset or dropping
-  the cell; the writer never emits them. `spec.test.ts` asserts that every name on that list really
-  is a cell record with no declared layout, so the gap cannot be closed by deleting the list.
+  `BrtShortReal`, `BrtShortSt`, `BrtShortIsst` — have no established payload layout, and the
+  evidence for them is thinner than that phrasing suggests: **`[MS-XLSB]` 2.4 does not list ids
+  12–18 at all.** The names come from community reverse engineering, not the specification, which
+  `spec/record-names.ts` states explicitly by keeping them in `RECORDS_ABSENT_FROM_SPEC` rather
+  than beside the 868 records the specification does name. They also appear **zero** times across
+  the twenty-three pinned corpus workbooks, eighteen of them Excel-authored, all of which used the
+  full `BrtCell*` forms. The reader recognises them, counts them and reports them rather than
+  guessing an offset or dropping the cell; the writer never emits them. `spec.test.ts` asserts that
+  every name on that list really is a cell record with no declared layout, so the gap cannot be
+  closed by deleting the list.
 
 ### Runnable examples
 
@@ -1526,13 +2259,41 @@ in it wanting a rotation, is a shape that does not arise when you write tests a 
 Row formatting was being applied _after_ the cells, so it overwrote what each cell had declared for
 itself — inverting the format's own rule, in which a cell's `iStyleRef` wins over its row's `ixfe`.
 
-### What the reference corpus actually is
+### The reference corpus, and how to get it
 
-Eleven `.xlsb` files, of which **nine are Excel's own output** and two — `issue_666_lost_sheets` and
-`issue_666_panic` — are hand-reduced bug reports. Every layout claim in this module rests on the
-nine; the two reduced files corroborate nothing the nine do not already establish, and the
-distinction matters because the whole method here is "read it off Excel's output rather than assume
-it".
+```bash
+pnpm corpus:xlsb   # 23 fixtures into tmp/xlsb-corpus, every SHA-256 verified
+```
+
+Twenty-three `.xlsb` files pinned in `xlsb/corpus/manifest.ts` by upstream commit and digest — twelve
+from [Calamine](https://github.com/tafia/calamine) and eleven from [Apache POI](https://github.com/apache/poi).
+They are not committed: they are other projects' test fixtures, their licensing is not ours to assume,
+and 283 KiB of third-party binaries does not belong in the published package. The gate that reads them
+skips when the cache is absent, so a contributor who has not fetched it is never blocked.
+
+**This replaced a `DOCUMONSTER_XLSB_CORPUS_DIR` pointing at a directory on one machine**, which was not
+a corpus but a private note: nobody else could confirm a single offset asserted here, and nothing said
+whether a later run used the same bytes. Pinning turns "read off Excel's output" from a claim into a
+procedure.
+
+Each entry carries an `authority`, and the distinction is load-bearing rather than descriptive:
+
+| Authority       | Count | What may be asserted of it                                                                                                                                                   |
+| --------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `excel`         | 18    | Everything. These establish record layouts.                                                                                                                                  |
+| `reduced`       | 2     | Readability. Hand-trimmed bug reports legitimately omit records every real workbook has.                                                                                     |
+| `nonconformant` | 1     | Readability. `poi-Simple.xlsb` says "Microsoft Excel 2007 Beta 2" in its own properties and writes `iTabID` as 0 where the spec says the value MUST be between 1 and 0xFFFF. |
+| `encrypted`     | 2     | That they are refused rather than mangled. OLE-wrapped, not ZIP packages.                                                                                                    |
+
+Without that column a beta's mistake becomes evidence about the format, and the temptation is to widen a
+codec to accept it — which is how a reader comes to accept two layouts and write a third.
+
+**Adding the second upstream immediately paid for itself.** Two of this module's pinned "constant" record
+sizes were constant only across Calamine's collection: `BrtCellBlank` is 8 bytes in eleven files and 9 in
+`poi-62815.xlsb`, which is Excel 16.0 and conformant in every other respect. And two real bugs surfaced on
+the first run — a malformed sheet record made a three-sheet workbook read back as having none, and records
+inside a future-record wrapper were being read as though they were ordinary records, which invented a cell
+at A282 wearing a cell format the workbook does not have.
 
 The two are worth keeping. They are a five-part skeleton with a 31-byte worksheet that declares no
 view — which is, almost exactly, the shape this library used to write. So they are simultaneously
@@ -1583,8 +2344,8 @@ same mistake — treating `.bin` as a format:
 
 A part's identity comes from its content type, so that is what the validator reads. The shapes
 are pinned by `utils/__tests__/xlsb-validator/real-world-shapes.test.ts`, as synthetic packages
-rather than vendored binaries; point `DOCUMONSTER_XLSB_CORPUS_DIR` at a directory of `.xlsb`
-files to run the same checks against real ones.
+rather than vendored binaries. The same checks run against real files too, from the pinned corpus:
+`pnpm corpus:xlsb` fetches it and `real-world-corpus.node.test.ts` reads it.
 
 That last point is the whole posture of this module: a layout that has not been established is
 recorded as unestablished. Guessing an offset produces a reader and a writer that agree with

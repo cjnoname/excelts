@@ -12,7 +12,7 @@
 
 import { readFile, stat } from "node:fs/promises";
 
-import { Workbook, Worksheet } from "documonster/excel";
+import { ExcelNotSupportedError, Workbook, Worksheet } from "documonster/excel";
 import { readCsvFile, writeCsvFile } from "documonster/excel/csv";
 import { calculateFormulas } from "documonster/excel/formula";
 import { Pdf } from "documonster/pdf";
@@ -46,16 +46,42 @@ const ROUTES: Readonly<Record<string, readonly DocFormat[]>> = {
   docx: ["md", "html", "pdf", "txt", "odt"],
   odt: ["docx", "md", "pdf"],
   md: ["docx", "pdf"],
-  xlsx: ["csv", "pdf"],
-  csv: ["xlsx"]
+  xlsx: ["csv", "pdf", "xlsb"],
+  // Same routes as XLSX, because the two are the same model in different containers — plus the
+  // conversion between them, which is the one a caller reaches for when a workbook is too slow to open.
+  xlsb: ["csv", "pdf", "xlsx"],
+  csv: ["xlsx", "xlsb"]
 };
+
+/**
+ * What a container cannot carry, as the writer itself reports it.
+ *
+ * Obtained by attempting the write under the default `unsupported: "error"` and reading `items` off the
+ * error — the writer's own list, rather than a second one maintained here that would drift from it. The
+ * *real* write then runs with `"ignore"`.
+ *
+ * Two attempts rather than one is the cost. It is worth paying: a caller converting a real workbook to
+ * XLSB needs to be told what was dropped, and the alternative is a public "what would be lost" API that
+ * exists only for this tool.
+ */
+async function workbookLossReport(
+  workbook: ReturnType<typeof Workbook.create>,
+  format: "xlsx" | "xlsb"
+): Promise<readonly string[]> {
+  try {
+    await Workbook.toBuffer(workbook, { format });
+    return [];
+  } catch (cause) {
+    return cause instanceof ExcelNotSupportedError ? cause.items : [];
+  }
+}
 
 export const docConvertTool = defineTool({
   name: "doc_convert",
   group: ["word", "pdf", "excel"],
   title: "Convert a document",
   description:
-    "Convert a document between formats: docx→md/html/pdf/txt/odt, odt→docx/md/pdf, md→docx/pdf, xlsx→csv/pdf, csv→xlsx. The output extension chooses the target. PDF is a terminal format — there is no PDF→Word, because no faithful conversion exists.",
+    "Convert a document between formats: docx→md/html/pdf/txt/odt, odt→docx/md/pdf, md→docx/pdf, xlsx→csv/pdf/xlsb, xlsb→csv/pdf/xlsx, csv→xlsx/xlsb. The output extension chooses the target. PDF is a terminal format — there is no PDF→Word, because no faithful conversion exists.",
   inputSchema: {
     from: z.string().min(1).describe("Source path, relative to the server root."),
     to: z
@@ -229,15 +255,27 @@ async function convert(
     throw unreachable(from, to);
   }
 
-  if (from === "xlsx") {
+  if (from === "xlsx" || from === "xlsb") {
     const wb = Workbook.create();
-    await Workbook.readFile(wb, source).catch((cause: unknown) => {
+    // `readWithDiagnostics` rather than `readFile`, so what the *reader* could not recover is available to report. The
+    // plain read discards it, which is why a conversion could call itself lossless while content had already gone.
+    let readLosses: readonly string[] = [];
+    const bytes = await readFile(source).catch((cause: unknown) => {
       throw toolError.unsupported(
         `could not read the source as a workbook`,
         "Run doc_inspect to confirm the file type.",
         { cause }
       );
     });
+    readLosses = await Workbook.readWithDiagnostics(wb, new Uint8Array(bytes))
+      .then(report => report.lost)
+      .catch((cause: unknown) => {
+        throw toolError.unsupported(
+          `could not read the source as a workbook`,
+          "Run doc_inspect to confirm the file type.",
+          { cause }
+        );
+      });
 
     if (to === "csv") {
       // writeCsvFile takes the workbook and selects the sheet by name — passing
@@ -260,15 +298,45 @@ async function convert(
         "- formulas recalculated before rendering"
       ];
     }
+    if (to === "xlsx" || to === "xlsb") {
+      // Container to container. The loss report is the point of surfacing this at all: XLSB cannot carry
+      // everything XLSX can, so a caller converting a real workbook needs to be told what was dropped
+      // rather than discovering it in Excel.
+      const written = await workbookLossReport(wb, to);
+      await replaceAtomically(target, temporary =>
+        Workbook.writeFile(wb, temporary, { format: to, unsupported: "ignore" })
+      );
+      // **Both ends, because "nothing was dropped" was only ever about the writer.**
+      //
+      // Reading an XLSB can lose content of its own — a chartsheet, a record whose layout is unestablished, a defined
+      // name with no definition — and those losses happen before the target writer is asked anything. So a conversion
+      // whose *writer* dropped nothing was reported as lossless while the reader had already dropped something, which
+      // for a conversion tool is the one claim that must not be wrong. `readLosses` is captured where the file is read.
+      const dropped = [
+        ...readLosses.map(entry => `read: ${entry}`),
+        ...written.map(entry => `write: ${entry}`)
+      ];
+      return [
+        `- rewritten as ${to.toUpperCase()}`,
+        ...(dropped.length === 0
+          ? ["- nothing was dropped, reading or writing"]
+          : [
+              `- **dropped**: ${dropped.slice(0, 10).join(", ")}${dropped.length > 10 ? ", …" : ""}`
+            ])
+      ];
+    }
     throw unreachable(from, to);
   }
 
-  if (from === "csv" && to === "xlsx") {
+  if (from === "csv" && (to === "xlsx" || to === "xlsb")) {
     const wb = Workbook.create();
     const ws = await readCsvFile(wb, source);
     Worksheet.setModel(ws, { ...Worksheet.getModel(ws), name: "Sheet1" });
-    await replaceAtomically(target, temporary => Workbook.writeFile(wb, temporary));
-    return [`- ${Worksheet.actualRowCount(ws)} row(s) imported into sheet "Sheet1"`];
+    await replaceAtomically(target, temporary => Workbook.writeFile(wb, temporary, { format: to }));
+    return [
+      `- ${Worksheet.actualRowCount(ws)} row(s) imported into sheet "Sheet1"`,
+      ...(to === "xlsb" ? ["- written as XLSB, which opens faster for large sheets"] : [])
+    ];
   }
 
   throw unreachable(from, to);

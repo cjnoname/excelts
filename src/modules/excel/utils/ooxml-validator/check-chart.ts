@@ -108,6 +108,17 @@ interface ClassicOrderRule {
    * group maps to the same rank when comparing positions.
    */
   choiceGroups?: string[][];
+  /**
+   * Whether `order` is the *complete* set of permitted children, so a child outside it is an error rather
+   * than something to skip.
+   *
+   * Off by default, and deliberately opt-in: the order check must stay tolerant of extension elements and of
+   * children this table has not enumerated, or it would report a healthy file. But for a type whose content
+   * model is short and closed, silence is the wrong answer — a `<c:overlay>` inside `<c:dispUnitsLbl>` ranked
+   * -1, was skipped as "not in the table", and shipped in a file Excel repaired while this validator reported
+   * zero problems.
+   */
+  closed?: boolean;
 }
 
 const CT_CHART_TYPE_TAGS = [
@@ -384,6 +395,11 @@ const CLASSIC_ORDER_RULES: ClassicOrderRule[] = [
   },
   // CT_Title (§21.2.2.210)
   { parent: "title", order: ["tx", "layout", "overlay", "spPr", "txPr", "extLst"] },
+
+  // CT_DispUnitsLbl (§21.2.2.49). **Not CT_Title**, though it is easy to render as one: the sequence is
+  // `layout` before `tx` — the reverse of a title's — and there is no `overlay` and no `extLst`. Closed,
+  // because those two absences are the whole point of listing it.
+  { parent: "dispUnitsLbl", order: ["layout", "tx", "spPr", "txPr"], closed: true },
 
   // ---------------------------------------------------------------------------
   // Chart-type elements (§21.2.2.4 — §21.2.2.198). Each plotArea
@@ -967,6 +983,13 @@ function checkClassicChildOrder(ctx: ValidationContext, path: string, root: XmlE
         const name = localName(child.name);
         const rank = rankOf(name);
         if (rank < 0) {
+          if (rule.closed === true) {
+            ctx.reporter.error(
+              "chart-child-not-permitted",
+              `${path}: <c:${rule.parent}> child <c:${name}> is not permitted — CT_${capitalise(rule.parent)} allows only ${rule.order.map(tag => `<c:${tag}>`).join(", ")}.`,
+              path
+            );
+          }
           continue;
         }
         if (rank < lastRank) {

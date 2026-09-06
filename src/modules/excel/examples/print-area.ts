@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Workbook, Worksheet } from "@excel/index";
 
 const outDir = path.resolve(
@@ -38,7 +39,7 @@ ws.pageSetup.printTitlesRow = "1:1";
 ws.pageSetup.printArea = "A1:B10";
 
 try {
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("Done.");
 } catch (error) {
   console.log(error.message);

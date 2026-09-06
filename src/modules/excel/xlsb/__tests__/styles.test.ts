@@ -14,7 +14,7 @@
 import { extractAll } from "@archive/unzip/extract";
 import { Cell, Workbook } from "@excel";
 import { expectValidXlsb } from "@excel/__tests__/helpers/expect-valid-xlsb";
-import type { Font } from "@excel/types";
+import type { Font, Style } from "@excel/types";
 import { iterateBiffRecords } from "@excel/xlsb/binary";
 import { readFont } from "@excel/xlsb/font";
 import { recordSpec } from "@excel/xlsb/spec/records";
@@ -81,7 +81,7 @@ describe("the format table", () => {
   });
 
   it("reads only the cell formats, not the named-style formats", () => {
-    // `BrtXF` appears in two collections and only the ones inside `BrtBeginCellXfs` are what a
+    // `BrtXF` appears in two collections and only the ones inside `BrtBeginCellXFs` are what a
     // cell's index refers to. Collecting both shifts every cell's format by one.
     const table = new CellFormatTable();
     table.intern({ numberFormat: "0.0%" });
@@ -125,13 +125,33 @@ describe("formats survive a round trip", () => {
     const sheet = Workbook.addWorksheet(source, "Shared");
     for (let row = 1; row <= 50; row++) {
       Cell.setValue(sheet, `A${row}`, row);
-      Cell.setStyle(sheet, `A${row}`, { numFmt: "0.00" });
+      // A format code that is *not* one of the reserved ones, because a built-in needs no `BrtFmt` at all and
+      // would make this pass for the wrong reason. `"0.00"` is built-in 2, which is what this used.
+      Cell.setStyle(sheet, `A${row}`, { numFmt: "0.0000_ ;[Red]-0.0000_ " });
     }
 
     const entries = await extractAll(await Workbook.toBuffer(source, { format: "xlsb" }));
     const listing = describeBiffStream(entries.get("xl/styles.bin")!.data);
     expect(listing.match(/BrtFmt /g)).toHaveLength(1);
-    expect(listing).toContain("BrtBeginCellXfs count=2");
+    expect(listing).toContain("BrtBeginCellXFs count=2");
+  });
+
+  it("spends no BrtFmt on a built-in format code", async () => {
+    // The reserved identifiers name their formats on their own, and Excel writes `iFmt = 14` for a date with
+    // no `BrtFmt` beside it. Every format string used to become a custom entry from 164 up.
+    const source = Workbook.create();
+    const sheet = Workbook.addWorksheet(source, "BuiltIn");
+    Cell.setValue(sheet, "A1", 1);
+    Cell.setStyle(sheet, "A1", { numFmt: "0.00" });
+    const entries = await extractAll(await Workbook.toBuffer(source, { format: "xlsb" }));
+    const listing = describeBiffStream(entries.get("xl/styles.bin")!.data);
+    expect(listing.match(/BrtFmt /g)).toBeNull();
+    // Still two cell formats: the empty one at index 0 and the cell's.
+    expect(listing).toContain("BrtBeginCellXFs count=2");
+    // And it survives the trip, which is the point of resolving rather than dropping it.
+    const reopened = Workbook.create();
+    await Workbook.read(reopened, await Workbook.toBuffer(source, { format: "xlsb" }));
+    expect(Cell.getStyle(Workbook.getWorksheet(reopened, "BuiltIn")!, "A1")?.numFmt).toBe("0.00");
   });
 
   it("keeps a format on a cell with no value", async () => {
@@ -347,9 +367,11 @@ describe("fonts and fills reach the cells that asked for them", () => {
     const source = Workbook.create();
     const sheet = Workbook.addWorksheet(source, "Shared");
     Cell.setValue(sheet, "A1", 1);
-    Cell.setStyle(sheet, "A1", { font: { bold: true }, numFmt: "0.00" });
+    // Both codes are custom, so each really does contribute a `BrtFmt`. `"0.00"` is built-in 2 and used to be
+    // counted here as though it were custom.
+    Cell.setStyle(sheet, "A1", { font: { bold: true }, numFmt: "0.0000_ ;[Red]-0.0000_ " });
     Cell.setValue(sheet, "A2", 2);
-    Cell.setStyle(sheet, "A2", { font: { bold: true }, numFmt: "0.000" });
+    Cell.setStyle(sheet, "A2", { font: { bold: true }, numFmt: "0.00000_ ;[Red]-0.00000_ " });
     Cell.setValue(sheet, "A3", 3);
     Cell.setStyle(sheet, "A3", { font: { bold: true } });
 
@@ -502,5 +524,146 @@ describe("the workbook default font", () => {
     const font = await fontZero(source);
     expect(font?.name).toBe("Calibri");
     expect(font?.size).toBe(11);
+  });
+});
+
+describe("BrtDXF field widths, measured against Excel's own bytes", () => {
+  /**
+   * The `XFProp` array of the first `BrtDXF` `writeStyles` emits for `style`.
+   *
+   * **Two of these fields were the wrong width, and nothing in the suite measured any of them.** Excel discarded
+   * the whole `DXFs` collection — `Removed Part: /xl/styles.bin` — and with it every conditional-formatting
+   * rule's formatting. The defects were found by grafting this library's `styles.bin` into a workbook Excel had
+   * repaired, then substituting one collection at a time; that is what "measure it against Excel" has to mean
+   * when a reader and a writer share the same wrong assumption.
+   */
+  function propsOf(style: Partial<Style>): { type: number; cb: number; blob: Uint8Array }[] {
+    const bytes = writeStyles(new CellFormatTable(), undefined, [], [style]);
+    for (const record of iterateBiffRecords(bytes, "xl/styles.bin")) {
+      if (recordSpec(record.id)?.name !== "BrtDXF") {
+        continue;
+      }
+      const view = new DataView(
+        record.payload.buffer,
+        record.payload.byteOffset,
+        record.payload.byteLength
+      );
+      const count = view.getUint16(4, true);
+      const props: { type: number; cb: number; blob: Uint8Array }[] = [];
+      let offset = 6;
+      for (let index = 0; index < count; index += 1) {
+        const type = view.getUint16(offset, true);
+        const cb = view.getUint16(offset + 2, true);
+        props.push({ type, cb, blob: record.payload.slice(offset + 4, offset + cb) });
+        offset += cb;
+      }
+      expect(offset, "the properties should account for the whole record").toBe(
+        record.payload.length
+      );
+      return props;
+    }
+    throw new Error("no BrtDXF was written");
+  }
+
+  it("writes a FillPattern as one byte", () => {
+    // MS-XLSB 2.5.51: an enumeration from 0x00 to 0x12. This wrote a `u32`, so the property measured `cb=8`
+    // where Excel's measures 5.
+    const fill = propsOf({
+      fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FF00FF00" } } as never
+    }).find(prop => prop.type === 0x00);
+    expect(fill?.cb).toBe(5);
+    expect([...(fill?.blob ?? [])]).toEqual([1]);
+  });
+
+  it("writes an LPWideString count as two bytes", () => {
+    // MS-XLSB 2.5.92: `cchCharacters` is two bytes. This wrote one, so every byte of the name landed a byte
+    // early. Excel's own property for "Comic Sans MS" is `cb=32` beginning `0d 00`; this produced 31 and `0d`.
+    const name = propsOf({ font: { name: "Comic Sans MS" } as never }).find(
+      prop => prop.type === 0x18
+    );
+    expect(name?.cb).toBe(4 + 2 + "Comic Sans MS".length * 2);
+    expect([...(name?.blob ?? []).slice(0, 4)]).toEqual([0x0d, 0x00, 0x43, 0x00]);
+  });
+
+  it("round-trips a font name through the corrected width", () => {
+    // The reader read a one-byte count too, so a name survived this codec and was rejected by Excel. Asserted
+    // through `readStyles` so the two halves cannot drift apart again.
+    const style = { font: { name: "Comic Sans MS", bold: true } } as Partial<Style>;
+    const read = readStyles(
+      writeStyles(new CellFormatTable(), undefined, [], [style]),
+      "xl/styles.bin"
+    );
+    expect(read.dxfs[0]?.font?.name).toBe("Comic Sans MS");
+    expect(read.dxfs[0]?.font?.bold).toBe(true);
+  });
+
+  it("writes an underline, which had no branch at all", () => {
+    // `XFProp` type 0x1A, an `Underline` enumeration — not a boolean. Without it a rule formatted with nothing
+    // but an underline produced a `BrtDXF` with zero properties, which Excel also rejects.
+    const props = propsOf({ font: { underline: true } as never });
+    expect(props.map(prop => prop.type)).toEqual([0x1a]);
+    expect([...props[0]!.blob]).toEqual([1, 0]);
+    expect([...propsOf({ font: { underline: "double" } as never })[0]!.blob]).toEqual([2, 0]);
+  });
+
+  it("refuses to emit a DXF that changes nothing", () => {
+    // A style this writer cannot express must not become an empty `BrtDXF`: Excel discards the collection when
+    // it meets one. The style is dropped instead, so the rule keeps `dxfId` "none".
+    const bytes = writeStyles(new CellFormatTable(), undefined, [], [{} as Partial<Style>]);
+    const dxfs = [...iterateBiffRecords(bytes, "xl/styles.bin")].filter(
+      record => recordSpec(record.id)?.name === "BrtDXF"
+    );
+    expect(dxfs).toHaveLength(0);
+  });
+});
+
+describe("ixfParent, which decides whether a style XF is a root", () => {
+  /** The `ixfParent` of every `BrtXF`, split by which collection it is in. */
+  function parents(bytes: Uint8Array): { style: number[]; cell: number[] } {
+    const out = { style: [] as number[], cell: [] as number[] };
+    let open: "style" | "cell" | undefined;
+    for (const record of iterateBiffRecords(bytes, "xl/styles.bin")) {
+      const name = recordSpec(record.id)?.name;
+      if (name === "BrtBeginCellStyleXFs") {
+        open = "style";
+      } else if (name === "BrtBeginCellXFs") {
+        open = "cell";
+      } else if (name?.startsWith("BrtEnd") === true) {
+        open = undefined;
+      } else if (name === "BrtXF" && open !== undefined) {
+        out[open].push(
+          new DataView(record.payload.buffer, record.payload.byteOffset).getUint16(0, true)
+        );
+      }
+    }
+    return out;
+  }
+
+  it("is 0xFFFF on every style XF and 0 on every cell XF", () => {
+    // **The defect that cost a workbook all forty-nine of its named styles.** `ixfParent` indexes the style-XF
+    // collection, so a style XF cannot have one — 0xFFFF says "root", and Excel writes it for every one. This
+    // wrote 0 for all but the first, reasoning that a named style inherits from `Normal`: true of the style
+    // hierarchy, false of this field.
+    //
+    // Excel's answer named the *Styles* collection (`Removed Records: Style`) while the fault was in the XFs
+    // those styles index — which is why reading the message literally led nowhere. The assertion is therefore on
+    // the field, not on the symptom.
+    const named = [
+      { name: "Heading", builtinId: 3, font: { bold: true } },
+      { name: "Total", builtinId: 25, font: { italic: true } },
+      { name: "Note", builtinId: 10 }
+    ] as never[];
+    const table = new CellFormatTable();
+    table.intern({ font: { bold: true } } as never);
+    const found = parents(writeStyles(table, undefined, named));
+
+    expect(found.style).toHaveLength(1 + named.length);
+    expect(
+      found.style.every(parent => parent === 0xffff),
+      "style XFs are roots"
+    ).toBe(true);
+    // A cell XF is the opposite case: it really does inherit from a style XF, and 0 is `Normal`.
+    expect(found.cell.length).toBeGreaterThan(0);
+    expect(found.cell.every(parent => parent === 0)).toBe(true);
   });
 });

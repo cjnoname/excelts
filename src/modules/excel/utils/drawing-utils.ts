@@ -363,3 +363,270 @@ export function filterDrawingAnchors<
     return true;
   });
 }
+
+/**
+ * Anchors for a sheet's user-drawn shapes.
+ *
+ * Extracted from the XLSX worksheet xform, where it was sixty inline lines. That was fine while one
+ * caller existed; the XLSB writer is a second, and shape anchoring is exactly the kind of arithmetic
+ * that two implementations get subtly differently — the three anchoring modes below are dispatched on
+ * which fields are *present*, not on a discriminator, so a caller that forgot `ext` in the one-cell case
+ * produces a shape with no size and no error.
+ *
+ * `startIndex` is the number of anchors already in the drawing. `cNvPrId` has to be unique across the
+ * whole part, and image and chart ids derive from their anchor position — so a shape numbering itself
+ * from 1 would collide with the first picture.
+ */
+export function buildShapeAnchors(
+  shapes: readonly ShapeLike[],
+  startIndex: number
+): DrawingAnchor[] {
+  const anchors: DrawingAnchor[] = [];
+  for (const shape of shapes) {
+    const anchorRange = shape.anchorRange;
+    if (!anchorRange) {
+      continue;
+    }
+    // The three modes `getAnchorType` dispatches on: absolute when `pos` is present, two-cell when `br`
+    // is, one-cell otherwise — and one-cell needs `ext`, because there is no second corner to size it.
+    const range =
+      anchorRange.pos !== undefined
+        ? { pos: anchorRange.pos, ext: anchorRange.ext, editAs: "absolute" as const }
+        : anchorRange.br !== undefined
+          ? { tl: anchorRange.tl, br: anchorRange.br, editAs: anchorRange.editAs ?? "oneCell" }
+          : { tl: anchorRange.tl, ext: anchorRange.ext, editAs: anchorRange.editAs ?? "oneCell" };
+    const cNvPrId = startIndex + anchors.length + 1;
+    anchors.push({
+      range,
+      shape: {
+        kind: "userShape",
+        cNvPrId,
+        name: shape.name ?? `Shape ${cNvPrId}`,
+        shapeType: shape.shapeType,
+        fill: shape.fillColor ? { color: shape.fillColor } : undefined,
+        line:
+          shape.lineColor !== undefined || shape.lineWidth !== undefined
+            ? { color: shape.lineColor, width: shape.lineWidth }
+            : undefined,
+        text: shape.text
+      }
+    } as unknown as DrawingAnchor);
+  }
+  return anchors;
+}
+
+/** The shape fields an anchor is built from. */
+export interface ShapeLike {
+  readonly anchorRange?: {
+    readonly pos?: unknown;
+    readonly ext?: unknown;
+    readonly tl?: unknown;
+    readonly br?: unknown;
+    readonly editAs?: string;
+  };
+  readonly name?: string;
+  readonly shapeType?: string;
+  readonly fillColor?: unknown;
+  readonly lineColor?: unknown;
+  readonly lineWidth?: unknown;
+  readonly text?: unknown;
+}
+
+/**
+ * Anchors for a sheet's legacy form controls.
+ *
+ * Extracted from the XLSX worksheet xform alongside {@link buildShapeAnchors}, and for the same reason:
+ * the XLSB writer is a second caller, and two implementations of "where does this checkbox sit" diverge
+ * quietly.
+ *
+ * **A form control is three things, not one.** The DrawingML anchor here is a *hidden bridge* to the VML
+ * shape that actually draws it — Excel writes one when it repairs a sheet with legacy controls and no
+ * `<drawing>` part, which is why it exists at all. The control's own properties live in a third part,
+ * `xl/ctrlProps/ctrlPropN.xml`, reached by its own relationship. Omitting any of the three leaves a
+ * control Excel offers to repair.
+ *
+ * `spid` is the link: the anchor names `_x0000_s{shapeId}` and the VML shape carries the same id.
+ */
+export function buildFormControlAnchors(
+  controls: readonly FormControlLike[],
+  startIndex: number
+): DrawingAnchor[] {
+  void startIndex;
+  const anchors: DrawingAnchor[] = [];
+  for (const control of controls) {
+    if (control.tl === undefined || control.br === undefined) {
+      continue;
+    }
+    // `shapeId` is the control's own, not derived from the anchor position — the VML shape shares it, so
+    // renumbering here would break the bridge.
+    const shapeId = control.shapeId ?? 1025;
+    anchors.push({
+      range: {
+        editAs: "absolute",
+        tl: toNativeAnchorPos(control.tl),
+        br: toNativeAnchorPos(control.br)
+      },
+      alternateContent: { requires: "a14" },
+      shape: {
+        cNvPrId: shapeId,
+        // Excel's own default, and the arithmetic is its: legacy shape ids start at 1025.
+        name: control.name || `Check Box ${Math.max(1, shapeId - 1024)}`,
+        hidden: true,
+        spid: `_x0000_s${shapeId}`,
+        text: control.text
+      }
+    } as unknown as DrawingAnchor);
+  }
+  return anchors;
+}
+
+/** A control's corner in the `native*` shape an anchor wants. */
+function toNativeAnchorPos(position: {
+  col: number;
+  colOff: number;
+  row: number;
+  rowOff: number;
+}): { nativeCol: number; nativeColOff: number; nativeRow: number; nativeRowOff: number } {
+  return {
+    nativeCol: position.col,
+    nativeColOff: position.colOff,
+    nativeRow: position.row,
+    nativeRowOff: position.rowOff
+  };
+}
+
+/** The form-control fields an anchor is built from. */
+export interface FormControlLike {
+  readonly shapeId?: number;
+  readonly name?: string;
+  readonly text?: unknown;
+  readonly tl?: { col: number; colOff: number; row: number; rowOff: number };
+  readonly br?: { col: number; colOff: number; row: number; rowOff: number };
+}
+
+/**
+ * Anchors and drawing relationships for a sheet's charts.
+ *
+ * Extracted alongside {@link buildShapeAnchors} and {@link buildFormControlAnchors}, and this one carries
+ * the detail most likely to be got wrong twice: **a chart anchor's absolute position is in EMU in the
+ * model and in pixels in the anchor.** `PosXform`/`ExtXform` multiply by `EMU_PER_PIXEL_AT_96_DPI` on
+ * render, so passing EMU straight through overshoots by 9525× — and `ext` carries `{ cx, cy }` in the
+ * model where the xform reads `{ width, height }`, which renders as `NaN`.
+ *
+ * A chart also needs a relationship *from the drawing*, not from the sheet: the drawing's `graphicFrame`
+ * names it. `nextRelationshipId` is supplied so the caller controls the id space it comes from.
+ */
+export function buildChartAnchors(
+  charts: readonly ChartAnchorLike[],
+  drawingRels: DrawingRel[]
+): DrawingAnchor[] {
+  const anchors: DrawingAnchor[] = [];
+  for (const chart of charts) {
+    const range: Record<string, unknown> = { ...chart.range };
+    if (chart.range?.pos !== undefined) {
+      range.pos = { x: emuToPixels(chart.range.pos.x), y: emuToPixels(chart.range.pos.y) };
+    }
+    if (chart.range?.ext?.cx !== undefined) {
+      range.ext = {
+        width: emuToPixels(chart.range.ext.cx),
+        height: emuToPixels(chart.range.ext.cy)
+      };
+    }
+    const relationshipId = `rId${drawingRels.length + 1}`;
+    const isChartEx = (chart.chartExNumber ?? 0) > 0;
+    const number = isChartEx ? chart.chartExNumber! : chart.chartNumber!;
+    drawingRels.push({
+      Id: relationshipId,
+      // **`RelType.ChartEx`, not a literal.** This URI was written out by hand here and it was wrong twice over:
+      // `…/office/drawing/2014/chartex` where the relationship type is `…/office/2014/relationships/chartEx` —
+      // a different path *and* a different case. Relationship type URIs are case-sensitive (unlike part names),
+      // so Excel did not recognise the relationship, could not resolve the `graphicFrame` that named it, and
+      // answered `Removed Part: /xl/drawings/drawingN.xml (Drawing shape)`: a drawing pointing at a relationship
+      // it cannot understand is not a drawing.
+      //
+      // `RelType` had the correct constant all along and this file already imports it for images. A hand-written
+      // copy of a URI is a copy that can be wrong on its own, and this one was.
+      Type: isChartEx ? RelType.ChartEx : RelType.Chart,
+      Target: isChartEx ? `../charts/chartEx${number}.xml` : `../charts/chart${number}.xml`
+    } as DrawingRel);
+    anchors.push({
+      range,
+      ...(isChartEx ? { chartExNumber: number } : { chartNumber: number }),
+      ...(isChartEx ? { alternateContent: { requires: "cx1" } } : {}),
+      graphicFrame: {
+        rId: relationshipId,
+        ...(isChartEx ? { isChartEx: true } : {}),
+        name: `Chart ${number}`
+      }
+    } as unknown as DrawingAnchor);
+  }
+  return anchors;
+}
+
+/** EMU to pixels at 96 dpi, the unit the drawing xforms expect. */
+function emuToPixels(value: number): number {
+  return Math.round(value / 9525);
+}
+
+/** The chart-anchor fields a drawing anchor is built from. */
+export interface ChartAnchorLike {
+  readonly chartNumber?: number;
+  readonly chartExNumber?: number;
+  readonly range?: {
+    readonly pos?: { x: number; y: number };
+    readonly ext?: { cx: number; cy: number };
+    readonly tl?: unknown;
+    readonly br?: unknown;
+    readonly editAs?: string;
+  };
+}
+
+/**
+ * The anchors and relationships an *overlay* watermark needs — a picture stretched over the sheet's data
+ * area with an alpha applied, which is how Excel expresses a watermark that sits behind the cells.
+ *
+ * Shared because the XLSB writer had no version of this at all and silently routed an overlay watermark
+ * into the header/footer VML instead: the picture came back as a `headerImage` at the centre of the page
+ * header, with its opacity dropped. That is not a lossy write, it is a *different document* — and it read
+ * back cleanly, so nothing pointed at it.
+ *
+ * `alphaModFix` is a percentage in hundred-thousandths, and the default of 0.15 is Excel's own for a
+ * watermark rather than a value chosen here.
+ */
+export function buildWatermarkOverlayAnchors(
+  watermarks: readonly { readonly imageId: string | number; readonly opacity?: number }[],
+  options: {
+    readonly getBookImage: (imageId: string | number) => MediaLike | undefined;
+    readonly nextRId: (rels: readonly DrawingRel[]) => string;
+    /** The sheet's data extent, so the picture covers what the sheet actually uses. */
+    readonly extent?: { readonly right?: number; readonly bottom?: number };
+  },
+  rels: DrawingRel[]
+): DrawingAnchor[] {
+  const anchors: DrawingAnchor[] = [];
+  // A generous floor, because a watermark over a two-cell sheet should still look like a watermark.
+  const right = Math.max(options.extent?.right ?? 100, 100);
+  const bottom = Math.max(options.extent?.bottom ?? 200, 200);
+  for (const watermark of watermarks) {
+    const bookImage = options.getBookImage(watermark.imageId);
+    if (bookImage === undefined) {
+      continue;
+    }
+    const rIdImage = options.nextRId(rels);
+    rels.push(buildImageRel(rIdImage, bookImage));
+    const opacity = Math.max(0, Math.min(1, watermark.opacity ?? 0.15));
+    anchors.push({
+      picture: {
+        rId: rIdImage,
+        alphaModFix: Math.round(opacity * 100000),
+        ...(isExternalImage(bookImage) ? { external: true } : {})
+      },
+      range: {
+        editAs: "absolute",
+        tl: { nativeCol: 0, nativeColOff: 0, nativeRow: 0, nativeRowOff: 0 },
+        br: { nativeCol: right, nativeColOff: 0, nativeRow: bottom, nativeRowOff: 0 }
+      }
+    } as DrawingAnchor);
+  }
+  return anchors;
+}

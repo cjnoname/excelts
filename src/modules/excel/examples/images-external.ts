@@ -41,6 +41,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { HrStopwatch } from "@excel/examples/utils/hr-stopwatch";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Image, Watermark, Workbook } from "@excel/index";
 
 const exampleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -97,7 +98,7 @@ Watermark.add(wmSheet, { imageId: wmImageId, mode: "overlay", opacity: 0.15 });
 const stopwatch = new HrStopwatch();
 stopwatch.start();
 try {
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("Done. Wrote linked-image workbook to:", filename);
   console.log("Time taken (us):", stopwatch.microseconds);
 } catch (error) {

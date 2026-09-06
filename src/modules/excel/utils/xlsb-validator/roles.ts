@@ -179,10 +179,10 @@ export const XLSB_PART_ROLES: Readonly<Record<XlsbPartRole, XlsbPartExpectations
     // Cell formats reference fonts, fills, borders and number formats by index, so
     // every table they index into has to be declared first.
     precedes: [
-      ["BrtBeginFmts", "BrtBeginCellXfs"],
-      ["BrtBeginFonts", "BrtBeginCellXfs"],
-      ["BrtBeginFills", "BrtBeginCellXfs"],
-      ["BrtBeginBorders", "BrtBeginCellXfs"]
+      ["BrtBeginFmts", "BrtBeginCellXFs"],
+      ["BrtBeginFonts", "BrtBeginCellXFs"],
+      ["BrtBeginFills", "BrtBeginCellXFs"],
+      ["BrtBeginBorders", "BrtBeginCellXFs"]
     ]
   },
   table: { rootScope: "BrtBeginList" },

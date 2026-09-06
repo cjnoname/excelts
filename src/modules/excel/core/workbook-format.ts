@@ -21,8 +21,10 @@
  *    else keeps the streaming path, and an explicit `format` overrides both.
  */
 
+import { refuseUnsupported } from "@excel/core/unsupported";
 import type { WorkbookData } from "@excel/core/workbook-core";
 import { ExcelFileError } from "@excel/errors";
+import { modelHash, sameHash } from "@excel/xlsb/model-hash";
 import { commitXlsbRead, isXlsbPackage, parseXlsbPackage } from "@excel/xlsb/read/package";
 import { writeXlsbPackage } from "@excel/xlsb/write/package";
 import { base64ToUint8Array } from "@utils/utils";
@@ -136,9 +138,16 @@ export async function readXlsbInto(
   workbook: WorkbookData,
   bytes: Uint8Array,
   source?: string,
-  options: { readonly unsupported?: "error" | "ignore" } = {}
+  options: {
+    readonly unsupported?: "error" | "ignore";
+    readonly blankCells?: "keep" | "collapse";
+    readonly formulas?: "preserve" | "cached" | "error";
+  } = {}
 ): Promise<WorkbookData> {
-  const parsed = await parseXlsbPackage(bytes, source);
+  const parsed = await parseXlsbPackage(bytes, source, {
+    ...(options.blankCells === undefined ? {} : { blankCells: options.blankCells }),
+    ...(options.formulas === undefined ? {} : { formulas: options.formulas })
+  });
   if (parsed.diagnostics.lost.length > 0 && options.unsupported === "error") {
     const { ExcelNotSupportedError } = await import("@excel/errors");
     throw new ExcelNotSupportedError(
@@ -174,22 +183,119 @@ export async function writeXlsbBytes(
   options: { readonly unsupported?: "error" | "ignore" } = {}
 ): Promise<Uint8Array> {
   const { getWorkbookModel } = await import("@excel/core/workbook.browser");
-  const written = await writeXlsbPackage(getWorkbookModel(workbook));
-  if (written.unsupported.length > 0 && (options.unsupported ?? "error") === "error") {
-    const { ExcelNotSupportedError } = await import("@excel/errors");
-    throw new ExcelNotSupportedError(
-      "Write XLSB",
-      // Deliberately not "cell(s) … written as blanks": the report covers sheet features and defined
-      // names as well, and what happens to each differs — an unsupported cell becomes a blank, a
-      // dropped sheet feature simply does not appear, and a formula whose cached result cannot be
-      // expressed keeps its formula. Naming one outcome for all of them was accurate only while cells
-      // were all this could report.
-      `${written.unsupported.length} item(s) carry content this writer cannot express: ` +
-        `${written.unsupported.slice(0, 10).join(", ")}` +
-        `${written.unsupported.length > 10 ? ", …" : ""}. ` +
-        `Pass { unsupported: "ignore" } to write the workbook without them.`,
-      { items: written.unsupported }
-    );
+  const model = getWorkbookModel(workbook);
+  // **An unchanged package comes back exactly as it arrived.**
+  //
+  // The comparison is against a hash taken when the workbook was read, and it is safe to act on because
+  // `writeXlsbPackage` reads nothing but the model: an unchanged model would produce equivalent bytes regardless.
+  // What the original adds is fidelity for the parts this library understands imperfectly — a macro project, a
+  // chart it did not model, a pivot cache it rebuilt approximately. Those survive a read-and-write untouched
+  // instead of being reconstructed from what was understood of them.
+  //
+  // `unsupported` is deliberately not consulted. There is nothing to refuse: nothing is being dropped, because
+  // nothing is being rewritten. Reporting a loss here would describe a package that is not the one returned.
+  const source = (workbook as unknown as { _xlsbSource?: { bytes: Uint8Array; hash: Uint8Array } })
+    ._xlsbSource;
+  if (source !== undefined && sameHash(source.hash, modelHash(model))) {
+    return source.bytes;
   }
+  const written = await writeXlsbPackage(model);
+  refuseUnsupported(written.unsupported, options);
   return written.bytes;
+}
+
+/**
+ * Write an XLSB package straight into a sink, one part at a time.
+ *
+ * The same `writeXlsbPackage` as {@link writeXlsbBytes} — the only difference is where the parts go, which is
+ * the whole point of `PackageSink`. So the loss report and its `unsupported` policy are shared too, through
+ * {@link refuseUnsupported}: a caller must not get a different answer about what was dropped depending on
+ * whether they asked for bytes or a stream.
+ *
+ * **The refusal happens after the parts are written**, which is a real difference worth naming. A buffered write
+ * can refuse before anything leaves the process; a streamed one has already sent bytes downstream by the time
+ * the report is complete, so `unsupported: "error"` throws *and* the sink has received a package. That is
+ * inherent to streaming rather than a flaw here — the alternative is to buffer, which is the mode the caller
+ * chose against — and it is why the default for a stream is worth thinking about at the call site.
+ */
+export async function writeXlsbToStream(
+  workbook: WorkbookData,
+  stream: unknown,
+  options: { readonly unsupported?: "error" | "ignore" } = {}
+): Promise<void> {
+  const [{ getWorkbookModel }, { streamXlsbPackage }, { createXlsbZipWriter }] = await Promise.all([
+    import("@excel/core/workbook.browser"),
+    import("@excel/core/xlsb-stream"),
+    import("@excel/core/xlsb-zip")
+  ]);
+  const model = getWorkbookModel(workbook);
+  // **The same unchanged-package passthrough `writeXlsbBytes` does, because the guarantee is about the workbook and
+  // not about which entry point asked for it.**
+  //
+  // This entry point rebuilt unconditionally, so one unmodified workbook produced two different packages depending on
+  // whether the caller wanted bytes or a stream: measured on `poi-sample.xlsb`, 10,843 bytes from `toBuffer` and 8,061
+  // from here. The missing 2,782 are exactly what the passthrough exists to protect — parts this library models
+  // imperfectly, kept as Excel wrote them.
+  //
+  // Written through the sink rather than returned, so the caller's stream receives the original bytes as one part-less
+  // copy of the archive. There is nothing to refuse: nothing is being rewritten, so nothing is being dropped.
+  const source = (workbook as unknown as { _xlsbSource?: { bytes: Uint8Array; hash: Uint8Array } })
+    ._xlsbSource;
+  if (source !== undefined && sameHash(source.hash, modelHash(model))) {
+    await writeBytesToStream(stream, source.bytes);
+    return;
+  }
+  // The policy is applied *inside*, before the archive is finalised — see `streamXlsbPackage`'s `refuse`. Applying it
+  // here, after the call returned, meant the destination already held a complete package when the error was thrown.
+  await streamXlsbPackage(model, stream as never, createXlsbZipWriter, unsupported =>
+    refuseUnsupported(unsupported, options)
+  );
+}
+
+/**
+ * The original package, handed to whatever stream shape the caller supplied.
+ *
+ * `writeStream` accepts a Node writable, a web `WritableStream` and this library's own sink, so the passthrough has to
+ * reach all three — which is why this is a small adapter rather than a `write` call.
+ */
+async function writeBytesToStream(stream: unknown, bytes: Uint8Array): Promise<void> {
+  const candidate = stream as {
+    write?: (chunk: Uint8Array) => unknown;
+    end?: (callback?: () => void) => unknown;
+    getWriter?: () => {
+      write: (chunk: Uint8Array) => Promise<void>;
+      close: () => Promise<void>;
+    };
+  };
+  if (typeof candidate.getWriter === "function") {
+    const writer = candidate.getWriter();
+    await writer.write(bytes);
+    await writer.close();
+    return;
+  }
+  if (typeof candidate.write !== "function") {
+    throw new TypeError("writeStream needs a writable stream");
+  }
+  // **`write` is called with one argument, and completion is settled separately.**
+  //
+  // This used to pass a second, callback argument and resolve only when it was invoked — but `XlsxWritable.write` is
+  // declared as `(data) => boolean | void | Promise<boolean>` and carries no callback at all. So a destination that
+  // conforms to the published type and simply returns `true` was never going to call it, and `writeStream` hung
+  // forever. Measured: a `{ write(d) { …; return true; }, end() {} }` sink received the bytes and the promise never
+  // settled.
+  //
+  // The returned value is awaited when it is a promise, which is the other shape the type allows, and completion goes
+  // through the same `settled` the part-by-part path uses rather than a protocol private to this branch. That helper
+  // already knows the three ways a destination can say it is done, including the one where it cannot.
+  const result = candidate.write(bytes);
+  if (result !== null && typeof result === "object" && "then" in result) {
+    await (result as PromiseLike<unknown>);
+  }
+  if (typeof candidate.end === "function" && candidate.end.length === 0) {
+    candidate.end();
+  }
+  // Imported here rather than at the top, because every other reach into this module in this file is dynamic: the
+  // XLSB path is loaded on demand so an XLSX-only consumer does not pay for it.
+  const { settled } = await import("@excel/core/xlsb-stream");
+  await settled(candidate);
 }

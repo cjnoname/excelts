@@ -37,6 +37,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ChartRichText } from "@excel/chart/index";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import {
   Address,
   Cell,
@@ -987,7 +988,7 @@ async function main(): Promise<void> {
   // Write outputs
   // =========================================================================
 
-  await Workbook.writeFile(wb, XLSX_PATH);
+  await writeBothFormats(wb, XLSX_PATH);
   console.log(`XLSX → ${XLSX_PATH}`);
 
   const pdf = await excelToPdf(wb, {

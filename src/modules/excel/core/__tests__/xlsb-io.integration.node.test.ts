@@ -167,8 +167,14 @@ describe("streams", () => {
   });
 
   it("surfaces an assembly failure as a stream error, not a hang", async () => {
-    // The XLSX path reports serialisation failures through `'error'`; the XLSB path assembles
-    // in one step and must do the same rather than leaving the consumer waiting.
+    // The XLSX path reports serialisation failures through `'error'`, and the XLSB path must do the same rather than
+    // leaving the consumer waiting.
+    //
+    // **This case caught a real regression when `toStream` was rebuilt on the part-by-part writer.** The refusal used to
+    // be applied *after* `streamXlsbPackage` returned — which worked while the package was assembled up front and the
+    // throw came before any push, and stopped working the moment production became incremental: the readable had already
+    // been ended, so the error reached nobody and a workbook with unwritable content streamed to a clean finish. The
+    // policy is applied before the archive is finalised now, so this holds for both shapes.
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "Hard"), "A1", {
       formula: "MATCH(1,{1,2},0)",
@@ -183,6 +189,42 @@ describe("streams", () => {
       })()
     ).rejects.toThrow(ExcelNotSupportedError);
   });
+
+  it("does not leave a readable package behind when it refuses", async () => {
+    // The other half of applying the policy before `finalize`. `writeStream` used to hand a *complete* archive to the
+    // destination and then throw, so a caller who ignored the rejection was left with a file that opened perfectly and
+    // was missing content the writer had promised to refuse over. A ZIP with no central directory cannot be mistaken
+    // for a finished one.
+    const workbook = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(workbook, "Hard"), "A1", {
+      formula: "MATCH(1,{1,2},0)",
+      result: 1
+    } as never);
+    // A collecting sink rather than a file. Two attempts with `createWriteStream` were flaky in opposite directions —
+    // first a zero-length read, then `ENOENT`, because the refusal now happens early enough that the file had not been
+    // opened. What is being asserted is what the *destination* received, and an in-memory one answers that exactly.
+    const chunks: Uint8Array[] = [];
+    const sink = {
+      write(chunk: Uint8Array) {
+        chunks.push(Uint8Array.from(chunk));
+        return true;
+      },
+      end() {}
+    };
+    await expect(Workbook.writeStream(workbook, sink as never, { format: "xlsb" })).rejects.toThrow(
+      ExcelNotSupportedError
+    );
+    // **The invariant is "not a package", not "some bytes".** How much reached the sink before the refusal is not the
+    // point and is not stable; that it cannot be read back as a workbook is.
+    const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const written = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      written.set(chunk, at);
+      at += chunk.length;
+    }
+    await expect(Workbook.read(Workbook.create(), written)).rejects.toThrow();
+  });
 });
 
 describe("content the writer cannot express", () => {
@@ -192,13 +234,17 @@ describe("content the writer cannot express", () => {
     const workbook = Workbook.create();
     const sheet = Workbook.addWorksheet(workbook, "Hard");
     Cell.setValue(sheet, "A1", { formula: "MATCH(1,{1,2,3},0)", result: 1 });
-    Cell.setValue(sheet, "A2", { richText: [{ text: "bold", font: { bold: true } }] });
+    // **Two features have left this test in one session.** Rich text is written now — a `RichStr` carries the
+    // runs and their fonts go into the styles part — and so are the eight `BErr` error values. What remains
+    // unwritable is an error with no `BErr` code at all: `#SPILL!` and the rest of the dynamic-array family
+    // postdate the enumeration, so substituting `#VALUE!` would be a different error rather than a loss.
+    Cell.setValue(sheet, "A2", { error: "#SPILL!" } as never);
 
     await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
       ExcelNotSupportedError
     );
     await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
-      /Hard!A1: formula.*Hard!A2: rich text/s
+      /Hard!A1: formula.*Hard!A2: error value #SPILL!/s
     );
   });
 
@@ -213,8 +259,9 @@ describe("content the writer cannot express", () => {
 
     const reopened = Workbook.create();
     await Workbook.read(reopened, bytes);
-    // The cell that could be written survives; the one that could not is blank, not missing.
-    expect(describeWorkbook(reopened)).toBe('Hard!A2 string "kept"');
+    // Both survive: `A2` outright, and `A1` as its cached result with the expression reported as lost. `A1` used to
+    // come back blank — see `write/worksheet.ts` for why keeping the value loses strictly less.
+    expect(describeWorkbook(reopened)).toBe('Hard!A1 number 1\nHard!A2 string "kept"');
   });
 
   it("does not refuse an XLSX write for the same content", async () => {
@@ -486,10 +533,11 @@ describe("read diagnostics", () => {
     ]);
   });
 
-  it("reports formatting runs dropped from a rich shared string", async () => {
-    // A rich string's runs follow its text. The text is complete, so the string is read and the runs
-    // are what is lost — the right trade, and one the reader used to describe in a comment and report
-    // to nobody.
+  it("reports trailing bytes it cannot read as formatting runs", async () => {
+    // Formatting runs themselves are read now. What this fixture has is not runs: its flag byte is `0x00`,
+    // so `fRichStr` is clear and the five bytes after the text are not a `StrRun` array — a record longer
+    // than the shape it declares. The text is complete, so the string is read and those bytes are what is
+    // lost, which is the right trade and one the reader used to describe in a comment and report to nobody.
     const archive = new ZipArchive();
     archive.add(
       "xl/_rels/workbook.bin.rels",
@@ -535,14 +583,14 @@ describe("read diagnostics", () => {
     );
     await expect(
       Workbook.read(Workbook.create(), await archive.bytes(), { unsupported: "error" })
-    ).rejects.toThrow(/formatting runs on 1 rich string/);
+    ).rejects.toThrow(/unreadable trailing bytes on 1 string/);
   });
 
-  it("reports an error-valued cell, which used to read back as an empty one", async () => {
-    // `BrtCellError` decoded to `null`, which is indistinguishable from `BrtCellBlank` — so a sheet
-    // of `#N/A` came back as a sheet of blanks with nothing said. The cell is still kept as a blank,
-    // because writing `BrtCellError` back needs an error-code mapping no corpus workbook establishes;
-    // what changed is that the caller can be told.
+  it("reads an error-valued cell as its error, and reports only an unrecognised code", async () => {
+    // `BrtCellError` used to decode to `null`, indistinguishable from `BrtCellBlank`, so a sheet of `#N/A`
+    // came back as a sheet of blanks. The reason given was that no corpus workbook established the code
+    // mapping; five now do, and all five agree with MS-XLSB 2.5.98.2 — so the eight known codes are read as
+    // values and only a byte outside the table is still reported.
     const archive = new ZipArchive();
     archive.add(
       "xl/_rels/workbook.bin.rels",
@@ -568,19 +616,27 @@ describe("read diagnostics", () => {
         ["BrtWsDim", { ref: { firstRow: 0, lastRow: 0, firstColumn: 1, lastColumn: 1 } }],
         ["BrtBeginSheetData"],
         ["BrtRowHdr", rowHeader({ row: 0 })],
+        // `0x07` is `#DIV/0!` — one of the four codes Excel's own files confirm.
         ["BrtCellError", { cell: { column: 1, styleIndex: 0 }, error: 0x07 }],
+        // `0x99` is not in the table, so it is the case that must still be reported rather than guessed.
+        ["BrtCellError", { cell: { column: 2, styleIndex: 0 }, error: 0x99 }],
         ["BrtEndSheetData"],
         ["BrtEndSheet"]
       ])
     );
     const bytes = await archive.bytes();
     await expect(Workbook.read(Workbook.create(), bytes, { unsupported: "error" })).rejects.toThrow(
-      /S1!B1: error value/
+      /S1!C1: error value/
     );
-    // And by default it is still a readable workbook with a blank there.
+
     const workbook = Workbook.create();
     await Workbook.read(workbook, bytes);
-    expect(Cell.getValue(Workbook.getWorksheet(workbook, "S1")!, "B1")).toBeNull();
+    // The known code is the cell's value, in the shape the model gives an error.
+    expect(Cell.getValue(Workbook.getWorksheet(workbook, "S1")!, "B1")).toEqual({
+      error: "#DIV/0!"
+    });
+    // The unknown one is still a blank, which is the honest outcome for a byte with no meaning here.
+    expect(Cell.getValue(Workbook.getWorksheet(workbook, "S1")!, "C1")).toBeNull();
   });
 });
 

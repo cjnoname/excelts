@@ -20,6 +20,7 @@
  */
 
 import { XlsbParseError } from "@excel/errors";
+import { decodeRange, encodeRange as encodeRangeAddress } from "@excel/utils/address";
 import { MAX_RECORD_ID } from "@excel/xlsb/spec/records";
 import type { BinaryReader } from "@utils/binary";
 import { BinaryWriter, concatUint8Arrays, decodeBytesToString } from "@utils/binary";
@@ -247,6 +248,17 @@ export function encodeRk(value: number): number | undefined {
   if (!Number.isFinite(value)) {
     return undefined;
   }
+  // **The truncated-double form first**, because that is the one Excel reaches for. A double whose low 34 bits
+  // are zero survives the truncation exactly, which every small integer and every whole-day date serial does —
+  // and Excel writes `10`, `20` and a 2024 date serial this way, not as integers. Any of these forms decodes to
+  // the same number, so the order is about matching Excel's bytes rather than about correctness; it was
+  // integer-first, and every numeric cell differed from Excel's by three bytes.
+  const scratch = new DataView(new ArrayBuffer(8));
+  scratch.setFloat64(0, value, true);
+  if (scratch.getUint32(0, true) === 0 && (scratch.getUint32(4, true) & 0x03) === 0) {
+    return scratch.getUint32(4, true) >>> 0;
+  }
+  // Integers the truncation cannot hold: near ±2²⁹ the mantissa reaches into the discarded bits.
   if (Number.isInteger(value) && value >= -(2 ** 29) && value < 2 ** 29) {
     return ((value << 2) | 0x02) >>> 0;
   }
@@ -259,12 +271,6 @@ export function encodeRk(value: number): number | undefined {
   const scaled = Math.round(value * 100);
   if (scaled >= -(2 ** 29) && scaled < 2 ** 29 && scaled / 100 === value) {
     return ((scaled << 2) | 0x03) >>> 0;
-  }
-  // A double whose low 34 bits are zero survives the truncation exactly.
-  const scratch = new DataView(new ArrayBuffer(8));
-  scratch.setFloat64(0, value, true);
-  if (scratch.getUint32(0, true) === 0 && (scratch.getUint32(4, true) & 0x03) === 0) {
-    return scratch.getUint32(4, true) >>> 0;
   }
   return undefined;
 }
@@ -308,7 +314,67 @@ export function readRange(reader: BinaryReader): BiffRange {
   };
 }
 
+/**
+ * An `UncheckedRfX` as an A1 reference.
+ *
+ * Beside `readRange` because it is what every caller of it wants next, and it was private to `filter.ts`
+ * while a second reader needed the identical three lines — the point at which a copy becomes two places for
+ * an off-by-one to live.
+ */
+export function rangeReference(range: BiffRange): string {
+  return encodeRangeAddress(
+    { r: range.firstRow, c: range.firstColumn },
+    { r: range.lastRow, c: range.lastColumn }
+  );
+}
+
 /** Encode an `UncheckedRfX`. */
+/**
+ * An `A1:B2` reference as a {@link BiffRange}, or `undefined` when it is not one.
+ *
+ * **One implementation, because there were five and they had already split into two policies.** The identical body
+ * appeared in `conditional-format.ts`, `filter.ts`, `data-validation.ts` and `tables.ts`, all of which decoded through
+ * `@excel/utils/address`'s `decodeRange` — which returns an *inverted* range unchanged. Meanwhile the merge path had its
+ * own regex-based `parseRange` that **refused** an inverted range, with a comment explaining that the validator calls it
+ * `coordinate-range-inverted`. So one package could carry a refused merge and four written-inverted `RfX`s.
+ *
+ * **Normalised rather than refused**, because that is what the library's own authoritative decoder already does:
+ * `colCache.decode("B2:A1")` returns `A1:B2`, while `utils/address`'s `decodeRange` returns `s = B2, e = A1`. Two answers
+ * inside one utility module is the actual root, and the normalising one is right — `B2:A1` and `A1:B2` denote the same
+ * rectangle, so refusing it loses a range the caller described perfectly well and writing it inverted produces a record
+ * the validator rejects.
+ *
+ * `$` is accepted, which the merge path's regex was not: `$A$1:$B$2` was reported as unsupported there while a single
+ * `$A$1` parsed fine two hundred lines away.
+ *
+ * **A single cell is a 1×1 range here, and that is the caller's business to accept or refuse.** A conditional format or a
+ * data validation over `A1` is ordinary; a *merge* of `A1` is not, and Excel refuses one. So the axis-and-bounds parsing
+ * is shared and the "must cover more than one cell" rule stays with merges, where it is true — folding it in here would
+ * make four callers refuse something legitimate.
+ */
+export function tryDecodeRange(reference: string | undefined): BiffRange | undefined {
+  if (reference === undefined || reference === "") {
+    return undefined;
+  }
+  try {
+    const { s, e } = decodeRange(reference);
+    // **Both axes, on both ends.** A reference missing one is a *span*, not a cell range: `A:B` names two whole columns
+    // and `1:2` two whole rows. `decodeCell` yields `NaN` for the absent row and `null` for the absent column, so a
+    // check on rows alone let `1:2` through with `firstColumn: null` — which an `RfX` would have written as garbage.
+    if (![s.r, e.r, s.c, e.c].every(value => Number.isInteger(value))) {
+      return undefined;
+    }
+    return {
+      firstRow: Math.min(s.r, e.r),
+      lastRow: Math.max(s.r, e.r),
+      firstColumn: Math.min(s.c, e.c),
+      lastColumn: Math.max(s.c, e.c)
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function encodeRange(range: BiffRange): Uint8Array {
   return new BinaryWriter()
     .writeUint32(range.firstRow)
@@ -316,6 +382,86 @@ export function encodeRange(range: BiffRange): Uint8Array {
     .writeUint32(range.firstColumn)
     .writeUint32(range.lastColumn)
     .toUint8Array();
+}
+
+/**
+ * Record ids that open and close a future-record wrapper.
+ *
+ * `BrtFRTBegin`/`BrtFRTEnd` (35/36) and `BrtACBegin`/`BrtACEnd` (37/38), which this library's spec table
+ * names `BrtFRTBegin`, `BrtFRTEnd`, `BrtACBegin` and
+ * `BrtACEnd`.
+ */
+const FUTURE_OPEN = new Set([0x0023, 0x0025]);
+const FUTURE_CLOSE = new Set([0x0024, 0x0026]);
+
+/**
+ * Records this library models that legitimately live inside a future-record wrapper.
+ *
+ * The sparkline family, whose ids appear nowhere else — so yielding them cannot resurrect the misreading that
+ * the wrapper skip was written to prevent. Anything added here must have that property.
+ */
+const MODELLED_FUTURE_RECORDS = new Set([
+  1041, // BrtBeginSparklineGroup
+  1042, // BrtEndSparklineGroup
+  1043, // BrtSparkline
+  1056, // BrtBeginSparklines
+  1057, // BrtEndSparklines
+  1058, // BrtBeginSparklineGroups
+  1059 // BrtEndSparklineGroups
+]);
+
+/**
+ * Records in a part, with the contents of future-record wrappers left out.
+ *
+ * **Why the contents have to be skipped rather than merely ignored.** The future-record mechanism
+ * (MS-XLSB 2.1.6) lets a newer Excel carry data an older one must step over, and the records inside a
+ * wrapper *reuse the ordinary record ids*. So a reader that walks the stream flat sees whatever those ids
+ * normally mean, in a position where it cannot mean that.
+ *
+ * `poi-62815.xlsb` in the pinned corpus is the case that found this. Its sheet ends
+ *
+ * ```text
+ * BrtEndSheetData → … → BrtPageSetup → BrtFRTBegin → BrtCellBlank → BrtFRTEnd → BrtEndSheet
+ * ```
+ *
+ * and the reader took that `BrtCellBlank` for a cell: it invented a blank at A282 wearing cell format 8
+ * in a workbook that has seven, *after* the sheet data had ended. The validator then reported both facts
+ * as defects in the file. Both were defects in this walk.
+ *
+ * The wrapper markers themselves are still yielded, so a scope checker can see the pairing; only what is
+ * between them is withheld.
+ *
+ * **The exception, and why there has to be one.** This used to claim that "nothing inside is lost that this
+ * library models". That became false the moment sparklines were modelled: Excel writes the whole
+ * `BrtBeginSparklineGroups` collection *inside* a wrapper, so a blanket skip means this library cannot read a
+ * sparkline Excel wrote. It did not notice, because its own writer emitted them outside any wrapper and its own
+ * reader looked only outside — self-consistent, and matching no other program.
+ *
+ * So a small set of ids is allowed through. The criterion is narrow on purpose: a record whose id this library
+ * models **as a future record** — one that only ever appears inside a wrapper — cannot be confused with an
+ * ordinary record at that position, which is the hazard the skip exists for. `BrtCellBlank` is emphatically not
+ * in the set, and `poi-62815.xlsb` still reads correctly.
+ */
+export function* iterateInterpretableRecords(
+  bytes: Uint8Array,
+  part: string
+): Generator<BiffRecord> {
+  let depth = 0;
+  for (const record of iterateBiffRecords(bytes, part)) {
+    if (FUTURE_OPEN.has(record.id)) {
+      depth++;
+      yield record;
+      continue;
+    }
+    if (FUTURE_CLOSE.has(record.id)) {
+      depth = Math.max(0, depth - 1);
+      yield record;
+      continue;
+    }
+    if (depth === 0 || MODELLED_FUTURE_RECORDS.has(record.id)) {
+      yield record;
+    }
+  }
 }
 
 /** Grid limits, which several checks and both codecs need. */
@@ -350,19 +496,11 @@ export function sheetStateName(value: number): "visible" | "hidden" | "veryHidde
 }
 
 /**
- * `BrtWbProp` flag selecting the 1904 date system.
- *
- * Excel for Mac used 1904 as its epoch, and workbooks created that way are still in
- * circulation. A reader that ignores the flag reads every date in one exactly 1462 days early —
- * four years, which is wrong in a way that looks like a plausible date rather than an error.
- */
-export const WORKBOOK_FLAG_1904 = 0x0001;
-
-/**
  * `BrtName` flag bits that mark a name as machinery rather than something a user created.
  *
- * `_xlfn.CONCAT` in the reference corpus carries `fHidden | fFunc | fProc` — 0x0b — which is
- * exactly the combination a hidden function stub should have, and is what identified these bits.
+ * `_xlfn.CONCAT` in the reference corpus carries `fHidden | fFunc | fProc` — 0x0b — which is exactly the
+ * combination a hidden function stub should have, and is what first identified these bits. MS-XLSB 2.4.712
+ * confirms the order: `fHidden`, `fFunc`, `fOB`, `fProc` at bits 0 through 3.
  * `fProc` additionally selects a longer record tail; see `readName`.
  */
 export const NAME_FLAG_HIDDEN = 0x0001;

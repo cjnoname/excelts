@@ -3,9 +3,10 @@
  *
  * Covers:
  * - format → parse → format round-trip fidelity
- * - Workbook.readMarkdown / writeMarkdown
- * - Workbook.readMarkdownAll (multi-table → worksheets)
- * - Workbook.writeMarkdownBuffer
+ * - readMarkdown / writeMarkdown (bridge functions taking a workbook handle,
+ *   not members of the `Workbook` namespace — it has none)
+ * - readMarkdownAll (multi-table → worksheets)
+ * - writeMarkdownBuffer
  * - Value mapper on readMarkdown
  * - Multiline round-trip through Workbook
  * - Error handling with MarkdownParseError
@@ -70,10 +71,10 @@ fs.writeFileSync(path.join(outDir, "round-trip.md"), markdown1, "utf8");
 console.log();
 
 // =============================================================================
-// 2. Workbook.readMarkdown / writeMarkdown
+// 2. readMarkdown / writeMarkdown
 // =============================================================================
 
-console.log("=== 2. Workbook readMarkdown / writeMarkdown ===\n");
+console.log("=== 2. readMarkdown / writeMarkdown ===\n");
 
 const markdownInput = `
 | Name  | Age | Department  |
@@ -99,7 +100,7 @@ console.log(mdOut);
 fs.writeFileSync(path.join(outDir, "workbook-single.md"), mdOut, "utf8");
 
 // =============================================================================
-// 3. Workbook.readMarkdownAll
+// 3. readMarkdownAll
 // =============================================================================
 
 console.log("=== 3. readMarkdownAll ===\n");

@@ -285,40 +285,44 @@ describe("the limits are pinned, not implied", () => {
     Cell.setValue(sheet, "A3", { formula: "MATCH(1,{1,2,3},0)", result: 1 });
 
     const { unsupported, sheets } = await roundTrip(workbook);
-    expect(unsupported).toEqual(["Formulas!A3: formula"]);
+    expect(unsupported).toEqual(["Formulas!A3: formula (an array constant is not supported yet)"]);
     expect(sheets[0]!.cells.get("A1")).toBe(2);
     // The one it could encode round-trips with its cached result.
     expect(sheets[0]!.cells.get("A2")).toBe(4);
-    // The one it could not survives as a blank rather than vanishing: that a cell existed is
-    // information, and once styles are written it carries formatting too.
+    // The one it could not keeps its cached result and loses only the expression. It used to come back as a blank —
+    // "that a cell existed is information" — which is true and was not enough: the value was information too, and the
+    // writer could express it. See `write/worksheet.ts` for why the reasoning was reversed.
     expect(sheets[0]!.cells.has("A3")).toBe(true);
-    expect(sheets[0]!.cells.get("A3")).toBeNull();
+    expect(sheets[0]!.cells.get("A3")).toBe(1);
   });
 
   it("reports each unwritable feature by name and address", async () => {
     // The report is the contract for what this writer cannot yet do, so it names the feature
     // rather than saying "unsupported".
+    //
+    // A hyperlink used to be on this list and is not any more: `BrtHLink` and an external relationship
+    // now carry it. **Rich text has since left too** — a `RichStr` carries the runs and their fonts go into
+    // the styles part's font collection. That is the shape a feature leaves this test in — one line deleted
+    // here, a file of its own added — and it is why the list is written out rather than counted.
     const workbook = Workbook.create();
     const sheet = Workbook.addWorksheet(workbook, "Mixed");
     Cell.setValue(sheet, "A1", { error: "#DIV/0!" });
     Cell.setValue(sheet, "A2", { richText: [{ text: "bold", font: { bold: true } }] });
-    Cell.setValue(sheet, "A3", { text: "link", hyperlink: "https://example.com" });
+    // The one error with no `BErr` code: `#SPILL!` postdates the enumeration.
+    Cell.setValue(sheet, "A3", { error: "#SPILL!" } as never);
     Cell.setValue(sheet, "A4", "plain");
 
     const { unsupported, sheets } = await roundTrip(workbook);
-    expect(unsupported).toEqual([
-      "Mixed!A1: error value",
-      "Mixed!A2: rich text",
-      "Mixed!A3: hyperlink"
-    ]);
+    expect(unsupported).toEqual(["Mixed!A3: error value #SPILL!"]);
     expect(sheets[0]!.cells.get("A4")).toBe("plain");
-    // Each survives as a blank. This is what makes the `writableValue` guard load-bearing: an
-    // error and a rich string hold their content *inside* `value`, so without it the object
-    // reaches the record chooser, which emits nothing and the cell disappears.
-    for (const address of ["A1", "A2", "A3"]) {
-      expect(sheets[0]!.cells.has(address), address).toBe(true);
-      expect(sheets[0]!.cells.get(address), address).toBeNull();
-    }
+    // `#DIV/0!` and rich text are both written now, so both come back as content rather than as blanks.
+    expect(sheets[0]!.cells.get("A1")).toBe("#DIV/0!");
+    expect(sheets[0]!.cells.get("A2")).toBe("bold");
+    // The unwritable one survives as a blank with its position and format. This is what makes the
+    // `writableValue` guard load-bearing: an error holds its content *inside* `value`, so without it the
+    // object reaches the record chooser, which emits nothing and the cell disappears.
+    expect(sheets[0]!.cells.has("A3")).toBe(true);
+    expect(sheets[0]!.cells.get("A3")).toBeNull();
   });
 
   it("counts nothing as unread in a package it wrote itself", async () => {

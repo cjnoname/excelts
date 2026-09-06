@@ -73,8 +73,21 @@ describe("committed fixtures through XLSB", () => {
     const left = describeWorkbook(viaXlsx);
     const right = describeWorkbook(viaXlsb);
     const changed = differingAddresses(left, right);
+    // Cells an array formula's range covers, which the two containers genuinely disagree about.
+    //
+    // **The disagreement is the format's, not this library's.** XLSB requires a forwarding record in every cell
+    // an array's `ref` spans — omit them and Excel crashes on open rather than repairing — while XLSX carries
+    // only the cells the author filled in. So a model whose array range has gaps produces an XLSB with cells the
+    // XLSX does not have, and both files are correct.
+    //
+    // Exempted by *position inside a declared range*, not by "appeared on one side only": a cell outside every
+    // array `ref` is still a failure, which is what keeps this from becoming a blanket excuse.
+    const arrayCovered = arrayCoveredAddresses(viaXlsx);
     const unexplained = changed.filter(
-      address => !reported.has(address) && knownCause(address, left, right) === undefined
+      address =>
+        !reported.has(address) &&
+        !arrayCovered.has(address) &&
+        knownCause(address, left, right) === undefined
     );
 
     // Every difference must be one the writer named. A cell it could not express is expected to come
@@ -82,3 +95,63 @@ describe("committed fixtures through XLSB", () => {
     expect(unexplained, `${file}: ${unexplained.slice(0, 6).join(", ")}`).toEqual([]);
   });
 });
+
+/**
+ * Every address covered by a multi-cell array formula's `ref`, qualified with its sheet name.
+ *
+ * Read from the model rather than from either description, so the exemption is decided by what the workbook
+ * declares and not by what the two readers happened to produce.
+ */
+function arrayCoveredAddresses(handle: Workbook.Handle): ReadonlySet<string> {
+  const covered = new Set<string>();
+  for (const worksheet of Workbook.getModel(handle).worksheets) {
+    for (const row of worksheet.rows ?? []) {
+      for (const cell of row.cells ?? []) {
+        const facets = cell as { shareType?: string; ref?: string; address?: string };
+        if (facets.shareType !== "array" || typeof facets.ref !== "string") {
+          continue;
+        }
+        const [start, end = start] = facets.ref.split(":");
+        const first = splitAddress(start);
+        const last = splitAddress(end);
+        if (first === undefined || last === undefined) {
+          continue;
+        }
+        for (let r = Math.min(first.row, last.row); r <= Math.max(first.row, last.row); r++) {
+          for (
+            let c = Math.min(first.column, last.column);
+            c <= Math.max(first.column, last.column);
+            c++
+          ) {
+            covered.add(`${worksheet.name}!${columnLetters(c)}${r}`);
+          }
+        }
+      }
+    }
+  }
+  return covered;
+}
+
+/** `"K2"` as a one-based row and zero-based column. */
+function splitAddress(address: string): { row: number; column: number } | undefined {
+  const match = /^\$?([A-Z]+)\$?(\d+)$/i.exec(address.trim());
+  if (match === null) {
+    return undefined;
+  }
+  let column = 0;
+  for (const character of match[1].toUpperCase()) {
+    column = column * 26 + (character.charCodeAt(0) - 64);
+  }
+  return { row: Number(match[2]), column: column - 1 };
+}
+
+/** A zero-based column index as letters. */
+function columnLetters(column: number): string {
+  let text = "";
+  let remaining = column + 1;
+  while (remaining > 0) {
+    text = String.fromCharCode(65 + ((remaining - 1) % 26)) + text;
+    remaining = Math.floor((remaining - 1) / 26);
+  }
+  return text;
+}

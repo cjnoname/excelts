@@ -17,6 +17,7 @@ import {
   FIXED_FIELD_WIDTHS,
   INFERRED_VALUES,
   MAX_RECORD_ID,
+  OBSERVED_PAYLOAD_SIZES,
   RECORD_BY_ID,
   RECORD_BY_NAME
 } from "@excel/xlsb/spec/records";
@@ -35,6 +36,29 @@ import {
  * a communication job rather than an assertion. Both now read the same function, so they cannot
  * disagree about what "consistent" means.
  */
+/**
+ * Records whose field list describes only the start of the payload, and why.
+ *
+ * A short layout is this module's normal way of saying "this much is understood". Naming the records that do
+ * it keeps the check above meaningful: without the list every short layout is permitted and a record that
+ * silently *lost* its tail looks the same as one that never described it.
+ *
+ * Each entry is a claim that the undescribed bytes were looked at and left alone, not overlooked.
+ */
+const PARTIAL_LAYOUTS: ReadonlySet<string> = new Set([
+  // 13 of 25. The tail is `ccolspan` and one `BrtColSpan`, which `write/rows.ts` builds directly — a
+  // repeating structure the field vocabulary here has no way to express.
+  "BrtRowHdr",
+  // 4 of 68. Every corpus workbook holds exactly two of these, differing in the single byte `fls`. One
+  // sample of a structure establishes its size and nothing else, so the remaining 64 bytes — the pattern's
+  // foreground and background colours and a gradient — stay undeclared. See `xlsb/fill.ts`.
+  "BrtFill",
+  // 12 of 16. The four trailing bytes are the alignment and protection bits. `xlsb/alignment.ts` reads and
+  // writes them; they are not declared here because the field vocabulary has no bitfield type and naming
+  // them as a `u32` would describe eight fields as one.
+  "BrtXF"
+]);
+
 export function checkRecordTable(): string[] {
   const problems: string[] = [];
 
@@ -94,6 +118,20 @@ export function checkRecordTable(): string[] {
 
   // --- Scope pairs -------------------------------------------------------------
 
+  /**
+   * The pairs whose `End` identifier is **lower** than its `Begin`.
+   *
+   * `[MS-XLSB]` numbers almost every delimiter pair with `End = Begin + 1`, and the check below treats a
+   * departure from that as a sign the table was mistyped — which it usually is. Two pivot pairs are genuinely
+   * decreasing, so they are named here rather than the check being dropped: removing it would stop catching
+   * the transposition it exists for, and this work has already produced one (`BrtBeginSXVI` was first entered
+   * under `BrtBeginSXDI`'s identifiers, which this same verification caught).
+   *
+   * A name in this set is still checked for everything else: that the counterpart exists, has the opposite
+   * role, and names it back.
+   */
+  const DECREASING_PAIRS: ReadonlySet<string> = new Set(["BrtBeginSXVI", "BrtBeginSXLocation"]);
+
   // Every delimiter must name a counterpart that exists, has the opposite role, and
   // names it back. A one-directional pair is the failure that would silently break
   // the scope checker.
@@ -123,24 +161,36 @@ export function checkRecordTable(): string[] {
           `${counterpart.pairsWith}`
       );
     }
-    if (record.scope === "begin" && counterpart.id <= record.id) {
+    if (
+      record.scope === "begin" &&
+      counterpart.id <= record.id &&
+      !DECREASING_PAIRS.has(record.name)
+    ) {
       fail(`${record.name} (0x${record.id.toString(16)}) is not below its End`);
     }
   }
 
-  // The naming convention is load-bearing: the table generates both halves of a
-  // pair from one row, so a name that does not follow it means the generator was
-  // bypassed and the two halves can drift.
+  // A pair's two names must differ **only** by `Begin` versus `End`, wherever that word sits.
+  //
+  // This used to demand a `BrtBegin…` prefix, which four real records do not have: `BrtFRTBegin`,
+  // `BrtFRTEnd`, `BrtACBegin` and `BrtACEnd` put the word last. The prefix rule was inherited from a
+  // table that derived both names from one suffix, and enforcing it made the check an assertion about
+  // this file's former shortcut rather than about the format — it would have rejected the specification's
+  // own names. Comparing the two halves with the word removed is the invariant that actually matters,
+  // and it is the one that catches a pair pointing at different scopes.
   for (const record of BIFF_RECORDS) {
-    if (record.scope === "begin" && !record.name.startsWith("BrtBegin")) {
-      fail(`${record.name}: a begin delimiter should be named BrtBegin…`);
+    if (record.scope !== undefined && !/Begin|End/.test(record.name)) {
+      fail(`${record.name}: a scope delimiter must say Begin or End in its name`);
     }
-    if (record.scope === "end" && !record.name.startsWith("BrtEnd")) {
-      fail(`${record.name}: an end delimiter should be named BrtEnd…`);
+    if (record.scope === "begin" && /End/.test(record.name)) {
+      fail(`${record.name}: categorised as a begin delimiter but named End`);
+    }
+    if (record.scope === "end" && /Begin/.test(record.name)) {
+      fail(`${record.name}: categorised as an end delimiter but named Begin`);
     }
     if (record.scope && record.pairsWith) {
-      const own = record.name.replace(/^Brt(Begin|End)/, "");
-      const other = record.pairsWith.replace(/^Brt(Begin|End)/, "");
+      const own = record.name.replace(/Begin|End/, "");
+      const other = record.pairsWith.replace(/Begin|End/, "");
       if (own !== other) {
         fail(`${record.name} and ${record.pairsWith} describe different scopes`);
       }
@@ -210,8 +260,83 @@ export function checkRecordTable(): string[] {
   // Every record whose name marks it as a cell must be categorised, or the ordering
   // check stops applying to it the moment one is added to the table without the tag.
   for (const record of BIFF_RECORDS) {
-    if (/^Brt(Cell|Short|Fmla)[A-Z]/.test(record.name) && record.category !== "cell") {
+    // `BrtCellIgnoreEC` is the exception the pattern cannot see: it is an entry in the ignored-error
+    // collection, not a cell value, and it is named for the cell it refers *to*. Excluding it by name is
+    // honest about the rule being a name-shaped proxy for a thing names do not quite determine.
+    if (
+      /^Brt(Cell|Short|Fmla)[A-Z]/.test(record.name) &&
+      record.category !== "cell" &&
+      record.name !== "BrtCellIgnoreEC"
+    ) {
       fail(`${record.name}: looks like a cell record but is not categorised as one`);
+    }
+  }
+
+  // **A declared layout must not overrun the record, and must account for it unless it says why not.**
+  //
+  // Two tables describe the same bytes — the field list, and `OBSERVED_PAYLOAD_SIZES`, which holds lengths
+  // read off real Excel output — and nothing compared them. The comparison is one-directional on purpose:
+  //
+  // - Declaring **more** than the record holds is always wrong. `decodeRecord` would read past the payload,
+  //   and a writer built from the table would emit a record Excel cannot parse.
+  // - Declaring **less** is a legitimate position this module takes often: a field is named once it is
+  //   understood, and the rest of the record is left undescribed rather than guessed at. `BrtBorder` is the
+  //   extreme case — 51 bytes, one corpus sample, no fields declared at all.
+  //
+  // So a short layout is allowed only for a record named in {@link PARTIAL_LAYOUTS}, which is the list of
+  // records whose trailing bytes are deliberately undescribed. Adding a field to one of those and forgetting
+  // to remove it from the list is harmless; the reverse — a record quietly losing its tail — is what this
+  // catches.
+  //
+  // It found `BrtWsFmtInfo` declaring 10 bytes against an observed 12, omitting `iOutLevelRw` and
+  // `iOutLevelCol`; the writer and reader handle those with their own arithmetic, so only the tooling built
+  // on this table was wrong — and that is the tooling the rest of these checks run on. It also found
+  // `BrtBeginColInfos` declaring a four-byte count where Excel writes an empty payload.
+  //
+  // It would **not** have caught `BrtRowHdr`, and no length check could have. That record declared 12 of 25
+  // bytes before and after the fix, and the writer emitted the full 25 in both cases — `u16` plus a byte is
+  // three bytes and so is a byte three times. The defect was the *bit positions inside* those bytes, which is
+  // why `check-framing.ts` — which compares each written record against Excel's own length, and does catch a
+  // record that is genuinely the wrong size — passed it too. A wrong layout of the right length is only
+  // visible against the specification, which is what `__tests__/row-header.test.ts` asserts.
+  for (const record of BIFF_RECORDS) {
+    const observed = OBSERVED_PAYLOAD_SIZES.get(record.name);
+    if (record.fields === undefined || observed === undefined) {
+      continue;
+    }
+    let declared = 0;
+    let variable = false;
+    for (const field of record.fields) {
+      const width = FIXED_FIELD_WIDTHS[field.type];
+      if (width === undefined) {
+        // A variable-width field makes the total depend on content, so an observed size is one sample
+        // rather than a constraint and there is nothing to compare.
+        variable = true;
+        break;
+      }
+      declared += width;
+    }
+    if (variable) {
+      // **A record with a variable-width field must not be in the length table at all.** An entry there is
+      // read as "every Excel-authored one is exactly this", and the validator raises an *error* on a
+      // mismatch — so a record whose length legitimately follows its content makes that check reject valid
+      // files. `BrtDrawing` was listed at 12 bytes, which is what `"rId2"` encodes to; a sheet with ten
+      // relationships produces `rId10`, and the validator rejected a package this library had just written.
+      fail(
+        `${record.name}: has a variable-width field, so it cannot have a fixed observed size — remove it ` +
+          `from OBSERVED_PAYLOAD_SIZES`
+      );
+      continue;
+    }
+    if (declared > observed) {
+      fail(
+        `${record.name}: fields describe ${declared} byte(s) but the record is only ${observed}`
+      );
+    } else if (declared < observed && !PARTIAL_LAYOUTS.has(record.name)) {
+      fail(
+        `${record.name}: fields describe ${declared} of ${observed} byte(s); declare the rest or add it ` +
+          `to PARTIAL_LAYOUTS with the reason`
+      );
     }
   }
 

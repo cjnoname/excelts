@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { HrStopwatch } from "@excel/examples/utils/hr-stopwatch";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Workbook } from "@excel/index";
 
 const outDir = path.resolve(
@@ -20,7 +21,7 @@ Cell.setValue(ws, "B1", "Hello, World!");
 
 const stopwatch = new HrStopwatch();
 stopwatch.start();
-Workbook.writeFile(wb, filename).then(() => {
+writeBothFormats(wb, filename).then(() => {
   const micros = stopwatch.microseconds;
   console.log("Done.");
   console.log("Time taken:", micros);

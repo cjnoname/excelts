@@ -23,7 +23,6 @@
  * in `INFERRED_VALUES` so the distinction survives.
  */
 import type { Alignment, Protection } from "@excel/types";
-import { INFERRED_VALUES } from "@excel/xlsb/spec/records";
 
 /** Byte offsets within a `BrtXF` payload, all established from the corpus. */
 export const XF_ROTATION_OFFSET = 10;
@@ -33,10 +32,11 @@ export const XF_PROTECTION_OFFSET = 13;
 export const XF_ATTRIBUTE_MASK_OFFSET = 14;
 
 /**
- * Horizontal alignment, by `alc` value.
+ * Horizontal alignment, by `alc` value — MS-XLSB 2.5.74.
  *
- * `general` at 0 and `center` at 2 are read off Excel's output, which leaves exactly one slot for
- * `left`. The rest continue the documented order.
+ * Eight values, `ALCGEN` through `ALCDIST`. The published table also carries `ALCNIL` at `0xFF` for
+ * "alignment not specified", which this array cannot index and does not need to: the model spells the
+ * absence of a choice by omitting the field, and `general` at 0 is what Excel writes for it.
  */
 const HORIZONTAL: readonly (Alignment["horizontal"] | undefined)[] = [
   undefined, // general — the absence of a choice, which the model spells by omitting the field
@@ -50,9 +50,10 @@ const HORIZONTAL: readonly (Alignment["horizontal"] | undefined)[] = [
 ];
 
 /**
- * Vertical alignment, by `alcV` value.
+ * Vertical alignment, by `alcV` value — MS-XLSB 2.5.158.
  *
- * `center` at 1 and `bottom` at 2 are read off Excel's output, so `top` can only be 0.
+ * The five values were first established by reading Excel's own output, with a comment saying so. The
+ * enumeration is published and says the same thing, so the inference is now a citation.
  */
 const VERTICAL: readonly (Alignment["vertical"] | undefined)[] = [
   "top",
@@ -62,10 +63,34 @@ const VERTICAL: readonly (Alignment["vertical"] | undefined)[] = [
   "distributed"
 ];
 
-/** Reading order, by `iReadingOrder` value. Zero — context-dependent — throughout the corpus. */
+/**
+ * Reading order, by `iReadingOrder` value — MS-XLSB 2.5.114.
+ *
+ * Three values: context, left-to-right, right-to-left. Every corpus workbook carries 0, so the two non-zero
+ * values are unexercised by any sample here — but they are published rather than guessed, which is the
+ * difference between an unobserved value and an inferred one.
+ */
 const READING_ORDER: readonly (Alignment["readingOrder"] | undefined)[] = [undefined, "ltr", "rtl"];
 
-/** `fLocked`. Set on every cell format in the corpus, which is Excel's default. */
+/**
+ * The two bytes of alignment and protection bits — MS-XLSB 2.4.876.
+ *
+ * ```text
+ * byte 2   alc(0-2)  alcv(3-5)  fWrap(6)  fJustLast(7)
+ * byte 3   fShrinkToFit(0)  fMergeCell(1)  iReadingOrder(2-3)  fLocked(4)  fHidden(5)
+ * ```
+ *
+ * The split matters: `fWrap` sits in the *first* byte immediately above the two three-bit alignments, while
+ * `fShrinkToFit` starts the second. Reading them as one sixteen-bit field and counting attributes in order
+ * places `fShrinkToFit` at bit 8, which is `fMergeCell` shifted — and a cell would come back merged.
+ *
+ * `WRAP` and `SHRINK_TO_FIT` were in the inferred register, described as unexercised by the corpus. They are
+ * published, so they are citations now; the register is for values Excel's bytes and the specification both
+ * leave open.
+ */
+const WRAP = 0x40;
+const SHRINK_TO_FIT = 0x01;
+/** `fLocked`. Set on every cell format in the corpus, which is also Excel's default. */
 const LOCKED = 0x10;
 /** `fHidden`. Zero throughout the corpus. */
 const HIDDEN = 0x20;
@@ -102,10 +127,10 @@ export function readAlignment(payload: Uint8Array): Partial<Alignment> | undefin
   if (vertical !== undefined) {
     alignment.vertical = vertical;
   }
-  if ((bits & INFERRED_VALUES.alignmentWrap) !== 0) {
+  if ((bits & WRAP) !== 0) {
     alignment.wrapText = true;
   }
-  if ((more & INFERRED_VALUES.alignmentShrinkToFit) !== 0) {
+  if ((more & SHRINK_TO_FIT) !== 0) {
     alignment.shrinkToFit = true;
   }
   const readingOrder = READING_ORDER[(more >> 2) & 0x03];
@@ -161,12 +186,12 @@ export function encodeAlignmentAndProtection(
   const verticalValue = vertical === undefined ? 2 : Math.max(VERTICAL.indexOf(vertical), 0);
   bits |= verticalValue << 3;
   if (alignment?.wrapText === true) {
-    bits |= INFERRED_VALUES.alignmentWrap;
+    bits |= WRAP;
   }
 
   let more = 0;
   if (alignment?.shrinkToFit === true) {
-    more |= INFERRED_VALUES.alignmentShrinkToFit;
+    more |= SHRINK_TO_FIT;
   }
   const readingOrder = alignment?.readingOrder;
   if (readingOrder !== undefined) {

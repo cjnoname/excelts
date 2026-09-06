@@ -4,7 +4,7 @@
  * **Why this exists at all.** The writer's `unsupported` list covered cell values and merge
  * references, and `unsupported: "error"` — the default — reads as "refuse anything this container
  * cannot express". It did not: a workbook with tables, filters, validations, conditional formatting,
- * frozen panes, page breaks, comments, shapes or charts wrote successfully and arrived with none of
+ * shapes or charts wrote successfully and arrived with none of
  * them, and the caller was told nothing. The gap between the promise and the behaviour is the defect;
  * the missing features are merely the reason the gap exists.
  *
@@ -31,6 +31,7 @@
  * to report it. `writeStyles` now applies it at font index 0.
  */
 import type { WorkbookModel } from "@excel/core/workbook.browser";
+import { filterCriteriaRecords } from "@excel/xlsb/filter-criteria";
 import type { CellLike } from "@excel/xlsb/write/types";
 
 /**
@@ -45,83 +46,36 @@ const WRITER_DEFAULTS = {
   blackAndWhite: false,
   draft: false,
   cellComments: "None",
-  errors: "displayed",
-  showRowColHeaders: false,
-  showGridLines: false,
-  horizontalCentered: false,
-  verticalCentered: false
+  errors: "displayed"
 } as const;
+
+// `showRowColHeaders`, `showGridLines`, `horizontalCentered` and `verticalCentered` were listed here as losable
+// and are not lost any more: `BrtPrintOptions` carries all four, and its bits went uninterpreted until Excel's
+// own output pinned them. They are removed rather than left in place — a name in this list is a claim that the
+// writer cannot express it.
 
 /** A worksheet field that carries a feature, and the name to report it under. */
 const SHEET_FEATURES: readonly {
   readonly name: string;
   readonly of: (worksheet: SheetLike) => unknown;
 }[] = [
-  { name: "data validation", of: sheet => countKeys(sheet.dataValidations) },
-  { name: "conditional formatting", of: sheet => sheet.conditionalFormattings?.length },
-  { name: "table", of: sheet => sheet.tables?.length },
-  { name: "pivot table", of: sheet => sheet.pivotTables?.length },
-  { name: "auto filter", of: sheet => (sheet.autoFilter ? 1 : 0) },
-  // Configured protection only. The writer emits a default `BrtSheetProtection` for every sheet
-  // because Excel does, so an *unprotected* sheet loses nothing.
-  { name: "sheet protection", of: sheet => (sheet.sheetProtection ? 1 : 0) },
-  { name: "row page break", of: sheet => sheet.rowBreaks?.length },
-  { name: "column page break", of: sheet => sheet.colBreaks?.length },
-  { name: "shape", of: sheet => sheet.shapes?.length },
-  { name: "chart", of: sheet => sheet.charts?.length },
-  { name: "sparkline group", of: sheet => sheet.sparklineGroups?.length },
-  { name: "form control", of: sheet => sheet.formControls?.length },
-  { name: "ignored error", of: sheet => sheet.ignoredErrors?.length },
-  { name: "threaded comment", of: sheet => sheet.threadedComments?.length },
-  { name: "watermark", of: sheet => (sheet.watermark ? 1 : 0) },
-  // A frozen or split pane is `BrtPane`, whose layout no corpus workbook establishes.
+  // The filter's *criteria*, not the filter. `BrtBeginAFilter` carries the range and the arrows appear
+  // on it; a condition a person applied lives in the `BrtBeginFilterColumn` collection.
+  //
+  // Values, custom comparisons and top-N are written now. What is not is a **dynamic, colour or icon**
+  // filter, and the check names only those — the raw XML the reader preserved is parsed, so this can report
+  // the kinds actually present instead of condemning every criterion the moment one appears.
+  //
+  // The field name matters and was wrong here first: it is `autoFilterCriteria` on the *sheet*, not a
+  // `filterColumns` on the `autoFilter`. Reading a field the model does not have made the check both
+  // dead and misleading — it never fired for a real dropped filter, and fired for a shape nothing
+  // produces.
   {
-    name: "frozen or split pane",
+    name: "auto filter criteria",
     of: sheet =>
-      (sheet.views ?? []).filter(view => view.state === "frozen" || view.state === "split").length
-  },
-  // The rest of a view. Not "a scroll position": a page-layout view, a right-to-left sheet or a zoom
-  // level are all settings an author chose and would notice the absence of. The writer emits one fixed
-  // `BrtWsView`, so every one of them is dropped.
-  {
-    name: "worksheet view setting",
-    of: sheet =>
-      (sheet.views ?? []).filter(
-        view =>
-          view.style !== undefined ||
-          view.rightToLeft === true ||
-          view.showGridLines === false ||
-          view.showRowColHeaders === false ||
-          view.showRuler === false ||
-          (view.zoomScale !== undefined && view.zoomScale !== 100)
-      ).length
-  },
-  { name: "print area", of: sheet => (sheet.pageSetup?.printArea ? 1 : 0) },
-  {
-    name: "print titles",
-    of: sheet => (sheet.pageSetup?.printTitlesRow || sheet.pageSetup?.printTitlesColumn ? 1 : 0)
-  },
-  // Media that is not a placed picture. `drawingForWorksheet` selects `type === "image"` and nothing
-  // else, so a background, a header picture or a watermark image never reaches the package.
-  {
-    name: "background image",
-    of: sheet => (sheet.media ?? []).filter(medium => medium.type === "background").length
-  },
-  {
-    name: "header image",
-    of: sheet => (sheet.media ?? []).filter(medium => medium.type === "headerImage").length
-  },
-  {
-    name: "watermark image",
-    of: sheet => (sheet.media ?? []).filter(medium => medium.type === "watermark").length
-  },
-  // Outline levels on the sheet itself, which is where a grouped sheet records its depth.
-  {
-    name: "outline level",
-    of: sheet =>
-      (sheet.properties?.outlineLevelCol ?? 0) > 0 || (sheet.properties?.outlineLevelRow ?? 0) > 0
-        ? 1
-        : 0
+      sheet.autoFilterCriteria?.xml === undefined
+        ? 0
+        : filterCriteriaRecords(sheet.autoFilterCriteria.xml).unsupported.length
   }
 ];
 
@@ -132,7 +86,10 @@ interface SheetLike {
   readonly tables?: readonly unknown[];
   readonly pivotTables?: readonly unknown[];
   readonly autoFilter?: unknown;
-  readonly sheetProtection?: unknown;
+  /** Raw filter-criteria XML the XLSX reader preserved. No BIFF12 record holds XML. */
+  readonly autoFilterCriteria?: { readonly xml?: string };
+  /** Only `hashValue` is read: the permissions are written, the password is not. */
+  readonly sheetProtection?: { readonly hashValue?: string };
   readonly rowBreaks?: readonly unknown[];
   readonly colBreaks?: readonly unknown[];
   readonly shapes?: readonly unknown[];
@@ -141,7 +98,6 @@ interface SheetLike {
   readonly formControls?: readonly unknown[];
   readonly ignoredErrors?: readonly unknown[];
   readonly threadedComments?: readonly unknown[];
-  readonly watermark?: unknown;
   readonly media?: readonly { readonly type?: string }[];
   readonly views?: readonly {
     readonly state?: string;
@@ -193,55 +149,6 @@ export function worksheetLosses(worksheet: unknown): readonly string[] {
   for (const feature of SHEET_FEATURES) {
     add(losses, feature.name, Number(feature.of(sheet) ?? 0));
   }
-  // Borders are a cell format rather than a sheet feature. A `BrtBorder` layout is not established by
-  // any corpus workbook — `styles.ts` writes every cell format with border index zero — and a border
-  // silently removed from a table of figures is the kind of loss a reader notices immediately and a
-  // differential test that compares only values does not.
-  //
-  // The count is of *owners* that ask for a border, which is the honest unit and is why the name says
-  // so: a column model covers a range, and a row's border is inherited by cells that never declared
-  // one, so neither "cells affected" nor "distinct borders" would be a number this scan can produce.
-  add(losses, "border (owner)", countOwners(sheet, hasBorder));
-  add(
-    losses,
-    "cell comment",
-    countCells(sheet, cell => cell.comment !== undefined)
-  );
-  add(
-    losses,
-    "hidden row",
-    countRows(sheet, row => row.hidden === true)
-  );
-  add(
-    losses,
-    "grouped row",
-    countRows(sheet, row => (row.outlineLevel ?? 0) > 0)
-  );
-  add(
-    losses,
-    "collapsed row",
-    countRows(sheet, row => row.collapsed === true)
-  );
-  add(
-    losses,
-    "hidden column",
-    countColumns(sheet, column => column.hidden === true)
-  );
-  add(
-    losses,
-    "grouped column",
-    countColumns(sheet, column => (column.outlineLevel ?? 0) > 0)
-  );
-  add(
-    losses,
-    "collapsed column",
-    countColumns(sheet, column => column.collapsed === true)
-  );
-  add(
-    losses,
-    "best-fit column",
-    countColumns(sheet, column => column.bestFit === true)
-  );
   // Page-setup fields outside the subset whose `BrtPageSetup` layout the corpus establishes. Compared
   // against the value the writer produces anyway, so a default-constructed `pageSetup` is silent.
   for (const [field, expected] of Object.entries(WRITER_DEFAULTS)) {
@@ -257,24 +164,13 @@ export function worksheetLosses(worksheet: unknown): readonly string[] {
 export function workbookLosses(model: WorkbookModel): readonly string[] {
   const losses: string[] = [];
   const book = model as unknown as Record<string, unknown>;
-  // A chartsheet holds a chart rather than a cell grid. The reader already declines to invent cells for
-  // one; the writer emits only `model.worksheets`, so a chartsheet does not reach the file at all.
-  add(losses, "chartsheet", (book.chartsheets as readonly unknown[] | undefined)?.length ?? 0);
-  // `BrtBookProtection` is not a record this writer emits, so a structure- or window-locked workbook
-  // comes back unlocked — and a lock silently removed is worse than one that fails to apply.
-  add(losses, "workbook protection", book.protection === undefined ? 0 : 1);
-  // A workbook view carries the window geometry and the active tab. The writer emits one fixed
-  // `BrtBookView`, so anything the model said is replaced.
-  add(losses, "workbook view", (book.views as readonly unknown[] | undefined)?.length ?? 0);
-  // Named cell styles, and the `Normal` entry the writer hard-codes in their place. A cell referring to
-  // one by `styleName` therefore loses the reference as well as the style.
-  add(losses, "named cell style", countKeys(book.cellStyles));
-  // Iterative calculation. The *count* and the *delta* are written — their `BrtCalcProp` offsets are
-  // established — but the bit that turns iteration on is in a flags word every corpus workbook leaves
-  // off, so it is unobserved. A guessed bit would enable or disable recalculation of every circular
-  // reference in the file, which is why this one is reported rather than approximated.
-  const calc = book.calcProperties as { iterate?: boolean } | undefined;
-  add(losses, "iterative calculation", calc?.iterate === true ? 1 : 0);
+  // One `BrtBookView` is written, so a *second* workbook view has nowhere to go. The first one's
+  // geometry, tab ratio, active sheet and visibility are all expressed.
+  add(
+    losses,
+    "additional workbook view",
+    Math.max(0, ((book.views as readonly unknown[] | undefined)?.length ?? 0) - 1)
+  );
   return losses;
 }
 
@@ -282,70 +178,4 @@ function add(losses: string[], name: string, count: number): void {
   if (count > 0) {
     losses.push(count === 1 ? name : `${name} (${count})`);
   }
-}
-
-function countRows(sheet: SheetLike, matches: (row: RowLike) => boolean): number {
-  return (sheet.rows ?? []).filter(matches).length;
-}
-
-function countColumns(sheet: SheetLike, matches: (column: ColumnLike) => boolean): number {
-  return (sheet.cols ?? []).filter(matches).length;
-}
-
-function countCells(
-  sheet: SheetLike,
-  matches: (cell: { readonly style?: CellLike["style"]; readonly comment?: unknown }) => boolean
-): number {
-  let count = 0;
-  for (const row of sheet.rows ?? []) {
-    count += (row.cells ?? []).filter(matches).length;
-  }
-  return count;
-}
-
-/** Rows, their cells, and columns that satisfy a style predicate. */
-function countOwners(sheet: SheetLike, matches: (style: CellLike["style"]) => boolean): number {
-  let count = 0;
-  for (const row of sheet.rows ?? []) {
-    if (matches(row.style)) {
-      count++;
-    }
-    count += (row.cells ?? []).filter(cell => matches(cell.style)).length;
-  }
-  return count + (sheet.cols ?? []).filter(column => matches(column.style)).length;
-}
-
-/**
- * Whether a style asks for a border that would actually draw.
- *
- * `Object.keys(border).length > 0` was not enough: `{ border: { top: {} } }` and
- * `{ border: { diagonal: { up: false, down: false } } }` are both shapes the model produces, and
- * neither draws anything — so reporting them was a loss report for a workbook that had lost nothing.
- */
-function hasBorder(style: CellLike["style"]): boolean {
-  const border = (style as { border?: Record<string, unknown> } | undefined)?.border;
-  if (border === undefined) {
-    return false;
-  }
-  for (const [edge, value] of Object.entries(border)) {
-    if (value === undefined || value === null) {
-      continue;
-    }
-    if (edge === "diagonal") {
-      const diagonal = value as { up?: boolean; down?: boolean; style?: unknown };
-      if (diagonal.up === true || diagonal.down === true || diagonal.style !== undefined) {
-        return true;
-      }
-      continue;
-    }
-    const side = value as { style?: unknown; color?: unknown };
-    if (side.style !== undefined || side.color !== undefined) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function countKeys(value: unknown): number {
-  return value === undefined || value === null ? 0 : Object.keys(value as object).length;
 }

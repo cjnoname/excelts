@@ -1,3 +1,4 @@
+import { isInternalLink } from "@excel/core/hyperlink";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import type { ParseOpenTag, XmlSink } from "@xml/types";
 
@@ -58,15 +59,6 @@ class HyperlinkXform extends BaseXform {
   parseClose(): boolean {
     return false;
   }
-}
-
-/**
- * Internal hyperlinks start with "#" (e.g. "#Sheet2!A1").
- * This matches Excel's convention and the OOXML spec where internal links
- * use the `location` attribute instead of a relationship.
- */
-function isInternalLink(target: string): boolean {
-  return target.startsWith("#");
 }
 
 export { HyperlinkXform, isInternalLink };

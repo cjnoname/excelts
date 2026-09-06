@@ -172,35 +172,40 @@ describe("Synthetic chart corpus", () => {
       for (const fixture of fixtures) {
         await expectOpensInLibreOffice(fixture);
       }
-    });
+      // Each fixture is a separate LibreOffice process start, so the default 30 s covers roughly one of them.
+    }, 600_000);
 
     it("opens every ChartEx fixture if LibreOffice is installed", async () => {
       const fixtures = chartExFixtures;
       for (const fixture of fixtures) {
         await expectOpensInLibreOffice(fixture);
       }
-    });
+      // Each fixture is a separate LibreOffice process start, so the default 30 s covers roughly one of them.
+    }, 600_000);
 
     it("opens combo/axis variants if LibreOffice is installed", async () => {
       const fixtures = comboAxisFixtures;
       for (const fixture of fixtures) {
         await expectOpensInLibreOffice(fixture);
       }
-    });
+      // Each fixture is a separate LibreOffice process start, so the default 30 s covers roughly one of them.
+    }, 600_000);
 
     it("opens chartsheet variants if LibreOffice is installed", async () => {
       const fixtures = chartsheetFixtures;
       for (const fixture of fixtures) {
         await expectOpensInLibreOffice(fixture);
       }
-    });
+      // Each fixture is a separate LibreOffice process start, so the default 30 s covers roughly one of them.
+    }, 600_000);
 
     it("opens pivot chart variants if LibreOffice is installed", async () => {
       const fixtures = pivotChartFixtures;
       for (const fixture of fixtures) {
         await expectOpensInLibreOffice(fixture);
       }
-    });
+      // Each fixture is a separate LibreOffice process start, so the default 30 s covers roughly one of them.
+    }, 600_000);
   });
 
   // -----------------------------------------------------------------------

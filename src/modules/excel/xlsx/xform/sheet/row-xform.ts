@@ -8,6 +8,10 @@ import type { ParseOpenTag, XmlSink } from "@xml/types";
 
 interface RowXformOptions {
   maxItems?: number;
+  /** Collapse styled blank cells instead of materialising them — see the call site. */
+  blankCells?: "keep" | "collapse";
+  /** Called for each collapsed cell, with zero-based row and column. */
+  collectStyledBlank?: (row: number, column: number, styleId: number) => void;
 }
 
 /**
@@ -39,8 +43,34 @@ interface RowModel {
   dyDescent?: number;
 }
 
+/**
+ * Whether a parsed cell carries formatting and nothing else.
+ *
+ * A style and no value. A cell with a formula, a hyperlink or a comment is not blank however empty its value looks —
+ * `null` is a value a formula can produce — so all of those are checked rather than only the value.
+ */
+function isStyledBlank(cell: {
+  readonly value?: unknown;
+  readonly type?: number;
+  readonly formula?: unknown;
+  readonly sharedFormula?: unknown;
+  readonly hyperlink?: unknown;
+  readonly comment?: unknown;
+  readonly styleId?: number;
+}): boolean {
+  return (
+    cell.styleId !== undefined &&
+    cell.value === undefined &&
+    cell.formula === undefined &&
+    cell.sharedFormula === undefined &&
+    cell.hyperlink === undefined &&
+    cell.comment === undefined
+  );
+}
+
 class RowXform extends BaseXform<RowModel> {
   declare private maxItems?: number;
+  declare private options?: RowXformOptions;
   declare public map: Record<string, BaseXform>;
   declare public parser?: BaseXform;
   declare private numRowsSeen: number;
@@ -50,6 +80,7 @@ class RowXform extends BaseXform<RowModel> {
     super();
 
     this.maxItems = options && options.maxItems;
+    this.options = options;
     this.map = {
       c: new CellXform()
     };
@@ -203,7 +234,25 @@ class RowXform extends BaseXform<RowModel> {
           this.lastCellCol += 1;
           cellModel.address = colCache.encodeAddress(this.model!.number, this.lastCellCol);
         }
-        this.model!.cells.push(cellModel);
+        // **A styled cell with no value is collapsed rather than materialised.**
+        //
+        // `<c r="A9" s="3"/>` is what Excel writes for formatting applied past the data, one per cell — 62,400 of them
+        // for an eight-column region against 200 rows of actual data, costing 36.8 MB retained and reporting 8,000
+        // physical rows where there are 200. The binary container has the identical shape and the identical cost.
+        //
+        // **Collapsed, not dropped.** The run is handed to `collectStyledBlank`, which accumulates rectangles into the
+        // same `styledBlankRanges` the XLSB reader fills and both writers expand again — so a formatted region survives
+        // a round trip through either container and nothing is owed to a fidelity report. That shared field is why this
+        // is not the lossy sibling of a lossless option: making them differ would have been the worse API.
+        if (this.options?.blankCells === "collapse" && isStyledBlank(cellModel)) {
+          this.options.collectStyledBlank?.(
+            this.model!.number - 1,
+            colCache.decodeCol(cellModel.address) - 1,
+            cellModel.styleId ?? 0
+          );
+        } else {
+          this.model!.cells.push(cellModel);
+        }
         if (this.maxItems && this.model!.cells.length > this.maxItems) {
           throw new MaxItemsExceededError("column", this.maxItems);
         }

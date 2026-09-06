@@ -37,6 +37,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ChartRichText } from "@excel/chart/index";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Address, Cell, Chart, Column, DefinedNames, Row, Workbook, Worksheet } from "@excel/index";
 import { excelToPdf } from "@pdf/excel-bridge";
 
@@ -871,7 +872,7 @@ async function main(): Promise<void> {
   // Write XLSX + encrypted PDF
   // ---------------------------------------------------------------------------
 
-  await Workbook.writeFile(wb, XLSX_PATH);
+  await writeBothFormats(wb, XLSX_PATH);
   console.log(`XLSX → ${XLSX_PATH}`);
 
   // Encrypted PDF — owner can do anything, users need a password

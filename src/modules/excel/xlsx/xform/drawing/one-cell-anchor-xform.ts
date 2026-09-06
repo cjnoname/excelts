@@ -52,7 +52,17 @@ class OneCellAnchorXform extends BaseCellAnchorXform {
   }
 
   render(xmlStream: XmlSink, model: OneCellModel): void {
-    xmlStream.openNode(this.tag, { editAs: model.range.editAs ?? "oneCell" });
+    // **No attributes.** `editAs` belongs to `CT_TwoCellAnchor` alone — it is the choice between resizing with
+    // the cells and keeping a fixed size, which only a two-cell anchor can make. `CT_OneCellAnchor` declares no
+    // attributes at all, so `editAs="oneCell"` here was schema-invalid and Excel answered
+    // `Repaired Records: Drawing from /xl/drawings/drawingN.xml part (Drawing shape)` for every drawing that
+    // contained one. `AbsoluteAnchorXform` had it right; `TwoCellAnchorXform` is where the attribute lives.
+    //
+    // Nothing is lost by dropping it. Which anchor element gets written is decided by `getAnchorType` from the
+    // *shape* of the range — `pos` means absolute, `br` means two-cell, neither means one-cell — so the anchor
+    // tag already carries everything `editAs` would have said here. The parser still reads the attribute if a
+    // foreign file supplies one, which is deliberate: being strict on write and tolerant on read is the rule.
+    xmlStream.openNode(this.tag);
 
     this.map["xdr:from"].render(xmlStream, model.range.tl);
     this.map["xdr:ext"].render(xmlStream, model.range.ext);
@@ -81,6 +91,16 @@ class OneCellAnchorXform extends BaseCellAnchorXform {
         this.model.range.ext = this.map["xdr:ext"].model;
         this.model.picture = this.map["xdr:pic"].model;
         this.model.graphicFrame = this.map["xdr:graphicFrame"].model;
+        // **Derived from the element, not read from an attribute.** A one-cell anchor *is* `editAs="oneCell"`
+        // — move with the cells, keep a fixed size — so the tag already states it and `CT_OneCellAnchor`
+        // rightly has nowhere to repeat it. `AbsoluteAnchorXform`'s consumers do the same thing for
+        // `"absolute"` (`drawing-utils.ts` hard-codes it from the shape of the range).
+        //
+        // The base class fills this in from `node.attributes.editAs`, which is kept as the first choice so a
+        // file that carries the invalid attribute anyway still round-trips its value verbatim. Only the
+        // default changed, and it is what stops the public `range.editAs` from going undefined now that this
+        // writer no longer emits an attribute the schema forbids.
+        this.model.range.editAs ??= "oneCell";
         return false;
       default:
         // could be some unrecognised tags

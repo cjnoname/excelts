@@ -18,7 +18,12 @@ import { extractAll } from "@archive/unzip/extract";
 import { Cell, DefinedNames, Workbook, Worksheet } from "@excel";
 import { expectValidXlsb } from "@excel/__tests__/helpers/expect-valid-xlsb";
 import { ExcelNotSupportedError, XlsbParseError } from "@excel/errors";
-import { decodePtg, encodePtg, type PtgContext } from "@excel/xlsb/formula/ptg";
+import {
+  decodePtg,
+  encodePtg,
+  encodeSharedFormulaReference,
+  type PtgContext
+} from "@excel/xlsb/formula/ptg";
 import { readSharedStrings, readWorkbookPart, readWorksheetPart } from "@excel/xlsb/read/parts";
 import { writeXlsbPackage } from "@excel/xlsb/write/package";
 import type { AstNode } from "@formula/syntax/ast";
@@ -198,15 +203,39 @@ describe("what the codec refuses", () => {
     // together as "unsupported".
     const cases: readonly (readonly [string, RegExp])[] = [
       ["{1,2;3,4}", /array constant/],
-      ["Table1[Col]", /structured reference/],
-      ["A:B", /whole-row or whole-column/],
-      ["1:3", /whole-row or whole-column/],
+      // Still refused, but for a different reason: the table has to *exist*. A `PtgList` carries an
+      // `idList`, and one matching no `BrtBeginList` is a reference Excel reports as broken.
+      ["Table1[Col]", /structured reference to the unknown table Table1/],
       ["NOTAFUNCTION(1)", /function NOTAFUNCTION/],
       ["Unknown", /name Unknown/]
     ];
     for (const [source, expected] of cases) {
       expect(() => encodePtg(parse(tokenize(source)), CONTEXT, "A1"), source).toThrow(expected);
     }
+  });
+
+  it("encodes a whole-row or whole-column reference rather than refusing it", () => {
+    // These two were on the refusal list. They are ordinary `PtgArea` tokens with the other axis pinned
+    // to the sheet's limit — there is no `PtgAreaWholeRow`, so the gap was a missing lowering step and
+    // not a missing token. The round trip has to come back in the *same shape*: `A:B` printed as
+    // `$A$1:$B$1048576` computes the same thing but is not a valid print title, which is what depended
+    // on this.
+    for (const source of ["A:B", "1:3", "AA:AB"] as const) {
+      const tokens = encodePtg(parse(tokenize(source)), CONTEXT, "A1");
+      const decoded = decodePtg(tokens, CONTEXT, "A1");
+      expect(printAst(decoded as never), source).toBe(source);
+    }
+  });
+
+  it("marks a whole-axis reference absolute, so it does not drift when copied", () => {
+    // `A:A` means every row. Leaving the bounds relative would make it shift with the formula, which for
+    // a print title is the difference between "repeat row 1" and "repeat the row above me".
+    const tokens = encodePtg(parse(tokenize("1:1")), CONTEXT, "A1");
+    const view = new DataView(tokens.buffer, tokens.byteOffset, tokens.byteLength);
+    // Past the one-byte token id: two `u32` rows, then two `u16` columns whose top two bits are the
+    // relative markers. Both clear means absolute.
+    expect(view.getUint16(9, true) & 0xc000).toBe(0);
+    expect(view.getUint16(11, true) & 0xc000).toBe(0);
   });
 
   it("rejects a sheet the workbook does not have", () => {
@@ -234,18 +263,42 @@ describe("what the codec refuses", () => {
 });
 
 describe("shared formulas", () => {
-  it("reports a PtgExp deferral instead of treating it as an expression", () => {
-    // `PtgExp` means the formula lives in another cell. Decoding it as an expression would
-    // invent one.
-    const tokens = Uint8Array.of(0x01, 4, 0, 0, 0, 2, 0);
-    const decoded = decodePtg(tokens, CONTEXT, "C5");
-    expect(decoded).toEqual({ sharedRow: 4, sharedColumn: 2 });
+  /**
+   * **`PtgExp` is five bytes, and its column is not in the `Rgce`.**
+   *
+   * This used to pass a seven-byte token — the ptg, a four-byte row and a two-byte column — and that shape
+   * does not exist. MS-XLSB 2.5.98.40 gives the token a row and nothing else; the column is a `PtgExtraCol`
+   * (2.5.98.42) over in the `RgbExtra`. Excel agrees: `poi-62815.xlsb` and `poi-bug66682.xlsb` both carry a
+   * `cce` of 5 with `01 rr rr rr rr`, and the four bytes that complete it sit after the `cb`.
+   *
+   * The old fixture was self-consistent with the old decoder, so the pair round-tripped and the reader threw
+   * "truncated" on every real file — a failure the sheet reader catches and reports as "could not be
+   * decoded", which is why nothing looked broken.
+   */
+  it("takes the row from the token and the column from RgbExtra", () => {
+    const tokens = Uint8Array.of(0x01, 4, 0, 0, 0);
+    const extra = Uint8Array.of(2, 0, 0, 0);
+    expect(decodePtg(tokens, CONTEXT, "C5", extra)).toEqual({ sharedRow: 4, sharedColumn: 2 });
+  });
+
+  it("refuses a PtgExp with no PtgExtraCol to complete it", () => {
+    // Guessing zero would point every deferral at column A of the right row.
+    expect(() => decodePtg(Uint8Array.of(0x01, 4, 0, 0, 0), CONTEXT, "C5")).toThrow(
+      /needs a PtgExtraCol/
+    );
   });
 
   it("rejects a PtgExp that is not alone in the stream", () => {
-    expect(() =>
-      decodePtg(Uint8Array.of(0x01, 0, 0, 0, 0, 0, 0, 0x1e, 1, 0), CONTEXT, "A1")
-    ).toThrow(/must be the only token/);
+    expect(() => decodePtg(Uint8Array.of(0x01, 0, 0, 0, 0, 0x1e, 1, 0), CONTEXT, "A1")).toThrow(
+      /must be the only token/
+    );
+  });
+
+  it("round-trips a deferral through the encoder", () => {
+    const { rgce, rgbExtra } = encodeSharedFormulaReference(4, 2);
+    expect([...rgce]).toEqual([0x01, 4, 0, 0, 0]);
+    expect([...rgbExtra]).toEqual([2, 0, 0, 0]);
+    expect(decodePtg(rgce, CONTEXT, "C5", rgbExtra)).toEqual({ sharedRow: 4, sharedColumn: 2 });
   });
 });
 
@@ -309,9 +362,16 @@ describe("formulas through a whole package", () => {
     expect(listing).toMatch(/BrtFmlaBool cell=col=0,style=0 value=0/);
   });
 
-  it("reports a formula it cannot encode and does not write a misleading value", async () => {
-    // Emitting the cached result as a plain number would produce a cell that looks right and
-    // never recalculates — the failure mode that makes a converter untrustworthy.
+  it("reports a formula it cannot encode and keeps the cached value", async () => {
+    // **This case argued the other way, and the argument is recorded rather than deleted.** It read: "emitting the
+    // cached result as a plain number would produce a cell that looks right and never recalculates — the failure mode
+    // that makes a converter untrustworthy", and asserted the cell came back blank.
+    //
+    // The formula is gone either way, so the choice is between a cell holding the number it held and a cell holding
+    // nothing — and a blank makes the package assert the cell was empty, which is false. This path is also reachable
+    // only through `unsupported: "ignore"`, since the default refuses the write outright; a caller who has said "write
+    // what you can" is not served by discarding a value the writer can express. The loss is reported either way, which
+    // is what answers the trust concern. See `write/worksheet.ts`.
     const workbook = Workbook.create();
     const sheet = Workbook.addWorksheet(workbook, "Hard");
     Cell.setValue(sheet, "A1", { formula: "MATCH(1,{1,2,3},0)", result: 1 });
@@ -319,12 +379,15 @@ describe("formulas through a whole package", () => {
 
     const written = await writeXlsbPackage(Workbook.getModel(workbook));
     await expectValidXlsb(written.bytes, { includeWarnings: true });
-    expect(written.unsupported).toEqual(["Hard!A1: formula"]);
+    expect(written.unsupported).toEqual([
+      "Hard!A1: formula (an array constant is not supported yet)"
+    ]);
 
     const entries = await extractAll(written.bytes);
     const read = readWorksheetPart(entries.get("xl/worksheets/sheet1.bin")!.data, "sheet1", [], {});
-    // A1 survives as a blank cell; A2's formula is intact.
-    expect(read.cells.find(cell => cell.row === 0)?.value).toBeNull();
+    // A1 keeps its cached value and loses only the expression; A2's formula is intact.
+    expect(read.cells.find(cell => cell.row === 0)?.value).toBe(1);
+    expect(read.cells.find(cell => cell.row === 0)?.formula).toBeUndefined();
     expect(read.cells.find(cell => cell.row === 1)?.formula).toBe("1+1");
   });
 
@@ -626,5 +689,62 @@ describe("3D sheet spans", () => {
     const read = Workbook.getWorksheet(reopened, "S1")!;
     expect(Cell.getFormula(read, "B1")).toBe("S3!A1");
     expect(Cell.getFormula(read, "C1")).toBe("SUM(S1:S3!A1)");
+  });
+});
+
+/**
+ * Operand classes, against Excel's own bytes.
+ *
+ * **A systematic inversion here was invisible to the whole suite.** `REFERENCE_CLASS` and `VALUE_CLASS` were
+ * swapped, so every reference was emitted in the value class and every function call in the reference class,
+ * and 5,245 tests passed either way: a round trip through this library reads back whatever it wrote, and no
+ * assertion named a class. It surfaced only when a defined name Excel had written was compared byte for byte —
+ * `0x3A` where this produced `0x5A`.
+ *
+ * The class is not decoration. A reference in the value class is dereferenced before the surrounding function
+ * sees it, so `SUM` over a value-class area receives one number rather than a range.
+ *
+ * The expected values are the classic table's, which fixes them independently of this library: a base token
+ * plus `0x20` is the reference class and plus `0x40` is the value class.
+ */
+describe("operand classes", () => {
+  /** The first token of a formula, as written into a cell. */
+  const firstPtg = async (formula: string): Promise<number> => {
+    const workbook = Workbook.create();
+    const sheet = Workbook.addWorksheet(workbook, "F");
+    Cell.setValue(sheet, "A1", 1);
+    // A formula is set through the value, which is where the model keeps it.
+    Cell.setValue(sheet, "C1", { formula: formula.replace(/^=/, ""), result: 1 } as never);
+    const parts = await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+    const { iterateInterpretableRecords } = await import("@excel/xlsb/binary");
+    const { recordSpec } = await import("@excel/xlsb/spec/records");
+    for (const entry of iterateInterpretableRecords(
+      parts.get("xl/worksheets/sheet1.bin")!.data,
+      "s"
+    )) {
+      if (recordSpec(entry.id)?.name?.startsWith("BrtFmla") === true) {
+        // Cell head (8) then the cached value, then `cce` and the token stream. The formula's first byte is
+        // what this is about, so the record is searched for the first plausible reference token instead of
+        // its layout being restated here.
+        const payload = entry.payload!;
+        for (let at = 8; at < payload.length; at += 1) {
+          if ((payload[at]! & 0x1f) === 0x04 && payload[at]! >= 0x20) {
+            return payload[at]!;
+          }
+        }
+      }
+    }
+    throw new Error("no reference token found");
+  };
+
+  it("puts a formula that is only a reference in the value class", async () => {
+    // **`0x44`, and this asserted `0x24`.** The comment here used to say the reference class "is what Excel
+    // emits" for a bare reference; Excel's own re-save of `formulas.xlsb` writes `44 00 00 00 00 00 c0` for
+    // `=A1`, in four cells. An operand's class states what its consumer wants, and the consumer of the outermost
+    // operand is the cell, which wants a value.
+    //
+    // The narrowness is deliberate and is asserted below: a reference handed to a function that takes a
+    // reference stays in the reference class.
+    expect(await firstPtg("=A1")).toBe(0x44);
   });
 });

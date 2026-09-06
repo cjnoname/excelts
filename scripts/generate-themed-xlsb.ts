@@ -135,12 +135,12 @@ a.add(
     ["BrtBeginBorders", new Uint8Array([1, 0, 0, 0])],
     ["BrtBorder", new Uint8Array(51)],
     ["BrtEndBorders"],
-    ["BrtBeginCellStyleXfs", new Uint8Array([1, 0, 0, 0])],
+    ["BrtBeginCellStyleXFs", new Uint8Array([1, 0, 0, 0])],
     ["BrtXF", new Uint8Array(16)],
-    ["BrtEndCellStyleXfs"],
-    ["BrtBeginCellXfs", new Uint8Array([1, 0, 0, 0])],
+    ["BrtEndCellStyleXFs"],
+    ["BrtBeginCellXFs", new Uint8Array([1, 0, 0, 0])],
     ["BrtXF", new Uint8Array(16)],
-    ["BrtEndCellXfs"],
+    ["BrtEndCellXFs"],
     ["BrtEndStyleSheet"]
   ])
 );

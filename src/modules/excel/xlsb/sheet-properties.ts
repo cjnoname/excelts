@@ -32,8 +32,25 @@ import { BinaryReader, BinaryWriter, concatUint8Arrays } from "@utils/binary";
  */
 export const HEADER_SIZE = 19;
 
-/** The three flag bytes, verbatim from every corpus sheet. */
+/**
+ * The three flag bytes.
+ *
+ * They were a verbatim copy of every corpus sheet's, and the comment said so — which was accurate and made two
+ * content-dependent bits look constant, because no corpus sheet exercises either:
+ *
+ * - **bit 8, `fFitToPage`.** Set for `<pageSetUpPr fitToPage="1"/>`. Excel sets it on the one reference workbook that
+ *   asks for fit-to-page and on none of the other fourteen — including another that has a header and footer, which is
+ *   what made the correlation testable rather than assumed.
+ * - **bit 16, `fFilterMode`.** Set on the one reference workbook with an autofilter and on none of the others.
+ *
+ * A sheet that says "scale to one page" and then writes a flag word saying it does not is inconsistent with itself, and
+ * the consumer that notices is the one applying the print settings.
+ */
 const FLAG_BYTES = [0xc9, 0x04, 0x02] as const;
+/** `fFitToPage`, in the second flag byte. */
+const FIT_TO_PAGE = 1 << 0;
+/** `fFilterMode`, in the third flag byte. */
+const FILTER_MODE = 1 << 0;
 
 /** Index of the automatic tab colour — "no colour chosen". */
 const AUTOMATIC_TAB_INDEX = 64;
@@ -45,6 +62,10 @@ const NO_SYNC = 0xffffffff;
 export interface SheetProperties {
   readonly tabColor?: Partial<Color>;
   readonly codeName?: string;
+  /** `<pageSetUpPr fitToPage="1"/>` — sets `fFitToPage` in the flag word. */
+  readonly fitToPage?: boolean;
+  /** The sheet has an autofilter — sets `fFilterMode`. */
+  readonly filterMode?: boolean;
 }
 
 /** Read a `BrtWsProp`. */
@@ -69,10 +90,15 @@ export function readSheetProperties(
     // A truncated code name costs the code name, not the sheet.
   }
 
+  // Read before the reader moved past them.
+  const fitToPage = (payload[1]! & FIT_TO_PAGE) !== 0;
+  const filterMode = (payload[2]! & FILTER_MODE) !== 0;
   const properties: SheetProperties = {
     // An automatic colour is the absence of a choice, so it is not reported as one.
     ...(Object.keys(tabColor).length === 0 ? {} : { tabColor }),
-    ...(codeName === undefined ? {} : { codeName })
+    ...(codeName === undefined ? {} : { codeName }),
+    ...(fitToPage ? { fitToPage } : {}),
+    ...(filterMode ? { filterMode } : {})
   };
   return Object.keys(properties).length === 0 ? undefined : properties;
 }
@@ -86,7 +112,11 @@ export function encodeSheetProperties(properties: SheetProperties | undefined): 
         automaticColor(AUTOMATIC_TAB_INDEX, false)
       : encodeColor(properties.tabColor);
   return concatUint8Arrays([
-    new Uint8Array(FLAG_BYTES),
+    new Uint8Array([
+      FLAG_BYTES[0],
+      FLAG_BYTES[1] | (properties?.fitToPage === true ? FIT_TO_PAGE : 0),
+      FLAG_BYTES[2] | (properties?.filterMode === true ? FILTER_MODE : 0)
+    ]),
     colorBytes,
     new BinaryWriter().writeUint32(NO_SYNC).writeUint32(NO_SYNC).toUint8Array(),
     encodeWideString(properties?.codeName ?? "")

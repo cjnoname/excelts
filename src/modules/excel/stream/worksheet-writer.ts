@@ -9,8 +9,15 @@ import type { RangeData } from "@excel/core/range";
 import { rangeCreate, rangeIntersects, rangeRange } from "@excel/core/range";
 import type { RowData } from "@excel/core/row";
 import { rowCreate, rowFindCell, rowGetModel, rowHasValues } from "@excel/core/row";
-import { columnCreate, columnSetDefn, rowGetCellEx, rowSetValues } from "@excel/core/worksheet";
+import type { WorkbookFormat } from "@excel/core/workbook-format";
 import type { WorksheetData } from "@excel/core/worksheet";
+import {
+  columnCreate,
+  columnSetDefn,
+  getSheetModel,
+  rowGetCellEx,
+  rowSetValues
+} from "@excel/core/worksheet";
 import {
   ExcelStreamStateError,
   ImageError,
@@ -20,6 +27,12 @@ import {
 import { SheetCommentsWriter } from "@excel/stream/sheet-comments-writer";
 import { SheetRelsWriter } from "@excel/stream/sheet-rels-writer";
 import type { Medium as WriterMedium } from "@excel/stream/workbook-writer";
+import {
+  StreamedXlsbWorksheet,
+  streamedWorksheetPath,
+  type StreamedXlsbTables,
+  xlsbSheetOptionsFromModel
+} from "@excel/stream/xlsb-writer";
 import { colCache } from "@excel/utils/col-cache";
 import type { DrawingAnchor, DrawingRel } from "@excel/utils/drawing-utils";
 import { buildDrawingAnchorsAndRels, isExternalImage } from "@excel/utils/drawing-utils";
@@ -29,9 +42,13 @@ import {
   mediaRelTargetFromRels,
   worksheetPath
 } from "@excel/utils/ooxml-paths";
+import type { PackageSink } from "@excel/utils/package-sink";
 import type { SharedStrings } from "@excel/utils/shared-strings";
 import { buildSheetProtection } from "@excel/utils/sheet-protection";
 import type { StreamBuf } from "@excel/utils/stream-buf";
+import type { SheetComment } from "@excel/xlsb/comments";
+import { commentsFromModel, sheetRowsFromModel } from "@excel/xlsb/write/model-adapter";
+import type { WriteWorksheetPartOptions } from "@excel/xlsb/write/worksheet";
 import { RelType } from "@excel/xlsx/rel-type";
 import type { CommentModel } from "@excel/xlsx/xform/comment/comment-xform";
 import { StringBuf } from "@utils/string-buf";
@@ -133,6 +150,30 @@ export interface WorkbookWriterLike {
   commentRefs: { commentName: string; vmlDrawing: string }[];
   /** Open a streaming entry in the output zip for the given path. */
   _openStream(path: string): InstanceType<typeof StreamBuf>;
+  /**
+   * The workbook-wide names a BIFF12 formula resolves against — see `WorkbookWriter.xlsbFormulaContext`.
+   *
+   * Optional so an XLSX-only host need not provide it; absent means cross-sheet formulas cannot be encoded, which is
+   * then reported rather than written as a blank cell.
+   */
+  xlsbFormulaContext?: () => {
+    readonly sheetNames: readonly string[];
+    readonly definedNames: readonly string[];
+    readonly externSheets: { first: number; last: number }[];
+  };
+  /**
+   * Whether the workbook counts days from 1904 — see `WorkbookWriter.xlsbDate1904`.
+   *
+   * Optional for the same reason as `xlsbFormulaContext`; absent means the 1900 system, which is the default a host
+   * that does not model the setting would want.
+   */
+  xlsbDate1904?: () => boolean;
+  /** Which container is being written. `"xlsb"` sends rows through the binary encoder. */
+  readonly format: WorkbookFormat;
+  /** The workbook-wide interning tables for a streamed XLSB. Absent for XLSX. */
+  readonly xlsbTables?: StreamedXlsbTables;
+  /** The zip as a `PackageSink`, which is what the binary sheet writer takes. */
+  packageSink(): PackageSink;
 }
 
 interface WorksheetWriterOptions {
@@ -194,6 +235,13 @@ class WorksheetWriter {
   private _merges: RangeData[] & { add?: () => void };
   private _sheetRelsWriter: SheetRelsWriter;
   private _sheetCommentsWriter: SheetCommentsWriter;
+  /**
+   * Notes collected as rows were committed, for the XLSB comments part.
+   *
+   * Named `_retainedComments` because `getSheetModel` reads it under that name — see the field it emits. Small by
+   * construction: one entry per annotated cell, not per row.
+   */
+  readonly _retainedComments: SheetComment[] = [];
   private _dimensions: RangeData;
   private _rowZero: number;
   private _rowOffset: number;
@@ -203,6 +251,44 @@ class WorksheetWriter {
   private _formulae: { [key: string]: unknown };
   private _siFormulae: number;
   conditionalFormatting: ConditionalFormattingOptions[];
+  /**
+   * The rest of what a worksheet is, so `getSheetModel` can be handed this object.
+   *
+   * **`_asWorksheet` used to be a cast with a note calling it "a deliberate, contained masquerade".** It was
+   * passed only to the core factories, which store it as a back-pointer and never look inside — so nothing
+   * checked the claim, and the model that both binary writers consume could not be obtained from a streaming
+   * sheet at all. Filling the gaps makes the cast honest and gives `format: "xlsb"` the whole of
+   * `writeXlsbPackage`'s model→records mapping for free, rather than a second adapter reaching into twenty
+   * private fields.
+   *
+   * **Empty is not a placeholder here, it is the truth.** A streaming worksheet has no charts, shapes,
+   * sparklines, tables or pivot tables — those need a second pass over cells this writer has already discarded,
+   * which is the whole point of it. `Worksheet` reports the same fields as populated because it keeps its cells;
+   * this one reports them as absent because they are.
+   *
+   * `conditionalFormattings` is the exception and is a genuine naming split rather than a gap: this class has
+   * always called the same thing `conditionalFormatting`, and `getSheetModel` reads the plural. The getter below
+   * bridges the two rather than renaming a public field.
+   */
+  readonly tables: Record<string, unknown> = {};
+  readonly pivotTables: readonly unknown[] = [];
+  readonly threadedComments: readonly unknown[] = [];
+  readonly formControls: readonly unknown[] = [];
+  readonly _charts: readonly unknown[] = [];
+  readonly _shapes: readonly unknown[] = [];
+  readonly _sparklineGroups: readonly unknown[] = [];
+  readonly _worksheetMcIgnorable: string | undefined = undefined;
+  readonly _sortStateAutoFilterRef: string | undefined = undefined;
+  /** Tab position, allocated across worksheets and chartsheets — see `core/sheet-order`. */
+  orderNo?: number;
+  /** The file-path number, which is this sheet's `id` for a streaming writer. */
+  get sheetNo(): number {
+    return this.id;
+  }
+  /** What `getSheetModel` reads; this class spells the same field singular. */
+  get conditionalFormattings(): ConditionalFormattingOptions[] {
+    return this.conditionalFormatting;
+  }
   ignoredErrors: IgnoredError[];
   rowBreaks: RowBreak[];
   colBreaks: ColBreak[];
@@ -236,6 +322,25 @@ class WorksheetWriter {
   private _headerRowCount?: number;
   /** Watermark configuration */
   private _watermark: WatermarkOptions | null;
+  /** The binary sheet part being written forward, when the target is XLSB. */
+  private _xlsb: StreamedXlsbWorksheet | undefined;
+  /** What the binary encoder could not express in this sheet. */
+  private _xlsbLosses: readonly string[] = [];
+
+  /**
+   * What the binary encoder could not express in this sheet, once `commit()` has run.
+   *
+   * **Public because it had no reader at all.** The row encoder reports what it cannot express — a formula whose token
+   * stream needs a workbook-wide context the streaming path does not have becomes a blank cell — and the report was
+   * stored in a private field nothing consulted. The package writer cannot recover it either: by the time it runs, the
+   * sheet is already in the ZIP and its rows are gone, so `writeXlsbPackage` sees nothing to report. The result was a
+   * cross-sheet formula silently becoming an empty cell with `xlsbUnsupported` reading `[]`.
+   *
+   * `WorkbookWriter.commit()` folds this into `xlsbUnsupported`, which is where a caller looks.
+   */
+  get xlsbUnsupported(): readonly string[] {
+    return this._xlsbLosses;
+  }
   /** Drawing model — populated during commit if images were added */
   private _drawing?: {
     rId: string;
@@ -268,7 +373,12 @@ class WorksheetWriter {
 
     // keep a record of all row and column pageBreaks
     this._merges = [];
-    this._merges.add = function () {}; // ignore cell instruction
+    // **Non-enumerable, because it is a method and not a merge.** The stub exists so that code calling
+    // `merges.add(...)` does not have to know which kind of worksheet it holds. As a plain assignment it became an
+    // own enumerable property of the array, and `getSheetModel` reads merges with `Object.values` — correct for a
+    // real worksheet, whose `_merges` is keyed by address — so the function was mapped into a range and every
+    // streamed sheet gained a phantom `A1:A1` merge. It surfaced the moment this class started producing a model.
+    Object.defineProperty(this._merges, "add", { value: () => {}, enumerable: false });
 
     // keep record of all hyperlinks
     this._sheetRelsWriter = new SheetRelsWriter(options);
@@ -342,8 +452,11 @@ class WorksheetWriter {
       {
         margins: { left: 0.7, right: 0.7, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 },
         orientation: "portrait",
-        horizontalDpi: 4294967295,
-        verticalDpi: 4294967295,
+        // Absent, expressed as absent. This used to be 4294967295, a sentinel the XLSX writer stripped on the
+        // way out — which worked for exactly one writer and left the XLSB one stating 0xFFFFFFFF where the
+        // schema's default is 600. `core/worksheet.ts` already had it this way with a note saying why.
+        horizontalDpi: undefined,
+        verticalDpi: undefined,
         fitToPage: !!(
           options.pageSetup &&
           (options.pageSetup.fitToWidth || options.pageSetup.fitToHeight) &&
@@ -390,7 +503,20 @@ class WorksheetWriter {
     this.sheetProtection = null;
 
     // start writing to stream now
-    this._writeOpenWorksheet();
+    if (this._workbook.format === "xlsb") {
+      // **No XML prologue, and no ZIP entry yet.** The binary prologue describes the columns, panes and views, and
+      // a caller sets those after `addWorksheet` — so the part is opened on the first committed row instead. The
+      // XLSX path emits `<cols>` on the first row for the same reason; this just moves one more record behind the
+      // same line.
+      this._xlsb = new StreamedXlsbWorksheet(
+        this._workbook.packageSink(),
+        streamedWorksheetPath(this.id),
+        this._workbook.xlsbTables!,
+        () => this._xlsbSheetOptions()
+      );
+    } else {
+      this._writeOpenWorksheet();
+    }
 
     this.startedData = false;
   }
@@ -441,6 +567,18 @@ class WorksheetWriter {
 
     // we _cannot_ accept new rows from now on
     this._rows = null;
+
+    if (this._xlsb !== undefined) {
+      // The epilogue reads the sheet's metadata — merges, conditional formats, panes, page setup — at this moment
+      // rather than when the part was opened, which is what makes it legal for a caller to keep setting those
+      // while rows arrive. Nothing after this point touches the rows.
+      const { unsupported } = this._xlsb.end();
+      this._xlsbLosses = unsupported;
+      this._sheetCommentsWriter.commit();
+      this._sheetRelsWriter.commit();
+      this.committed = true;
+      return;
+    }
 
     if (!this.startedData) {
       this._writeOpenSheetData();
@@ -1004,7 +1142,69 @@ class WorksheetWriter {
     this._write("<sheetData>");
   }
 
+  /**
+   * The sheet's options for the binary prologue and epilogue, from the shared model→options mapping.
+   *
+   * `getSheetModel(this)` works because this class now carries every field a worksheet does — see the note on
+   * `tables` above. That is the whole reason there is no second adapter here: merges, panes, views, page setup,
+   * conditional formats, hyperlinks and the rest are read by `worksheetPartOptionsFromModel`, the same function
+   * the buffered writer uses, so a field added there reaches this path without an edit.
+   */
+  private _xlsbSheetOptions(): Omit<WriteWorksheetPartOptions, "rows" | "omitDimension"> {
+    const model = getSheetModel(this as unknown as Parameters<typeof getSheetModel>[0]);
+    // The formula context comes from the workbook, not from this sheet: an `ixti` indexes the workbook's sheet list.
+    // Fetched per call rather than captured, because `addWorksheet` runs between sheet commits — see
+    // `WorkbookWriter.xlsbFormulaContext`.
+    return xlsbSheetOptionsFromModel(
+      model,
+      this._workbook.xlsbTables!,
+      this.id === 1,
+      this._workbook.xlsbFormulaContext?.()
+    );
+  }
+
+  /**
+   * One committed row, as binary records.
+   *
+   * Goes through `sheetRowsFromModel` on a one-row view of this sheet, which is where a cell's value, style,
+   * number format, hyperlink and shared-formula role are decided. Deciding them again here would be the ninth
+   * instance of this module's most repeated defect.
+   */
+  private _writeRowXlsb(row: RowData): void {
+    const model = rowGetModel(row);
+    if (model === null || model === undefined) {
+      return;
+    }
+    // **Notes are kept, because this sheet will not have its rows when the package is written.**
+    //
+    // The XLSX branch of `_writeRow` collects a row's comments into `_sheetCommentsWriter` as it goes; this branch
+    // returned before ever reaching that code, and nothing else carried them — a BIFF12 comments part is written whole at
+    // the end, from `commentsFromModel`, which reads `rows[].cells[].comment` off a row store that `commit()` has already
+    // released. So a note written through the streaming XLSB writer vanished: no `comments1.bin`, no VML, no indicator on
+    // the cell. Measured against the two paths that work — streaming XLSX and buffered XLSB both produce a comments part
+    // and its VML for the same workbook.
+    //
+    // Through `commentsFromModel` on a one-row view, which is the same extraction rule the buffered path uses. A second
+    // implementation of "which cells have notes and what is in them" is this module's most repeated defect.
+    this._retainedComments.push(
+      ...commentsFromModel({ rows: [model] } as unknown as Parameters<typeof commentsFromModel>[0])
+    );
+    for (const sheetRow of sheetRowsFromModel(
+      { rows: [model] } as unknown as Parameters<typeof sheetRowsFromModel>[0],
+      // **The workbook's date system, not a literal `false`.** A serial is four years and a day out under the wrong
+      // epoch, and the workbook part written at commit states the real setting — so the package disagreed with itself.
+      // See `WorkbookWriter.xlsbDate1904`.
+      this._workbook.xlsbDate1904?.() ?? false
+    )) {
+      this._xlsb!.row(sheetRow);
+    }
+  }
+
   private _writeRow(row: RowData): void {
+    if (this._xlsb !== undefined) {
+      this._writeRowXlsb(row);
+      return;
+    }
     if (!this.startedData) {
       this._writeColumns();
       this._writeOpenSheetData();

@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Note, Workbook } from "@excel/index";
 
 const outDir = path.resolve(
@@ -55,5 +56,5 @@ Cell.setValue(ws, "B2", 42);
 Cell.setNote(ws, "B2", note.note ?? "");
 console.log("readback note:", Cell.getNote(ws, "B2"));
 
-await Workbook.writeFile(wb, filename);
+await writeBothFormats(wb, filename);
 console.log(`Done. Wrote ${filename}`);

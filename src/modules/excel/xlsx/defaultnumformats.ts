@@ -88,6 +88,17 @@ const defaultNumFormats: { [key: number]: NumFormat } = {
   38: { f: "#,##0 ;[Red](#,##0)" },
   39: { f: "#,##0.00;(#,##0.00)" },
   40: { f: "#,##0.00;[Red](#,##0.00)" },
+  // **41–44 are the built-in accounting formats and were missing from this table.** Their absence had two
+  // consequences, and the second is the expensive one: a workbook using them got its formats re-registered as
+  // *custom* ids 164+ (because nothing matched), and the styles part Excel then repaired — `Removed Records:
+  // Style from /xl/styles.bin`.
+  //
+  // The codes are the ones Excel itself writes, read out of a template it produced. Note the `\-`: the escape is
+  // part of the code, and dropping it is what stopped these from matching even after they were added here.
+  41: { f: '_ * #,##0_ ;_ * \\-#,##0_ ;_ * "-"_ ;_ @_ ' },
+  42: { f: '_ "￥"* #,##0_ ;_ "￥"* \\-#,##0_ ;_ "￥"* "-"_ ;_ @_ ' },
+  43: { f: '_ * #,##0.00_ ;_ * \\-#,##0.00_ ;_ * "-"??_ ;_ @_ ' },
+  44: { f: '_ "￥"* #,##0.00_ ;_ "￥"* \\-#,##0.00_ ;_ "￥"* "-"??_ ;_ @_ ' },
   45: { f: "mm:ss" },
   46: { f: "[h]:mm:ss" },
   47: { f: "mmss.0" },

@@ -733,9 +733,11 @@ describe("Workbook", () => {
       const wb2 = Workbook.create();
       await getXlsxIo(wb2).load(buffer);
 
-      // Default: fullCalcOnLoad should be false, iterate fields undefined
+      // **`fullCalcOnLoad` is now true by default.** This writer produces no `calcChain`, so it cannot claim
+      // its cached formula results are Excel's — the flag is how a file says "recalculate these". The XLSB
+      // container has always done the equivalent through `recalcID = 0`.
       expect(wb2.calcProperties).toBeDefined();
-      expect(wb2.calcProperties.fullCalcOnLoad).toBe(false);
+      expect(wb2.calcProperties.fullCalcOnLoad).toBe(true);
       expect(wb2.calcProperties.iterate).toBeUndefined();
       expect(wb2.calcProperties.iterateCount).toBeUndefined();
       expect(wb2.calcProperties.iterateDelta).toBeUndefined();

@@ -572,9 +572,46 @@ export function renderBarChart(xml: XmlSink, g: BarChartGroup): void {
   // Excel's behaviour when the attributes are absent.
   xml.leafNode("c:barDir", { val: g.barDir ?? "col" });
   xml.leafNode("c:grouping", { val: g.grouping ?? "clustered" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  // **`c:varyColors` is written even when the model is silent, and getting this wrong cost 15× on open.**
+  //
+  // It is optional in every `CT_*Chart`, so omitting it produces a valid file that Excel renders identically. A third
+  // party need not read the omission the same way — and the direction here is the opposite of what it sounds like.
+  //
+  // Measured against LibreOffice on `sales-dashboard`, whose bar series carries 10,080 points and a data table:
+  //
+  // | `c:varyColors`     | time to open |
+  // | ------------------ | ------------ |
+  // | absent             | 495 s        |
+  // | `val="0"`          | 498 s        |
+  // | `val="1"`          | **31 s**     |
+  // | Excel's own file   | 32 s         |
+  //
+  // The 31 s is a hand-patched copy of this library's own output; with the fix in place the example writes 32 s for
+  // `.xlsb` and 33 s for `.xlsx`, which is the number that matters and is Excel's own to within a second.
+  //
+  // So *one colour per series* is the expensive answer: it makes the renderer resolve each of 10,080 points against
+  // the inherited series fill, and the data table then draws every one of those again as a key. `val="1"` indexes a
+  // palette instead. **Excel writes `1` on all five charts in that workbook**, which is why its larger file opens in a
+  // fifteenth of the time, and it is why the default here is `1` rather than the `0` a reading of the schema suggests.
+  //
+  // The first attempt at this fix wrote `"0"` — reasoning that a series has one colour unless told otherwise — and
+  // changed nothing, because that was already the effective behaviour. Deleting the data table also "fixed" it (28 s)
+  // by removing a feature the example asks for; Excel carries the same table over the same categories for free.
+  //
+  // The general rule this establishes for this file: **an element Excel always emits gets emitted.** A schema default
+  // is what a *validator* falls back to, not what every consumer does, and "the model said nothing" is not the same
+  // claim as "the default applies".
+  //
+  // **It is not a change of visual semantics, which is the obvious objection.** Three things settle that:
+  //
+  // - Excel's own `12-charts` reference is a **single-series** `barChart` with no series `spPr` and no `dPt`, and it
+  //   still writes `val="1"`. There is nothing there for the flag to be overridden by, so `1` is simply what Excel
+  //   writes for a chart nobody has coloured.
+  // - This library's *renderer* reads `group.varyColors` from the **model**, not from this XML (see
+  //   `chart-renderer.ts`), and the model still says `undefined`. SVG and PDF output are byte-identical across this
+  //   change.
+  // - `varyColors` only distinguishes points within one series; a multi-series chart colours by series regardless.
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderBarSeries(xml, s);
   }
@@ -613,9 +650,7 @@ export function renderBarChart(xml: XmlSink, g: BarChartGroup): void {
 export function renderBar3DChart(xml: XmlSink, g: BarChartGroup): void {
   xml.leafNode("c:barDir", { val: g.barDir ?? "col" });
   xml.leafNode("c:grouping", { val: g.grouping ?? "clustered" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderBarSeries(xml, s);
   }
@@ -644,9 +679,7 @@ export function renderLineChart(xml: XmlSink, g: LineChartGroup): void {
   // Guard required `c:grouping` with schema default `"standard"` when
   // parser narrowing rejected the source value; see `_renderBarChart`.
   xml.leafNode("c:grouping", { val: g.grouping ?? "standard" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderLineSeries(xml, s);
   }
@@ -694,9 +727,7 @@ export function renderLineChart(xml: XmlSink, g: LineChartGroup): void {
  */
 export function renderLine3DChart(xml: XmlSink, g: LineChartGroup): void {
   xml.leafNode("c:grouping", { val: g.grouping ?? "standard" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderLineSeries(xml, s);
   }
@@ -717,9 +748,7 @@ export function renderLine3DChart(xml: XmlSink, g: LineChartGroup): void {
 }
 
 export function renderPieChart(xml: XmlSink, g: PieChartGroup): void {
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderPieSeries(xml, s);
   }
@@ -758,9 +787,7 @@ export function renderPieChart(xml: XmlSink, g: PieChartGroup): void {
  * it for layout; only the XLSX writer filters it out.
  */
 export function renderDoughnutChart(xml: XmlSink, g: DoughnutChartGroup): void {
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderPieSeries(xml, s, { suppressDLblPos: true });
   }
@@ -778,9 +805,7 @@ export function renderDoughnutChart(xml: XmlSink, g: DoughnutChartGroup): void {
 export function renderAreaChart(xml: XmlSink, g: AreaChartGroup): void {
   // Guard required `c:grouping` — see `_renderBarChart`.
   xml.leafNode("c:grouping", { val: g.grouping ?? "standard" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderAreaSeries(xml, s);
   }
@@ -811,9 +836,7 @@ export function renderScatterChart(xml: XmlSink, g: ScatterChartGroup): void {
   // `c:scatterStyle` is required; fall back to `"marker"` (Excel's
   // default scatter style) when parser narrowing rejected the source.
   xml.leafNode("c:scatterStyle", { val: g.scatterStyle ?? "marker" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderScatterSeries(xml, s);
   }
@@ -826,9 +849,7 @@ export function renderScatterChart(xml: XmlSink, g: ScatterChartGroup): void {
 }
 
 export function renderBubbleChart(xml: XmlSink, g: BubbleChartGroup): void {
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderBubbleSeries(xml, s);
   }
@@ -853,9 +874,7 @@ export function renderRadarChart(xml: XmlSink, g: RadarChartGroup): void {
   // `c:radarStyle` is required; default to `"standard"` per schema
   // when parser narrowing rejected the source value.
   xml.leafNode("c:radarStyle", { val: g.radarStyle ?? "standard" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderRadarSeries(xml, s);
   }
@@ -939,9 +958,7 @@ export function renderOfPieChart(xml: XmlSink, g: OfPieChartGroup): void {
   // `c:ofPieType` is required; default to `"pie"` (Excel's default
   // bar-of-pie / pie-of-pie style) when parser narrowing rejected.
   xml.leafNode("c:ofPieType", { val: g.ofPieType ?? "pie" });
-  if (g.varyColors !== undefined) {
-    xml.leafNode("c:varyColors", { val: g.varyColors ? "1" : "0" });
-  }
+  xml.leafNode("c:varyColors", { val: g.varyColors === false ? "0" : "1" });
   for (const s of g.series) {
     renderPieSeries(xml, s);
   }
@@ -1924,6 +1941,15 @@ export function renderAxis(xml: XmlSink, ax: ChartAxis): void {
         : {})
     });
   }
+  // **These stay conditional, and an earlier attempt at this fix made them unconditional.**
+  //
+  // The reasoning was that Excel always writes them, so writing them could only improve fidelity. Two things were
+  // wrong with it. Performance: the 473 s → 403 s drop that motivated it was measured by running LibreOffice on
+  // several variants *concurrently*, so the instances contended and every intermediate reading was noise — re-measured
+  // serially it changes nothing, and `c:varyColors` is the whole effect. Correctness: this renderer is not the only
+  // path to a chart part. A chart loaded from a file and patched keeps its original XML, and injecting a default into
+  // an axis the caller never touched overwrites what was there — which is exactly what the raw-passthrough test
+  // caught, an axis arriving with `val="outside"` and leaving with the default.
   if (ax.majorTickMark) {
     xml.leafNode("c:majorTickMark", { val: tickMarkToOoxml(ax.majorTickMark) });
   }
@@ -2000,7 +2026,7 @@ export function renderAxis(xml: XmlSink, ax: ChartAxis): void {
         xml.leafNode("c:custUnit", { val: String(va.dispUnits.custUnit) });
       }
       if (va.dispUnits.label) {
-        renderTitle(xml, va.dispUnits.label, "c:dispUnitsLbl");
+        renderDispUnitsLbl(xml, va.dispUnits.label);
       }
       if (va.dispUnits.extLst) {
         xml.writeRaw(va.dispUnits.extLst);
@@ -2048,6 +2074,49 @@ export function renderAxis(xml: XmlSink, ax: ChartAxis): void {
 }
 
 // ---- Title, Legend, Layout ----
+
+/**
+ * `<c:dispUnitsLbl>` — **not** a title, despite carrying the same pieces.
+ *
+ * This called {@link renderTitle} with a different tag, and `CT_DispUnitsLbl` differs from `CT_Title` in three
+ * ways rather than one:
+ *
+ * - it has **no `overlay`**, and one was emitted — the single schema violation Excel actually reported,
+ *   as `Repaired Records: Drawing from /xl/drawings/drawingN.xml part (Drawing shape)` against the drawing
+ *   anchoring the chart;
+ * - its sequence is `layout` **then** `tx`, the reverse of `CT_Title`'s `tx` then `layout`;
+ * - it has no `extLst`.
+ *
+ * So the shared renderer was wrong for this element in element set, order and both directions at once. The two
+ * types are kept apart here rather than parameterised, because "a title with two fields suppressed and two
+ * swapped" is a longer thing to read than the four-line sequence it actually is.
+ *
+ * The model is a `ChartTitle` because that is what the parser fills in and what the public surface accepts;
+ * the fields this element cannot express are dropped on write rather than rejected, which is what every other
+ * unrepresentable-in-this-position value does here.
+ */
+function renderDispUnitsLbl(xml: XmlSink, label: ChartTitle): void {
+  xml.openNode("c:dispUnitsLbl");
+  if (label.layout) {
+    renderLayout(xml, label.layout);
+  }
+  if (label.rawTx) {
+    xml.writeRaw(label.rawTx);
+  } else if (label.text) {
+    renderRichText(xml, label.text, "c:tx");
+  } else if (label.strRef) {
+    xml.openNode("c:tx");
+    renderStrRef(xml, label.strRef);
+    xml.closeNode();
+  }
+  if (label.spPr) {
+    renderSpPr(xml, label.spPr);
+  }
+  if (label.txPr) {
+    renderTxPr(xml, label.txPr);
+  }
+  xml.closeNode();
+}
 
 export function renderTitle(xml: XmlSink, title: ChartTitle, tag: string): void {
   xml.openNode(tag);
@@ -2167,6 +2236,8 @@ export function renderLayout(xml: XmlSink, layout?: ChartLayout): void {
 
 export function renderDataTable(xml: XmlSink, dt: DataTable): void {
   xml.openNode("c:dTable");
+  // Conditional, for the reason given in `renderAxis`: an unconditional default overwrites what a patched chart
+  // already carried. Measured to be performance-neutral in any case — `c:varyColors` is where the cost was.
   if (dt.showHorzBorder !== undefined) {
     xml.leafNode("c:showHorzBorder", { val: dt.showHorzBorder ? "1" : "0" });
   }

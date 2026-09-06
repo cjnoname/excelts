@@ -12,9 +12,11 @@ import { Zip, ZipDeflate } from "@archive/zip/stream";
 import type { DefinedNamesData } from "@excel/core/defined-names";
 import { createDefinedNames, definedNamesModel } from "@excel/core/defined-names";
 import { validateCellStyleName } from "@excel/core/workbook-core";
+import type { WorkbookFormat } from "@excel/core/workbook-format";
 import { ExcelNotSupportedError, ImageError } from "@excel/errors";
 import { WorksheetWriter } from "@excel/stream/worksheet-writer";
 import type { WorkbookWriterLike } from "@excel/stream/worksheet-writer";
+import { createStreamedXlsbTables, type StreamedXlsbTables } from "@excel/stream/xlsb-writer";
 import type {
   Font,
   ImageData,
@@ -39,6 +41,7 @@ import {
   OOXML_REL_TARGETS,
   worksheetRelTarget
 } from "@excel/utils/ooxml-paths";
+import type { PackageSink, PartWriter } from "@excel/utils/package-sink";
 import { SharedStrings } from "@excel/utils/shared-strings";
 import { StreamBuf } from "@excel/utils/stream-buf";
 import { buildWorkbookProtection } from "@excel/utils/workbook-protection";
@@ -138,6 +141,17 @@ export interface WorkbookWriterOptions {
   lastPrinted?: Date;
   useSharedStrings?: boolean;
   useStyles?: boolean;
+  /**
+   * Count dates from 1904 instead of 1900.
+   *
+   * **Declared here because it could previously only be set by a cast.** A random-access workbook carries it on
+   * `properties.date1904`; a `WorkbookWriter` has no `properties` at all, so a caller who needed the 1904 system had to
+   * assign an undeclared field — which this library's own test for the setting did. The value reaches both the workbook
+   * part and every cell serial through `xlsbDate1904()`.
+   *
+   * Read per row rather than captured, so setting it before the first commit is what matters; see `xlsbDate1904`.
+   */
+  date1904?: boolean;
   zip?: Partial<WorkbookZipOptions>;
   /**
    * Destination sink. Backpressure is respected, so the sink must already be
@@ -149,6 +163,14 @@ export interface WorkbookWriterOptions {
   stream?: Writable | WritableStream<Uint8Array>;
   filename?: string; // Node.js only
   trueStreaming?: boolean;
+  /**
+   * Which container to write. Defaults to `"xlsx"`.
+   *
+   * `"xlsb"` produces the binary form from the same calls, with the same memory bound: rows are encoded and handed
+   * to the ZIP as they are committed. See `stream/xlsb-writer` for what is and is not bounded, and for the single
+   * record (`BrtWsDim`) a forward pass cannot write.
+   */
+  format?: WorkbookFormat;
 }
 
 interface OutputStreamLike {
@@ -180,6 +202,16 @@ export interface WorksheetWriterLike {
   fileIndex?: number;
   stream: InstanceType<typeof StreamBuf>;
   commit(): void;
+  /**
+   * What the binary encoder could not express in this sheet's *rows*, after `commit()`.
+   *
+   * Part of the contract because the package writer cannot recover it: by the time it runs the sheet is in the ZIP and
+   * its rows are gone. Without this the row-level report was computed and discarded, so a cross-sheet formula that
+   * became a blank cell left `WorkbookWriter.xlsbUnsupported` empty.
+   *
+   * Optional so an XLSX-only worksheet writer need not carry it.
+   */
+  xlsbUnsupported?: readonly string[];
   /** Drawing model — populated after commit if images were added */
   drawing?: { rId: string; name: string; anchors: DrawingAnchor[]; rels: DrawingRel[] };
 }
@@ -216,6 +248,86 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
   private _worksheets: TWorksheetWriter[];
   views: WorkbookView[];
   zipOptions?: Partial<WorkbookZipOptions>;
+  /** Which container this writer produces. Read by `WorksheetWriter` to decide what a row becomes. */
+  readonly format: WorkbookFormat;
+  /**
+   * The interning tables and written-path set a streamed XLSB shares across its sheets.
+   *
+   * Created eagerly rather than on first use so that `WorksheetWriter` can rely on it existing: a `BrtCellIsst`
+   * index is workbook-wide, and a table created per sheet would make every sheet after the first name the wrong
+   * strings. Undefined for XLSX, where nothing needs it.
+   */
+  readonly xlsbTables?: StreamedXlsbTables;
+  /** What the binary writer could not express, once `commit()` has run. Empty unless something was dropped. */
+  xlsbUnsupported: readonly string[] = [];
+
+  /**
+   * The workbook-wide names a formula's token stream resolves against, as they stand *now*.
+   *
+   * A BIFF12 formula stores `Sheet2!A1` as an `ixti` index rather than a name, so encoding one needs the workbook's
+   * sheet list. The streamed sheet writer had no context at all and every cross-sheet formula became a blank cell —
+   * reported by the row encoder and then discarded, so `xlsbUnsupported` read empty.
+   *
+   * **Built on demand rather than held**, because it grows: `addWorksheet` is called between sheet commits, so a sheet
+   * committed later resolves against more sheets than an earlier one. That asymmetry is inherent to writing forward and
+   * is exactly why it must not be captured once.
+   *
+   * `externSheets` is the identity table `writeXlsbPackage` emits at the end, stated here so the encoder resolves an
+   * `ixti` against the same table the file will carry. It is mutable on purpose — a reference spanning a range of sheets
+   * has no identity entry and the encoder appends one.
+   *
+   * A forward reference — sheet 1 naming sheet 3 — still cannot resolve, and is now *reported* rather than silent.
+   */
+  xlsbFormulaContext(): {
+    readonly sheetNames: readonly string[];
+    readonly definedNames: readonly string[];
+    readonly externSheets: { first: number; last: number }[];
+  } {
+    const sheetNames = this._worksheets.map(
+      (sheet, index) => (sheet as { name?: string } | undefined)?.name ?? `Sheet${index + 1}`
+    );
+    return {
+      sheetNames,
+      definedNames: definedNamesModel(this._definedNames).map(defined => defined.name),
+      externSheets: sheetNames.map((_name, index) => ({ first: index, last: index }))
+    };
+  }
+  /**
+   * Whether this workbook counts days from 1904, as the date system stands *now*.
+   *
+   * **A serial is meaningless without it, and the streamed row encoder was passing a literal `false`.** The workbook
+   * part is produced at `commit()` from the model, so `BrtWbProp` recorded the real setting while every cell serial had
+   * been computed against the other epoch — a package internally inconsistent by 1,462 days. Measured on a workbook
+   * with `date1904: true`: `2020-01-15` written through `Workbook.toBuffer` read back as `2020-01-15`, and through the
+   * streaming writer as `2024-01-16`.
+   *
+   * Read per row rather than captured, for the reason `xlsbFormulaContext` is: a caller may set the property between
+   * `addWorksheet` and the first row. A caller who changes it *after* rows are committed gets the ordinary
+   * forward-pass consequence — the rows already encoded keep the epoch they were encoded with — which is the same
+   * constraint the columns, panes and views are under.
+   */
+  xlsbDate1904(): boolean {
+    // `date1904` is a declared writer option now. `properties.date1904` is still honoured because a caller may have
+    // assigned it — that was the only way to set this before the option existed, and this library's own test did it.
+    return this.properties?.date1904 === true;
+  }
+
+  /**
+   * Workbook properties, which a streaming writer did not have at all.
+   *
+   * **One field, because `date1904` was being read from two places that could not agree.** The option sets the epoch the
+   * *rows* are encoded against, while `writeXlsbPackage` writes `BrtWbProp` from `model.properties?.date1904` — and the
+   * model comes from `getWorkbookModel`, which reads `wb.properties`. With no such property the two disagreed by 1,462
+   * days in the opposite direction from the original defect: `date1904: true` produced cells encoded for 1904 inside a
+   * package declaring 1900, and `2020-01-15` read back as `2016-01-14`.
+   *
+   * A plain field rather than a getter, so a caller may still assign it — which was the only way to set the date system
+   * before the option existed.
+   */
+  properties: { date1904?: boolean } = {};
+
+  /** Deflate completions for entries opened through `packageSink()`, awaited before the ZIP is finalised. */
+  private readonly _sinkCompletions: Promise<void>[] = [];
   compressionLevel: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   media: Medium[];
   commentRefs: CommentRef[];
@@ -285,6 +397,9 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     this.lastPrinted = options.lastPrinted;
 
     this.useSharedStrings = options.useSharedStrings ?? false;
+    // Into `properties`, which is what both readers of this setting consult — the row encoder through `xlsbDate1904()`
+    // and the workbook part through `getWorkbookModel().properties`.
+    this.properties = { ...(options.date1904 === undefined ? {} : { date1904: options.date1904 }) };
     this.sharedStrings = new SharedStrings();
     this.styles = options.useStyles ? new StylesXform(true) : new StylesXform.Mock(true);
     this._definedNames = createDefinedNames();
@@ -292,6 +407,8 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     this.views = [];
 
     this.zipOptions = options.zip;
+    this.format = options.format ?? "xlsx";
+    this.xlsbTables = this.format === "xlsb" ? createStreamedXlsbTables() : undefined;
     const level = options.zip?.zlib?.level ?? options.zip?.compressionOptions?.level ?? 6;
     this.compressionLevel = Math.max(0, Math.min(9, level)) as
       | 0
@@ -613,6 +730,16 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       if (!worksheet) {
         continue;
       }
+      if (this.format === "xlsb") {
+        // **`worksheet.stream` is not touched here.** It is a lazy getter that opens `xl/worksheets/sheetN.xml`
+        // on first access — so reading it merely to find the completion promise created an XML entry the binary
+        // package does not want, registered a promise nothing would ever resolve, and `commit()` hung. The
+        // binary sheet's entry is opened by the sink instead, and its completion is awaited below with the rest.
+        if (!worksheet.committed) {
+          worksheet.commit();
+        }
+        continue;
+      }
       const stream = worksheet.stream;
       const zipCompletion = this._worksheetZipCompletions.get(stream)!;
       if (!worksheet.committed) {
@@ -623,11 +750,96 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       await zipCompletion;
       await this._waitForUserSinkDrain();
     }
+    if (this.format === "xlsb") {
+      // Every entry the sink opened, in one place. They were all started by `_openStream`, so they are all in the
+      // same map the XML path reads one at a time — there is just no per-sheet stream object to key them by.
+      await Promise.all(this._sinkCompletions);
+      await this._waitForUserSinkDrain();
+    }
+  }
+
+  /**
+   * A `PackageSink` over this writer's ZIP.
+   *
+   * The two operations a sink needs are the two this class already had: `_addFile` writes a whole part and
+   * `_openStream` opens an incremental one, both through the same `Zip` with the same compression level and the
+   * same backpressure accounting. So the binary writer reaches the destination through the machinery that has
+   * been carrying the XML one, rather than through a second ZIP layer beside it.
+   */
+  packageSink(): PackageSink {
+    const written: string[] = [];
+    return {
+      part: (path: string, data: Uint8Array | string): void => {
+        written.push(path);
+        this._addFile(data, path);
+      },
+      open: (path: string): PartWriter => {
+        written.push(path);
+        const stream = this._openStream(path);
+        // Kept in an array as well as the `WeakMap` keyed by stream, because a sink caller has no stream object to
+        // look one up with — and the map is weak, so it cannot be enumerated.
+        const completion = this._worksheetZipCompletions.get(stream);
+        if (completion !== undefined) {
+          this._sinkCompletions.push(completion);
+        }
+        return {
+          write: (chunk: Uint8Array | string): void => {
+            stream.write(chunk as never);
+          },
+          end: (): void => {
+            stream.end();
+          }
+        };
+      },
+      get paths(): readonly string[] {
+        return written;
+      },
+      drain: async (): Promise<void> => {
+        await this._waitForUserSinkDrain();
+      }
+    };
   }
 
   async commit(): Promise<void> {
     await this.promise;
     await this._commitWorksheets();
+    if (this.format === "xlsb") {
+      // **Everything except the sheet parts, from the same writer the buffered path uses.**
+      //
+      // The sheets are already in the ZIP — streamed row by row — and `writeXlsbPackage` is told so through
+      // `streamed`, along with the interning tables their records index into. It then produces the workbook,
+      // styles, shared strings, relationships, content types, drawings and media exactly as it does for
+      // `Workbook.toBuffer`, which is why a streamed package and a buffered one differ in one record rather than
+      // in a hundred small ways.
+      const { writeXlsbPackage } = await import("@excel/xlsb/write/package");
+      const { getWorkbookModel } = await import("@excel/core/workbook.browser");
+      const written = await writeXlsbPackage(getWorkbookModel(this as never), {
+        sink: this.packageSink(),
+        streamed: {
+          sheetPaths: this.xlsbTables!.sheetPaths,
+          strings: this.xlsbTables!.strings,
+          formats: this.xlsbTables!.formats
+        }
+      });
+      // **Both halves of the report, and the row half used to be dropped.**
+      //
+      // `writeXlsbPackage` sees the workbook after its sheets have been streamed, so it can only report what the
+      // *package* could not express. Anything a row could not express was reported by the row encoder at the time and
+      // kept on the worksheet — where nothing read it, so a cross-sheet formula that became a blank cell left
+      // `xlsbUnsupported` empty. A loss that is computed and then discarded is worse than one that is never computed:
+      // it reads as a guarantee.
+      //
+      // Reported, not thrown: the streaming writer has no `unsupported` option and a refusal here would abort a workbook
+      // whose rows are already in the caller's stream. Nothing can be taken back at this point.
+      const sheetLosses = this._worksheets.flatMap(sheet => [...(sheet?.xlsbUnsupported ?? [])]);
+      const all = [...sheetLosses, ...written.unsupported];
+      if (all.length > 0) {
+        this.xlsbUnsupported = all;
+      }
+      await this._waitForUserSinkDrain();
+      await this._finalize();
+      return;
+    }
     await this.addMedia();
     await this.addDrawings();
     await this._waitForUserSinkDrain();
@@ -760,6 +972,17 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       headerFooter: opts.headerFooter
     });
 
+    // **`orderNo` is assigned here, and was never assigned at all.**
+    //
+    // `WorksheetData` declares it as a required `number`, and `getWorksheets` sorts by `a.orderNo - b.orderNo` — so for
+    // a streaming writer, whose sheets masquerade as `WorksheetData`, every comparison was `NaN` and `Array.sort` fell
+    // back to engine-defined behaviour. The order came out right by accident: `sheetsInTabOrder` falls back to `sheetNo`,
+    // which a streaming sheet derives from its `id`. Three layers of fallback standing in for the one field that means
+    // tab order.
+    //
+    // Sequential from the id because a streaming writer has no chartsheets to interleave with — `addChartsheet` is not
+    // part of its surface — so the id *is* the tab position, and stating it makes the declared field true.
+    (worksheet as { orderNo?: number }).orderNo = id - 1;
     this._worksheets[id] = worksheet;
     return worksheet;
   }

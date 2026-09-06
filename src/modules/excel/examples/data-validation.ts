@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, DataValidation, Workbook } from "@excel/index";
 
 const outDir = path.resolve(
@@ -123,7 +124,7 @@ DataValidation.add(standalone, "A1", { type: "any", allowBlank: true });
 console.log("Standalone registry rule at A1:", DataValidation.find(standalone, "A1")?.type);
 
 try {
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("Wrote:", filename);
 } catch (error) {
   console.error((error as Error).stack);

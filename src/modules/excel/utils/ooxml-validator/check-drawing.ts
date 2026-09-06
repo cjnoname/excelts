@@ -220,6 +220,26 @@ function checkAnchor(ctx: ValidationContext, path: string, anchor: XmlElement): 
     ? anchor.name.slice(anchor.name.lastIndexOf(":") + 1)
     : anchor.name;
 
+  // **Attributes, before the children.** Only `CT_TwoCellAnchor` declares one — `editAs`, the choice between
+  // resizing with the cells and holding a fixed size, which is a choice only a two-cell anchor can make.
+  // `CT_OneCellAnchor` and `CT_AbsoluteAnchor` declare none.
+  //
+  // This checker looked exclusively at child elements, so it passed a drawing carrying
+  // `<xdr:oneCellAnchor editAs="oneCell">` — schema-invalid, and enough for Excel to answer
+  // `Repaired Records: Drawing … (Drawing shape)`. Reporting zero problems on a file Excel repairs is the
+  // failure mode a validator exists to avoid, so the attribute set is now part of what it checks.
+  if (name !== "twoCellAnchor") {
+    for (const attribute of Object.keys(anchor.attributes ?? {})) {
+      ctx.reporter.error(
+        "drawing-anchor-attribute",
+        `${path}: <${anchor.name}> carries the attribute ${attribute}, and ` +
+          `CT_${name[0]!.toUpperCase()}${name.slice(1)} declares none. ` +
+          `editAs belongs to twoCellAnchor alone.`,
+        path
+      );
+    }
+  }
+
   // twoCellAnchor requires from+to; oneCellAnchor requires from+ext;
   // absoluteAnchor requires pos+ext.
   if (name === "twoCellAnchor") {

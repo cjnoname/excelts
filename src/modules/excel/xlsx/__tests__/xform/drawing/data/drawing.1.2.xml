@@ -46,7 +46,7 @@
     </xdr:pic>
     <xdr:clientData/>
   </xdr:twoCellAnchor>
-  <xdr:oneCellAnchor editAs="oneCell">
+  <xdr:oneCellAnchor>
     <xdr:from>
       <xdr:col>5</xdr:col>
       <xdr:colOff>320000</xdr:colOff>

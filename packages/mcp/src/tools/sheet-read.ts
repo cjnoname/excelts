@@ -38,7 +38,7 @@ export const sheetReadTool = defineTool({
   group: "excel",
   title: "Read spreadsheet cells",
   description:
-    "Read a bounded window of an .xlsx/.xlsm sheet as a Markdown table with column letters and row numbers, so cells can be referenced by address afterwards. Call doc_inspect first to learn the sheet names. Reads at most 50 rows unless maxRows says otherwise, and always reports what was omitted.",
+    "Read a bounded window of an .xlsx/.xlsm/.xlsb sheet as a Markdown table with column letters and row numbers, so cells can be referenced by address afterwards. Call doc_inspect first to learn the sheet names. Reads at most 50 rows unless maxRows says otherwise, and always reports what was omitted.",
   inputSchema: {
     path: z.string().min(1).describe("Workbook path, relative to the server root."),
     sheet: z
@@ -82,7 +82,7 @@ export const sheetReadTool = defineTool({
     } catch (cause) {
       throw toolError.unsupported(
         `could not read ${args.path} as a workbook`,
-        "Run doc_inspect to confirm the file really is an .xlsx package.",
+        "Run doc_inspect to confirm the file really is a workbook package (.xlsx, .xlsm or .xlsb).",
         { cause }
       );
     }

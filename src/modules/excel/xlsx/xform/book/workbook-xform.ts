@@ -1,3 +1,4 @@
+import { sheetsInTabOrder } from "@excel/core/sheet-order";
 import { RowOutOfBoundsError } from "@excel/errors";
 import { colCache } from "@excel/utils/col-cache";
 import { resolveRelTarget } from "@excel/utils/ooxml-paths";
@@ -59,45 +60,11 @@ class WorkbookXform extends BaseXform {
   }
 
   prepare(model: any): void {
-    // Build the sheets list preserving the author's chosen sheet order.
-    // Each sheet (worksheet or chartsheet) carries an `orderNo` set
-    // during add / load; we sort the combined list by that field so a
-    // workbook with interleaved `[ws1, cs1, ws2, cs2]` round-trips in
-    // the same order the user authored. The previous implementation
-    // sorted by `sheetNo` — but `sheetNo` is the file-path number
-    // (independent per family), so a workbook where the author added
-    // worksheet A, chartsheet X, worksheet B got reshuffled to
-    // [A(1), X(1), B(2)] → [A, X, B] which is only correct by
-    // accident when worksheet and chartsheet numbering starts at the
-    // same value. `orderNo` is a unified counter and reflects true
-    // insertion / tab order.
-    const worksheets = [...(model.worksheets ?? [])];
-    const chartsheets = [...(model.chartsheets ?? [])];
-    if (chartsheets.length === 0) {
-      model.sheets = worksheets;
-    } else {
-      const combined: any[] = [...worksheets, ...chartsheets];
-      const withIndex = combined.map((sheet, originalIndex) => ({ sheet, originalIndex }));
-      withIndex.sort((a, b) => {
-        const aOrder =
-          typeof a.sheet.orderNo === "number"
-            ? a.sheet.orderNo
-            : typeof a.sheet.sheetNo === "number"
-              ? a.sheet.sheetNo
-              : Infinity;
-        const bOrder =
-          typeof b.sheet.orderNo === "number"
-            ? b.sheet.orderNo
-            : typeof b.sheet.sheetNo === "number"
-              ? b.sheet.sheetNo
-              : Infinity;
-        if (aOrder !== bOrder) {
-          return aOrder - bOrder;
-        }
-        return a.originalIndex - b.originalIndex;
-      });
-      model.sheets = withIndex.map(entry => entry.sheet);
-    }
+    // Tab order comes from `core/sheet-order`, which the XLSB writer uses too. It lived here, and the XLSB
+    // writer consequently invented its own answer — every worksheet then every chartsheet — which put a
+    // workbook whose first tab is a chartsheet in the wrong order. See that module for why the fallback chain
+    // has three levels.
+    model.sheets = sheetsInTabOrder(model.worksheets ?? [], model.chartsheets ?? []);
 
     // collate all the print areas from all of the sheets and add them to the defined names
     //
@@ -831,7 +798,7 @@ function parsePrintReference(input: string): PrintReference | undefined {
  * emits for a single-cell print area, and the worksheet API exposes
  * `printArea` as a range string (single-cell entries surface as `A1:A1`).
  */
-function normalisePrintAreaRange(input: string, sheetName: string): string | undefined {
+export function normalisePrintAreaRange(input: string, sheetName: string): string | undefined {
   const ref = parsePrintReference(input);
   if (!ref) {
     return undefined;
@@ -852,7 +819,7 @@ function normalisePrintAreaRange(input: string, sheetName: string): string | und
  * input shape. Strict enforcement would silently drop print titles
  * users have set successfully for years.
  */
-function normalisePrintTitlesAxis(input: string, sheetName: string): string | undefined {
+export function normalisePrintTitlesAxis(input: string, sheetName: string): string | undefined {
   const ref = parsePrintReference(input);
   if (!ref || (ref.kind !== "row" && ref.kind !== "col")) {
     return undefined;

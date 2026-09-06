@@ -1,8 +1,8 @@
+import { isInternalLink } from "@excel/core/hyperlink";
 import type { WorkbookWriterLike } from "@excel/stream/worksheet-writer";
 import { worksheetRelsPath } from "@excel/utils/ooxml-paths";
 import type { StreamBuf } from "@excel/utils/stream-buf";
 import { RelType } from "@excel/xlsx/rel-type";
-import { isInternalLink } from "@excel/xlsx/xform/sheet/hyperlink-xform";
 import { xmlEncode } from "@xml/encode";
 
 interface Hyperlink {

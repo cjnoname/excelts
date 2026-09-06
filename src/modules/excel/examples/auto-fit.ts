@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 /**
  * Auto-Fit Example: Demonstrates autoFitColumns() and autoFitRows()
@@ -60,7 +61,7 @@ async function generateBasic() {
   Worksheet.autoFitRows(Worksheet.autoFitColumns(ws));
 
   const filePath = `${outDir}/auto-fit-basic.xlsx`;
-  await Workbook.writeFile(wb, filePath);
+  await writeBothFormats(wb, filePath);
   console.log(`Written: ${filePath}`);
 }
 
@@ -112,7 +113,7 @@ async function generateFonts() {
   Worksheet.autoFitRows(Worksheet.autoFitColumns(ws));
 
   const filePath = `${outDir}/auto-fit-fonts.xlsx`;
-  await Workbook.writeFile(wb, filePath);
+  await writeBothFormats(wb, filePath);
   console.log(`Written: ${filePath}`);
 }
 
@@ -207,7 +208,7 @@ async function generateAdvanced() {
   Worksheet.autoFitRows(ws);
 
   const filePath = `${outDir}/auto-fit-advanced.xlsx`;
-  await Workbook.writeFile(wb, filePath);
+  await writeBothFormats(wb, filePath);
   console.log(`Written: ${filePath}`);
 }
 

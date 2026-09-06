@@ -189,8 +189,11 @@ describe("row heights", () => {
     Cell.setValue(sheet, "A1", 1);
     Row.setHeight(sheet, 1, 24);
 
-    // 24pt × 20 = 480.
-    expect(await sheetListing(source)).toMatch(/BrtRowHdr rw=0 ixfe=0 miyRw=480 flags=2/);
+    // 24pt × 20 = 480, and `flags` is now the *second* flag byte — `fUnsynced` at bit 5, so 32. It read 2
+    // while the record's two flag bytes were declared as one `u16`, which put the flag in `fExtraDsc`.
+    expect(await sheetListing(source)).toMatch(
+      /BrtRowHdr rw=0 ixfe=0 miyRw=480 ascDsc=0 flags=32 phShow=0/
+    );
   });
 
   it("marks a custom height so Excel keeps it", async () => {
@@ -203,8 +206,9 @@ describe("row heights", () => {
     Row.setHeight(sheet, 2, 40);
 
     const listing = await sheetListing(source);
-    expect(listing).toMatch(/BrtRowHdr rw=0 ixfe=0 miyRw=300 flags=0/);
-    expect(listing).toMatch(/BrtRowHdr rw=1 ixfe=0 miyRw=800 flags=2/);
+    expect(listing).toMatch(/BrtRowHdr rw=0 ixfe=0 miyRw=300 ascDsc=0 flags=0 phShow=0/);
+    // `fUnsynced` is bit 5 of the byte at offset 11, which is 32 — not 2 in the byte before it.
+    expect(listing).toMatch(/BrtRowHdr rw=1 ixfe=0 miyRw=800 ascDsc=0 flags=32 phShow=0/);
   });
 });
 
@@ -249,7 +253,16 @@ describe("content this writer cannot express is named, not dropped", () => {
    *
    * A shared formula was already reported, so the array case was the same situation left out.
    */
-  it("reports an array formula rather than writing one cell of it", async () => {
+  /**
+   * **An array formula is written now, not reported.** This asserted the refusal, and the refusal existed
+   * because `BrtArrFmla`'s layout was undetermined against the nine-workbook corpus the claim was written
+   * for. The current corpus settles it — `poi-bug66682.xlsb` carries one and the field list closes to the
+   * byte — so the record is emitted and the assertion is now about the bytes rather than the excuse.
+   *
+   * A `shareType` with no `ref` is still refused, and that is a different thing: the range is the one fact
+   * the record exists to state, and narrowing it to a single cell would silently shrink an author's spill.
+   */
+  it("writes an array formula as BrtArrFmla over its range", async () => {
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", {
       formula: "SUM(A2:A3)",
@@ -257,8 +270,21 @@ describe("content this writer cannot express is named, not dropped", () => {
       shareType: "array",
       ref: "A1:B2"
     } as never);
+    const entries = await extractAll(await Workbook.toBuffer(workbook, { format: "xlsb" }));
+    const listing = describeBiffStream(entries.get("xl/worksheets/sheet1.bin")!.data);
+    // The cell, then the record carrying the expression its `PtgExp` defers to.
+    expect(listing).toMatch(/BrtFmlaNum[\s\S]*BrtArrFmla/);
+  });
+
+  it("still refuses a share type with no range", async () => {
+    const workbook = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", {
+      formula: "SUM(A2:A3)",
+      result: 1,
+      shareType: "array"
+    } as never);
     await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
-      /S1!A1: array formula/
+      /S1!A1: array formula without a range/
     );
   });
 
@@ -284,9 +310,9 @@ describe("content this writer cannot express is named, not dropped", () => {
    * is a different formula: it computes one value where the author asked for a spilled range.
    */
   it.each([
-    ["array", { formula: "SUM(A2:A3)", result: 1, shareType: "array", ref: "A1:B2" }],
+    ["array formula with no range", { formula: "SUM(A2:A3)", result: 1, shareType: "array" }],
     ["dynamic array", { formula: "A2:A4", result: 1, isDynamicArray: true }]
-  ])("writes an ignored %s formula as a blank, not as a formula", async (_kind, value) => {
+  ])("writes an ignored %s as a blank, not as a formula", async (_kind, value) => {
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", value as never);
     const entries = await extractAll(
@@ -309,41 +335,68 @@ describe("content this writer cannot express is named, not dropped", () => {
    * Writing `BrtFmlaError` properly is not available: no workbook in the reference corpus contains
    * one, so the error-code byte is unobserved.
    */
-  it("reports a formula's cached error while keeping the formula", async () => {
+  it("writes a formula's cached error as BrtFmlaError, and refuses nothing", async () => {
+    // **This case used to pin the defect.** It asserted that a cached `#DIV/0!` was *refused* and written as a
+    // `BrtFmlaNum` — so the error came back as the number 0, silently, and the test called that correct. The reasoning
+    // it rested on ("no workbook in the reference corpus contains a single `BrtCellError` or `BrtFmlaError`") was true
+    // of the nine-file corpus and false of the current twenty-three: `poi-bug66682` and `poi-testVarious` hold five
+    // between them, carrying four distinct `BErr` codes. `verify:xlsb-corpus` found it once its fingerprint could see
+    // cell values.
     const workbook = Workbook.create();
     Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", {
       formula: "1/0",
       result: { error: "#DIV/0!" }
     } as never);
+    // Nothing to refuse: the record expresses it exactly.
+    const bytes = await Workbook.toBuffer(workbook, { format: "xlsb" });
+    const listing = describeBiffStream(
+      (await extractAll(bytes)).get("xl/worksheets/sheet1.bin")!.data
+    );
+    expect(listing).toContain("BrtFmlaError");
+    expect(listing).not.toContain("BrtFmlaNum");
+    const reopened = Workbook.create();
+    await Workbook.read(reopened, bytes);
+    const sheet = Workbook.getWorksheet(reopened, "S1")!;
+    expect(Cell.getFormula(sheet, "A1")).toBe("1/0");
+    // The half that was being lost: the cached error itself.
+    expect(Cell.getValue(sheet, "A1")).toEqual({ formula: "1/0", result: { error: "#DIV/0!" } });
+  });
+
+  it("still reports a cached error that has no BErr code", async () => {
+    // The narrowing must not swing the other way. `#SPILL!` postdates the enumeration, so there is no byte for it and
+    // substituting one would be a different error rather than a reported loss.
+    const workbook = Workbook.create();
+    Cell.setValue(Workbook.addWorksheet(workbook, "S1"), "A1", {
+      formula: "SEQUENCE(3)",
+      result: { error: "#SPILL!" }
+    } as never);
     await expect(Workbook.toBuffer(workbook, { format: "xlsb" })).rejects.toThrow(
       /S1!A1: formula cached error/
     );
-    const entries = await extractAll(
-      await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
-    );
-    const listing = describeBiffStream(entries.get("xl/worksheets/sheet1.bin")!.data);
-    expect(listing).toContain("BrtFmlaNum");
-    const reopened = Workbook.create();
-    await Workbook.read(
-      reopened,
-      await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
-    );
-    expect(Cell.getFormula(Workbook.getWorksheet(reopened, "S1")!, "A1")).toBe("1/0");
   });
 
-  it.each(["A1", "B2:A1", "1:2", "A:B"])(
-    "reports the merge reference %s it cannot express",
-    reference => {
-      // Exercised against the writer's own parser, because the surface rejects some of these
-      // before they reach it — and the writer must still not drop the ones that get through.
-      const result = mergesFromModel({ mergeCells: [reference] } as never);
-      expect(result.ranges).toHaveLength(0);
-      expect(result.unsupported).toEqual([`${reference}: merge range`]);
-    }
-  );
+  it.each(["A1", "1:2", "A:B"])("reports the merge reference %s it cannot express", reference => {
+    // Exercised against the writer's own parser, because the surface rejects some of these
+    // before they reach it — and the writer must still not drop the ones that get through.
+    //
+    // `1:2` and `A:B` are unbounded, which `BrtMergeCell`'s four indices cannot state. `A1` is a single cell, which the
+    // shared range parser accepts as a 1×1 rectangle — right for a conditional format, wrong for a merge — so this
+    // caller adds the "more than one cell" condition itself.
+    const result = mergesFromModel({ mergeCells: [reference] } as never);
+    expect(result.ranges).toHaveLength(0);
+    expect(result.unsupported).toEqual([`${reference}: merge range`]);
+  });
 
-  it("still accepts a well-formed merge", () => {
-    const result = mergesFromModel({ mergeCells: ["A1:B2"] } as never);
+  it.each([
+    ["A1:B2", "the ordinary form"],
+    ["B2:A1", "inverted, naming the same rectangle"],
+    ["$A$1:$B$2", "absolute"]
+  ])("accepts %s — %s", reference => {
+    // **`B2:A1` used to be refused and `$A$1:$B$2` used to be reported as unsupported.** This path had its own regex,
+    // which had no `\$?` and rejected an inverted range outright — while the four other range callers in the same module
+    // decoded through a shared helper that passed an inversion straight into an `RfX`, producing exactly the
+    // `coordinate-range-inverted` record the refusal here was justified by avoiding. One parser now serves all five.
+    const result = mergesFromModel({ mergeCells: [reference] } as never);
     expect(result.unsupported).toEqual([]);
     expect(result.ranges).toEqual([{ firstRow: 0, lastRow: 1, firstColumn: 0, lastColumn: 1 }]);
   });
@@ -472,9 +525,9 @@ describe("index zero of each style table", () => {
         ["BrtBeginFonts", new Uint8Array([1, 0, 0, 0])],
         ["BrtFont", encodeFont({ name: "Calibri", size: 11, bold: true })],
         ["BrtEndFonts"],
-        ["BrtBeginCellXfs", new Uint8Array([1, 0, 0, 0])],
+        ["BrtBeginCellXFs", new Uint8Array([1, 0, 0, 0])],
         ["BrtXF", new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0x10, 0, 0])],
-        ["BrtEndCellXfs"],
+        ["BrtEndCellXFs"],
         ["BrtEndStyleSheet"]
       ])
     );

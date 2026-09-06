@@ -57,8 +57,12 @@ describe("BrtMargins", () => {
 
 describe("BrtPageSetup", () => {
   it("reads A4 and 100% out of Excel's own record", () => {
-    // Verbatim from `date.xlsb`. Paper size 9 is A4 and the second field is a scale percentage,
-    // which is what identified both. The 0x0080 flag says the orientation was chosen.
+    // Verbatim from `date.xlsb`. Paper size 9 is A4 and the second field is a scale percentage, which is what
+    // identified both.
+    //
+    // `0x0080` is `fUsePage`, not "the orientation was chosen" — this file and `issue127.xlsb` below differ in
+    // exactly that bit, and reading it as an orientation flag happened to give the right answer for both, which
+    // is why it survived. The orientation flag is `fNoOrient` at bit 6, clear in both, so both state portrait.
     const real =
       "09 00 00 00 64 00 00 00 2c 01 00 00 2c 01 00 00 " +
       "01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 80 00 ff ff ff ff";
@@ -66,22 +70,26 @@ describe("BrtPageSetup", () => {
       paperSize: 9,
       horizontalDpi: 300,
       verticalDpi: 300,
-      orientation: "portrait"
+      orientation: "portrait",
+      // `fUsePage` is set, so the first page number is a statement rather than a default.
+      firstPageNumber: 1
     });
     expect(toHex(encodePageSetup(readPageSetup(hexBytes(real), "sheet")))).toBe(real);
   });
 
-  it("does not report an orientation the file left to the printer", () => {
-    // `issue127.xlsb` is the same record with the flag clear. Reporting `portrait` there would
-    // invent a choice the author did not make.
+  it("reads the same record without fUsePage as portrait with no page number", () => {
+    // `issue127.xlsb` is the same record with `fUsePage` clear. It used to be read as having *no* orientation,
+    // because the bit was taken for an orientation flag; `fNoOrient` is clear here, so portrait is stated.
     const real =
       "09 00 00 00 64 00 00 00 2c 01 00 00 2c 01 00 00 " +
       "01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 00 00 ff ff ff ff";
     expect(readPageSetup(hexBytes(real), "sheet")).toEqual({
       paperSize: 9,
       horizontalDpi: 300,
-      verticalDpi: 300
+      verticalDpi: 300,
+      orientation: "portrait"
     });
+    expect(toHex(encodePageSetup(readPageSetup(hexBytes(real), "sheet")))).toBe(real);
   });
 
   it("writes the printer-settings relationship as absent", () => {

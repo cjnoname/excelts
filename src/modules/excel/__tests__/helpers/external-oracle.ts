@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -85,9 +85,14 @@ export async function runExternalOracle(
     const args = options.args.map(arg =>
       arg.replace(/\{input\}/g, inputPath).replace(/\{outDir\}/g, outDir)
     );
-    const { stdout, stderr } = await execFileAsync(executable, args, {
-      timeout: options.timeoutMs ?? 120_000
-    });
+    const { stdout, stderr } = await runExclusively(() =>
+      execFileAsync(executable, args, {
+        timeout: options.timeoutMs ?? 120_000,
+        // A profile of its own, so two runs cannot contend for one lock. LibreOffice serialises invocations that share
+        // a profile: the second exits zero having converted nothing, which reads as a pass.
+        env: { ...process.env, UserInstallation: `file://${join(dir, "profile")}` }
+      })
+    );
     const outputs = await collectOutputs(outDir, options.outputGlob);
     return { available: true, executable, exitCode: 0, stdout, stderr, outputs };
   } finally {
@@ -149,6 +154,71 @@ export async function runOfficeOpenValidation(
   return result;
 }
 
+/**
+ * Absolute paths to try after the PATH-relative candidates.
+ *
+ * **A cask installs LibreOffice outside PATH on macOS,** so `soffice` never resolved and every oracle here reported
+ * `available: false` — for as long as nobody had it installed, which was the whole time. That is the failure mode a
+ * skip-when-absent gate has: it is indistinguishable from a pass, and it stays that way silently. Adding the install
+ * locations is what made these tests run for the first time, and they found a real defect immediately.
+ */
+const WELL_KNOWN: Record<string, readonly string[]> = {
+  LIBREOFFICE_BIN: [
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    "/usr/bin/soffice",
+    "/usr/bin/libreoffice",
+    "/snap/bin/libreoffice"
+  ]
+};
+
+/**
+ * One external conversion at a time, across every worker.
+ *
+ * These helpers spawn a full office suite, and vitest runs test files in *separate processes* — so an in-process queue
+ * is not enough: several workers start a conversion at once, contend for CPU, and each takes long enough to blow a
+ * per-test timeout that is generous for a single run. The failure looks like a broken file and is not one.
+ *
+ * That is not a hypothesis. The same mistake made by hand during a performance investigation produced six consecutive
+ * *wrong* measurements, each looking like a real improvement; re-measured serially, the file had not changed at all.
+ *
+ * A lock rather than a bigger timeout, because the timeout was never the problem — the contention was, and raising it
+ * only makes a contended run slower rather than fixing what it reports. `mkdir` is the primitive: it is atomic on every
+ * platform this runs on, needs no dependency, and a stale directory from a killed process expires by age.
+ */
+const LOCK_DIR = join(tmpdir(), "documonster-external-oracle.lock");
+const LOCK_STALE_MS = 15 * 60 * 1000;
+
+async function acquireLock(): Promise<void> {
+  for (;;) {
+    try {
+      await mkdir(LOCK_DIR);
+      return;
+    } catch {
+      // Held. Take it over if the holder is old enough to be dead, otherwise wait.
+      try {
+        const age = Date.now() - (await stat(LOCK_DIR)).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          await rm(LOCK_DIR, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        // It disappeared between the two calls, which means it is free.
+        continue;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+}
+
+async function runExclusively<T>(task: () => Promise<T>): Promise<T> {
+  await acquireLock();
+  try {
+    return await task();
+  } finally {
+    await rm(LOCK_DIR, { recursive: true, force: true });
+  }
+}
+
 async function resolveExecutable(
   envName: string,
   candidates: string[],
@@ -158,7 +228,9 @@ async function resolveExecutable(
   if (resolveCache.has(cacheKey)) {
     return resolveCache.get(cacheKey);
   }
-  const values = [process.env[envName], ...candidates].filter((value): value is string => !!value);
+  const values = [process.env[envName], ...candidates, ...(WELL_KNOWN[envName] ?? [])].filter(
+    (value): value is string => !!value
+  );
   for (const value of values) {
     if (versionArgs === false) {
       resolveCache.set(cacheKey, value);

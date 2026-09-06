@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Note, Workbook } from "@excel/index";
 
 import { ArchiveFile } from "../../archive/fs/archive-file";
@@ -37,7 +38,7 @@ Cell.setComment(ws, "A1", Note.create({ texts: [{ text: "Comment by Alice" }] },
 Cell.setValue(ws, "B2", "World");
 Cell.setComment(ws, "B2", Note.create({ texts: [{ text: "Comment by Bob" }] }, "Bob"));
 
-await Workbook.writeFile(wb, flatFile);
+await writeBothFormats(wb, flatFile);
 console.log(`  Written flat-layout file: ${flatFile}`);
 
 // ---------------------------------------------------------------------------
@@ -110,6 +111,10 @@ for (const entry of flatZip.getEntriesSync()) {
   subdirZip.addBuffer(data, entry.path);
 }
 
+// **XLSX only, by subject.** This file is a hand-rebuilt ZIP that rewrites relationship targets to
+// `/xl/comments/commentN.xml` in order to demonstrate a package-layout quirk of the *XML* container. There is no
+// binary counterpart to produce: the thing being shown is the XLSX part naming itself, not a workbook feature.
+// The workbook written earlier in this example does go out in both containers.
 const subdirBytes = subdirZip.toBufferSync();
 fs.writeFileSync(subdirFile, subdirBytes);
 console.log(`  Written subdirectory-layout file: ${subdirFile}`);

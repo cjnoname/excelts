@@ -12,7 +12,7 @@
  * change a report's usefulness; the deep option trees stay in `documonster_help`.
  */
 
-import { Cell, Workbook, Worksheet } from "documonster/excel";
+import { Cell, ExcelNotSupportedError, Workbook, Worksheet } from "documonster/excel";
 import { readCsvFile } from "documonster/excel/csv";
 import { calculateFormulas } from "documonster/excel/formula";
 import { z } from "zod";
@@ -21,7 +21,7 @@ import type { ServerConfig } from "../config.js";
 import { toolError } from "../errors.js";
 import { assertWritable, outputDisplay, resolveInRoot, resolveOutputPath } from "../sandbox.js";
 import { addChart, chartSchema, generateSchema, writeGenerated } from "./chart.js";
-import { assertNonMacroOutput } from "./document.js";
+import { assertNonMacroOutput, requireFormat } from "./document.js";
 import { writeWithPolicy } from "./fs-helpers.js";
 import { newImageBudget, resolveImageSource, type ResolvedImage } from "./image.js";
 import { textResult } from "./result.js";
@@ -123,12 +123,14 @@ export const sheetWriteTool = defineTool({
   group: "excel",
   title: "Write a spreadsheet",
   description:
-    "Create an .xlsx from a declarative spec: one call describes every sheet, its data, formulas, widths, freeze panes, merges and formatting. Use `fromCsv` to pull existing data in server-side instead of copying rows through your reply. Formulas are evaluated before saving unless recalculate is false.",
+    "Create an .xlsx or .xlsb from a declarative spec — the output extension chooses the container: one call describes every sheet, its data, formulas, widths, freeze panes, merges and formatting. Use `fromCsv` to pull existing data in server-side instead of copying rows through your reply. Formulas are evaluated before saving unless recalculate is false.",
   inputSchema: {
     path: z
       .string()
       .min(1)
-      .describe("Output .xlsx path below --output-root; returned as @output/<path>."),
+      .describe(
+        "Output .xlsx or .xlsb path below --output-root; returned as @output/<path>. XLSB opens faster for large sheets and carries less: the tool reports what it dropped."
+      ),
     sheets: z.array(sheetSchema).min(1).describe("One entry per worksheet, in order."),
     overwrite: z
       .boolean()
@@ -192,8 +194,21 @@ export const sheetWriteTool = defineTool({
     // leave a truncated workbook where a valid one used to be. `ensureParent`
     // is handled by the atomic writer, since a model writes "out/report.xlsx"
     // without checking that "out" exists.
+    // The container comes from the extension. Defaulting to XLSX regardless would put an XLSX package
+    // behind an `.xlsb` name, which Excel opens and no tool here would report.
+    const format = requireFormat(args.path, "path") === "xlsb" ? "xlsb" : "xlsx";
+    // What XLSB cannot carry, from the writer's own report rather than a list maintained here. Only
+    // reached for XLSB: an XLSX write drops nothing this spec can express.
+    const dropped: string[] =
+      format === "xlsb"
+        ? await Workbook.toBuffer(wb, { format }).then(
+            () => [],
+            (cause: unknown): string[] =>
+              cause instanceof ExcelNotSupportedError ? [...cause.items] : []
+          )
+        : [];
     await writeWithPolicy(target, args.overwrite === true, temporary =>
-      Workbook.writeFile(wb, temporary)
+      Workbook.writeFile(wb, temporary, { format, unsupported: "ignore" })
     );
 
     return textResult(
@@ -201,6 +216,13 @@ export const sheetWriteTool = defineTool({
       [
         `Wrote **${outputDisplay(args.path)}** (${args.sheets.length} sheet(s)): ${args.sheets.map(sheet => JSON.stringify(sheet.name)).join(", ")}`,
         `- ${formulaNote}`,
+        ...(format === "xlsb"
+          ? [
+              dropped.length === 0
+                ? "- written as XLSB; nothing was dropped"
+                : `- written as XLSB; **dropped**: ${dropped.slice(0, 10).join(", ")}${dropped.length > 10 ? ", …" : ""}`
+            ]
+          : []),
         ...report,
         "",
         "Read the returned @output path with sheet_read to verify before reporting success."

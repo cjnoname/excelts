@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { HrStopwatch } from "@excel/examples/utils/hr-stopwatch";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Workbook, Worksheet } from "@excel/index";
 
 const outDir = path.resolve(
@@ -32,7 +33,7 @@ async function save() {
   console.log("Protection Time:", stopwatch.microseconds);
 
   stopwatch.start();
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("Done.");
   console.log("Time taken:", stopwatch.microseconds);
 }

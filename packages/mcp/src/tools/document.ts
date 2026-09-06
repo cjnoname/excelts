@@ -18,7 +18,17 @@ import { toolError } from "../errors.js";
  * this file really", while this answers "what has the caller asked for", which
  * for a write target is a question about the extension alone.
  */
-export type DocFormat = "docx" | "pdf" | "md" | "html" | "txt" | "xlsx" | "csv" | "odt" | "mermaid";
+export type DocFormat =
+  | "docx"
+  | "pdf"
+  | "md"
+  | "html"
+  | "txt"
+  | "xlsx"
+  | "xlsb"
+  | "csv"
+  | "odt"
+  | "mermaid";
 
 const EXTENSION_FORMATS: Readonly<Record<string, DocFormat>> = {
   ".docx": "docx",
@@ -31,6 +41,10 @@ const EXTENSION_FORMATS: Readonly<Record<string, DocFormat>> = {
   ".txt": "txt",
   ".xlsx": "xlsx",
   ".xlsm": "xlsx",
+  // A distinct format rather than an alias for `xlsx`, because the *writer* needs to be told which
+  // container to produce — `Workbook.writeFile` defaults to XLSX and would happily put an XLSX package
+  // behind an `.xlsb` name. Reading needs no such hint: `Workbook.readFile` detects the container.
+  ".xlsb": "xlsb",
   ".csv": "csv",
   ".odt": "odt",
   // Recognised so the document tools can *route* a diagram source rather than

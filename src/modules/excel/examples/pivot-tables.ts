@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Column, Pivot, Table, Workbook, Worksheet } from "@excel/index";
 /**
  * Pivot Table Examples — 25 variations showcasing all supported features
@@ -433,7 +434,7 @@ async function main() {
   );
   fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, "pivot-tables-example.xlsx");
-  await Workbook.writeFile(workbook, outPath);
+  await writeBothFormats(workbook, outPath);
   console.log(`Done! ${rows.length} sales rows + ${empRows.length} employee rows`);
   console.log(`Generated 25 pivot tables -> ${outPath}`);
   console.log(`

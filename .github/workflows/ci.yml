@@ -331,6 +331,83 @@ jobs:
         env:
           CI: true
 
+      # The XLSB benchmarks, which CI did not run at all.
+      #
+      # `benchmark:xlsb` is the format comparison — size, write, read, passthrough, blank-tail heap — and it is the check
+      # that caught a 3.34x read regression introduced by the passthrough hash. `benchmark:xlsb-scale` is the ten-million
+      # cell streaming shape; it used to live in `examples/` where two correctness gates ran it, producing a 99 MB and a
+      # 145 MB workbook every time and then converting both through LibreOffice.
+      #
+      # Run for their exit status rather than compared against a threshold: what is being protected here is that the
+      # commands still work and the shapes are still measurable, which is what silently rotted while nothing invoked them.
+      - name: Run XLSB benchmarks
+        run: |
+          pnpm benchmark:xlsb
+          pnpm benchmark:xlsb-scale
+        env:
+          CI: true
+
+  xlsb-corpus:
+    # The XLSB semantic corpus, which nothing in CI ran until this job existed.
+    #
+    # `verify:xlsb-corpus` is 107 check groups over 23 real-world `.xlsb` files — probes with asserted values, exact
+    # passthrough, an edited round trip, cross-container parity and the three formula-read policies. The cross-container
+    # group is the one that has found defects nothing else could: XLSB→XLSX was dropping comments 4→1, from two
+    # independent causes, and both were invisible to a round trip through this library's own reader.
+    #
+    # A separate job because the corpus is *downloaded*. Putting it in the nine-cell test matrix would fetch it nine
+    # times to learn the same thing, and a network failure would fail every platform at once.
+    #
+    # `DOCUMONSTER_REQUIRE_XLSB_CORPUS` makes the passthrough suite fail rather than skip when the fixtures are absent.
+    # Those tests degrade to no-ops without them — correct for a developer, and indistinguishable from success here.
+    needs: should-run
+    timeout-minutes: 25
+    name: XLSB corpus
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Fetch the corpus
+        run: pnpm corpus:xlsb
+
+      - name: Semantic checks across the corpus
+        run: pnpm verify:xlsb-corpus
+        env:
+          CI: true
+
+      # **Every corpus-backed suite, not just the passthrough one.**
+      #
+      # Four test files reach into `tmp/xlsb-corpus/` and each degrades to a no-op without it. The regular `test` job does
+      # not download the corpus and this job used to run only one of them, so three suites — the validator's real-world
+      # sweep, the corpus comment cases and the pivot-preservation cases — were skipped in every job that existed. A test
+      # that never runs anywhere is indistinguishable from one that always passes.
+      #
+      # `DOCUMONSTER_REQUIRE_XLSB_CORPUS` makes the passthrough suite *fail* rather than skip when a fixture is absent,
+      # which is what turns "the download worked" into an assertion instead of an assumption.
+      - name: Corpus-backed suites, with the corpus required present
+        run: |
+          pnpm exec vitest run \
+            src/modules/excel/xlsb/__tests__/passthrough.node.test.ts \
+            src/modules/excel/xlsb/__tests__/comments.node.test.ts \
+            src/modules/excel/xlsb/__tests__/pivot-preservation.node.test.ts \
+            src/modules/excel/utils/__tests__/xlsb-validator/real-world-corpus.node.test.ts
+        env:
+          CI: true
+          DOCUMONSTER_REQUIRE_XLSB_CORPUS: "1"
+
   chart-oracle:
     # Opt-in real-file validation: install LibreOffice on Linux and run
     # the `chart-oracle.integration.node.test.ts` suite with the env flags
@@ -342,7 +419,9 @@ jobs:
     # (~200MB of apt packages) and the goal is catching open-validation
     # regressions, not multiplying across OS/Node variants.
     needs: should-run
-    timeout-minutes: 20
+    # Raised from 20 for the whole-tree LibreOffice gate added at the end of this job: 149 files, each a separate
+    # headless process start, measured at roughly 50 minutes locally.
+    timeout-minutes: 90
     name: Chart real-file oracle (LibreOffice)
     runs-on: ubuntu-latest
 
@@ -379,6 +458,31 @@ jobs:
           # secret + setup action). Safe to leave unset on public PRs.
           DOCUMONSTER_ENTERPRISE_CORPUS_DIR: ${{ vars.DOCUMONSTER_ENTERPRISE_CORPUS_DIR }}
           DOCUMONSTER_CORPUS_LIBREOFFICE_OPEN_VALIDATION: "1"
+
+      # The examples have to run first: this gate reads what they wrote to `tmp/`.
+      #
+      # It asks the one question no other check here can — whether an *independent* implementation can read what this
+      # library writes. The round-trip tests are judged by this library's own reader, which shares its assumptions with
+      # the writer; the byte oracle needs a human to save each reference file and so covers fifteen cases; and most of
+      # the files this repository produces have never been opened by anyone. LibreOffice is the only judge that is both
+      # independent and cheap enough to point at all 149 of them.
+      #
+      # `--require` is deliberate. Without it the script skips when LibreOffice is absent, which is right for a
+      # developer machine and useless here: a skip and a pass are indistinguishable, so a broken apt install would
+      # leave this job green forever. That is not hypothetical — the repository's *existing* LibreOffice tests looked
+      # for `soffice` on PATH only, a cask installs it outside PATH on macOS, and they had therefore been silently
+      # skipping since they were written.
+      #
+      # A failure here means the file is structurally broken. A pass does not mean Excel accepts it: LibreOffice is
+      # markedly more permissive, and an array formula missing a per-cell `PtgExp` once terminated Excel's own process
+      # while every automated check in this repository passed.
+      - name: Write the examples' output
+        run: pnpm verify:examples
+
+      - name: LibreOffice reads every .xlsb this library writes
+        run: pnpm verify:libreoffice --require
+        env:
+          SOFFICE: soffice
 
   codeql:
     needs: should-run

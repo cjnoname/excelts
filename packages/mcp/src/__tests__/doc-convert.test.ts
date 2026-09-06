@@ -11,7 +11,7 @@ import { mkdtemp, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { Workbook, Worksheet } from "documonster/excel";
+import { Cell, Workbook, Worksheet } from "documonster/excel";
 import { Pdf } from "documonster/pdf";
 import { Document, Io, Query } from "documonster/word";
 import { renderToMarkdown } from "documonster/word/markdown";
@@ -168,6 +168,97 @@ describe("doc_convert", () => {
     await Workbook.writeFile(wb, path.join(fx.root, name));
     return name;
   }
+
+  /**
+   * The XLSB routes.
+   *
+   * Worth their own block because the container is chosen by the *output extension* and nothing else —
+   * `Workbook.writeFile` produces XLSX unless told otherwise, so a route that forgot to pass `format`
+   * would write an XLSX package behind an `.xlsb` name. Excel opens that, which is exactly why it needs
+   * a test rather than a convention.
+   */
+  it("converts xlsx to xlsb and back", async () => {
+    const fx = await fixture();
+    const source = await makeWorkbook(fx);
+    await run(docConvertTool, fx, { from: source, to: "out.xlsb" });
+
+    // Read back through the *detector*, not through a format hint: if the bytes were XLSX the reader
+    // would accept them and this would pass regardless.
+    const reopened = Workbook.create();
+    await Workbook.readFile(reopened, path.join(fx.root, "out.xlsb"));
+    expect(Workbook.getWorksheets(reopened).map(sheet => Worksheet.getName(sheet))).toEqual([
+      "Data",
+      "Notes"
+    ]);
+
+    await run(docConvertTool, fx, { from: "out.xlsb", to: "round.xlsx" });
+    const roundTripped = Workbook.create();
+    await Workbook.readFile(roundTripped, path.join(fx.root, "round.xlsx"));
+    expect(Cell.getValue(Workbook.getWorksheet(roundTripped, "Data")!, "B2")).toBe(10);
+  });
+
+  it("really writes a BIFF12 package, not XLSX under an .xlsb name", async () => {
+    const fx = await fixture();
+    await run(docConvertTool, fx, { from: await makeWorkbook(fx), to: "out.xlsb" });
+    const bytes = await readFile(path.join(fx.root, "out.xlsb"));
+    // `xl/workbook.bin` is the part that distinguishes the two containers; XLSX has `xl/workbook.xml`.
+    const text = bytes.toString("latin1");
+    expect(text).toContain("xl/workbook.bin");
+    expect(text).not.toContain("xl/workbook.xml");
+  });
+
+  it("reports what XLSB could not carry", async () => {
+    const fx = await fixture();
+    const wb = Workbook.create();
+    const sheet = Workbook.addWorksheet(wb, "Data");
+    // A filter column carrying a schema extension — the last thing XLSB genuinely cannot carry on a sheet.
+    // Pivot tables, conditional formatting and every other criterion kind are written now. Set through the
+    // model because `addWorksheet` takes no `autoFilterCriteria`, and `getModel` returns a snapshot.
+    Worksheet.addAoa(sheet, [["a", 1]]);
+    const model = Workbook.getModel(wb);
+    // The range as well as the criteria: the XLSX writer emits the criteria *inside* `<autoFilter>`, so
+    // without a range they never reach the intermediate file and nothing is lost on the way back.
+    (model.worksheets[0] as { autoFilter?: string }).autoFilter = "A1:B2";
+    (
+      model.worksheets[0] as { autoFilterCriteria?: { ref: string; xml: string } }
+    ).autoFilterCriteria = {
+      ref: "A1:B2",
+      xml: '<filterColumn colId="0"><extLst><ext uri="{x}"/></extLst></filterColumn>'
+    };
+    Workbook.setModel(wb, model);
+
+    await Workbook.writeFile(wb, path.join(fx.root, "lossy.xlsx"));
+
+    const result = await run(docConvertTool, fx, { from: "lossy.xlsx", to: "out.xlsb" });
+    expect(JSON.stringify(result)).toContain("dropped");
+    expect(JSON.stringify(result)).toContain("auto filter criteria");
+  });
+
+  it("converts csv to xlsb", async () => {
+    const fx = await fixture();
+    await writeFile(path.join(fx.root, "in.csv"), "region,units\nAPAC,10\n", "utf8");
+    await run(docConvertTool, fx, { from: "in.csv", to: "out.xlsb" });
+    const reopened = Workbook.create();
+    await Workbook.readFile(reopened, path.join(fx.root, "out.xlsb"));
+    expect(Cell.getValue(Workbook.getWorksheet(reopened, "Sheet1")!, "A2")).toBe("APAC");
+  });
+
+  it("converts xlsb to csv and to pdf, like xlsx", async () => {
+    const fx = await fixture();
+    const wb = Workbook.create();
+    Worksheet.addAoa(Workbook.addWorksheet(wb, "Data"), [
+      ["region", "units"],
+      ["APAC", 10]
+    ]);
+    await Workbook.writeFile(wb, path.join(fx.root, "book.xlsb"), { format: "xlsb" });
+
+    await run(docConvertTool, fx, { from: "book.xlsb", to: "out.csv" });
+    expect(await readFile(path.join(fx.root, "out.csv"), "utf8")).toContain("APAC");
+
+    await run(docConvertTool, fx, { from: "book.xlsb", to: "out.pdf" });
+    const pdf = await readFile(path.join(fx.root, "out.pdf"));
+    expect(pdf.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+  });
 
   it("converts docx to Markdown", async () => {
     const fx = await fixture();

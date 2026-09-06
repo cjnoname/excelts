@@ -46,7 +46,16 @@ export {
   getColumns as columns,
   getColumnDefinitions as columnDefinitions,
   getLastColumn as lastColumn,
-  getLastRow as lastRow
+  getLastRow as lastRow,
+  // Panes and the auto-filter. Both were model fields with no public setter, so the only way to freeze a header
+  // row or filter a range was `getModel`/`setModel` with the OOXML field names — which two examples here did,
+  // with a comment naming the member that would close the gap. These are those members.
+  freeze,
+  split,
+  unfreeze,
+  panes,
+  setAutoFilter,
+  autoFilter
 } from "@excel/core/worksheet";
 
 export {

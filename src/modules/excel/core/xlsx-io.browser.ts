@@ -1,3 +1,11 @@
+import type { WorkbookData } from "@excel/core/workbook-core";
+import {
+  resolveReadFormat,
+  normalizeBytes,
+  readXlsbInto,
+  writeXlsbBytes,
+  writeXlsbToStream
+} from "@excel/core/workbook-format";
 /**
  * Browser xlsx IO handle accessor and the canonical public IO surface.
  *
@@ -6,14 +14,7 @@
  * workbook ↔ xlsx import cycle). Selected over `xlsx-io.ts` (Node) via the
  * `.browser` same-name swap at build/test time.
  */
-import type { WorkbookData } from "@excel/core/workbook-core";
-import {
-  resolveReadFormat,
-  normalizeBytes,
-  readXlsbInto,
-  writeXlsbBytes
-} from "@excel/core/workbook-format";
-import { createXlsbReadable, writeBytesToSink } from "@excel/core/workbook-format-stream";
+import { readWorkbookWithDiagnostics } from "@excel/core/workbook-io-types";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
@@ -86,21 +87,15 @@ export async function readWithDiagnostics(
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
   options?: WorkbookDiagnosticReadOptions
 ): Promise<WorkbookReadReport> {
-  const bytes = normalizeBytes(data, options?.base64);
-  if (bytes !== undefined && resolveReadFormat(bytes, options?.format) === "xlsb") {
-    const parsed = await parseXlsbPackage(bytes);
-    commitXlsbRead(wb, parsed);
-    wb.sourceFilePath = undefined;
-    return { workbook: wb, ...parsed.diagnostics };
-  }
-  return {
-    workbook: await read(wb, data, options),
-    lost: [],
-    unreadRecords: new Map(),
-    undecodedFormulas: [],
-    sharedFormulaCells: [],
-    unknownRecords: new Map()
-  };
+  // The shared body — see `readWorkbookWithDiagnostics`. This was 26 lines duplicated between the two platform
+  // variants, in the one file pair where every other shared piece had already been extracted.
+  return readWorkbookWithDiagnostics(wb, data, options, {
+    read,
+    normalizeBytes,
+    resolveReadFormat,
+    parseXlsbPackage,
+    commitXlsbRead
+  });
 }
 
 /** Read a workbook from a parse stream (mutates and returns `wb`). */
@@ -157,7 +152,9 @@ export async function writeStream(
   options?: WorkbookWriteOptions
 ): Promise<void> {
   if (options?.format === "xlsb") {
-    await writeBytesToSink(stream, await writeXlsbBytes(wb, options));
+    // Streamed part by part through the same writer the buffered path uses — see the Node twin for why the
+    // previous "nothing to stream incrementally" was wrong.
+    await writeXlsbToStream(wb, stream, options);
     return;
   }
   await getXlsxIo(wb).write(stream, options);
@@ -208,7 +205,10 @@ export function toStream(
   options?: XlsxStreamOptions & WorkbookWriteOptions
 ): XlsxReadable {
   if (options?.format === "xlsb") {
-    return createXlsbReadable(() => writeXlsbBytes(wb, options), options);
+    // The same bridge the XLSX branch uses — see the Node variant for the measurement. Keeping the two platforms on one
+    // mechanism matters more here than anywhere: a difference between them is invisible to whichever one a developer
+    // happens to run.
+    return createXlsxByteStream(sink => writeXlsbToStream(wb, sink, options), options);
   }
   const io = getXlsxIo(wb);
   return createXlsxByteStream((sink, writeOptions) => io.write(sink, writeOptions), options);

@@ -34,7 +34,7 @@ import {
 } from "@excel/core/worksheet-core";
 import { PivotTableError } from "@excel/errors";
 import { colCache } from "@excel/utils/col-cache";
-import { range, toSortedArray } from "@utils/utils";
+import { range } from "@utils/utils";
 
 // Re-export the pure OOXML data types/constants that were relocated to
 // pivot-table-types.ts, preserving backward compatibility for existing
@@ -753,12 +753,21 @@ function makeCacheFields(
         uniqueValues.add(v);
       }
     }
-    const sorted = toSortedArray(uniqueValues);
+    // **In the order the data presents them, not sorted.**
+    //
+    // A cache field's shared items are addressed by index — a `BrtBeginSXVI`'s `iCache`, a `<x v="2"/>` — so their order
+    // is not presentation, it is identity. Excel writes them in first-appearance order, and sorting them therefore
+    // renumbered every item and every reference to one: the oracle's `05-pivots` case showed `AMER, APAC, EMEA` against
+    // Excel's `APAC, EMEA, AMER`, which is exactly the order the source column presents. Twenty-seven of the
+    // thirty-three record differences against Excel's own files came from this single call.
+    //
+    // A `Set` preserves insertion order, so the values are already in it — `toSortedArray` was undoing that.
+    const ordered = [...uniqueValues];
     // Append null at the end (OOXML convention: <m/> items go last in sharedItems)
     if (hasNull) {
-      sorted.push(null);
+      ordered.push(null);
     }
-    return sorted;
+    return ordered;
   };
 
   // Calculate min/max and integer status for numeric fields
@@ -789,6 +798,50 @@ function makeCacheFields(
     return hasNumeric ? { minValue: min, maxValue: max, allInteger } : null;
   };
 
+  /**
+   * The cache field's `numFmtId`, which for a date column is not zero.
+   *
+   * Excel writes `14` — the built-in short-date format — for a source column of dates, *even when the source file's own
+   * `<cacheField numFmtId="0">` says otherwise: it is derived from the column, not copied. Without it a date field's
+   * `BrtBeginPCDField` claims the General format, and a consumer that trusts the cache rather than the sheet displays a
+   * serial number.
+   *
+   * A serial date is a number in the cell model, so the values cannot answer this on their own — the number format is
+   * what distinguishes `45306` the date from `45306` the quantity, which is also how Excel decides.
+   */
+  const numberFormatIdFor = (columnIndex: number): string | undefined => {
+    const columnValues = columnValuesOf(source.getColumn(columnIndex));
+    let sawDate = false;
+    for (let i = DATA_START_INDEX; i < columnValues.length; i++) {
+      const cell = columnValues[i];
+      const value = unwrapCellValue(cell);
+      if (value === null || value === undefined) {
+        continue;
+      }
+      if (value instanceof Date) {
+        sawDate = true;
+        continue;
+      }
+      const numFmt = (cell as { style?: { numFmt?: string | { formatCode?: string } } } | undefined)
+        ?.style?.numFmt;
+      const code = typeof numFmt === "string" ? numFmt : numFmt?.formatCode;
+      // A date format names a date or time component outside a literal.
+      if (typeof code === "string" && /(?:^|[^\\])[dmyhs]/i.test(code)) {
+        sawDate = true;
+        continue;
+      }
+      // Anything else in the column means it is not a date field.
+      return undefined;
+    }
+    // `14` is `mm-dd-yy`, the built-in Excel writes here.
+    return sawDate ? "14" : undefined;
+  };
+
+  const withNumberFormat = (columnIndex: number): { numFmtId?: string } => {
+    const id = numberFormatIdFor(columnIndex);
+    return id === undefined ? {} : { numFmtId: id };
+  };
+
   // Build result array
   const result: CacheField[] = [];
   for (const columnIndex of range(1, names.length)) {
@@ -796,21 +849,47 @@ function makeCacheFields(
     const name = String(rawName);
     if (sharedItemsFields.has(name)) {
       // Field used for rows/columns - extract unique values as sharedItems
-      result.push({ name, sharedItems: aggregate(columnIndex) });
+      result.push({
+        name,
+        sharedItems: aggregate(columnIndex),
+        ...withNumberFormat(columnIndex)
+      });
     } else if (valueFields.has(name)) {
       // Field used only for values (aggregation) - calculate min/max
       const minMax = getMinMax(columnIndex);
       result.push({
         name,
         sharedItems: null,
+        ...withNumberFormat(columnIndex),
         containsNumber: minMax ? "1" : undefined,
         minValue: minMax?.minValue,
         maxValue: minMax?.maxValue,
         containsInteger: minMax?.allInteger ? "1" : undefined
       });
     } else {
-      // Unused field - just empty sharedItems (like Excel does)
-      result.push({ name, sharedItems: null });
+      // **An unused field gets empty shared items, whatever its type — and a date is not the exception it looks like.**
+      //
+      // Excel's own save of the oracle's `05-pivots` appears to contradict this: one of its three caches materialises
+      // three `BrtPCDIDatetime` for a `Sold` column that no axis uses. It does not. **The cache numbering differs
+      // between the two files** — Excel's `pivotCacheDefinition3.bin` serves the sheet this library's
+      // `pivotCacheDefinition1.bin` serves — and pairing the caches by *filename* rather than by the pivot table that
+      // points at them inverts the finding completely. Paired correctly:
+      //
+      // | field 2 (`Sold`) | Excel shared items | Excel record |
+      // | ---------------- | ------------------ | ------------ |
+      // | on the row axis  | 3                  | index, 16 B  |
+      // | on the column axis | 3                | index, 16 B  |
+      // | on no axis       | **0**              | **inline, 20 B** |
+      //
+      // So the rule is the axis, and an unused field's *values* travel inline in the records instead — which is why
+      // giving it shared items also shortened every `BrtPCRRecord` from 20 bytes to 16 and made the two halves
+      // disagree about how to read the same column.
+      //
+      // A previous attempt added a date special case here on the strength of the filename pairing. It is recorded
+      // because the reasoning was sound and the data was not: two earlier attempts at this same field went the same
+      // way, one of them taking the oracle from 100 differences to 155.
+      // Unused string or numeric field — empty shared items, which is what Excel writes for those.
+      result.push({ name, sharedItems: null, ...withNumberFormat(columnIndex) });
     }
   }
   return result;

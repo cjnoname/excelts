@@ -330,7 +330,11 @@ describe("WorkbookWriter", () => {
       expect(xml).toMatch(/<dataBar>/);
       expect(xml).toMatch(/<cfvo type="min"/);
       expect(xml).toMatch(/<cfvo type="max"/);
-      expect(xml).toMatch(/<color rgb="FF638EC6"/);
+      // The element has to be there — `CT_DataBar` requires it — but its *value* is the writer's business, and this
+      // assertion used to pin it to `FF638EC6`. That is the colour Excel's UI offers when creating a data bar, not what
+      // Excel writes for a bar with no colour of its own, which is `auto="1"`. Asserting the element rather than a
+      // particular colour is what the test was for.
+      expect(xml).toMatch(/<color (?:auto="1"|rgb="[0-9A-Fa-f]{8}")\s*\/>/);
 
       // Primary section must have <x14:id> linking to ext
       const primaryIdMatch = xml.match(/<x14:id>([^<]+)<\/x14:id>/);

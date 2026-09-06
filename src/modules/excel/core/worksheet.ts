@@ -1,8 +1,3 @@
-// Chart runtime is imported directly (static). The chart modules depend only
-// on the `*-core` data layer (never on this heavy `worksheet.ts`), so the
-// dependency graph stays acyclic: `worksheet → chart → *-core`. A consumer
-// that never references a chart API gets the entire chart implementation
-// tree-shaken out by the bundler — no host registry / install step required.
 import {
   chartExOptionsFromRows,
   chartExOptionsFromTable,
@@ -81,6 +76,12 @@ import {
 } from "@excel/core/row";
 import type { AddSparklineGroupOptions, SparklineGroup } from "@excel/core/sparkline";
 import { buildSparklineGroup } from "@excel/core/sparkline";
+// Chart runtime is imported directly (static). The chart modules depend only
+// on the `*-core` data layer (never on this heavy `worksheet.ts`), so the
+// dependency graph stays acyclic: `worksheet → chart → *-core`. A consumer
+// that never references a chart API gets the entire chart implementation
+// tree-shaken out by the bundler — no host registry / install step required.
+import type { StyledBlankRangeModel } from "@excel/core/styled-blanks";
 import type { TableData, TableModel } from "@excel/core/table";
 import { createTable, tableModel, tableName, tableSetModel } from "@excel/core/table";
 import type { Workbook } from "@excel/core/workbook";
@@ -177,6 +178,30 @@ interface WorksheetOptions {
 
 /** The round-trip worksheet model — `Worksheet.getModel` / `Worksheet.setModel`. */
 export interface WorksheetModel {
+  /**
+   * Where this sheet sits on the tab bar, counted across worksheets *and* chartsheets.
+   *
+   * Present on the model because both writers need it to order the tabs, and its absence was a real defect
+   * rather than a gap: a worksheet compared as "unknown position" while a chartsheet carried a number, so a
+   * chartsheet added last was drawn first. See `core/sheet-order`.
+   */
+  orderNo?: number;
+  /**
+   * Styled blank cells, as rectangles, from a collapsed XLSB read.
+   *
+   * A cell that carries formatting and no value is one `BrtCellBlank` record, and Excel writes one per cell of a
+   * formatted region — thousands for a formatted column, which is the commonest reason a small XLSB is expensive
+   * to read. `blankCells: "collapse"` accumulates them here instead of materialising each, and the XLSB writer
+   * expands them again, so the round trip is unchanged and no fidelity report is owed.
+   */
+  styledBlankRanges?: readonly StyledBlankRangeModel[];
+  /**
+   * Notes a *streamed* sheet kept, because it no longer has the rows they were attached to.
+   *
+   * `readonly unknown[]` for the same reason the reader's side of `styledBlankRanges` was: the element is the XLSB
+   * writer's `SheetComment`, and naming it here would make this model depend on that writer. See `getSheetModel`.
+   */
+  retainedComments?: readonly unknown[];
   id: number;
   name: string;
   dataValidations: DataValidationModel;
@@ -195,6 +220,8 @@ export interface WorksheetModel {
    * model. See `WorksheetData._opaqueRels`.
    */
   opaqueRels?: OpaqueRelationship[];
+  /** See `WorksheetData._chartsheetPlaceholder`. */
+  chartsheetPlaceholder?: string;
   /** See `WorksheetData._xlsbDrawingRelationshipId`. */
   xlsbDrawingRelationshipId?: string;
   worksheetNamespaceAttributes?: Record<string, string>;
@@ -2483,6 +2510,27 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
   const model: WorksheetModel = {
     id: ws.id,
     name: getSheetName(ws),
+    // **Tab order, which the model dropped.** `orderNo` is allocated across worksheets *and* chartsheets as
+    // sheets are added, and it is the only field that records where the author put a tab. Leaving it out of the
+    // model made every worksheet compare as "unknown position" while a chartsheet still carried its number — so
+    // in `financial-report`, whose chartsheet is added last, the chartsheet sorted *first* and "Board View"
+    // appeared as the leading tab in the XLSX. The XLSB writer then produced a third answer of its own.
+    //
+    // One dropped field, two wrong orders, and both writers looked like the culprit. Neither was.
+    orderNo: ws.orderNo,
+    // **Notes a streamed sheet retained, because its rows are gone by the time the package is written.**
+    //
+    // `commentsFromModel` reads notes off `rows[].cells[].comment`, and a streaming worksheet releases `_rows` at
+    // `commit()` — so a comment written through the streaming writer reached the model as nothing at all. Measured:
+    // streaming XLSX produced `xl/comments1.xml` and `vmlDrawing1.vml`, buffered XLSB produced `xl/comments1.bin` and the
+    // VML, and streaming XLSB produced neither — the notes were silently absent, indicator and text alike.
+    //
+    // Retained rather than streamed because a BIFF12 comments part is written whole at the end, and it is small: one
+    // entry per annotated cell, against a row store that may be millions.
+    retainedComments: ws._retainedComments,
+    // Carried so the writer can put the same records back — see `styledBlankRanges` above.
+    styledBlankRanges: (ws as { _styledBlankRanges?: readonly StyledBlankRangeModel[] })
+      ._styledBlankRanges,
     dataValidations: ws.dataValidations.model,
     properties: ws.properties,
     state: ws.state,
@@ -2495,6 +2543,7 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
     autoFilterCriteria: ws._autoFilterCriteria,
     sortStateXml: ws._sortStateXml,
     opaqueRels: ws._opaqueRels,
+    chartsheetPlaceholder: ws._chartsheetPlaceholder,
     xlsbDrawingRelationshipId: ws._xlsbDrawingRelationshipId,
     worksheetNamespaceAttributes: ws._worksheetNamespaceAttributes,
     worksheetMcIgnorable: ws._worksheetMcIgnorable,
@@ -2544,7 +2593,10 @@ export function getSheetModel(ws: WorksheetData): WorksheetModel {
   // Rows
   const rows: RowModel[] = (model.rows = []);
   const dimensions: RangeData = (model.dimensions = rangeCreate());
-  ws._rows.forEach(row => {
+  // **`_rows` may be gone.** A streaming worksheet releases it at `commit()` — the rows have been serialised and
+  // handed to the ZIP, which is the property that writer exists for — and the workbook-level pass still needs the
+  // rest of the model afterwards. So an absent row store means "no rows to describe", not a broken worksheet.
+  (ws._rows ?? []).forEach(row => {
     const rowModel = row && rowGetModel(row);
     if (rowModel) {
       rangeExpand(dimensions, rowModel.number, rowModel.min, rowModel.number, rowModel.max);
@@ -2597,6 +2649,10 @@ export function setColumns(ws: WorksheetData, value: ColumnDefn[]): void {
 }
 
 export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
+  if (value.styledBlankRanges !== undefined) {
+    (ws as { _styledBlankRanges?: readonly unknown[] })._styledBlankRanges =
+      value.styledBlankRanges;
+  }
   setSheetName(ws, value.name);
   ws.state = value.state;
   ws._columns = columnFromModel(ws, value.cols ?? []);
@@ -2631,6 +2687,7 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws._autoFilterCriteria = value.autoFilterCriteria;
   ws._sortStateXml = value.sortStateXml;
   ws._opaqueRels = value.opaqueRels;
+  ws._chartsheetPlaceholder = value.chartsheetPlaceholder;
   ws._xlsbDrawingRelationshipId = value.xlsbDrawingRelationshipId;
   ws._worksheetNamespaceAttributes = value.worksheetNamespaceAttributes;
   ws._worksheetMcIgnorable = value.worksheetMcIgnorable;
@@ -2668,6 +2725,13 @@ export function setSheetModel(ws: WorksheetData, value: WorksheetModel): void {
   ws.conditionalFormattings = value.conditionalFormattings;
   ws.ignoredErrors = value.ignoredErrors ?? [];
   ws.threadedComments = value.threadedComments ?? [];
+  // **`getModel` has always written this out and nothing read it back**, which made `getModel`/`setModel`
+  // asymmetric for sparklines and is not a defect of any one container: every path that carries a worksheet
+  // through its model dropped them. `Workbook.read` is one such path — it builds sheets internally and
+  // transfers them to the caller's workbook as a model — so an XLSB *and* an XLSX read both produced a sheet
+  // whose sparklines had been read correctly and then discarded one step later. Copied rather than aliased so
+  // a caller mutating the model it passed in cannot reach inside the sheet.
+  ws._sparklineGroups = value.sparklineGroups ? [...value.sparklineGroups] : [];
   // Rebuild form controls from the serialised model so importSheet() and any
   // other model round-trip preserves checkbox state, position, and links.
   ws.formControls = (value.formControls ?? []).map(fcModel => formCheckboxFromModel(ws, fcModel));
@@ -2815,5 +2879,11 @@ export {
   columnSetAlignment,
   columnSetProtection,
   columnSetBorder,
-  columnSetFill
+  columnSetFill,
+  freeze,
+  split,
+  unfreeze,
+  panes,
+  setAutoFilter,
+  autoFilter
 } from "@excel/core/worksheet-core";

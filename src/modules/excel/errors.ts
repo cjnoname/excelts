@@ -267,3 +267,28 @@ export class XlsbParseError extends ExcelError {
     super(`${part}: ${detail}`, options);
   }
 }
+
+/**
+ * Error thrown when a formula expression cannot be decoded and the caller asked for `formulas: "error"`.
+ *
+ * Carries the sheet and the addresses rather than only a count, because the useful next step is to look at those cells
+ * — and a caller who decides the failure is acceptable can re-read with `"preserve"` and compare against this list.
+ * Truncated in the message at ten addresses so a sheet that fails wholesale stays readable; `addresses` holds them all.
+ */
+export class XlsbFormulaDecodeError extends ExcelError {
+  override name = "XlsbFormulaDecodeError";
+
+  constructor(
+    public readonly sheet: string,
+    public readonly addresses: readonly string[],
+    public readonly source: string,
+    options?: BaseErrorOptions
+  ) {
+    const shown = addresses.slice(0, 10).join(", ");
+    const rest = addresses.length > 10 ? `, and ${addresses.length - 10} more` : "";
+    super(
+      `${source}: ${addresses.length} formula expression(s) on sheet "${sheet}" could not be decoded (${shown}${rest})`,
+      options
+    );
+  }
+}

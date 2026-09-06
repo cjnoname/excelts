@@ -50,7 +50,16 @@ class NumFmtXform extends BaseXform {
       case "numFmt":
         this.model = {
           id: parseInt(node.attributes.numFmtId, 10),
-          formatCode: node.attributes.formatCode.replace(/[\\](.)/g, "$1")
+          // **The code is kept verbatim, backslashes included.** This stripped every `\x` escape on the way in
+          // while `render` writes the code back unchanged — a one-way loss. `\-` became `-`, so the code no
+          // longer matched the built-in table (`getDefaultFmtId` looks up the *escaped* form, which is what
+          // Excel writes), the format was re-registered as a custom id 164+, and Excel answered
+          // `Removed Records: Style from /xl/styles.bin`.
+          //
+          // A backslash in a number format is an escape for the character after it and is part of the code's
+          // meaning, not decoration around it: `\-` is a literal minus sign. Unescaping here also changed what
+          // the code *means* to any consumer reading the model.
+          formatCode: node.attributes.formatCode
         };
         return true;
       default:

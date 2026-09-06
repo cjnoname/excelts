@@ -47,6 +47,15 @@ interface WaitingWorksheet {
   path: string;
   cleanup: () => void;
   writePromise: Promise<void>;
+  /**
+   * Whether the spooled entry is a binary sheet.
+   *
+   * **Recorded when the entry is stored, not guessed when it is replayed.** A deferred sheet is replayed from a
+   * temporary file whose name this code chose, so by then the only evidence of which container it came from is what
+   * was written down here — and replaying a `.bin` sheet through the XML parser fails with
+   * `The encoded data was not valid for encoding utf-8`, which names the symptom and not the cause.
+   */
+  isXlsb: boolean;
 }
 
 class WorkbookReader extends WorkbookReaderBase<
@@ -69,7 +78,10 @@ class WorkbookReader extends WorkbookReaderBase<
 
   async _storeWaitingWorksheet(sheetNo: string, entry: ZipEntry): Promise<WaitingWorksheet> {
     const tmpDir = createTempDirSync("documonster-");
-    const filePath = join(tmpDir, `sheet${sheetNo}.xml`);
+    // The extension carries which decoder to replay through, and the spool file is named to match the source so that
+    // a leftover temporary file is self-describing rather than a lie.
+    const isXlsb = /\.bin$/i.test(entry.path);
+    const filePath = join(tmpDir, `sheet${sheetNo}.${isXlsb ? "bin" : "xml"}`);
     const cleanup = () => {
       remove(tmpDir).catch(() => {});
     };
@@ -117,7 +129,7 @@ class WorkbookReader extends WorkbookReaderBase<
       entry.pipe(tempStream);
     });
 
-    return { sheetNo, path: filePath, cleanup, writePromise };
+    return { sheetNo, path: filePath, cleanup, writePromise, isXlsb };
   }
 
   async *_processWaitingWorksheets(
@@ -127,7 +139,9 @@ class WorkbookReader extends WorkbookReaderBase<
       await ws.writePromise;
       const fileStream = createReadStream(ws.path);
       try {
-        yield* this._parseWorksheet(iterateStream(fileStream), ws.sheetNo);
+        yield* ws.isXlsb
+          ? this._parseXlsbWorksheet(iterateStream(fileStream), ws.sheetNo)
+          : this._parseWorksheet(iterateStream(fileStream), ws.sheetNo);
       } finally {
         fileStream.close();
         ws.cleanup();

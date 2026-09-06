@@ -114,12 +114,29 @@ describe("Documonster.Excel XLSB in the browser", () => {
     const wb = Workbook.create();
     const sheet = Workbook.addWorksheet(wb, "S1");
     Cell.setValue(sheet, "A1", 1);
-    Cell.setStyle(sheet, "A1", { border: { top: { style: "thin" } } });
-    // The default is to refuse, and that has to hold in a browser too — the rejection is what makes
-    // the loss discoverable, and it is produced by the same writer.
-    await expect(Workbook.toBuffer(wb, { format: "xlsb" })).rejects.toThrow(/border/);
+    // An array constant: still refused, and refused by the same writer in a browser. This case used to
+    // use a border, which the writer now carries — so it was asserting that a *supported* feature was
+    // rejected, and the browser suite is where that surfaced.
+    Cell.setValue(sheet, "A2", { formula: "SUM({1,2;3,4})" } as never);
+    // The default is to refuse, and that has to hold in a browser too — the rejection is what makes the
+    // loss discoverable, and it is produced by the same writer.
+    await expect(Workbook.toBuffer(wb, { format: "xlsb" })).rejects.toThrow(/array constant/);
     expect(
       (await Workbook.toBuffer(wb, { format: "xlsb", unsupported: "ignore" })).byteLength
     ).toBeGreaterThan(0);
+  });
+
+  it("carries a border, which it once reported as a loss", async () => {
+    // The inverse of the case above, in the browser: `BrtBorder`'s layout is established now, so a
+    // border is written rather than counted — and the same bundle has to do it.
+    const wb = Workbook.create();
+    const sheet = Workbook.addWorksheet(wb, "S1");
+    Cell.setValue(sheet, "A1", 1);
+    Cell.setStyle(sheet, "A1", { border: { top: { style: "thin" } } });
+    const reopened = Workbook.create();
+    await Workbook.read(reopened, await Workbook.toBuffer(wb, { format: "xlsb" }));
+    expect(Cell.getStyle(Workbook.getWorksheet(reopened, "S1")!, "A1")?.border).toMatchObject({
+      top: { style: "thin" }
+    });
   });
 });

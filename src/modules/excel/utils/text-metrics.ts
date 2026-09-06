@@ -185,7 +185,23 @@ export function calculateAutoFitWidth(
  * Uses the formula:
  *   lineHeight = (unitsPerEm + usWinDescent) / unitsPerEm * fontSizePx
  *
- * This matches Excel's actual row height calculation.
+ * **Rounded up to a whole pixel, which is what makes it agree with Excel.** A row height on screen is an integral
+ * number of pixels, so Excel's own auto-fit height is always a multiple of 0.75pt — and the unrounded formula lands
+ * just below one. Calibri 11 is the case that shows it: `(2048 + 550) / 2048 × 15 = 19.03px`, which becomes 14.27pt and
+ * rounds to 14.5, where Excel uses 15.0. Half a point short is a visibly clipped line, and every row in a workbook was
+ * short by it.
+ *
+ * Verified against Excel's own heights for Calibri, which the integral-pixel rule reproduces exactly:
+ *
+ * | size | unrounded | this | Excel |
+ * | ---- | --------- | ---- | ----- |
+ * | 11   | 14.27     | 15.0 | 15.0  |
+ * | 14   | 18.08     | 18.75| 18.75 |
+ * | 18   | 22.87     | 23.25| 23.25 |
+ * | 20   | 25.40     | 26.25| 26.25 |
+ *
+ * The rounding belongs here rather than at the caller because a multi-line height is `lineCount ×` this: rounding the
+ * *total* would let a two-line cell land half a pixel short per line, which is the same defect one row down.
  */
 export function getLineHeightPx(font?: Partial<Font>): number {
   const name = (font?.name ?? DEFAULT_FONT_NAME).toLowerCase();
@@ -195,12 +211,12 @@ export function getLineHeightPx(font?: Partial<Font>): number {
   const metrics = getFontMetrics(name);
   if (metrics) {
     const { unitsPerEm, usWinDescent } = metrics.header;
-    return ((unitsPerEm + usWinDescent) / unitsPerEm) * fontSizePx;
+    return Math.ceil(((unitsPerEm + usWinDescent) / unitsPerEm) * fontSizePx);
   }
 
   // Fallback: approximate. The ratio for most fonts is ~1.2 to 1.35.
   // Calibri is (2048 + 550) / 2048 = 1.268. Use 1.3 as a safe default.
-  return fontSizePx * 1.3;
+  return Math.ceil(fontSizePx * 1.3);
 }
 
 /**

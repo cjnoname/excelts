@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { HrStopwatch } from "@excel/examples/utils/hr-stopwatch";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Workbook } from "@excel/index";
 
 const exampleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -20,7 +21,7 @@ const wb = Workbook.create();
 stopwatch.start();
 Workbook.getXlsxIo(wb)
   .readFile(filenameIn)
-  .then(() => Workbook.writeFile(wb, filenameOut))
+  .then(() => writeBothFormats(wb, filenameOut))
   .then(() => {
     const micros = stopwatch.microseconds;
     console.log("Done.");

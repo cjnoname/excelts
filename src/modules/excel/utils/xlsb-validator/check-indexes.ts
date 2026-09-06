@@ -24,8 +24,16 @@ import { recordSpec } from "@excel/xlsb/spec/records";
 export interface CollectionCounts {
   /** Unique strings declared by `BrtBeginSst`, when the part was present. */
   readonly sharedStrings?: number;
-  /** Cell formats declared by `BrtBeginCellXfs`. */
+  /** Cell formats declared by `BrtBeginCellXFs`. */
   readonly cellFormats?: number;
+  /**
+   * Differential formats declared by `BrtBeginDXFs`.
+   *
+   * A conditional-formatting rule's `dxfId` indexes this table, and the two live in *different parts* — so an
+   * out-of-range index is a cross-part inconsistency that no per-part check can see. Excel's answer is
+   * `Repaired Records: Conditional formatting`, once per sheet that holds a bad reference.
+   */
+  readonly differentialFormats?: number;
 }
 
 /** Read the declared counts out of the parts that own them. */
@@ -35,6 +43,8 @@ export function readCollectionCounts(
 ): CollectionCounts {
   let sharedStrings: number | undefined;
   let cellFormats: number | undefined;
+  let differentialFormats: number | undefined;
+  let inStyleXfs = false;
 
   for (const framed of parts) {
     for (const record of framed.records) {
@@ -70,7 +80,60 @@ export function readCollectionCounts(
         continue;
       }
 
-      if (name === "BrtBeginCellXfs") {
+      // **A style XF has no parent.** `ixfParent` indexes the style-XF collection itself, so a `BrtXF` inside
+      // `BrtBeginCellStyleXFs` must carry 0xFFFF — "root". Anything else made Excel discard every named style in
+      // the workbook, and it reported the *Styles* collection rather than the XFs, so the message pointed away
+      // from the fault. A cell XF is the opposite: it does inherit, and its parent is a real index.
+      if (name === "BrtBeginCellStyleXFs") {
+        inStyleXfs = true;
+        continue;
+      }
+      if (name === "BrtEndCellStyleXFs") {
+        inStyleXfs = false;
+        continue;
+      }
+      if (name === "BrtXF" && inStyleXfs && record.payload.length >= 2) {
+        const parent = new DataView(
+          record.payload.buffer,
+          record.payload.byteOffset,
+          record.payload.byteLength
+        ).getUint16(0, true);
+        if (parent !== 0xffff) {
+          reporter.error(
+            "index-style-xf-has-parent",
+            `a style XF declares ixfParent ${parent}; a style XF is a root and must declare 0xFFFF`,
+            at
+          );
+        }
+        continue;
+      }
+
+      if (name === "BrtBeginDXFs") {
+        // Read straight off the payload: the record table carries no field list for this one, so
+        // `numberField(decodeRecord(…), "count")` returns `undefined` and the check would silently never run.
+        const declared =
+          record.payload.length >= 4
+            ? new DataView(
+                record.payload.buffer,
+                record.payload.byteOffset,
+                record.payload.byteLength
+              ).getUint32(0, true)
+            : undefined;
+        if (declared !== undefined) {
+          differentialFormats = declared;
+          const items = countRecords(framed, "BrtDXF");
+          if (declared !== items) {
+            reporter.error(
+              "index-count-mismatch",
+              `BrtBeginDXFs declares ${declared} format(s) but the part carries ${items} BrtDXF record(s)`,
+              at
+            );
+          }
+        }
+        continue;
+      }
+
+      if (name === "BrtBeginCellXFs") {
         const declared = numberField(decodeRecord(record, framed.part), "count");
         if (declared === undefined) {
           continue;
@@ -83,7 +146,7 @@ export function readCollectionCounts(
         if (declared > items) {
           reporter.error(
             "index-count-mismatch",
-            `BrtBeginCellXfs declares ${declared} format(s) but the part carries ${items} ` +
+            `BrtBeginCellXFs declares ${declared} format(s) but the part carries ${items} ` +
               `BrtXF record(s) in total`,
             at
           );
@@ -92,7 +155,7 @@ export function readCollectionCounts(
     }
   }
 
-  return { sharedStrings, cellFormats };
+  return { sharedStrings, cellFormats, differentialFormats };
 }
 
 function countRecords(framed: FramedPart, name: string): number {
@@ -111,6 +174,33 @@ export function checkIndexes(
   counts: CollectionCounts,
   reporter: XlsbReporter
 ): void {
+  // **`dxfId` must index the `BrtBeginDXFs` table, which lives in another part.** A rule pointing past the end of
+  // it is what Excel reports as `Repaired Records: Conditional formatting`, once per sheet — and nothing here
+  // could see it, because the reference and its target are in different parts. Same shape as a dangling
+  // relationship: the fault is in the space *between* parts.
+  //
+  // `0xFFFFFFFF` means "no differential format" and is not an index.
+  if (counts.differentialFormats !== undefined) {
+    for (const record of framed.records) {
+      if (recordSpec(record.id)?.name !== "BrtBeginCFRule" || record.payload.length < 12) {
+        continue;
+      }
+      const dxfId = new DataView(
+        record.payload.buffer,
+        record.payload.byteOffset,
+        record.payload.byteLength
+      ).getUint32(8, true);
+      if (dxfId !== 0xffffffff && dxfId >= counts.differentialFormats) {
+        reporter.error(
+          "index-dxf-out-of-range",
+          `a conditional-formatting rule names dxfId ${dxfId}, but the styles part declares ` +
+            `${counts.differentialFormats} differential format(s)`,
+          { part: framed.part }
+        );
+      }
+    }
+  }
+
   for (const record of framed.records) {
     if (reporter.capped) {
       return;

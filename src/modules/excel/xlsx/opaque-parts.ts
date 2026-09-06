@@ -150,6 +150,27 @@ export function ownerOfRelationshipsPart(relsPath: string): string | undefined {
  * too deep — which is exactly how `docProps/custom.xml` becomes the
  * non-existent `_rels/docProps/custom.xml`.
  */
+/**
+ * Whether a relationship on a surviving part should still be written.
+ *
+ * **The one predicate for "does this edge dangle", because the two writers had opposite answers.** The policy is stated
+ * beside `resolveReachableOpaqueParts`: prune only edges to paths *deliberately excluded*, and leave alone a target that
+ * is a modelled part, an external URL, or something this writer knows nothing about — the goal is to avoid dangling
+ * references, not to audit every relationship.
+ *
+ * `resolveRelationshipTarget` returns `undefined` for exactly those cases, so `undefined` means "not ours to judge" and
+ * must be kept. The XLSX writer had that; the XLSB writer required `target !== undefined && kept.has(target)`, so a
+ * sheet's external hyperlink relationship survived one container and was deleted by the other.
+ */
+export function relationshipStillResolves(
+  source: string,
+  relationship: { readonly target: string; readonly targetMode?: string },
+  kept: ReadonlySet<string>
+): boolean {
+  const target = resolveRelationshipTarget(source, relationship.target, relationship.targetMode);
+  return target === undefined || kept.has(target.toLowerCase());
+}
+
 export function resolveRelationshipTarget(
   source: string,
   target: string,
@@ -359,12 +380,28 @@ export function appendOpaqueSourceRelationships(
 export function opaqueContentTypeDeclarations(
   parts: readonly OpaquePart[] | undefined,
   defaults: Readonly<Record<string, string>> | undefined,
-  reserved: ReadonlyMap<string, string>
+  reserved: ReadonlyMap<string, string>,
+  /**
+   * Part *paths* this writer declares an `Override` for itself, lower-cased.
+   *
+   * **`reserved` handles a clash of extensions; this handles a clash of names, and they are not the same problem.** The
+   * XLSX content-types writer emits a fixed `Override` for `xl/theme/theme1.xml` whatever the model holds — so a theme
+   * that arrives as a *preserved* part, which is how every XLSB read delivers one, was declared twice and the package's
+   * own validator refused it with `content-types-duplicate-override`. Nothing caught it before because a preserved
+   * theme could not previously reach an XLSX write at all: it was being dropped as unreachable.
+   *
+   * The writer's own declaration wins, since it is emitted unconditionally and cannot be suppressed from here. Both
+   * name the same content type in practice — a theme is a theme — so which one survives changes nothing but the count.
+   */
+  reservedPaths: ReadonlySet<string> = new Set()
 ): { overrides: Record<string, string>; defaults: Record<string, string> } {
   const overrides: Record<string, string> = {};
   const emittedDefaults: Record<string, string> = {};
 
   for (const part of parts ?? []) {
+    if (reservedPaths.has(part.path.toLowerCase())) {
+      continue;
+    }
     if (part.contentType) {
       overrides[part.path] = part.contentType;
       continue;

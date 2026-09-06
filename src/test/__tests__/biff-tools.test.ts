@@ -31,7 +31,7 @@ const SHEET = [
   ["BrtBeginSheet"],
   ["BrtWsDim", { ref: { firstRow: 0, lastRow: 2, firstColumn: 0, lastColumn: 3 } }],
   ["BrtBeginSheetData"],
-  ["BrtRowHdr", { rw: 0, ixfe: 0, miyRw: 300, flags: 0 }],
+  ["BrtRowHdr", { rw: 0, ixfe: 0, miyRw: 300, ascDsc: 0, flags: 0, phShow: 0 }],
   ["BrtCellIsst", { cell: { column: 0, styleIndex: 1 }, isst: 0 }],
   ["BrtEndSheetData"],
   ["BrtEndSheet"]
@@ -42,9 +42,11 @@ describe("biff() fixture builder", () => {
     // One record, checked byte for byte, so the DSL is anchored to literal output
     // rather than only to the disassembler's reading of it.
     expect(biff([["BrtBeginSheet"]])).toEqual(Uint8Array.of(0x81, 0x01, 0x00));
-    expect(biff([["BrtRowHdr", { rw: 1, ixfe: 0, miyRw: 0, flags: 0 }]])).toEqual(
-      Uint8Array.of(0x00, 0x0c, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    );
+    expect(
+      biff([["BrtRowHdr", { rw: 1, ixfe: 0, miyRw: 0, ascDsc: 0, flags: 0, phShow: 0 }]])
+      // 0x0D bytes of payload: `rw`, `ixfe`, `miyRw`, then the *three* flag bytes and `ccolspan`. Declaring
+      // the first two flag bytes as one `u16` made it 0x0C and put `fUnsynced` in the wrong one.
+    ).toEqual(Uint8Array.of(0x00, 0x0d, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
   });
 
   it("is deterministic", () => {
@@ -58,23 +60,23 @@ describe("biff() fixture builder", () => {
   });
 
   it("rejects a field the record does not declare", () => {
-    expect(() => biff([["BrtRowHdr", { rw: 0, ixfe: 0, miyRw: 0, flags: 0, nope: 1 }]])).toThrow(
-      /BrtRowHdr has no field nope/
-    );
+    expect(() =>
+      biff([["BrtRowHdr", { rw: 0, ixfe: 0, miyRw: 0, ascDsc: 0, flags: 0, nope: 1 }]])
+    ).toThrow(/BrtRowHdr has no field nope/);
   });
 
   it("rejects a missing field rather than defaulting it", () => {
     // Defaulting would make a fixture quietly differ from what it appears to say.
     expect(() => biff([["BrtRowHdr", { rw: 0, ixfe: 0, miyRw: 0 }]])).toThrow(
-      /BrtRowHdr\.flags is missing/
+      /BrtRowHdr\.ascDsc is missing/
     );
   });
 
   it("rejects a value of the wrong shape", () => {
     expect(() => biff([["BrtWsDim", { ref: 5 }]])).toThrow(/expects an object with firstRow/);
-    expect(() => biff([["BrtRowHdr", { rw: "x", ixfe: 0, miyRw: 0, flags: 0 }]])).toThrow(
-      /expects a number/
-    );
+    expect(() =>
+      biff([["BrtRowHdr", { rw: "x", ixfe: 0, miyRw: 0, ascDsc: 0, flags: 0, phShow: 0 }]])
+    ).toThrow(/expects a number/);
   });
 
   it("requires bytes for a record whose layout is undeclared", () => {
@@ -207,7 +209,8 @@ describe("corruption helpers", () => {
 
   it("truncateInside makes the record overrun the part", () => {
     expect(() => describeBiffStream(truncateInside(biff(SHEET), "BrtRowHdr"))).toThrow(
-      /but only 11 remain/
+      // 13 bytes now that `BrtRowHdr`'s three flag bytes are declared separately, so 12 remain.
+      /declares 13 byte\(s\), but only 12 remain/
     );
   });
 

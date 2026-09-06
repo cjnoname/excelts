@@ -16,6 +16,7 @@ import type { Hyperlink } from "@excel/stream/hyperlink-reader";
 import { HyperlinkReader } from "@excel/stream/hyperlink-reader";
 import { WorksheetReader } from "@excel/stream/worksheet-reader";
 import type { WorksheetReaderWorkbook } from "@excel/stream/worksheet-reader";
+import { XlsbWorksheetReader } from "@excel/stream/xlsb-worksheet-stream-reader";
 import type {
   WorksheetState,
   Font,
@@ -32,6 +33,62 @@ import {
   OOXML_PATHS,
   worksheetRelTarget
 } from "@excel/utils/ooxml-paths";
+
+/** The binary package's fixed part paths — the `.bin` counterparts of `OOXML_PATHS`. */
+/** A ZIP entry's bytes, joined. Used only for the three small binary parts every sheet depends on. */
+async function collectXlsbBytes(entry: AsyncIterable<Uint8Array | string>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of entry as AsyncIterable<Uint8Array | string>) {
+    chunks.push(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
+  }
+  let total = 0;
+  for (const chunk of chunks) {
+    total += chunk.length;
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return joined;
+}
+
+/**
+ * The binary package's fixed part paths — the `.bin` counterparts of `OOXML_PATHS`.
+ *
+ * **Compared case-insensitively, because `normalizeZipPath` does not lower-case.** It only strips a leading slash, so
+ * a literal `case` in the switch matches one spelling of `sharedStrings.bin` and misses the other. A first version had
+ * this table in lower case and the shared-string part was therefore never parsed: every string cell streamed as the
+ * empty string, because the index resolved against an empty table. `xlsbPartKind` is the check the switch uses.
+ */
+const XLSB_PATHS = {
+  workbook: "xl/workbook.bin",
+  sharedStrings: "xl/sharedStrings.bin",
+  styles: "xl/styles.bin"
+} as const;
+
+/** Which of the three prerequisite binary parts `path` is, if any. */
+function xlsbPartKind(path: string): "workbook" | "sharedStrings" | "styles" | undefined {
+  const lowered = path.toLowerCase();
+  for (const [kind, known] of Object.entries(XLSB_PATHS)) {
+    if (lowered === known.toLowerCase()) {
+      return kind as "workbook" | "sharedStrings" | "styles";
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A binary worksheet's number, or `undefined` when the path is not one.
+ *
+ * Separate from `getWorksheetNoFromWorksheetPath` because that one matches `.xml`; sharing it would mean a regex with
+ * an alternation that reads as though either extension were equivalent, and they reach different decoders.
+ */
+function getXlsbWorksheetNo(path: string): number | undefined {
+  const match = /^xl\/worksheets\/sheet(\d+)\.bin$/i.exec(path);
+  return match === null ? undefined : parseInt(match[1]!, 10);
+}
 import type { SharedStringValue } from "@excel/utils/shared-strings";
 import { WorkbookXform } from "@excel/xlsx/xform/book/workbook-xform";
 import { MetadataXform } from "@excel/xlsx/xform/core/metadata-xform";
@@ -208,6 +265,15 @@ export abstract class WorkbookReaderBase<
   protected _hyperlinkReadersBySheetNo?: Record<string, THyperlinkReader>;
 
   protected _workbookRelIdByTarget?: Record<string, string>;
+  /** The binary workbook part, once read. Its presence is a prerequisite for decoding a binary sheet. */
+  protected _xlsbWorkbook?: {
+    readonly sheets?: readonly { name: string; state?: string; relId?: string }[];
+    readonly date1904?: boolean;
+  };
+  /** The binary shared-string table. `undefined` means "not seen yet", which is what defers a sheet. */
+  protected _xlsbSharedStrings?: readonly string[];
+  /** Number formats by style index, from `styles.bin`. */
+  protected _xlsbNumberFormats?: readonly (string | undefined)[];
   protected _sheetByRelId?: Record<string, SheetMetadata>;
 
   getHyperlinkReader(sheetNo: number | string): THyperlinkReader | undefined {
@@ -703,6 +769,94 @@ export abstract class WorkbookReaderBase<
     }
   }
 
+  /**
+   * The binary workbook part: sheet names, ids, states and `date1904`.
+   *
+   * Read whole rather than streamed, and that is not a compromise — `workbook.bin` is the package's table of contents.
+   * It is kilobytes for a workbook of any size, and every sheet after it needs all of it.
+   */
+  protected async _parseXlsbWorkbook(
+    entry: IterableStreamLike<Uint8Array | string>
+  ): Promise<void> {
+    this._emitEntry({ type: "workbook" });
+    const { readWorkbookPart } = await import("@excel/xlsb/read/parts");
+    this._xlsbWorkbook = readWorkbookPart(
+      await collectXlsbBytes(iterateStream(entry)),
+      XLSB_PATHS.workbook
+    ) as never;
+  }
+
+  /**
+   * The shared-string table.
+   *
+   * Held in full, because a `BrtCellIsst` is an index into it and a cell cannot be resolved without the entry it
+   * names. This is the one thing a streamed binary read is not bounded by, and it is bounded by *distinct strings*
+   * rather than by cells — the same position the XML streaming reader is in.
+   */
+  protected async _parseXlsbSharedStrings(
+    entry: IterableStreamLike<Uint8Array | string>
+  ): Promise<void> {
+    const { readSharedStrings } = await import("@excel/xlsb/read/parts");
+    this._xlsbSharedStrings = readSharedStrings(
+      await collectXlsbBytes(iterateStream(entry)),
+      XLSB_PATHS.sharedStrings
+    ).texts;
+  }
+
+  /** The style table, for the number formats that turn a serial into a date. */
+  protected async _parseXlsbStyles(entry: IterableStreamLike<Uint8Array | string>): Promise<void> {
+    const { readStyles } = await import("@excel/xlsb/styles");
+    const table = readStyles(await collectXlsbBytes(iterateStream(entry)), XLSB_PATHS.styles);
+    this._xlsbNumberFormats = (
+      table as unknown as { numberFormats?: readonly (string | undefined)[] }
+    ).numberFormats;
+  }
+
+  /**
+   * A binary worksheet, as row events.
+   *
+   * Mirrors `_parseWorksheet` deliberately closely — the same emit, the same `sheetNo` preservation, the same event
+   * shape — because a caller must not be able to tell which branch produced the reader it is handed.
+   */
+  protected *_parseXlsbWorksheet(
+    iterator: AsyncIterable<unknown>,
+    sheetNo: string
+  ): IterableIterator<WorksheetReadyEvent<TWorksheetReader>> {
+    this._emitEntry({ type: "worksheet", id: sheetNo });
+    const sheetNoNumber = parseInt(sheetNo, 10);
+    const reader = new XlsbWorksheetReader({
+      workbook: this as never,
+      id: sheetNoNumber,
+      iterator: iterator as AsyncIterable<never>,
+      options: this.options as InternalWorksheetOptions
+    });
+    reader.xlsbContext = {
+      sharedStrings: this._xlsbSharedStrings ?? [],
+      ...(this._xlsbNumberFormats === undefined ? {} : { numberFormats: this._xlsbNumberFormats }),
+      ...(this._xlsbWorkbook?.date1904 === undefined
+        ? {}
+        : { date1904: this._xlsbWorkbook.date1904 }),
+      part: `xl/worksheets/sheet${sheetNo}.bin`
+    };
+    (reader as { sheetNo?: number }).sheetNo = sheetNoNumber;
+    // **By relationship, not by position.** `sheets[n - 1]` looks right and is wrong: a package numbers its worksheet
+    // parts independently of the bundle, so a workbook with a chartsheet among its sheets has a hole in the worksheet
+    // numbering and every sheet after it takes the previous one's name. The buffered reader carries the same warning
+    // for the same file — `any_sheets.xlsb` is where it was found.
+    const relId = this._workbookRelIdByTarget?.[`worksheets/sheet${sheetNo}.bin`];
+    const declared =
+      relId === undefined
+        ? undefined
+        : this._xlsbWorkbook?.sheets?.find(sheet => sheet.relId === relId);
+    if (declared !== undefined) {
+      reader.name = declared.name;
+      if (declared.state !== undefined) {
+        reader.state = declared.state as never;
+      }
+    }
+    yield { eventType: "worksheet", value: reader as unknown as TWorksheetReader };
+  }
+
   protected *_parseWorksheet(
     iterator: AsyncIterable<unknown>,
     sheetNo: string
@@ -814,7 +968,45 @@ export abstract class WorkbookReaderBase<
         case OOXML_PATHS.xlMetadata:
           await this._parseMetadata(entry);
           break;
+        // **The binary package's three prerequisite parts.**
+        //
+        // Handled beside their XML counterparts rather than in a separate reader, because the thing that differs is
+        // how a part is decoded and not how the package is walked: the ZIP iteration, the relationship resolution and
+        // the `waiting-worksheet` spooling that copes with shared strings arriving *after* a sheet are all the same
+        // problem in both containers, and were already solved here for one of them.
         default:
+          if (normalizedPath.toLowerCase() === "xl/_rels/workbook.bin.rels") {
+            await this._parseRels(entry);
+            continue;
+          }
+
+          switch (xlsbPartKind(normalizedPath)) {
+            case "workbook":
+              await this._parseXlsbWorkbook(entry);
+              continue;
+            case "sharedStrings":
+              await this._parseXlsbSharedStrings(entry);
+              continue;
+            case "styles":
+              await this._parseXlsbStyles(entry);
+              continue;
+            default:
+              break;
+          }
+
+          sheetNo = getXlsbWorksheetNo(normalizedPath)?.toString();
+          if (sheetNo) {
+            // The same prerequisite test the XML branch makes, for the same reason: a cell record holds an index into
+            // the shared-string table rather than a string, so a sheet that arrives first has to be spooled and come
+            // back later. `_storeWaitingWorksheet` is shared.
+            if (this._xlsbSharedStrings !== undefined && !!this._xlsbWorkbook) {
+              yield* this._parseXlsbWorksheet(iterateStream(entry), sheetNo);
+              continue;
+            }
+            yield { eventType: "waiting-worksheet", sheetNo, entry };
+            continue;
+          }
+
           sheetNo = getWorksheetNoFromWorksheetPath(normalizedPath)?.toString();
           if (sheetNo) {
             // Performance: only wait for sharedStrings when they are actually needed.
@@ -860,6 +1052,15 @@ export const WorkbookReaderOptionsSchema = {
 interface WaitingWorksheet {
   sheetNo: string;
   data: Uint8Array[];
+  /**
+   * Whether the spooled bytes are BIFF12 rather than XML.
+   *
+   * **The Node variant recorded this and the browser one did not.** A worksheet is spooled when the ZIP delivers it
+   * before the workbook or shared strings it depends on, and the browser's replay called `_parseWorksheet`
+   * unconditionally — so a legally-ordered XLSB whose sheet comes first had its BIFF12 records handed to an XML parser.
+   * The Node path dispatches on exactly this field, which is why the two behaved differently on the same file.
+   */
+  isXlsb: boolean;
 }
 
 class WorkbookReader extends WorkbookReaderBase<
@@ -896,7 +1097,8 @@ class WorkbookReader extends WorkbookReaderBase<
       }
       chunks.push(bytes);
     }
-    return { sheetNo, data: chunks };
+    // `.bin` is the container's own marker, and it is the same test the Node variant applies.
+    return { sheetNo, data: chunks, isXlsb: /\.bin$/i.test(entry.path) };
   }
 
   async *_processWaitingWorksheets(
@@ -908,7 +1110,9 @@ class WorkbookReader extends WorkbookReaderBase<
           yield chunk;
         }
       })();
-      yield* this._parseWorksheet(iterator, ws.sheetNo);
+      yield* ws.isXlsb
+        ? this._parseXlsbWorksheet(iterator, ws.sheetNo)
+        : this._parseWorksheet(iterator, ws.sheetNo);
     }
   }
 }

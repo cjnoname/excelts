@@ -49,24 +49,45 @@ const TWENTIETHS_PER_POINT = 20;
 const WEIGHT_REGULAR = 400;
 
 /**
- * Weight for a bold font, and the `grbit` bits for the toggles.
+ * The `FontFlags` bits — MS-XLSB 2.5.53.
  *
- * **None of these appear in the reference corpus**, whose fonts are all regular with `grbit` = 0.
- * The offsets they sit at *are* established; only the values are not. They are the values the
- * same attributes take in the XLSX form of this format and in OpenType, so they are inferences
- * from a documented convention rather than from Excel's own bytes — a distinction this module
- * keeps visible rather than quietly collapsing.
+ * These were in the inferred register, described as values borrowed from the XLSX form of this format and
+ * from OpenType because no corpus font sets any of them. `FontFlags` is a published structure and gives all
+ * six positions, so they are citations now:
  *
- * A single workbook containing one bold and one italic cell would settle every entry here.
+ * ```text
+ * bit 0  unused1     bit 4  fOutline
+ * bit 1  fItalic     bit 5  fShadow
+ * bit 2  unused2     bit 6  fCondense
+ * bit 3  fStrikeout  bit 7  fExtend
+ * ```
+ *
+ * Note the two unused bits at 0 and 2: the six flags are *not* contiguous, so a table built by counting
+ * attributes in order would place every one of them wrongly from `fStrikeout` on.
+ */
+const FONT_FLAGS = {
+  italic: 0x0002,
+  strike: 0x0008,
+  outline: 0x0010,
+  shadow: 0x0020,
+  condense: 0x0040,
+  extend: 0x0080
+} as const;
+
+/**
+ * `BrtFont.bls` for a bold font — **observed, no longer inferred.**
+ *
+ * This said "a single workbook containing one bold cell would settle it", and three of them do: `poi-comments.xlsb`,
+ * `poi-sample.xlsb` and `poi-testVarious.xlsb` carry five bold fonts between them and every one is **700**, against 42
+ * regular fonts at 400 across the same corpus. Three independently-produced files agreeing is what turns the OpenType
+ * convention into a reading of this format.
+ *
+ * Kept as its own constant rather than folded into `FONT_FLAGS` because it is a *weight*, not a flag — the field takes a
+ * range and this is one point in it.
  */
 export const INFERRED_FONT_VALUES = {
   weightBold: INFERRED_VALUES.fontWeightBold,
-  italic: INFERRED_VALUES.fontItalic,
-  strike: INFERRED_VALUES.fontStrike,
-  outline: INFERRED_VALUES.fontOutline,
-  shadow: INFERRED_VALUES.fontShadow,
-  condense: INFERRED_VALUES.fontCondense,
-  extend: INFERRED_VALUES.fontExtend
+  ...FONT_FLAGS
 } as const;
 
 /** `uls` values. Only `single` (1) appears in the corpus. */
@@ -142,7 +163,16 @@ export function readFont(payload: Uint8Array, part: string): Partial<Font> | und
   }
   const underlineName = nameOf(UNDERLINE, underline);
   if (underlineName !== undefined && underlineName !== "none") {
-    font.underline = underlineName;
+    // **`true` for a plain single underline, because that is what the XLSX reader produces for the same font.**
+    //
+    // `<u/>` carries no `val`, so `UnderlineXform.parseOpen` reads `attributes.val || true` and yields `true`; this
+    // reader yielded `"single"` from the enumeration byte. Both mean one underline and both writers accept either, so
+    // nothing was lost — but the same font read through the two containers compared unequal, which is the container
+    // leaking into the model that `verify:xlsb-corpus`'s parity check exists to catch. It found this on `poi-sample`'s
+    // rich-text run.
+    //
+    // The other four names are unambiguous and stay as they are; only the single case has a shorthand.
+    font.underline = underlineName === "single" ? true : underlineName;
   }
   const verticalName = nameOf(VERTICAL_ALIGN, vertical);
   if (verticalName === "superscript" || verticalName === "subscript") {
@@ -204,12 +234,38 @@ export function encodeFont(font: Partial<Font>): Uint8Array {
  * Arial 10 and got Calibri 11 has had *every unstyled cell* restyled. The baseline is kept underneath
  * rather than replaced because a partial `defaultFont` — `{ name: "Arial" }` and nothing else — must
  * still produce the complete record `BrtFont` requires.
+ *
+ * **The baseline includes the colour**, and it did not. Without it `encodeColor` fell through to its last
+ * branch and wrote the automatic colour (`01 40 …`) — a `BrtColor` of kind *automatic* carrying palette index
+ * 64 — while Excel writes theme slot 1 (`07 01 … ff`) for the same font, and this library's own XLSX writer
+ * emits `<color theme="1"/>`. So a from-scratch workbook described its default text colour one way in the XML
+ * container and another in the binary one, and every one of the fifteen oracle cases differed on this record
+ * for that single reason.
+ *
+ * The value is deliberately the same literal the XLSX side uses (`styles-xform.ts`'s default font), because
+ * these are one fact about one workbook and a second copy is how the two came to disagree in the first place.
+ * Theme slot 1 is `lt1`/text-1 — near-black — which is what "no colour specified" has always rendered as.
  */
 export function defaultFont(override?: Partial<Font>): Uint8Array {
-  return encodeFont({ name: "Calibri", size: 11, family: 2, scheme: "minor", ...override });
+  return encodeFont({
+    name: "Calibri",
+    size: 11,
+    family: 2,
+    scheme: "minor",
+    color: { theme: 1 },
+    ...override
+  });
 }
 
-function underlineValue(underline: Partial<Font>["underline"]): number {
+/**
+ * The `Underline` enumeration value for a model underline.
+ *
+ * Exported because a *differential* format needs the same mapping: `XFProp` type `0x1A` carries an `Underline`,
+ * and the DXF encoder had no underline branch at all — so a conditional-formatting rule whose only formatting
+ * was an underline produced a `BrtDXF` with **zero properties**, six bytes of header and nothing else. A second
+ * copy of the enumeration is how the two would come to disagree about `singleAccounting`.
+ */
+export function underlineValue(underline: Partial<Font>["underline"]): number {
   if (underline === undefined || underline === false || underline === "none") {
     return UNDERLINE.none;
   }

@@ -19,8 +19,10 @@ const expectations = [
     parsedModel: {
       paperSize: 9,
       orientation: "portrait",
-      horizontalDpi: 4294967295,
-      verticalDpi: 4294967295,
+      // Absent in the XML, absent in the model. This asserted 4294967295 before, which pinned a sentinel that
+      // only the XLSX writer knew to strip — the XLSB writer wrote it into `BrtPageSetup` verbatim.
+      horizontalDpi: undefined,
+      verticalDpi: undefined,
       useFirstPageNumber: false,
       usePrinterDefaults: false,
       copies: 1,
@@ -59,8 +61,10 @@ const expectations = [
       useFirstPageNumber: false,
       usePrinterDefaults: false,
       copies: 1,
-      horizontalDpi: 4294967295,
-      verticalDpi: 4294967295,
+      // Absent in the XML, absent in the model. This asserted 4294967295 before, which pinned a sentinel that
+      // only the XLSX writer knew to strip — the XLSB writer wrote it into `BrtPageSetup` verbatim.
+      horizontalDpi: undefined,
+      verticalDpi: undefined,
       fitToHeight: 1,
       fitToWidth: 1,
       scale: 100
@@ -85,8 +89,10 @@ const expectations = [
       useFirstPageNumber: false,
       usePrinterDefaults: false,
       copies: 1,
-      horizontalDpi: 4294967295,
-      verticalDpi: 4294967295,
+      // Absent in the XML, absent in the model. This asserted 4294967295 before, which pinned a sentinel that
+      // only the XLSX writer knew to strip — the XLSB writer wrote it into `BrtPageSetup` verbatim.
+      horizontalDpi: undefined,
+      verticalDpi: undefined,
       blackAndWhite: false,
       draft: false,
       fitToHeight: 1,
@@ -115,8 +121,10 @@ const expectations = [
       useFirstPageNumber: false,
       usePrinterDefaults: false,
       copies: 1,
-      horizontalDpi: 4294967295,
-      verticalDpi: 4294967295,
+      // Absent in the XML, absent in the model. This asserted 4294967295 before, which pinned a sentinel that
+      // only the XLSX writer knew to strip — the XLSB writer wrote it into `BrtPageSetup` verbatim.
+      horizontalDpi: undefined,
+      verticalDpi: undefined,
       blackAndWhite: false,
       cellComments: "None",
       draft: false,

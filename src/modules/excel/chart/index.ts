@@ -11,7 +11,7 @@
  * ```
  *
  * No install / registration step exists. The high-level chart APIs
- * (`Chart.add`, `worksheet.addChart`, `Workbook.writeXlsx` chart serialisation,
+ * (`Chart.add`, `Worksheet.addChart`, chart serialisation on `Workbook.toBuffer`,
  * XLSX chart reconstruction on load) import the chart implementation directly
  * and statically. A consumer that never references any chart API gets the
  * entire chart implementation tree-shaken out by the bundler — the package's

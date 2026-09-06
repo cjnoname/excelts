@@ -125,9 +125,9 @@ describe("BrtXF alignment against Excel's own bytes", () => {
     let inCellXfs = false;
     for (const record of iterateBiffRecords(entries.get("xl/styles.bin")!.data, "styles")) {
       const name = recordSpec(record.id)?.name;
-      if (name === "BrtBeginCellXfs") {
+      if (name === "BrtBeginCellXFs") {
         inCellXfs = true;
-      } else if (name === "BrtEndCellXfs") {
+      } else if (name === "BrtEndCellXFs") {
         inCellXfs = false;
       } else if (name === "BrtXF" && inCellXfs) {
         masks.push(record.payload[14]!);

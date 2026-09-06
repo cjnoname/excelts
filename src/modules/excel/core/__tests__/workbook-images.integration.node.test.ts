@@ -205,7 +205,13 @@ describe("Workbook", () => {
       expect(images.length).toBe(1);
 
       const imageDesc = images[0];
-      expect(imageDesc.range!.editAs).toBe("absolute");
+      // **`"oneCell"`, not the `"absolute"` that was asked for**, and the request was the contradictory part.
+      // An absolute anchor is positioned by `pos`; this image gave `tl` + `ext`, which is a one-cell anchor by
+      // definition — so `<xdr:oneCellAnchor>` is what the file has always contained and what Excel has always
+      // rendered. The old `"absolute"` came back only because the writer stored the string in an `editAs`
+      // attribute that `CT_OneCellAnchor` does not define, which is a file Excel repairs. `range.editAs` now
+      // reports the anchor the file actually uses.
+      expect(imageDesc.range!.editAs).toBe("oneCell");
       expect(imageDesc.range!.ext!.width).toBe(100);
       expect(imageDesc.range!.ext!.height).toBe(100);
 

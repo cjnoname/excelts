@@ -91,10 +91,24 @@ export function encodeHeaderFooter(headerFooter: Partial<HeaderFooter> | undefin
   let flags = FLAGS_DEFAULT;
   // The flags are what make the later strings meaningful, so they follow the model rather than being
   // fixed: a distinct first-page header with the flag clear prints the odd-page header on page one.
-  if (headerFooter?.evenHeader !== undefined || headerFooter?.evenFooter !== undefined) {
+  //
+  // **The model's own booleans are the answer where it states them, and `!== undefined` was not.** The XLSX reader
+  // fills every unused slot with `null` rather than leaving it absent, so `evenHeader !== undefined` was true for a
+  // workbook that has only an odd header — and both flags were set on every sheet with a header at all. Excel writes
+  // `0x000c` for those, with both clear.
+  //
+  // `differentOddEven` and `differentFirst` are what `<headerFooter differentOddEven="1">` says in the other container,
+  // so a model that carries them has already answered this; the string check is the fallback for a model built by hand.
+  const hasEven =
+    present(headerFooter?.evenHeader) !== undefined ||
+    present(headerFooter?.evenFooter) !== undefined;
+  const hasFirst =
+    present(headerFooter?.firstHeader) !== undefined ||
+    present(headerFooter?.firstFooter) !== undefined;
+  if (headerFooter?.differentOddEven ?? hasEven) {
     flags |= FLAG_DIFFERENT_ODD_EVEN;
   }
-  if (headerFooter?.firstHeader !== undefined || headerFooter?.firstFooter !== undefined) {
+  if (headerFooter?.differentFirst ?? hasFirst) {
     flags |= FLAG_DIFFERENT_FIRST;
   }
   return concatUint8Arrays([

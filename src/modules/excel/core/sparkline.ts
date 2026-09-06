@@ -249,6 +249,55 @@ export function buildSparklineGroup(opts: AddSparklineGroupOptions): SparklineGr
   return group;
 }
 
+/**
+ * The eight colours a group gets when it states none, and the value Excel itself writes for each.
+ *
+ * **Read out of a sparkline created through Excel's own UI**, because the first attempt at this guessed
+ * `theme="4"` — accent1 — and that is not what Excel does: it writes concrete sRGB for all eight, `FF376092`
+ * for the series and `FFD00000` for every marker except the axis.
+ *
+ * **These are Excel's *authoring* defaults, and that is a different thing from what Excel does with an
+ * omission.** Handed a file whose group states no colour, Excel does not fill one in: it writes the colour out
+ * as `xColorType` 0 — automatic — in the binary form, which its own specification says that record MUST NOT
+ * contain. So the choice made here is deliberate rather than imitative. Passing an omission through is what
+ * Excel does and it produces an invisible chart; substituting what Excel's UI would have chosen produces the
+ * one the caller meant. For a library whose documented way of adding a sparkline is
+ * `Sparkline.add(sheet, { type, sparklines })`, the second is the only defensible reading.
+ *
+ * Defaults are needed at all because **a colour Excel does not find is a thing Excel does not paint.** A group
+ * with no `<x14:colorSeries>` loads — selecting the cell highlights the source range — and draws nothing, and
+ * the same is true one marker at a time: `high: true` with no `colorHigh` is an invisible high point. So all
+ * eight are supplied rather than only the series, which was the first fix and was incomplete.
+ *
+ * Consumed by the XLSB encoder too. It had the identical defect in a different spelling: an unstated colour
+ * became palette index 64 — "automatic" — because `BrtBeginSparklineGroup` forbids colour type 0, and
+ * automatic is as unpainted there as an absent element is here. One definition, two writers.
+ */
+export const DEFAULT_SPARKLINE_COLORS = {
+  colorSeries: { rgb: "FF376092" },
+  colorNegative: { rgb: "FFD00000" },
+  colorAxis: { rgb: "FF000000" },
+  colorMarkers: { rgb: "FFD00000" },
+  colorFirst: { rgb: "FFD00000" },
+  colorLast: { rgb: "FFD00000" },
+  colorHigh: { rgb: "FFD00000" },
+  colorLow: { rgb: "FFD00000" }
+} as const satisfies Record<string, SparklineColor>;
+
+/**
+ * How empty cells are plotted when the group says nothing.
+ *
+ * **`gap`, which is not the schema's default.** The XML default is `zero`, and a sparkline inserted through
+ * Excel's UI states `displayEmptyCellsAs="gap"` explicitly — precisely because Excel's own choice differs from
+ * the schema's. Following the schema meant a gap in the data was drawn as a column of height zero rather than
+ * as a break, which is a different chart.
+ *
+ * As with the colours, this is Excel's *authoring* default and not its passthrough behaviour: given a file that
+ * omits the attribute, Excel keeps the omission (`fShowEmptyCellAsZero = 0`). Substituting here is a decision
+ * about what an unconfigured `Sparkline.add` should mean, not an imitation of a converter.
+ */
+export const DEFAULT_SPARKLINE_EMPTY_CELLS = "gap" as const;
+
 function hexToSparklineColor(hex: string): SparklineColor {
   return { rgb: hex.replace(/^#/, "").toUpperCase() };
 }
@@ -284,9 +333,9 @@ function renderSparklineGroup(g: SparklineGroup): string {
   if (g.lineWeight !== undefined) {
     attrs.push(`lineWeight="${g.lineWeight}"`);
   }
-  if (g.displayEmptyCellsAs) {
-    attrs.push(`displayEmptyCellsAs="${g.displayEmptyCellsAs}"`);
-  }
+  // Stated even when the group says nothing, because the default this library wants is not the schema's — see
+  // `DEFAULT_SPARKLINE_EMPTY_CELLS`.
+  attrs.push(`displayEmptyCellsAs="${g.displayEmptyCellsAs ?? DEFAULT_SPARKLINE_EMPTY_CELLS}"`);
   if (g.markers) {
     attrs.push('markers="1"');
   }
@@ -330,30 +379,12 @@ function renderSparklineGroup(g: SparklineGroup): string {
   const parts: string[] = [];
   parts.push(`<x14:sparklineGroup${attrs.length > 0 ? ` ${attrs.join(" ")}` : ""}>`);
 
-  // Colors (emit only those set, in OOXML order)
-  if (g.colorSeries) {
-    parts.push(`<x14:colorSeries ${sparklineColorAttrs(g.colorSeries)}/>`);
-  }
-  if (g.colorNegative) {
-    parts.push(`<x14:colorNegative ${sparklineColorAttrs(g.colorNegative)}/>`);
-  }
-  if (g.colorAxis) {
-    parts.push(`<x14:colorAxis ${sparklineColorAttrs(g.colorAxis)}/>`);
-  }
-  if (g.colorMarkers) {
-    parts.push(`<x14:colorMarkers ${sparklineColorAttrs(g.colorMarkers)}/>`);
-  }
-  if (g.colorFirst) {
-    parts.push(`<x14:colorFirst ${sparklineColorAttrs(g.colorFirst)}/>`);
-  }
-  if (g.colorLast) {
-    parts.push(`<x14:colorLast ${sparklineColorAttrs(g.colorLast)}/>`);
-  }
-  if (g.colorHigh) {
-    parts.push(`<x14:colorHigh ${sparklineColorAttrs(g.colorHigh)}/>`);
-  }
-  if (g.colorLow) {
-    parts.push(`<x14:colorLow ${sparklineColorAttrs(g.colorLow)}/>`);
+  // All eight colours, in OOXML order, each falling back to what Excel writes — an absent one is a mark Excel
+  // does not paint. See `DEFAULT_SPARKLINE_COLORS`.
+  for (const [element, field] of SPARKLINE_COLOR_ELEMENTS) {
+    parts.push(
+      `<x14:${element} ${sparklineColorAttrs(g[field] ?? DEFAULT_SPARKLINE_COLORS[field])}/>`
+    );
   }
   if (g.dateAxis) {
     parts.push(`<xm:f>${escapeXml(g.dateAxis)}</xm:f>`);
@@ -371,6 +402,18 @@ function renderSparklineGroup(g: SparklineGroup): string {
   parts.push("</x14:sparklineGroup>");
   return parts.join("");
 }
+
+/** The eight colour elements, in the order `CT_SparklineGroup` requires, paired with their model fields. */
+const SPARKLINE_COLOR_ELEMENTS = [
+  ["colorSeries", "colorSeries"],
+  ["colorNegative", "colorNegative"],
+  ["colorAxis", "colorAxis"],
+  ["colorMarkers", "colorMarkers"],
+  ["colorFirst", "colorFirst"],
+  ["colorLast", "colorLast"],
+  ["colorHigh", "colorHigh"],
+  ["colorLow", "colorLow"]
+] as const satisfies readonly (readonly [string, keyof typeof DEFAULT_SPARKLINE_COLORS])[];
 
 function sparklineColorAttrs(c: SparklineColor): string {
   const parts: string[] = [];

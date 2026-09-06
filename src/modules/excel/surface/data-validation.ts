@@ -5,8 +5,8 @@
  *   `DataValidation.create()`, `DataValidation.add(dv, "A1", rule)`,
  *   `DataValidation.find(dv, "A1")`, `DataValidation.remove(dv, "A1")`.
  *
- * Cell-level validation (`Cell.dataValidation` / `Cell.setDataValidation`)
- * lives on the `Cell` namespace.
+ * Cell-level validation (`Cell.getValidation` / `Cell.setValidation`) lives on
+ * the `Cell` namespace.
  */
 export {
   createDataValidations as create,

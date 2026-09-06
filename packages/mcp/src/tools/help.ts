@@ -82,8 +82,8 @@ widened.`
 
 ## Spreadsheets
 - \`sheet_read\` — read a bounded window.
-- \`sheet_write\` — create an .xlsx from a spec, images included.
-- \`sheet_edit\` — patch an existing .xlsx; \`add_image\` places a picture.
+- \`sheet_write\` — create an .xlsx or .xlsb from a spec, images included.
+- \`sheet_edit\` — patch an existing .xlsx or .xlsb; \`add_image\` places a picture.
 - \`formula_evaluate\` — evaluate a formula against supplied values.
 
 ## Documents

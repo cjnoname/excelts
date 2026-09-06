@@ -27,8 +27,15 @@ describe("ConditionalFormattingsXform", () => {
 
       // Check that default cfvo was added
       expect(model[0].rules[0].cfvo).toEqual([{ type: "min" }, { type: "max" }]);
-      // Check that default color was added
-      expect(model[0].rules[0].color).toEqual({ argb: "FF638EC6" });
+      // **The automatic colour, not a concrete blue.**
+      //
+      // `color` is required by `CT_DataBar`, so a rule without one has to be given something — this test used to pin
+      // that something to `FF638EC6`, described in the writer as "same as Excel's default". It is the colour Excel's UI
+      // *offers*, and not what Excel writes: its binary save of a bar declared `<color auto="1"/>` carries the automatic
+      // colour. An empty colour object is how both writers here spell that (`ColorXform` emits `auto="1"`,
+      // `encodeColor(undefined)` emits the automatic BIFF12 colour), so "let the application choose" survives a round
+      // trip instead of being resolved to one application's choice.
+      expect(model[0].rules[0].color).toEqual({});
       // Check that priority was assigned
       expect(model[0].rules[0].priority).toBe(1);
     });

@@ -1,125 +1,80 @@
+/**
+ * The same workbook at three compression levels, in both containers.
+ *
+ * `zip.zlib.level` is passed straight to the DEFLATE encoder, so it trades time against size and nothing else —
+ * the parts inside are byte for byte the same at every level. Six files come out of this, and putting the sizes
+ * beside each other is the point: it shows what the level actually buys, per container.
+ *
+ * The binary container starts smaller — numbers are eight bytes rather than their decimal text, and a record
+ * header is two bytes rather than a tag — so it has less redundancy left for DEFLATE to find. Expect the *ratio*
+ * between levels to be narrower for `xlsb` than for `xlsx`, which is the interesting part rather than a defect.
+ *
+ * Run: pnpm example --filter streaming-writer-compression-options
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { streamBothFormats } from "@excel/examples/utils/stream-both";
 import { Stream } from "@excel/index";
 
 const outDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../../tmp/excel-examples"
 );
-fs.mkdirSync(outDir, { recursive: true });
-const filename = process.argv[2] ?? path.join(outDir, "streaming-writer-compression-best.xlsx");
-console.log(filename);
-const optionsBestCompression = {
-  filename,
-  useStyles: true,
-  zip: {
-    zlib: { level: 9 } // Sets the compression level.
-  }
-};
-const wb = new Stream.WorkbookWriter(optionsBestCompression);
-const ws = wb.addWorksheet("blort");
 
 const style = {
   font: { name: "Comic Sans MS", underline: true, bold: true, size: 16 },
   alignment: { vertical: "middle" as const, horizontal: "center" as const }
 };
-ws.columns = [
-  { header: "A1", width: 10 },
-  { header: "B1", width: 20, style },
-  { header: "C1", width: 30 }
-];
 
-Stream.setRowFont(ws.getRow(2), {
-  name: "Broadway",
-  color: { argb: "FFFF0000" },
-  outline: true,
-  size: 20
-});
-
-Stream.setCellValue(ws.getCell("A2"), "A2");
-Stream.setCellValue(ws.getCell("B2"), "B2");
-Stream.setCellValue(ws.getCell("C2"), "C2");
-Stream.setCellValue(ws.getCell("A3"), "A3");
-Stream.setCellValue(ws.getCell("B3"), "B3");
-Stream.setCellValue(ws.getCell("C3"), "C3");
-
-wb.commit().then(() => {
-  console.log("Done");
-  // var wb2 = new Workbook();
-  // return Workbook.readFile(wb2, './wb.test2.xlsx');
-});
-
-const filename2 = process.argv[3] ?? path.join(outDir, "streaming-writer-compression-speed.xlsx");
-console.log(filename2);
-const optionsBestSpeed = {
-  filename: filename2,
-  useStyles: true,
-  zip: {
-    zlib: { level: 1 } // Sets the compression level.
+/** The same content every time, so the only variable is the level. */
+function build(wb: Stream.WorkbookWriter): void {
+  const ws = wb.addWorksheet("blort");
+  ws.columns = [
+    { header: "A1", width: 10 },
+    { header: "B1", width: 20, style },
+    { header: "C1", width: 30 }
+  ];
+  Stream.setRowFont(ws.getRow(2), {
+    name: "Broadway",
+    color: { argb: "FFFF0000" },
+    outline: true,
+    size: 20
+  });
+  // Enough rows for the level to make a measurable difference; three cells would compress to the same size at
+  // every setting and the example would demonstrate nothing.
+  for (let row = 2; row <= 400; row++) {
+    for (const column of ["A", "B", "C"]) {
+      Stream.setCellValue(ws.getCell(`${column}${row}`), `${column}${row}`);
+    }
   }
-};
-const wb2 = new Stream.WorkbookWriter(optionsBestSpeed);
-const ws2 = wb2.addWorksheet("blort");
+  ws.commit();
+}
 
-ws2.columns = [
-  { header: "A1", width: 10 },
-  { header: "B1", width: 20, style },
-  { header: "C1", width: 30 }
+const levels: readonly { readonly name: string; readonly level: 9 | 1 | undefined }[] = [
+  { name: "best", level: 9 },
+  { name: "speed", level: 1 },
+  { name: "default", level: undefined }
 ];
 
-Stream.setRowFont(ws2.getRow(2), {
-  name: "Broadway",
-  color: { argb: "FFFF0000" },
-  outline: true,
-  size: 20
-});
+const sizes: Record<string, Record<string, number>> = {};
 
-Stream.setCellValue(ws2.getCell("A2"), "A2");
-Stream.setCellValue(ws2.getCell("B2"), "B2");
-Stream.setCellValue(ws2.getCell("C2"), "C2");
-Stream.setCellValue(ws2.getCell("A3"), "A3");
-Stream.setCellValue(ws2.getCell("B3"), "B3");
-Stream.setCellValue(ws2.getCell("C3"), "C3");
+for (const { name, level } of levels) {
+  const written = await streamBothFormats(
+    path.join(outDir, `streaming-writer-compression-${name}.xlsx`),
+    { useStyles: true, ...(level === undefined ? {} : { zip: { zlib: { level } } }) },
+    build
+  );
+  sizes[name] = {
+    xlsx: fs.statSync(written.xlsx).size,
+    xlsb: fs.statSync(written.xlsb).size
+  };
+}
 
-wb2.commit().then(() => {
-  console.log("Done");
-  // var wb2 = new Workbook();
-  // return Workbook.readFile(wb2, './wb.test2.xlsx');
-});
-
-const filename3 = process.argv[4] ?? path.join(outDir, "streaming-writer-compression-default.xlsx");
-console.log(filename3);
-const options = {
-  filename: filename3,
-  useStyles: true
-};
-const wb3 = new Stream.WorkbookWriter(options);
-const ws3 = wb3.addWorksheet("blort");
-
-ws3.columns = [
-  { header: "A1", width: 10 },
-  { header: "B1", width: 20, style },
-  { header: "C1", width: 30 }
-];
-
-Stream.setRowFont(ws3.getRow(2), {
-  name: "Broadway",
-  color: { argb: "FFFF0000" },
-  outline: true,
-  size: 20
-});
-
-Stream.setCellValue(ws3.getCell("A2"), "A2");
-Stream.setCellValue(ws3.getCell("B2"), "B2");
-Stream.setCellValue(ws3.getCell("C2"), "C2");
-Stream.setCellValue(ws3.getCell("A3"), "A3");
-Stream.setCellValue(ws3.getCell("B3"), "B3");
-Stream.setCellValue(ws3.getCell("C3"), "C3");
-
-wb3.commit().then(() => {
-  console.log("Done");
-  // var wb2 = new Workbook();
-  // return Workbook.readFile(wb2, './wb.test2.xlsx');
-});
+console.log("\n  level      xlsx      xlsb");
+for (const { name } of levels) {
+  console.log(
+    `  ${name.padEnd(8)} ${String(sizes[name].xlsx).padStart(8)}  ${String(sizes[name].xlsb).padStart(8)}`
+  );
+}

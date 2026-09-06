@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Cell, Workbook, Worksheet } from "@excel/index";
 
 const exampleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +45,7 @@ Workbook.getXlsxIo(wb)
     Cell.setStyle(ws!, "B1", { numFmt: "hh:mm:ss" });
 
     Worksheet.addRow(ws!, [1, "hello"]);
-    return Workbook.writeFile(wb, outputFile);
+    return writeBothFormats(wb, outputFile);
   })
   .then(() => {
     assert(passed, "Something went wrong", "All tests passed!");

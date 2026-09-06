@@ -194,6 +194,31 @@ export interface WorksheetData {
    */
   _opaqueRels?: OpaqueRelationship[];
   /**
+   * Set when this sheet stands in for a *chartsheet* the reader could not model.
+   *
+   * A chartsheet holds a chart rather than a cell grid, so reading its records as rows would invent cells that do not
+   * exist; the reader keeps the name and position as an empty worksheet instead, and reports the substitution. That
+   * repair is fine for a caller reading the workbook and wrong for one writing it back: the chartsheet's own part is
+   * preserved and still reachable, so emitting a worksheet part for the placeholder as well produced *two* parts for
+   * one declared sheet — thirteen relationship targets against twelve `BrtBundleSh` records, with the sheet's
+   * relationship pointing at a 319-byte empty grid instead of at the chart.
+   *
+   * So it holds the *path* of the part it stands for, not a boolean: the writer needs to point the sheet's
+   * relationship at the real chartsheet, and a flag would only tell it not to write the wrong thing.
+   */
+  _chartsheetPlaceholder?: string;
+  /**
+   * Notes a *streaming* worksheet kept, because it releases `_rows` at `commit()`.
+   *
+   * `readonly unknown[]` because the element is the XLSB writer's `SheetComment` and this layer must not depend on that
+   * writer — the same reason `styledBlankRanges` is typed loosely on the model. Declared here rather than reached through
+   * a cast at both ends, which is how `_styledBlankRanges` is still handled and is a weaker guarantee: a rename would
+   * silently produce `undefined` instead of a compile error.
+   *
+   * Absent on a random-access worksheet, whose rows are still there when the package is written.
+   */
+  _retainedComments?: readonly unknown[];
+  /**
    * Relationship id of the drawing this sheet already pointed at, from an XLSB read.
    *
    * XLSB stores the *reference* as a binary record while the drawing itself is XML this library keeps
@@ -293,10 +318,19 @@ export function getColumn(ws: WorksheetData, c: string | number): ColumnData {
 // =============================================================================
 
 export function _commitRow(ws: WorksheetData, row: RowData): void {
-  // Streaming writers track committed rows via an internal offset; dispatch to
-  // the writer's own commit logic so flat `rowCommit` works on writer rows too.
-  // For plain record worksheets this is a no-op (allows the streaming reader to
-  // fill a document).
+  // Streaming writers track committed rows via an internal offset; dispatch to the writer's own commit logic so the flat
+  // `rowCommit` works on writer rows too.
+  //
+  // **For a plain worksheet this is deliberately a no-op, and the reason matters — it was tried as a throw.** The
+  // justification here used to name the streaming *reader*, which does not call this at all, so the branch looked like a
+  // silence covering a caller mistake. Refusing broke ten tests across four files, all through one shared fixture
+  // builder: `__tests__/shared/test-values-sheet.ts` populates a worksheet with `cellSetValue` and `rowCommit`, and the
+  // same function runs against a random-access `Worksheet` and a `Stream.WorksheetWriter`.
+  //
+  // That is what the no-op buys: `rowCommit` is the one call in the row-building vocabulary that only means something to
+  // a streaming writer, so making it harmless elsewhere is what lets one piece of code fill either kind of sheet. A
+  // caller who reaches for it on a random-access worksheet is not making a mistake — the rows are written when the
+  // workbook is serialised, and committing is simply not a step there.
   if (typeof ws._commitRow === "function") {
     ws._commitRow(row);
   }
@@ -900,6 +934,18 @@ export function rowSplice(r: RowData, start: number, count: number, ...inserts: 
   }
 }
 
+/**
+ * Hand a row to the stream it belongs to — `Stream.commitRow` on the public surface.
+ *
+ * **A no-op when the row's worksheet is not a streaming writer, and that is part of the contract rather than an
+ * oversight.** `rowCommit` is the only call in the row-building vocabulary that means something exclusively to a
+ * streaming writer; making it harmless elsewhere is what lets one piece of code populate either kind of sheet, which is
+ * how this library's own shared fixture builder works. On a random-access worksheet the rows are written when the
+ * workbook is serialised, so there is no commit step to perform.
+ *
+ * Stated here because it cannot be inferred from the signature: a caller cannot otherwise tell whether nothing happened
+ * because nothing needed to. See `_commitRow` for what refusing it cost.
+ */
 export function rowCommit(r: RowData): void {
   _commitRow(r.worksheet, r);
 }
@@ -973,4 +1019,108 @@ export function getTable(ws: WorksheetData, name: string): TableData {
 /** All tables defined on the worksheet. See {@link getTable} for the layering rationale. */
 export function getTables(ws: WorksheetData): TableData[] {
   return Object.values(ws.tables);
+}
+
+// ============================================================================
+// Panes and the auto-filter
+// ============================================================================
+
+/**
+ * Freeze rows and columns so they stay in view while the rest scrolls.
+ *
+ * `columns` and `rows` are how many to hold — `freeze(ws, 1, 1)` pins the first column and the header row.
+ * Zero for either means that axis does not freeze, and `freeze(ws, 0, 0)` is the same as {@link unfreeze}.
+ *
+ * ## Why this exists
+ *
+ * A frozen pane is a `views` entry, and `views` had no public setter — so the only way to freeze anything was
+ * `Worksheet.setModel(sheet, { ...Worksheet.getModel(sheet), views: [{ state: "frozen", … }] })`. That is not a
+ * workaround a caller should have to find: it requires knowing the OOXML field names, that `xSplit` counts
+ * *columns* despite the name, and that `topLeftCell` has to be derived from the two splits or the sheet scrolls
+ * to the wrong place. Two of the examples here did exactly that and said so in a comment.
+ *
+ * `topLeftCell` is computed rather than accepted, because it is not an independent choice: it is the first cell
+ * *outside* the frozen region, and any other value is a file that scrolls somewhere the author did not ask for.
+ */
+export function freeze(ws: WorksheetData, columns = 0, rows = 0): void {
+  const heldColumns = Math.max(0, Math.trunc(columns));
+  const heldRows = Math.max(0, Math.trunc(rows));
+  if (heldColumns === 0 && heldRows === 0) {
+    unfreeze(ws);
+    return;
+  }
+  const topLeft = `${colCache.n2l(heldColumns + 1)}${heldRows + 1}`;
+  ws.views = [
+    {
+      state: "frozen",
+      // `xSplit` is a column count and `ySplit` a row count, despite reading like coordinates.
+      ...(heldColumns === 0 ? {} : { xSplit: heldColumns }),
+      ...(heldRows === 0 ? {} : { ySplit: heldRows }),
+      topLeftCell: topLeft,
+      activeCell: topLeft
+    }
+  ];
+}
+
+/**
+ * Split the sheet into resizable panes at a point measured in **twentieths of a point**.
+ *
+ * Distinct from {@link freeze} in the file and in behaviour: a split pane can be dragged and scrolls
+ * independently, a frozen one cannot. The units are the format's — `xSplit`/`ySplit` mean columns and rows for a
+ * frozen view and twips for a split one, which is the kind of overloading a public member should absorb rather
+ * than pass on, so this function's name says which it is.
+ */
+export function split(ws: WorksheetData, x = 0, y = 0): void {
+  const horizontal = Math.max(0, Math.trunc(x));
+  const vertical = Math.max(0, Math.trunc(y));
+  if (horizontal === 0 && vertical === 0) {
+    unfreeze(ws);
+    return;
+  }
+  ws.views = [
+    {
+      state: "split",
+      ...(horizontal === 0 ? {} : { xSplit: horizontal }),
+      ...(vertical === 0 ? {} : { ySplit: vertical }),
+      // The pane the cursor starts in. Bottom-right whenever both axes split, which is what Excel does.
+      activePane:
+        horizontal > 0 && vertical > 0 ? "bottomRight" : horizontal > 0 ? "topRight" : "bottomLeft"
+    }
+  ];
+}
+
+/** Remove any frozen or split panes, leaving a normally scrolling sheet. */
+export function unfreeze(ws: WorksheetData): void {
+  ws.views = [];
+}
+
+/**
+ * The frozen or split panes currently set, or `undefined` for a normally scrolling sheet.
+ *
+ * Returns the model's own view entry rather than a reduced shape, because a caller reading this wants whatever
+ * is there — including the fields {@link freeze} does not set, such as `zoomScale`, which a file read from Excel
+ * may carry.
+ */
+export function panes(ws: WorksheetData): Partial<WorksheetView> | undefined {
+  const view = ws.views?.[0];
+  return view === undefined || view.state === "normal" ? undefined : view;
+}
+
+/**
+ * Put an auto-filter over a range, or remove it with `null`.
+ *
+ * The range may be an `A1:C4` string or the `{ from, to }` pair the model also accepts; both are passed through
+ * unchanged, because the writers already normalise them and a second normalisation here would be a second set
+ * of rules for the same string.
+ *
+ * `autoFilter` was a model field with no setter, so an example that wanted one had to go through
+ * `getModel`/`setModel` — see {@link freeze} for why that is not an acceptable answer for a documented feature.
+ */
+export function setAutoFilter(ws: WorksheetData, range: AutoFilter | null): void {
+  ws.autoFilter = range;
+}
+
+/** The auto-filter range, or `null` when the sheet has none. */
+export function autoFilter(ws: WorksheetData): AutoFilter | null {
+  return ws.autoFilter ?? null;
 }

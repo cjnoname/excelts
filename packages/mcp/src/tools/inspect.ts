@@ -192,6 +192,9 @@ const CLAIMED_BY_EXTENSION: Readonly<Record<string, FileKind>> = {
   ".xlsx": "excel",
   ".xlsm": "excel",
   ".xltx": "excel",
+  // Also a ZIP, and also a workbook — the difference is that its parts are BIFF12 records rather than
+  // XML, which the reader detects from the package rather than from this name.
+  ".xlsb": "excel",
   ".docx": "word",
   ".docm": "word",
   ".dotx": "word",
@@ -281,7 +284,7 @@ async function describeWorkbook(resolved: string, config: ServerConfig): Promise
     // likely cause rather than the literal finding.
     return [
       "No worksheets were found. A valid Excel workbook always has at least one, so this is most",
-      "likely a ZIP file that is not really an .xlsx. Treat the extension as unreliable."
+      "likely a ZIP file that is not really a workbook. Treat the extension as unreliable."
     ];
   }
 
@@ -614,7 +617,11 @@ async function zipContentKind(filePath: string): Promise<FileKind> {
   try {
     const archive = await ArchiveFile.fromFile(filePath);
     const names = new Set((await archive.getEntries()).map(entry => entry.path));
-    if (names.has("xl/workbook.xml")) {
+    // **Either workbook part.** An XLSB stores its workbook in `xl/workbook.bin`; the XML name is the only one this
+    // looked for, so a binary workbook was reported as a plain `zip` — and the surrounding comment's own rule ("never
+    // by the filename") is what makes that a gap rather than a preference: the extension was right there and
+    // deliberately not consulted, so the content check has to cover both forms or it answers wrongly for one.
+    if (names.has("xl/workbook.xml") || names.has("xl/workbook.bin")) {
       return "excel";
     }
     if (names.has("word/document.xml")) {

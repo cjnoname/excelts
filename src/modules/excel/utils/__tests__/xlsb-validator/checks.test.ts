@@ -1,3 +1,4 @@
+import { extractAll } from "@archive/unzip/extract";
 /**
  * BIFF12 validator, checked one violation at a time.
  *
@@ -12,10 +13,10 @@
  * bottom is, by asserting that a valid stream produces nothing.
  */
 import { ZipArchive } from "@archive/zip";
-import { Cell, Workbook } from "@excel";
+import { Cell, Workbook, Worksheet } from "@excel";
 import { validateXlsbBuffer, validateXlsbPart } from "@excel/utils/xlsb-validator";
 import type { XlsbProblemKind } from "@excel/utils/xlsb-validator/types";
-import { encodeBiffRecord, encodeRange } from "@excel/xlsb/binary";
+import { encodeBiffRecord, encodeRange, iterateBiffRecords } from "@excel/xlsb/binary";
 import {
   bookView,
   calculationProperties,
@@ -26,6 +27,7 @@ import {
 } from "@excel/xlsb/defaults";
 import { encodeSheetFormatInfo } from "@excel/xlsb/page-setup";
 import { encodeSheetProperties } from "@excel/xlsb/sheet-properties";
+import { recordSpec } from "@excel/xlsb/spec/records";
 import {
   appendGarbage,
   biff,
@@ -184,8 +186,8 @@ describe("scopes", () => {
     // using a newer feature look mis-nested.
     const stream = biff([
       ["BrtBeginSheet"],
-      ["BrtBeginFutureRecord", new Uint8Array(4)],
-      ["BrtEndFutureRecord"],
+      ["BrtFRTBegin", new Uint8Array(4)],
+      ["BrtFRTEnd"],
       ["BrtBeginSheetData"],
       ["BrtRowHdr", rowHeader({ row: 0, heightTwips: 0 })],
       ["BrtEndSheetData"],
@@ -246,8 +248,8 @@ describe("ordering", () => {
     // Number formats are indexed by cell formats, so they must be declared first.
     const styles = biff([
       ["BrtBeginStyleSheet"],
-      ["BrtBeginCellXfs", { count: 0 }],
-      ["BrtEndCellXfs"],
+      ["BrtBeginCellXFs", { count: 0 }],
+      ["BrtEndCellXFs"],
       ["BrtBeginFmts", { count: 0 }],
       ["BrtEndFmts"],
       ["BrtEndStyleSheet"]
@@ -363,8 +365,8 @@ describe("indexes", () => {
   it("rejects a cell format index past the end of the table", () => {
     const styles = biff([
       ["BrtBeginStyleSheet"],
-      ["BrtBeginCellXfs", { count: 5 }],
-      ["BrtEndCellXfs"],
+      ["BrtBeginCellXFs", { count: 5 }],
+      ["BrtEndCellXFs"],
       ["BrtEndStyleSheet"]
     ]);
     expect(kinds(styles, "xl/styles.bin")).toContain("index-count-mismatch");
@@ -436,9 +438,9 @@ describe("the checks are not vacuous", () => {
       ["BrtEndFills"],
       ["BrtBeginBorders", { count: 0 }],
       ["BrtEndBorders"],
-      ["BrtBeginCellXfs", { count: 1 }],
+      ["BrtBeginCellXFs", { count: 1 }],
       ["BrtXF", new Uint8Array(16)],
-      ["BrtEndCellXfs"],
+      ["BrtEndCellXFs"],
       ["BrtEndStyleSheet"]
     ]);
     expect(validateXlsbPart(styles, "xl/styles.bin", { includeWarnings: true }).problems).toEqual(
@@ -477,7 +479,7 @@ describe("the checks are not vacuous", () => {
       ["BrtBeginSheet"],
       ["BrtBeginSheetData"],
       ["BrtBeginMergeCells", { cmcs: 0 }],
-      ["BrtBeginAutoFilter"]
+      ["BrtBeginAFilter"]
     ]);
     const result = validateXlsbPart(stream, SHEET_PATH, { maxProblems: 2 });
     expect(result.problems).toHaveLength(2);
@@ -695,5 +697,49 @@ describe("payload lengths Excel never varies", () => {
       includeWarnings: true
     });
     expect(result.problems).toEqual([]);
+  });
+
+  describe("a conditional-formatting rule's dxfId", () => {
+    it("is reported when it names a differential format the styles part does not declare", async () => {
+      // **Cross-part, which is why nothing saw it.** The rule lives in a worksheet and the table it indexes lives
+      // in `styles.bin`, so neither part is wrong on its own — Excel reports `Repaired Records: Conditional
+      // formatting`, once per sheet holding a bad reference. Found by grafting this library's `styles.bin` into a
+      // workbook Excel had repaired: Excel's sheets name dxfId 10–28 and the grafted table held ten formats, and
+      // the five sheets Excel repaired were exactly the five holding an out-of-range reference.
+      //
+      // Built by writing a real workbook and then shrinking its `DXFs` collection, so the rule and the table come
+      // from the writer rather than from a hand-made fixture that could be wrong in its own way.
+      const workbook = Workbook.create();
+      const sheet = Workbook.addWorksheet(workbook, "S");
+      Cell.setValue(sheet, "A1", 1);
+      Worksheet.addConditionalFormatting(sheet, {
+        ref: "A1",
+        rules: [
+          { type: "expression", priority: 1, formulae: ["TRUE"], style: { font: { bold: true } } }
+        ]
+      } as never);
+      const bytes = await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" });
+
+      // Sanity: as written, the reference is in range.
+      expect((await validateXlsbBuffer(bytes)).problems.map(problem => problem.kind)).not.toContain(
+        "index-dxf-out-of-range"
+      );
+
+      // Now declare zero differential formats while leaving the rule alone.
+      const parts = await extractAll(bytes);
+      const patched = Uint8Array.from(parts.get("xl/styles.bin")!.data);
+      // `payload` is a view onto the copy, so writing through it edits the part in place — no need to know
+      // how wide the record's own header happened to be.
+      const marker = [...iterateBiffRecords(patched, "xl/styles.bin")].find(
+        record => recordSpec(record.id)?.name === "BrtBeginDXFs"
+      )!;
+      new DataView(marker.payload.buffer, marker.payload.byteOffset, 4).setUint32(0, 0, true);
+      const archive = new ZipArchive();
+      for (const [name, entry] of parts) {
+        archive.add(name, name === "xl/styles.bin" ? patched : entry.data);
+      }
+      const report = await validateXlsbBuffer(await archive.bytes());
+      expect(report.problems.map(problem => problem.kind)).toContain("index-dxf-out-of-range");
+    });
   });
 });

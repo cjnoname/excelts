@@ -66,9 +66,21 @@ class ConditionalFormattingsXform extends BaseXform<ConditionalFormattingOptions
             rule.cfvo = [{ type: "min" }, { type: "max" }];
           }
           if (!rule.color) {
-            // Default blue color for data bars (same as Excel's default)
-            rule.color = { argb: "FF638EC6" };
+            // An empty colour *is* the automatic colour: `ColorXform` writes `auto="1"` when no rgb, theme or
+            // indexed value is present, and `encodeColor(undefined)` produces the same thing in BIFF12.
+            rule.color = {};
           }
+          // **A missing colour becomes the *automatic* colour, and it used to become a concrete blue.**
+          //
+          // `color` is required by `CT_DataBar`, so something has to be written — the first attempt at this fix removed
+          // the fill-in entirely and produced a bar with no colour element at all. What goes there is the question, and
+          // the comment here used to answer it with `FF638EC6`, "same as Excel's default". That is the colour Excel's
+          // *UI* offers when you create a data bar; it is not what Excel writes for a bar that has none of its own. The
+          // reference file for the oracle's `03-conditional-formats` carries `<color auto="1"/>`, and Excel's binary
+          // save of it carries the automatic colour rather than any RGB.
+          //
+          // The difference matters beyond one file: substituting a concrete blue turns "let the application choose"
+          // into a choice, and that choice then survives every round trip and every container change.
         }
       });
     });

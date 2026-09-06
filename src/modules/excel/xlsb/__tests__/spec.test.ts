@@ -8,8 +8,11 @@
  * remove and which three checkers were guilty of before this.
  */
 
+import { Image, Workbook, Worksheet } from "@excel";
+import { validateXlsbBuffer } from "@excel/utils/xlsb-validator";
 import { CELL_RECORD_NAMES, ROW_RECORD_NAMES } from "@excel/utils/xlsb-validator/roles";
 import { checkRecordTable, summariseRecordTable } from "@excel/xlsb/spec/check-records";
+import { MS_XLSB_RECORD_NAMES, RECORDS_ABSENT_FROM_SPEC } from "@excel/xlsb/spec/record-names";
 import {
   BIFF_RECORDS,
   INFERRED_VALUES,
@@ -149,7 +152,7 @@ describe("scope pairs", () => {
       "BrtBeginSheetData",
       "BrtBeginSst",
       "BrtBeginStyleSheet",
-      "BrtBeginCellXfs"
+      "BrtBeginCellXFs"
     ]) {
       expect(requireRecordSpec(name).scope, name).toBe("begin");
     }
@@ -243,7 +246,8 @@ describe("the record-table check is not vacuous", () => {
 
   it("would catch a scope opener with no closer", () => {
     for (const record of unpairedScope) {
-      const closer = record.name.replace(/^BrtBegin/, "BrtEnd");
+      // `Begin` is not always a prefix — `BrtFRTBegin` and `BrtACBegin` carry it last.
+      const closer = record.name.replace("Begin", "End");
       expect(unpairedScope.some(entry => entry.name === closer)).toBe(false);
     }
   });
@@ -253,11 +257,121 @@ describe("the record-table check is not vacuous", () => {
     expect(new Set(BIFF_RECORDS.map(record => record.id)).size).toBe(BIFF_RECORDS.length);
     expect(new Set(BIFF_RECORDS.map(record => record.name)).size).toBe(BIFF_RECORDS.length);
     for (const record of BIFF_RECORDS.filter(entry => entry.scope === "begin")) {
-      const closer = record.name.replace(/^BrtBegin/, "BrtEnd");
+      const closer = record.name.replace("Begin", "End");
       expect(
         BIFF_RECORDS.some(entry => entry.name === closer && entry.scope === "end"),
         closer
       ).toBe(true);
     }
+  });
+});
+
+describe("record names against [MS-XLSB]", () => {
+  // The table's names are what a diagnostic hands the caller and what the writer looks a record up by,
+  // so a name invented here sends someone to search the specification for a record that is not in it.
+  // Sixteen of them were wrong before this test existed, and nothing failed — which is exactly why it
+  // has to be a test rather than a convention.
+  it("names every record exactly as the specification does", () => {
+    const wrong: string[] = [];
+    for (const spec of BIFF_RECORDS) {
+      const official = MS_XLSB_RECORD_NAMES.get(spec.id);
+      if (official === undefined) {
+        continue; // Covered by the next test.
+      }
+      if (official !== spec.name) {
+        wrong.push(
+          `0x${spec.id.toString(16).padStart(4, "0")}: ${spec.name} should be ${official}`
+        );
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("segregates the records the specification does not list", () => {
+    // A record absent from `[MS-XLSB]` is named from community reverse engineering. That is allowed —
+    // reporting `BrtShortReal` beats reporting `record 16` — but it must be declared, or it reads as a
+    // spec record and the reader trusts it further than the evidence goes.
+    const undocumented = BIFF_RECORDS.filter(spec => !MS_XLSB_RECORD_NAMES.has(spec.id)).map(
+      spec => spec.id
+    );
+    for (const id of undocumented) {
+      expect(
+        RECORDS_ABSENT_FROM_SPEC.get(id),
+        `id ${id} must be declared absent from the spec`
+      ).toBeTypeOf("string");
+    }
+    // And the declaration must agree with the table, so the two cannot drift apart.
+    for (const [id, name] of RECORDS_ABSENT_FROM_SPEC) {
+      const spec = BIFF_RECORDS.find(entry => entry.id === id);
+      expect(spec?.name, `id ${id}`).toBe(name);
+    }
+  });
+
+  it("pairs every scope delimiter with a real counterpart", () => {
+    for (const spec of BIFF_RECORDS) {
+      if (spec.pairsWith === undefined) {
+        continue;
+      }
+      const counterpart = BIFF_RECORDS.find(entry => entry.name === spec.pairsWith);
+      expect(counterpart, `${spec.name} pairs with ${spec.pairsWith}`).toBeDefined();
+      expect(counterpart?.pairsWith).toBe(spec.name);
+    }
+  });
+});
+
+describe("a length table entry is an assertion about every producer", () => {
+  it("lists no record whose length follows its own content", () => {
+    // The three that did were found by reading `[MS-XLSB]`, because none of them declares a field list for
+    // `check-records.ts` to inspect. Each is a count followed by that many structures, or a string:
+    //
+    //   BrtDrawing   an `XLWideString` relationship id — 12 bytes for "rId2", 14 for "rId10"
+    //   BrtACBegin   `cver` then that many `ACProductVersion` — 6 bytes for one application
+    //   BrtSel       `sqrfx`, a counted array of 16-byte ranges — 36 bytes for a single selection
+    //
+    // Their constancy in the corpus is a fact about nine workbooks, not about the format. Asserting their
+    // absence keeps the reasoning attached to the table: a future entry for any of them would have to argue
+    // with this list rather than merely look plausible.
+    for (const name of ["BrtDrawing", "BrtACBegin", "BrtSel"]) {
+      expect(OBSERVED_PAYLOAD_SIZES.has(name)).toBe(false);
+    }
+  });
+
+  it("does not reject a package this library wrote, when a relationship id grows", async () => {
+    // `BrtDrawing`'s payload is an `XLWideString` holding the sheet's drawing relationship id, so its length
+    // follows that id: `"rId2"` encodes to 12 bytes and `"rId10"` to 14. The length table listed it at 12,
+    // read off a corpus workbook whose sheets happened to have single-digit ids — and the validator raises an
+    // *error* on a length mismatch, so it rejected a file this library had just produced.
+    //
+    // Nine preserved relationships push the drawing to `rId10`, which is the smallest arrangement that
+    // reaches the defect. Asserting the *absence* of an error is the point: the record is still written, and
+    // the only thing that changed is that nothing claims to know its length.
+    const png = Uint8Array.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0,
+      0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45,
+      0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+    ]);
+    const workbook = Workbook.create();
+    const sheet = Workbook.addWorksheet(workbook, "S");
+    Worksheet.addAoa(sheet, [["a"]]);
+    const model = Workbook.getModel(workbook);
+    (model.worksheets[0] as { opaqueRels?: unknown }).opaqueRels = Array.from(
+      { length: 9 },
+      (_unused, index) => ({
+        id: `rId${index + 1}`,
+        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customProperty",
+        target: `../customProperty${index}.bin`
+      })
+    );
+    Workbook.setModel(workbook, model);
+    Image.place(
+      Workbook.getWorksheet(workbook, "S")!,
+      Image.add(workbook, { buffer: png, extension: "png" }),
+      { tl: { col: 0, row: 0 }, ext: { width: 10, height: 10 } }
+    );
+    const result = await validateXlsbBuffer(
+      await Workbook.toBuffer(workbook, { format: "xlsb", unsupported: "ignore" })
+    );
+    expect(result.problems.filter(problem => problem.severity === "error")).toEqual([]);
   });
 });

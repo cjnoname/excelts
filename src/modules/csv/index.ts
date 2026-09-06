@@ -2,7 +2,9 @@
  * CSV Module - Public API
  *
  * Pure CSV parsing/formatting functionality with no Excel dependencies.
- * For CSV-Worksheet integration, use Workbook.readCsv/writeCsv methods instead.
+ * For CSV-Worksheet integration, use the `readCsv`/`writeCsv` bridge functions
+ * instead — they take a workbook handle rather than hanging off the `Workbook`
+ * namespace, which has no CSV members.
  *
  * Design principles:
  * - Only export types and functions that are part of the PUBLIC API

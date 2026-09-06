@@ -943,7 +943,10 @@ describe("WorkbookWriter", () => {
       expect(images.length).toBe(1);
 
       const imageDesc = images[0];
-      expect(imageDesc.range!.editAs).toBe("absolute");
+      // `"oneCell"`, because a `tl` + `ext` range *is* a one-cell anchor whatever `editAs` was asked for — see
+      // the same assertion in `core/__tests__/workbook-images.integration.node.test.ts` for why the previous
+      // `"absolute"` depended on writing an attribute `CT_OneCellAnchor` does not define.
+      expect(imageDesc.range!.editAs).toBe("oneCell");
       expect(imageDesc.range!.hyperlinks).toEqual({
         hyperlink: "http://www.somewhere.com",
         tooltip: "www.somewhere.com"

@@ -263,7 +263,9 @@ describe("Chart mutation round-trip", () => {
       }
       expect(result.exitCode, result.stderr ?? "").toBe(0);
       expect(result.outputs.length).toBeGreaterThan(0);
-    });
+      // A LibreOffice process start costs seconds on its own, and the default 30 s is spent before the conversion
+      // begins when the suite runs alongside the rest of the tree.
+    }, 600_000);
 
     it("a structurally-mutated ChartEx workbook opens cleanly in LibreOffice", async () => {
       // Pick the first ChartEx fixture that produces a structured model
@@ -298,6 +300,8 @@ describe("Chart mutation round-trip", () => {
       }
       expect(result.exitCode, result.stderr ?? "").toBe(0);
       expect(result.outputs.length).toBeGreaterThan(0);
-    });
+      // A LibreOffice process start costs seconds on its own, and the default 30 s is spent before the conversion
+      // begins when the suite runs alongside the rest of the tree.
+    }, 600_000);
   });
 });

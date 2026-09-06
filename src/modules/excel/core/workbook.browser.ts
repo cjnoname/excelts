@@ -40,6 +40,7 @@ import {
 import type { OpaqueDrop, OpaquePart } from "@excel/core/opaque-part";
 import { withPivotChartSource } from "@excel/core/pivot-chart";
 import type { PivotTable } from "@excel/core/pivot-table";
+import { sheetsInTabOrder } from "@excel/core/sheet-order";
 import type { WorkbookData, NamedStyleEntry } from "@excel/core/workbook-core";
 import {
   addChartEntry,
@@ -206,6 +207,7 @@ export interface WorkbookModel {
    * so the output kept declaring itself macro-enabled with no macros left in it.
    */
   opaqueParts?: OpaquePart[];
+  xlsbPivotCaches?: readonly { readonly cacheId: number; readonly relationshipId: string }[];
   /**
    * `Default` content-type declarations the preserved parts rely on, keyed by
    * lower-case extension. Separate from {@link OpaquePart.contentType} because a
@@ -222,6 +224,14 @@ export interface WorkbookModel {
    * when reachability is finally known.
    */
   opaqueDrops?: OpaqueDrop[];
+  /**
+   * What an XLSX write had to drop because it belongs to the other container's sheet family.
+   *
+   * Written by `_resolveOpaqueReachability` and read back by `writeToZip` in the same call, which is what distinguishes
+   * it from `opaqueDrops` — that one is a *read-time* report and a write never reaches its readers. This exists so
+   * `unsupported` can govern the one loss an XLSX write has; see `refuseXlsxUnsupported`.
+   */
+  opaqueForeignSheetParts?: readonly string[];
   /**
    * External workbook references in declaration order. Matches the on-disk
    * `[N]Sheet!Ref` indexing (1-based). Empty or undefined when the workbook
@@ -1186,6 +1196,8 @@ export function getPersons(wb: WorkbookData): ThreadedCommentPerson[] {
 }
 
 export function getWorkbookModel(wb: WorkbookData): WorkbookModel {
+  // Built once and used for both `worksheets` and `sheets`, which used to call `getSheetModel` on every sheet twice.
+  const worksheetModels = getWorksheets(wb).map(worksheet => getSheetModel(worksheet));
   return {
     creator: wb.creator || "Unknown",
     lastModifiedBy: wb.lastModifiedBy || "Unknown",
@@ -1194,10 +1206,22 @@ export function getWorkbookModel(wb: WorkbookData): WorkbookModel {
     modified: wb.modified,
     properties: wb.properties,
     protection: wb.protection,
-    worksheets: getWorksheets(wb).map(worksheet => getSheetModel(worksheet)),
-    sheets: getWorksheets(wb)
-      .map(ws => getSheetModel(ws))
-      .filter(Boolean),
+    worksheets: worksheetModels,
+    // **The full tab bar, chartsheets included — which is what every other producer of this field means by it.**
+    //
+    // This was `getWorksheets(wb).map(getSheetModel)`: a second copy of `worksheets`, with the chartsheets missing and
+    // `getSheetModel` run twice per sheet. Both of the other places that set `sheets` include chartsheets — the XLSX
+    // writer builds it with `sheetsInTabOrder`, and the XLSX reader assigns the parsed `<sheets>` list — so one field
+    // carried two meanings, and `setWorkbookModel` reads it under the other one.
+    //
+    // What that cost: `setModel(getModel(wb))` moved a chartsheet to the end of the tab bar. Measured on a workbook
+    // ordered worksheet `A`, chartsheet `C`, worksheet `B` — written directly it is `A, C, B` in both containers, and
+    // after a model round trip `A, B, C`. It also gave `B` and `C` the same `orderNo`, so what came out depended on
+    // sort stability rather than on the author's layout.
+    // `?? []` because this function is also called on the *streaming* writer, through
+    // `getWorkbookModel(this as never)` — a structurally similar object that carries no `_chartsheets` at all. Reading
+    // the field without a fallback threw inside `sheetsInTabOrder` and took out every streamed XLSB commit.
+    sheets: sheetsInTabOrder(worksheetModels, (wb._chartsheets ?? []) as never) as never,
     definedNames: definedNamesModel(wb._definedNames),
     // Live `DefinedNames` instance — required by the write-time
     // chartEx transform `prepareChartExSidecars`, which registers
@@ -1240,6 +1264,7 @@ export function getWorkbookModel(wb: WorkbookData): WorkbookModel {
     timelineParts: wb._timelineParts,
     timelineCacheParts: wb._timelineCacheParts,
     opaqueParts: wb._opaqueParts,
+    xlsbPivotCaches: wb._xlsbPivotCaches,
     opaqueContentTypeDefaults: wb._opaqueContentTypeDefaults,
     opaqueDrops: wb._opaqueDrops
   };
@@ -1347,6 +1372,7 @@ export function setWorkbookModel(wb: WorkbookData, value: WorkbookModel): void {
   wb._timelineParts = value.timelineParts ?? {};
   wb._timelineCacheParts = value.timelineCacheParts ?? {};
   wb._opaqueParts = value.opaqueParts ?? [];
+  wb._xlsbPivotCaches = value.xlsbPivotCaches;
   wb._opaqueContentTypeDefaults = value.opaqueContentTypeDefaults ?? {};
   wb._opaqueDrops = value.opaqueDrops ?? [];
   // Preserve external workbook references (empty array if none)

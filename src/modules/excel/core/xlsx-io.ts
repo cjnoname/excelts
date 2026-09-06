@@ -14,9 +14,10 @@ import {
   formatFromPath,
   normalizeBytes,
   readXlsbInto,
-  writeXlsbBytes
+  writeXlsbBytes,
+  writeXlsbToStream
 } from "@excel/core/workbook-format";
-import { createXlsbReadable, writeBytesToSink } from "@excel/core/workbook-format-stream";
+import { readWorkbookWithDiagnostics } from "@excel/core/workbook-io-types";
 import type { XlsxReadable, XlsxWritable } from "@excel/core/xlsx-io-types";
 import type { XlsxStreamOptions } from "@excel/core/xlsx-stream";
 import { createXlsxByteStream } from "@excel/core/xlsx-stream";
@@ -38,13 +39,20 @@ import type {
   WorkbookWriteOptions
 } from "@excel/core/workbook-io-types";
 
-/** Get (or lazily create) the Node xlsx IO handle bound to a workbook. */
+/**
+ * Get (or lazily create) the Node xlsx IO handle bound to a workbook.
+ *
+ * **`_xlsx`, the slot `WorkbookData` declares — this used an undeclared `_xlsxNode` reached through a cast.** Two slots
+ * for one handle meant the declared field was dead on Node: nothing but the browser variant ever wrote it, so any code
+ * reading `wb._xlsx` by its declaration got `undefined` there. They can never coexist, because `#platform/*` loads one
+ * of these two files and not both, so one slot is both sufficient and the only one that can be typed.
+ */
 export function getXlsxIo(wb: WorkbookData): XLSX {
-  const slot = wb as WorkbookData & { _xlsxNode?: XLSX };
-  if (!slot._xlsxNode) {
-    slot._xlsxNode = new XLSX(wb);
+  if (!wb._xlsx) {
+    // The declaration names the browser class; the Node one extends the same base, which is why the slot holds either.
+    wb._xlsx = new XLSX(wb) as unknown as NonNullable<WorkbookData["_xlsx"]>;
   }
-  return slot._xlsxNode;
+  return wb._xlsx as unknown as XLSX;
 }
 
 // =============================================================================
@@ -112,21 +120,15 @@ export async function readWithDiagnostics(
   data: Uint8Array | ArrayBuffer | ArrayBufferView | string,
   options?: WorkbookDiagnosticReadOptions
 ): Promise<WorkbookReadReport> {
-  const bytes = normalizeBytes(data, options?.base64);
-  if (bytes !== undefined && resolveReadFormat(bytes, options?.format) === "xlsb") {
-    const parsed = await parseXlsbPackage(bytes);
-    commitXlsbRead(wb, parsed);
-    wb.sourceFilePath = undefined;
-    return { workbook: wb, ...parsed.diagnostics };
-  }
-  return {
-    workbook: await read(wb, data, options),
-    lost: [],
-    unreadRecords: new Map(),
-    undecodedFormulas: [],
-    sharedFormulaCells: [],
-    unknownRecords: new Map()
-  };
+  // The shared body — see `readWorkbookWithDiagnostics`. This was 26 lines duplicated between the two platform
+  // variants, in the one file pair where every other shared piece had already been extracted.
+  return readWorkbookWithDiagnostics(wb, data, options, {
+    read,
+    normalizeBytes,
+    resolveReadFormat,
+    parseXlsbPackage,
+    commitXlsbRead
+  });
 }
 
 /** Read a workbook from a parse stream (mutates and returns `wb`). */
@@ -183,10 +185,11 @@ export async function writeStream(
   options?: WorkbookWriteOptions
 ): Promise<void> {
   if (options?.format === "xlsb") {
-    // The XLSB writer assembles a whole package before it can emit one — a ZIP central
-    // directory is written last — so there is nothing to stream incrementally. Writing the
-    // bytes through the sink keeps the contract identical from the caller's side.
-    await writeBytesToSink(stream, await writeXlsbBytes(wb, options));
+    // **Streamed part by part**, through the same `writeXlsbPackage` the buffered path uses. This used to
+    // assemble the whole package and hand it over in one write, on the stated grounds that "there is nothing
+    // to stream incrementally" — which was wrong: `sharedStrings.bin` is the ninth part produced for a
+    // three-sheet workbook, and the eight before it are finished bytes.
+    await writeXlsbToStream(wb, stream, options);
     return;
   }
   await getXlsxIo(wb).write(stream, options);
@@ -279,12 +282,24 @@ export function toStream(
   options?: XlsxStreamOptions & WorkbookWriteOptions
 ): XlsxReadable & Readable {
   if (options?.format === "xlsb") {
-    // XLSB has no incremental form: the ZIP central directory is written last and the
-    // shared-string table is only complete once every worksheet has been visited, so the
-    // package is assembled on first read and handed over in one chunk. The contract a
-    // consumer sees is unchanged.
-    return createXlsbReadable(() => writeXlsbBytes(wb, options), options) as XlsxReadable &
-      Readable;
+    // **Through the same bridge the XLSX branch uses, because the reason for not doing so was false.**
+    //
+    // This read: "XLSB has no incremental form: the ZIP central directory is written last and the shared-string table
+    // is only complete once every worksheet has been visited". `core/xlsb-stream.ts` records that
+    // argument as wrong and why — the central directory being last is how every ZIP writer works, and the shared-string
+    // *part* is written after the sheets, which is where it belongs — but the conclusion was left standing here.
+    //
+    // What it cost, measured on an eight-sheet workbook: XLSX produced 427 chunks of at most 7 KB while XLSB produced
+    // **one** chunk of 2,033 KB, so `highWaterMark` was inert and the whole package was built before a consumer saw any
+    // of it. Two containers behaving that differently behind one public function is the kind of difference a caller
+    // cannot see and cannot work around.
+    //
+    // `createXlsxByteStream` throttles the producer on `push()` returning `false`, and `writeXlsbToStream` writes part
+    // by part — so the same demand-driven contract now applies to both.
+    return createXlsxByteStream(
+      sink => writeXlsbToStream(wb, sink, options),
+      options
+    ) as XlsxReadable & Readable;
   }
   const io = getXlsxIo(wb);
   // `createXlsxByteStream` is shared with the browser build, so it is typed as

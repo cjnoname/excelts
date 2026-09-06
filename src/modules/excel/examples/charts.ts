@@ -168,6 +168,7 @@ import {
   drawChartExPdf,
   VECTOR_PDF_CHART_EX_LAYOUT_IDS
 } from "@excel/chart/index";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import {
   Cell,
   Chart,
@@ -5184,6 +5185,8 @@ async function main(): Promise<void> {
   // path (stays byte-preserving for the rest of the chart XML).
   // ---------------------------------------------------------------------------
 
+  // XLSX only, and deliberately: the next statement reads this file back, so it has to be the container
+  // `readFile` is about to open. The pair of containers is written at the end, from the reloaded workbook.
   await Workbook.writeFile(wb, XLSX_PATH);
 
   const reread = Workbook.create();
@@ -5212,7 +5215,7 @@ async function main(): Promise<void> {
       { preferRawPatch: true }
     );
   }
-  await Workbook.writeFile(reread, XLSX_PATH);
+  await writeBothFormats(reread, XLSX_PATH);
 
   // ---------------------------------------------------------------------------
   // Done — summarise counts and paths.

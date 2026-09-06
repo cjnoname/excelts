@@ -117,6 +117,14 @@ export interface WorkbookData {
   _timelineCacheParts: Record<string, Uint8Array>;
   /** Preserved unmodelled package parts — see `WorkbookModel.opaqueParts`. */
   _opaqueParts: OpaquePart[];
+  /**
+   * `BrtBeginPivotCacheID` bindings an XLSB read preserved.
+   *
+   * XLSB-only, and here rather than in the pivot model because the parts they name are carried through as
+   * opaque bytes: the reader does not build a `PivotTable` from them, but `workbook.bin` is rebuilt on write
+   * and would otherwise drop the record that announces each cache.
+   */
+  _xlsbPivotCaches?: readonly { readonly cacheId: number; readonly relationshipId: string }[];
   _opaqueContentTypeDefaults: Record<string, string>;
   /** Preserved parts not written back — see `WorkbookModel.opaqueDrops`. */
   _opaqueDrops: OpaqueDrop[];
@@ -198,8 +206,35 @@ export function getImage(wb: WorkbookData, id: number | string): WorkbookMedia |
   return wb.media[Number(id)];
 }
 
+/**
+ * The next free `chartN` number, counting **preserved parts as taken**.
+ *
+ * A chart read from a package this library does not fully model arrives as an *opaque part* — `xl/charts/chart1.xml`
+ * kept verbatim — and never enters `_chartEntries`. Numbering from that map alone therefore handed `1` straight back:
+ * adding a chart to a workbook read from XLSB overwrote the chart it came with, so two charts left one behind and the
+ * surviving drawing pointed at the wrong picture. The package writer's dedupe made it silent, because the newly
+ * generated part is written before the preserved one and the preserved one is the copy that gets dropped.
+ *
+ * Reading the paths is the honest test: it asks what is actually in the package rather than what the model happens to
+ * have recorded about it. `chartEx` shares the counter deliberately — `nextChartExNumber` reads the same space — so a
+ * `chartEx1.xml` also reserves 1.
+ */
+/**
+ * Chart numbers already taken by *preserved* parts.
+ *
+ * `chart1.xml` and `chartEx1.xml` are read together on purpose: both counters allocate into `xl/charts/`, so a name
+ * taken by either form is taken for both.
+ */
+function preservedChartNumbers(wb: WorkbookData): readonly number[] {
+  return wb._opaqueParts
+    .map(part => /\/charts\/chart(?:Ex)?(\d+)\.xml$/i.exec(part.path)?.[1])
+    .filter((digits): digits is string => digits !== undefined)
+    .map(Number)
+    .filter(number => Number.isFinite(number));
+}
+
 export function nextChartNumber(wb: WorkbookData): number {
-  const existing = Object.keys(wb._chartEntries).map(Number);
+  const existing = [...Object.keys(wb._chartEntries).map(Number), ...preservedChartNumbers(wb)];
   return existing.length > 0 ? Math.max(...existing) + 1 : 1;
 }
 
@@ -229,7 +264,9 @@ export function removeChartEntry(wb: WorkbookData, chartNumber: number): void {
 export function nextChartExNumber(wb: WorkbookData): number {
   const rawKeys = Object.keys(wb._chartExEntries ?? {}).map(Number);
   const structKeys = Object.keys(wb._chartExStructuredEntries ?? {}).map(Number);
-  const combined = [...rawKeys, ...structKeys];
+  // Preserved parts count as taken, for the reason given on `nextChartNumber`: a chart kept verbatim never enters the
+  // entry maps, so numbering from them alone reissues a name that is already in the package.
+  const combined = [...rawKeys, ...structKeys, ...preservedChartNumbers(wb)];
   return combined.length > 0 ? Math.max(...combined) + 1 : 1;
 }
 

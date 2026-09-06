@@ -70,10 +70,21 @@ export function encodeMargins(margins: Partial<Margins> | undefined): Uint8Array
 }
 
 /** `BrtPageSetup` flag bits. Only `fLandscape` and `fNoOrient` are exercised by the corpus. */
+/**
+ * `BrtPageSetup`'s flag word, MS-XLSB 2.4.722: `fLeftToRight`(0), `fLandscape`(1), reserved(2), `fNoColor`(3),
+ * `fDraft`(4), `fNotes`(5), `fNoOrient`(6), `fUsePage`(7), `fEndNotes`(8), `iErrors`(9–10).
+ *
+ * **`noOrient` was `0x0080` here**, under the name `orientationSet` and with the opposite polarity. Bit 7 is
+ * `fUsePage` — "number the first printed page from `iPageStart`" — so every sheet with a stated orientation
+ * also claimed a custom first page number. Excel writes `0x0000` for such a sheet.
+ *
+ * The bit that means "the orientation was not chosen" is `fNoOrient` at bit 6, and it is set when the
+ * orientation is *absent*, not present.
+ */
 const PAGE_SETUP_FLAGS = {
-  /** Set when the orientation was chosen rather than left to the printer. */
-  orientationSet: 0x0080,
-  landscape: 0x0002
+  landscape: 0x0002,
+  noOrient: 0x0040,
+  usePage: 0x0080
 } as const;
 
 /** What a `BrtPageSetup` says, in the model's terms. */
@@ -126,11 +137,13 @@ export function readPageSetup(payload: Uint8Array, part: string): ReadPageSetup 
   if (fitToHeight !== 1) {
     setup.fitToHeight = fitToHeight;
   }
-  if (firstPageNumber > 1) {
+  // Kept when `fUsePage` says the number is meant, even if it is 1: the bit and the number are one statement,
+  // and dropping the number turns a deliberate "start at 1" into silence that re-encodes without the bit.
+  if (firstPageNumber > 1 || (flags & PAGE_SETUP_FLAGS.usePage) !== 0) {
     setup.firstPageNumber = firstPageNumber;
   }
   // Reported only when the file says the orientation was chosen; otherwise it is the printer's.
-  if ((flags & PAGE_SETUP_FLAGS.orientationSet) !== 0) {
+  if ((flags & PAGE_SETUP_FLAGS.noOrient) === 0) {
     setup.orientation = (flags & PAGE_SETUP_FLAGS.landscape) !== 0 ? "landscape" : "portrait";
   }
   return Object.keys(setup).length === 0 ? undefined : setup;
@@ -146,23 +159,36 @@ export function readPageSetup(payload: Uint8Array, part: string): ReadPageSetup 
 export function encodePageSetup(setup: ReadPageSetup | undefined): Uint8Array {
   let flags = 0;
   if (setup?.orientation === "landscape" || setup?.orientation === "portrait") {
-    flags |= PAGE_SETUP_FLAGS.orientationSet;
     if (setup.orientation === "landscape") {
       flags |= PAGE_SETUP_FLAGS.landscape;
     }
+  } else {
+    // Nothing chose an orientation, so the printer decides.
+    flags |= PAGE_SETUP_FLAGS.noOrient;
   }
-  return new BinaryWriter()
-    .writeUint32(setup?.paperSize ?? 0)
-    .writeUint32(setup?.scale ?? 100)
-    .writeUint32(setup?.horizontalDpi ?? 0)
-    .writeUint32(setup?.verticalDpi ?? 0)
-    .writeUint32(1) // copies
-    .writeUint32(setup?.firstPageNumber ?? 1)
-    .writeUint32(setup?.fitToWidth ?? 1)
-    .writeUint32(setup?.fitToHeight ?? 1)
-    .writeUint16(flags)
-    .writeUint32(0xffffffff) // printer-settings relationship: absent
-    .toUint8Array();
+  if (setup?.firstPageNumber !== undefined) {
+    // `fUsePage` — number the first printed page from `iPageStart`. Derived from the presence of a first page
+    // number, which is what this library's XLSX writer does with `useFirstPageNumber`.
+    flags |= PAGE_SETUP_FLAGS.usePage;
+  }
+  return (
+    new BinaryWriter()
+      // **The defaults are the XLSX schema's, not zero.** A field omitted from `<pageSetup>` has a stated
+      // default; this record has no way to omit one, so a zero here is a positive claim rather than silence.
+      // `iPaperSize` of 0 means "a custom size described by a DEVMODE" — and there is no DEVMODE — where the
+      // schema's absent `paperSize` means US Letter. Likewise `horizontalDpi`/`verticalDpi` default to 600.
+      .writeUint32(setup?.paperSize ?? DEFAULT_PAPER_SIZE)
+      .writeUint32(setup?.scale ?? 100)
+      .writeUint32(setup?.horizontalDpi ?? DEFAULT_PRINT_DPI)
+      .writeUint32(setup?.verticalDpi ?? DEFAULT_PRINT_DPI)
+      .writeUint32(1) // copies
+      .writeUint32(setup?.firstPageNumber ?? 1)
+      .writeUint32(setup?.fitToWidth ?? 1)
+      .writeUint32(setup?.fitToHeight ?? 1)
+      .writeUint16(flags)
+      .writeUint32(0xffffffff) // printer-settings relationship: absent
+      .toUint8Array()
+  );
 }
 
 /** The sheet's default row height and column width. */
@@ -171,7 +197,24 @@ export interface SheetFormatInfo {
   readonly defaultRowHeight?: number;
   /** Default column width in characters. */
   readonly defaultColWidth?: number;
+  /**
+   * Deepest row grouping level, 0–7.
+   *
+   * The last two bytes of this record are `iOutLevelRw` and `iOutLevelCol` — one byte each, per
+   * MS-XLSB 2.4.873. They were written as a single zeroed `u16` and read not at all, which is why
+   * outline level was on the loss list: the sheet's grouped rows survived while the depth Excel uses to
+   * draw the outline gutter did not, so a grouped sheet opened with no controls to collapse it.
+   */
+  readonly outlineLevelRow?: number;
+  /** Deepest column grouping level, 0–7. */
+  readonly outlineLevelCol?: number;
 }
+
+/** `paperSize` when nothing chose one: US Letter, which is what an absent XLSX `paperSize` means. */
+const DEFAULT_PAPER_SIZE = 1;
+
+/** `horizontalDpi`/`verticalDpi` when nothing chose them, per the XLSX schema. */
+const DEFAULT_PRINT_DPI = 600;
 
 /** A column width this record spells as "unset". */
 const UNSET_WIDTH = 0xffffffff;
@@ -192,8 +235,20 @@ export function readSheetFormatInfo(
   // `dxGCol` is the precise width in the same 1/256-character units `BrtColInfo` uses, and it wins
   // when present: `date.xlsb` carries 2958 there — 11.55 characters — alongside a `cchDefColWidth`
   // of 8, so reading only the rounded field would report a width the file does not have.
+  // The flag word, then one byte per axis. Read defensively: this record is twelve bytes in every
+  // corpus workbook, but the length check above only requires eight.
+  let outlineLevelRow = 0;
+  let outlineLevelCol = 0;
+  if (payload.length >= 12) {
+    reader.readUint16(); // flags
+    outlineLevelRow = reader.readUint8();
+    outlineLevelCol = reader.readUint8();
+  }
+
   const info: SheetFormatInfo = {
     ...(rowHeightTwips === 0 ? {} : { defaultRowHeight: rowHeightTwips / TWIPS_PER_POINT }),
+    ...(outlineLevelRow === 0 ? {} : { outlineLevelRow }),
+    ...(outlineLevelCol === 0 ? {} : { outlineLevelCol }),
     ...(dxGCol !== UNSET_WIDTH && dxGCol !== 0
       ? { defaultColWidth: dxGCol / COLUMN_WIDTH_UNITS }
       : cchDefColWidth === 0
@@ -210,11 +265,25 @@ export function encodeSheetFormatInfo(info: SheetFormatInfo | undefined): Uint8A
   // Excel leaves `dxGCol` unset in that case — which is why the two are written as a pair rather
   // than one always overriding the other.
   const fractional = width !== undefined && !Number.isInteger(width);
-  return new BinaryWriter()
-    .writeUint32(fractional ? Math.round(width * COLUMN_WIDTH_UNITS) : UNSET_WIDTH)
-    .writeUint16(fractional ? 8 : Math.round(width ?? 8))
-    .writeUint16(Math.round((info?.defaultRowHeight ?? 15) * TWIPS_PER_POINT))
-    .writeUint16(0) // flags
-    .writeUint16(0)
-    .toUint8Array();
+  return (
+    new BinaryWriter()
+      .writeUint32(fractional ? Math.round(width * COLUMN_WIDTH_UNITS) : UNSET_WIDTH)
+      .writeUint16(fractional ? 8 : Math.round(width ?? 8))
+      .writeUint16(Math.round((info?.defaultRowHeight ?? 15) * TWIPS_PER_POINT))
+      .writeUint16(0) // flags
+      // `iOutLevelRw` and `iOutLevelCol`, one byte each, bounded at 7 by the specification. These were a
+      // single zeroed `u16` before, which is what made a grouped sheet come back without its outline
+      // gutter — the grouping survived on the rows and the depth that draws the controls did not.
+      .writeUint8(clampOutline(info?.outlineLevelRow))
+      .writeUint8(clampOutline(info?.outlineLevelCol))
+      .toUint8Array()
+  );
+}
+
+/** An outline level the record can hold: 0 through 7. */
+function clampOutline(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(7, Math.trunc(value)));
 }

@@ -323,4 +323,82 @@ describe("orchestration", () => {
     expect(report.problems).toEqual([]);
     expect(report.stats.recordCount).toBeGreaterThan(5000);
   });
+
+  describe("relationship targets", () => {
+    /** A `.rels` for the workbook part, naming whatever targets a case wants to try. */
+    function workbookRels(targets: readonly string[]): string {
+      return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        targets
+          .map(
+            (target, index) =>
+              `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="${target}"/>`
+          )
+          .join("") +
+        "</Relationships>"
+      );
+    }
+
+    it("refuses a relationship naming a part the package does not contain", async () => {
+      // **The check that would have caught a whole class by itself.** The XLSB writer named
+      // `../charts/chartEx1.xml` from a drawing and never wrote the part; Excel discarded the *drawing*, because
+      // one that points at nothing is not a drawing. Every part present was well formed and declared, which is
+      // exactly the shape of defect a per-part check cannot see — the fault is between parts.
+      const report = await validateXlsbBuffer(
+        await xlsbPackage({
+          parts: { "xl/_rels/workbook.bin.rels": workbookRels(["missing.bin"]) }
+        })
+      );
+      expect(report.problems.map(problem => problem.kind)).toContain(
+        "package-dangling-relationship"
+      );
+      expect(report.problems[0]?.message).toContain("xl/missing.bin");
+    });
+
+    it("accepts one whose target differs only in case", async () => {
+      // **OPC compares part names without regard to ASCII case, and a real workbook depends on it.**
+      // `cal-issue_419.xlsb`, written by Excel 12, contains `xl/SharedStrings.bin` while its relationship names
+      // `sharedStrings.bin`. Excel opens it. A case-sensitive check called that file broken — and a validator
+      // that refuses what Excel accepts teaches a caller to ignore it.
+      const report = await validateXlsbBuffer(
+        await xlsbPackage({
+          parts: {
+            "xl/SharedStrings.bin": SHARED_STRINGS,
+            "xl/_rels/workbook.bin.rels": workbookRels(["sharedStrings.bin"])
+          }
+        })
+      );
+      // Asserted as "no dangling relationship" rather than "no problems", and the leftover is named so it cannot
+      // hide anything: replacing `xl/_rels/workbook.bin.rels` drops the relationship that reaches the workbook,
+      // so the scope checker rightly reports `scope-missing-root`. Both are fixture artefacts of overriding one
+      // rels file — the real workbook this rule comes from, `cal-issue_419.xlsb`, is asserted clean in full by
+      // `real-world-corpus.node.test.ts`.
+      expect(report.problems.map(problem => problem.kind)).toEqual(["scope-missing-root"]);
+    });
+
+    it("ignores an external target, which is not a part at all", async () => {
+      const rels =
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/" TargetMode="External"/>' +
+        "</Relationships>";
+      const report = await validateXlsbBuffer(
+        await xlsbPackage({ parts: { "xl/_rels/workbook.bin.rels": rels } })
+      );
+      expect(report.problems).toEqual([]);
+    });
+
+    it("resolves an absolute target from the package root", async () => {
+      const report = await validateXlsbBuffer(
+        await xlsbPackage({
+          parts: {
+            "xl/sharedStrings.bin": SHARED_STRINGS,
+            "xl/_rels/workbook.bin.rels": workbookRels(["/xl/sharedStrings.bin"])
+          }
+        })
+      );
+      expect(report.problems).toEqual([]);
+    });
+  });
 });

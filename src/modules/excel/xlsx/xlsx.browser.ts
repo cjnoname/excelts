@@ -58,11 +58,17 @@ import {
 import { buildChartColors, buildChartStyle } from "@excel/chart/serialize/chart-sidecar";
 import { themeIndexToName } from "@excel/chart/shared/chart-utils";
 import { definedNamesAddHidden, definedNamesModel } from "@excel/core/defined-names";
+import {
+  imageContentTypeFor,
+  isForeignSheetPart,
+  isRootOrWorkbookSourced
+} from "@excel/core/opaque-part";
 import type {
   PivotTable,
   PivotTableSubtotal,
   ParsedCacheDefinition
 } from "@excel/core/pivot-table";
+import { refuseUnsupported } from "@excel/core/unsupported";
 import type { Workbook, ExternalLinkModel, NamedStyleEntry } from "@excel/core/workbook.browser";
 import {
   _collectExternalLinksForWrite,
@@ -177,8 +183,8 @@ import {
   groupOpaqueRelationshipsBySource,
   ownerOfRelationshipsPart,
   relationshipsPathFor,
-  resolveReachableOpaqueParts,
-  resolveRelationshipTarget
+  relationshipStillResolves,
+  resolveReachableOpaqueParts
 } from "@excel/xlsx/opaque-parts";
 import { RelType } from "@excel/xlsx/rel-type";
 import type { ParsedExternalLink } from "@excel/xlsx/xform/book/external-link-xform";
@@ -243,7 +249,11 @@ export interface IZipWriter extends EmitterLike {
    * The entry's compressed output is tracked internally, so a later
    * `waitForDrain()` observes it even when compression is asynchronous.
    */
-  createEntry(name: string): { write(chunk: string): void; end(): void };
+  /**
+   * `Uint8Array` as well as `string`, because a binary part cannot go through the string form: the entry
+   * encodes text as UTF-8, so every byte above 0x7F would become two. XML parts still pass strings.
+   */
+  createEntry(name: string): { write(chunk: Uint8Array | string): void; end(): void };
   pipe(stream: XlsxWritable): void;
   finalize(): void;
   /** Wait for downstream backpressure to clear. Resolves immediately if no backpressure. */
@@ -526,7 +536,7 @@ class StreamingZipWriterAdapter implements IZipWriter {
     this._trackOutput(file.push(buffer, true));
   }
 
-  createEntry(name: string): { write(chunk: string): void; end(): void } {
+  createEntry(name: string): { write(chunk: Uint8Array | string): void; end(): void } {
     if (this.finalized) {
       throw new ExcelStreamStateError("createEntry", "stream already finalized");
     }
@@ -538,8 +548,10 @@ class StreamingZipWriterAdapter implements IZipWriter {
     this.zip.add(file);
     const encoder = StreamingZipWriterAdapter.textEncoder;
     return {
-      write(chunk: string): void {
-        file.push(encoder.encode(chunk));
+      write(chunk: Uint8Array | string): void {
+        // Bytes go through untouched. Encoding them as text would re-encode everything above 0x7F, which is
+        // fine for the XML parts this used to carry exclusively and destroys a BIFF12 part.
+        file.push(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
       },
       end: (): void => {
         this._trackOutput(file.push(new Uint8Array(0), true));
@@ -576,14 +588,21 @@ export interface XlsxReadOptions {
    */
   base64?: boolean;
   /**
-   * Maximum number of rows to parse from each worksheet. Rows beyond this
-   * limit are silently skipped. Useful for previewing very large sheets
-   * without loading everything into memory.
+   * Refuse a worksheet with more rows than this, by throwing `MaxItemsExceededError`.
+   *
+   * **A guard, not a preview.** This used to say "rows beyond this limit are silently skipped. Useful for previewing
+   * very large sheets without loading everything into memory" — which is the opposite of what happens and of what the
+   * tests require: `ListXform.parseClose` throws, and the cases covering it are named "should bail out" and "should fail
+   * fast on a huge file". A caller who followed the old description got an exception instead of a truncated read.
+   *
+   * The distinction matters beyond wording: a limit that *fails* is a way to decline hostile input, while one that
+   * truncates is a way to lose data quietly. This is the first, and there is no option for the second.
    */
   maxRows?: number;
   /**
-   * Maximum number of columns to parse from each worksheet. Columns beyond
-   * this limit are silently skipped. Useful for previewing very wide sheets.
+   * Refuse a worksheet with more columns than this, by throwing `MaxItemsExceededError`.
+   *
+   * A guard, exactly as {@link maxRows} is — and its description was wrong in the same way.
    */
   maxCols?: number;
   /**
@@ -789,8 +808,14 @@ function snapshotChartModel(model: unknown): string | undefined {
  * with concrete EMU coordinates is how Excel itself writes
  * chartsheet drawings — the anchor's `pos`/`ext` pair gives the
  * engine something real to lay the graphic against, while the
- * inner `<xdr:graphicFrame>/<xdr:xfrm>` repeats the extent so the
- * graphic is sized to fill the anchor.
+ * inner `<xdr:graphicFrame>/<xdr:xfrm>` stays at zero, exactly as
+ * Excel writes it and as every worksheet chart here already does.
+ *
+ * That inner extent used to repeat the anchor's, on the reasoning
+ * that the graphic then filled it. It does the opposite: the frame
+ * re-sized itself against a transform it should have inherited and
+ * the chart was never drawn, so a chartsheet showed a blank canvas
+ * in both containers.
  *
  * ChartEx drawings additionally need an `<mc:AlternateContent>`
  * wrapper around the `<xdr:graphicFrame>` — the `cx` namespace is
@@ -799,7 +824,24 @@ function snapshotChartModel(model: unknown): string | undefined {
  * "This chart isn't available in your version of Excel" message
  * Office uses).
  */
-function renderChartsheetDrawingXml(options: {
+/**
+ * A chartsheet drawing's extent, in EMU.
+ *
+ * ≈ 10.84″ × 6.67″ — A4 landscape minus default margins, which is what Excel writes. Both the
+ * anchor-level and the frame-level size have to be non-zero or the chart renders as a blank canvas, so
+ * one constant serves both.
+ */
+export const CHARTSHEET_DRAWING_EMU = { cx: 9906000, cy: 6096000 } as const;
+
+/**
+ * Exported so the XLSB writer can produce the same chartsheet drawing.
+ *
+ * A chartsheet has no cell grid, so a cell-based anchor resolves to a 0×0 rectangle and Excel renders a
+ * blank canvas. The absolute EMU layout below is Excel's own, and it is emitted verbatim rather than
+ * routed through `DrawingXform` — which is tuned for the worksheet `twoCellAnchor` case. That reasoning
+ * applies identically to a `.bin` chartsheet, which is why this is shared rather than reimplemented.
+ */
+export function renderChartsheetDrawingXml(options: {
   chartRId: string;
   chartName: string;
   isChartEx: boolean;
@@ -816,13 +858,31 @@ function renderChartsheetDrawingXml(options: {
     `<xdr:graphicFrame macro="">` +
     `<xdr:nvGraphicFramePr>` +
     (cNvPrExtLst
-      ? `<xdr:cNvPr id="1" name="${escName}">${cNvPrExtLst}</xdr:cNvPr>`
-      : `<xdr:cNvPr id="1" name="${escName}"/>`) +
-    `<xdr:cNvGraphicFramePr/>` +
+      ? // **`id="2"`, which is what Excel writes.** A `cNvPr` id must be unique within the drawing and non-zero;
+        // 1 satisfies both, so this is not a validity fix but a conformance one — Excel numbers the first shape
+        // in a drawing 2, reserving 1, and its re-save of this library's chartsheet drawing does the same.
+        `<xdr:cNvPr id="2" name="${escName}">${cNvPrExtLst}</xdr:cNvPr>`
+      : `<xdr:cNvPr id="2" name="${escName}"/>`) +
+    // **`<a:graphicFrameLocks/>`, not an empty element.** Excel writes the child in its own chartsheet
+    // drawings — both in the corpus and in its re-save of this library's `financial-report.xlsb` — and an empty
+    // `cNvGraphicFramePr` is the one remaining structural difference between the two once the frame's transform
+    // is right. The element with no attributes is what Excel writes: `noGrp` is not set on a chartsheet's frame,
+    // which occupies the sheet alone and has nothing to be grouped with.
+    `<xdr:cNvGraphicFramePr><a:graphicFrameLocks/></xdr:cNvGraphicFramePr>` +
     `</xdr:nvGraphicFramePr>` +
+    // **Zero, not the anchor's extent.** The frame's own transform is inherited from the anchor; Excel writes
+    // `<a:ext cx="0" cy="0"/>` here in its own chartsheet drawings, and so does the generic `GraphicFrameXform`
+    // that serves every worksheet chart in this library — whose comment says "position/size handled by anchor,
+    // so use zeros". Repeating the extent here produced a chartsheet that rendered as an empty canvas: the
+    // anchor sized the frame and the frame then re-sized itself, and the chart inside it was never drawn.
+    //
+    // Worth being precise about which half of the original reasoning was wrong, because the other half is
+    // right and must stay: a chartsheet has no cell grid, so a `twoCellAnchor` does resolve to 0×0 there and
+    // `absoluteAnchor` with real EMU on the *anchor* is what Excel writes. It was only the inner repeat that
+    // was invented, and it was written into the comment as though it had been observed.
     `<xdr:xfrm>` +
     `<a:off x="0" y="0"/>` +
-    `<a:ext cx="${extCx}" cy="${extCy}"/>` +
+    `<a:ext cx="0" cy="0"/>` +
     `</xdr:xfrm>` +
     `<a:graphic>` +
     (isChartEx
@@ -921,7 +981,14 @@ function extractLeadingComments(originalXml: string, openTagRegex: RegExp): stri
  * `<c:chart>` open tag. If the original has no leading comments or no
  * `rawData` is available, returns the unmodified rendered bytes.
  */
-function renderChartWithLeadingComments(
+/**
+ * Exported so the XLSB writer can render the same chart XML.
+ *
+ * A chart part is XML in *both* containers — `cal-any_sheets.xlsb` carries `xl/charts/chart1.xml` beside
+ * a `.bin` chartsheet — so there is nothing for a BIFF12 writer to translate. Keeping this file-local was
+ * the only thing stopping XLSB charts.
+ */
+export function renderChartWithLeadingComments(
   entry: ChartEntry,
   xform: { render(xmlStream: XmlSink, model?: unknown): void }
 ): Uint8Array {
@@ -5044,6 +5111,27 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   protected async writeToZip(zip: IZipWriter, options?: XlsxWriteOptions): Promise<void> {
     const model = getWorkbookModel(this.workbook);
     this.prepareModel(model, options);
+    // **`unsupported` is honoured here, and used to be inert for this container.**
+    //
+    // `WorkbookWriteOptions.unsupported` is declared for both formats and was consulted only by the XLSB writer, so
+    // `{ format: "xlsx", unsupported: "error" }` was a guarantee that could never fire — measured against the same
+    // workbook, XLSB refused and XLSX wrote successfully. The comment justifying that said XLSX "expresses everything
+    // this library models", which is true of everything except one thing: a preserved sheet part from the *other*
+    // container. `_resolveOpaqueReachability` drops those, because a BIFF12 record stream has no form in a
+    // SpreadsheetML package, and the tab it described is gone.
+    //
+    // Applied here rather than at the five public entry points because this is the one place both platforms' writes
+    // pass through with the options in hand. `prepareModel` has already run, so `model.opaqueForeignSheetParts` holds
+    // what was dropped.
+    // `options` is typed `XlsxWriteOptions` here while `unsupported` is declared on the format-aware
+    // `WorkbookWriteOptions` that extends it — the object at runtime is the caller's, so the field is present when it
+    // was passed. Read through the narrower shape rather than widening this method's signature, which every subclass and
+    // every caller shares.
+    refuseUnsupported(
+      model.opaqueForeignSheetParts ?? [],
+      options as { readonly unsupported?: "error" | "ignore" } | undefined,
+      "XLSX"
+    );
     this.prepareChartsheets(model);
     this.prepareChartExSidecars(model);
 
@@ -7071,19 +7159,34 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     // writer's value silently reclassifies it.
     const reserved = new Map<string, string>([
       ["rels", "application/vnd.openxmlformats-package.relationships+xml"],
-      ["xml", "application/xml"]
+      ["xml", "application/xml"],
+      // **`vml`, because `ContentTypesXform` declares it and this map decides who may.**
+      //
+      // A preserved VML whose source declared it through a `Default` would otherwise have that `Default` re-emitted
+      // beside this writer's, and OPC allows one per extension. The XLSB writer reserves it for exactly this reason and
+      // says so; the XLSX writer emits the same `Default` — for comments, form controls, header watermarks and
+      // chartsheet VML — and did not reserve it. A defect fixed on one side of a pair is not fixed.
+      ["vml", "application/vnd.openxmlformats-officedocument.vmlDrawing"]
     ]);
     for (const medium of model.media ?? []) {
       if (medium?.type === "image" && typeof medium.extension === "string") {
+        // Skipped for a linked image, which adds no part to the package and so reserves nothing — the condition
+        // `ContentTypesXform` already applies where it emits the `Default`. Reserving an extension for a part that is
+        // never written turns a preserved part's own `Default` into an `Override` for no reason.
+        if (isExternalImage(medium)) {
+          continue;
+        }
         const extension = medium.extension.toLowerCase();
-        reserved.set(extension, extension === "svg" ? "image/svg+xml" : `image/${extension}`);
+        reserved.set(extension, imageContentTypeFor(extension));
       }
     }
 
     const declarations = opaqueContentTypeDeclarations(
       model.opaqueParts,
       model.opaqueContentTypeDefaults,
-      reserved
+      reserved,
+      // The two `Override`s `ContentTypesXform` writes unconditionally — see `reservedPaths`.
+      new Set([OOXML_PATHS.xlTheme1.toLowerCase(), OOXML_PATHS.xlStyles.toLowerCase()])
     );
     await this._renderToZip(zip, OOXML_PATHS.contentTypes, new ContentTypesXform(), {
       ...model,
@@ -7101,10 +7204,26 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
   }
 
   async addThemes(zip: IZipWriter, model: any): Promise<void> {
+    // **The built-in fallback stands down for a preserved theme.**
+    //
+    // A theme read from XLSX is modelled, so `model.themes` is set and the fallback never applies. A theme read from
+    // *XLSB* is a preserved part instead — this reader does not parse one — so `model.themes` is empty and the default
+    // was written to `xl/theme/theme1.xml`, which `addOpaqueParts` then wrote again. One ZIP entry survived that, but
+    // `[Content_Types].xml` declared the `Override` twice and the package's own validator refused it.
+    //
+    // The XLSB writer has the same guard for the same reason, in `themeParts`: a fallback exists to stop a package
+    // having *no* theme, and a preserved one means it has one. Suppressing it on the *path* rather than on the
+    // existence of any preserved theme is what keeps a preserved `theme2.xml` from silencing the default for `theme1`.
+    const preserved = new Set(
+      ((model.opaqueParts ?? []) as readonly OpaquePart[]).map(part => part.path.toLowerCase())
+    );
     const themes = model.themes || { theme1: theme1Xml };
     for (const name of Object.keys(themes)) {
-      const xml = themes[name];
-      await this._appendToZip(zip, xml, { name: themePath(name) });
+      const path = themePath(name);
+      if (!model.themes && preserved.has(path.toLowerCase())) {
+        continue;
+      }
+      await this._appendToZip(zip, themes[name], { name: path });
     }
   }
 
@@ -7136,7 +7255,23 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
    * package inconsistent in a different way than the one being fixed.
    */
   protected _resolveOpaqueReachability(model: any): void {
-    const parts: OpaquePart[] = model.opaqueParts ?? [];
+    const all: OpaquePart[] = model.opaqueParts ?? [];
+    // **A BIFF12 sheet part cannot sit in a SpreadsheetML package**, and recognising workbook-sourced edges across
+    // containers is what made this reachable in the first place: reading `cal-any_sheets.xlsb` and writing XLSX put
+    // `xl/chartsheets/sheet1.bin` — content type `application/vnd.ms-excel.chartsheet` — inside the output. Reported as
+    // a drop with its own reason, because "could not cross the container" is a different fact from "nothing points at
+    // it any more". See `isForeignSheetPart`.
+    const foreign = all.filter(part => isForeignSheetPart(part, "xlsx"));
+    const parts =
+      foreign.length === 0 ? all : all.filter(part => !isForeignSheetPart(part, "xlsx"));
+    if (foreign.length > 0) {
+      model.opaqueParts = parts;
+      // Recorded on the model so `writeToZip` can apply `unsupported` to it — the one loss this writer has, and the
+      // reason the option is no longer inert for XLSX. Unlike `opaqueDrops`, this is read back in the same call.
+      model.opaqueForeignSheetParts = foreign.map(
+        part => `${part.path}: preserved sheet part from the other container`
+      );
+    }
     if (parts.length === 0) {
       return;
     }
@@ -7150,7 +7285,9 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     const emitted: OpaqueSourceRelationship[] = [];
     for (const part of parts) {
       for (const inbound of part.sourceRelationships ?? []) {
-        if (inbound.source === "" || inbound.source === OOXML_PATHS.xlWorkbook) {
+        // Both containers' spellings of "the workbook" — see `isRootOrWorkbookSourced`. Comparing against this
+        // writer's own path dropped every workbook-sourced part that arrived from an XLSB read.
+        if (isRootOrWorkbookSourced(inbound)) {
           emitted.push(inbound);
         }
       }
@@ -7168,7 +7305,16 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     }
 
     model.opaqueParts = resolved.parts;
-    model.opaqueDrops = [...(model.opaqueDrops ?? []), ...resolved.drops];
+    // **Deliberately not recorded on the model, because nothing would read it.** `model` here is the object
+    // `getWorkbookModel` returned for this write, so assigning `opaqueDrops` on it reaches no caller —
+    // `WorkbookModel.opaqueDrops` is a *read-time* report, populated by the reader from the parts it declined to keep,
+    // and a write never touches the workbook's copy. The assignment that used to sit here looked like a report and was
+    // dead from the moment it was written; a `"foreign-sheet-part"` entry added beside it was dead for the same reason.
+    //
+    // The XLSB writer surfaces both decisions through its `unsupported` list, which is where everything that writer
+    // cannot carry goes. There is no equivalent here: an XLSX write has no loss channel at all — the same gap
+    // `WorkbookReadOptions.blankCells` already documents for the collapsed-blank case. Stating that is better than an
+    // assignment implying otherwise.
 
     // A sheet must not keep pointing at a part that is no longer written.
     const kept = new Set(resolved.parts.map(part => part.path.toLowerCase()));
@@ -7176,14 +7322,10 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
       if (!worksheet.opaqueRels) {
         continue;
       }
-      const surviving = worksheet.opaqueRels.filter((relationship: OpaqueRelationship) => {
-        const target = resolveRelationshipTarget(
-          canonicalSheet,
-          relationship.target,
-          relationship.targetMode
-        );
-        return !target || kept.has(target.toLowerCase());
-      });
+      // Through the shared predicate — see `relationshipStillResolves`. The XLSB writer had the inverse of this test.
+      const surviving = worksheet.opaqueRels.filter((relationship: OpaqueRelationship) =>
+        relationshipStillResolves(canonicalSheet, relationship, kept)
+      );
       worksheet.opaqueRels = surviving.length > 0 ? surviving : undefined;
     }
   }
@@ -7635,14 +7777,14 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
     // Excel's own output for chartsheet drawings uses
     // `<xdr:absoluteAnchor>` with concrete EMU `pos`/`ext` values
     // (≈ 10.84″ × 6.67″ — standard A4 landscape minus default
-    // margins), AND repeats the same `<a:ext>` on the inner
-    // `<xdr:graphicFrame>/<xdr:xfrm>` so both the anchor-level and
-    // frame-level sizes are non-zero. Omitting either produces the
-    // blank-canvas rendering bug users see. We emit the same byte
+    // margins) and leaves the inner `<xdr:graphicFrame>/<xdr:xfrm>`
+    // extent at zero, which is what Excel writes. Repeating the
+    // anchor's extent there is what *caused* the blank-canvas
+    // rendering, rather than avoiding it. We emit the same byte
     // layout here verbatim rather than route through `DrawingXform`,
     // which is tuned for the worksheet twoCellAnchor case.
-    const CHARTSHEET_EMU_CX = 9906000; // ≈ 10.84 inches
-    const CHARTSHEET_EMU_CY = 6096000; // ≈  6.67 inches
+    const CHARTSHEET_EMU_CX = CHARTSHEET_DRAWING_EMU.cx;
+    const CHARTSHEET_EMU_CY = CHARTSHEET_DRAWING_EMU.cy;
     for (const cs of model.chartsheets || []) {
       if (cs.drawingName && (cs.chartNumber || cs.chartExNumber)) {
         const chartRId = "rId1";
@@ -7800,6 +7942,53 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         await this._renderToZip(zip, chartRelsPath(n), relsXform, rels);
       }
     }
+  }
+
+  /**
+   * The `chartEx` parts a model implies, as bytes — for a container that is not a zip being streamed.
+   *
+   * **This exists because the XLSB writer had no way to reach any of it.** `addChartExEntries` appends straight
+   * into a zip, so the binary writer could not call it, wrote no `chartEx` part at all, and still emitted the
+   * drawing relationship naming one. Excel's answer was `Removed Part: /xl/drawings/drawingN.xml (Drawing
+   * shape)` — a drawing that points at nothing is not a drawing, so it discarded the whole drawing. `chartEx`
+   * is the modern chart family (waterfall, funnel, treemap, sunburst, histogram, box plot, region map), so any
+   * workbook using one was affected; five of this repository's own examples were, across 39 dangling references.
+   *
+   * Collecting into an array rather than moving the logic keeps one implementation. The alternative considered
+   * was extracting it to a shared module, which would have had to take `findXmlBlock` and `snapshotChartModel`
+   * with it — fifteen and five other callers in this file — and that is a restructuring, not a fix.
+   */
+  static async collectChartExParts(
+    model: any,
+    strictTemplateMode = false
+  ): Promise<{ name: string; data: Uint8Array }[]> {
+    const parts: { name: string; data: Uint8Array }[] = [];
+    const encoder = new TextEncoder();
+    // A collecting stand-in for the zip sink, with exactly the three members `_appendToZip` and `_renderToZip`
+    // use: `append`, `createEntry` and `waitForDrain`. `addChartExEntries` therefore stays the only place the
+    // rules about passthrough, patching, sidecars and relationship ids are written down — this reroutes where
+    // its output goes rather than restating any of it.
+    const sink = {
+      append: (data: string | Uint8Array, options: { name: string }) => {
+        parts.push({
+          name: options.name,
+          data: typeof data === "string" ? encoder.encode(data) : data
+        });
+      },
+      createEntry: (path: string) => {
+        const chunks: string[] = [];
+        return {
+          write: (chunk: string) => chunks.push(chunk),
+          end: () => parts.push({ name: path, data: encoder.encode(chunks.join("")) })
+        };
+      },
+      waitForDrain: async () => {}
+    };
+    // `static`, and the instance it creates is a throwaway: `addChartExEntries` and everything it reaches work
+    // from the `model` argument and never touch `this.workbook`. Requiring a workbook here would have meant the
+    // XLSB writer inventing one — it holds a model, not a handle.
+    await new XLSX(undefined as never).addChartExEntries(sink as never, model, strictTemplateMode);
+    return parts;
   }
 
   async addChartExEntries(zip: IZipWriter, model: any, strictTemplateMode = false): Promise<void> {
@@ -8336,6 +8525,19 @@ class XLSX<TWorkbook extends Workbook = Workbook> {
         )
     );
   }
+}
+
+/**
+ * A streaming zip writer, for a caller outside this module.
+ *
+ * A factory rather than the class, so `StreamingZipWriterAdapter` stays private: what a caller needs is an
+ * `IZipWriter`, and publishing the class would publish its constructor options and its internals along with it.
+ *
+ * The binary path uses this too. A ZIP is a ZIP — the same backpressure, the same entry lifecycle, the same
+ * finalisation — and a second adapter for XLSB would be a second set of those to get wrong.
+ */
+export function createZipWriterAdapter(options?: ZipWriterOptions): IZipWriter {
+  return new StreamingZipWriterAdapter(options);
 }
 
 export { XLSX };

@@ -41,6 +41,7 @@ import type {
   ChartStyleModel,
   ChartColorsModel
 } from "@excel/chart/index";
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import {
   Address,
   Cell,
@@ -1393,7 +1394,7 @@ async function main(): Promise<void> {
   // Write XLSX + PDF
   // =========================================================================
 
-  await Workbook.writeFile(wb, XLSX_PATH);
+  await writeBothFormats(wb, XLSX_PATH);
   console.log(`XLSX → ${XLSX_PATH}`);
 
   // PDF export with metadata (skip encryption to keep the file openable in

@@ -1,3 +1,4 @@
+import { imageContentTypeFor } from "@excel/core/opaque-part";
 import { isExternalImage } from "@excel/utils/drawing-utils";
 import {
   OOXML_PATHS,
@@ -121,9 +122,10 @@ class ContentTypesXform extends BaseXform<{
           mediaHash[imageType] = true;
           xmlStream.leafNode("Default", {
             Extension: imageType,
-            // SVG's IANA media type is "image/svg+xml"; everything else follows
-            // the "image/<ext>" convention.
-            ContentType: imageType === "svg" ? "image/svg+xml" : `image/${imageType}`
+            // One shared answer — see `imageContentTypeFor`. The rule used to be inline here *and* in the writer's
+            // reserved-extension map, and neither normalised `jpg`, so the same image was declared `image/jpg` here
+            // and `image/jpeg` by the XLSB writer.
+            ContentType: imageContentTypeFor(imageType)
           });
         }
       }

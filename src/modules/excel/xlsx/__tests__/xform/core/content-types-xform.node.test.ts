@@ -42,6 +42,9 @@ const expectations = [
       ],
       media: [
         { type: "image", extension: "png" },
+        // `jpg` on purpose: it is what people write, it is not a registered media type, and the fixture used to pin the
+        // unregistered `image/jpg` here while the XLSB writer normalised the same extension to `image/jpeg`. One answer
+        // now — see `imageContentTypeFor`.
         { type: "image", extension: "jpg" }
       ],
       drawings: [],

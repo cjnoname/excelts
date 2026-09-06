@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writeBothFormats } from "@excel/examples/utils/write-both";
 import { Anchor, Cell, Image, Workbook } from "@excel/index";
 
 const exampleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -103,7 +104,7 @@ console.log("Placed image with tl col/row:", Anchor.col(tl), Anchor.row(tl));
 console.log("                  br col/row:", Anchor.col(br), Anchor.row(br));
 
 try {
-  await Workbook.writeFile(wb, filename);
+  await writeBothFormats(wb, filename);
   console.log("\nWrote:", filename);
 } catch (error) {
   console.error((error as Error).stack);

@@ -12,6 +12,7 @@ import { MANDATORY_FILL_PATTERNS, encodeFill, mandatoryFill, readFill } from "@e
 import {
   FONT_HEADER_SIZE,
   GRBIT_OFFSET,
+  defaultFont,
   encodeFont,
   readFont,
   unmodelledFlagsOf
@@ -51,7 +52,13 @@ const REAL_FONTS: readonly { file: string; payload: string; expected: Partial<Fo
     payload:
       "c8 00 04 00 90 01 00 00 01 02 00 00 01 40 00 00 00 00 00 00 00 08 00 00 00 " +
       "46 00 72 00 65 00 65 00 53 00 61 00 6e 00 73 00",
-    expected: { name: "FreeSans", size: 10, family: 2, underline: "single" }
+    expected: {
+      name: "FreeSans",
+      size: 10,
+      family: 2, // `true`, not `"single"`: the two mean one underline and this reader now agrees with the XLSX one,
+      // which reads `<u/>` as `true`. See `readFont`.
+      underline: true
+    }
   },
   {
     file: "issue_182.xlsb",
@@ -209,12 +216,16 @@ describe("BrtColor against Excel's own bytes", () => {
     });
   });
 
-  it("clears fValidRGB for a colour it does not resolve", () => {
-    // A theme slot and a palette index are resolved by the consumer. Excel writes the resolved
-    // RGB alongside them; this writer cannot, and writing a plausible wrong one with the bit set
-    // would make a consumer honouring the bit render the wrong colour instead of falling back to
-    // the index. This is the one bit pattern here the corpus does not contain.
-    expect(toHex(encodeColor({ theme: 4 }))).toBe("06 04 00 00 00 00 00 00");
+  it("writes a theme colour the way Excel does, and leaves an indexed one alone", () => {
+    // **This asserted `06 04 …` with the alpha clear, and said so on the reasoning that a theme slot is resolved by the
+    // consumer — "the one bit pattern here the corpus does not contain".** The corpus contains it now: all fifteen
+    // `BrtFont` records across the oracle's reference workbooks write `07 01 00 00 00 00 00 ff`, so `fValidRGB` is set
+    // and the alpha is opaque. Read as `BGRA`, an alpha of zero would mean fully transparent, which is what made the old
+    // reading wrong rather than merely different.
+    //
+    // The indexed form is unchanged, because no reference file exercises it — the same standard, applied to a case that
+    // still has no evidence.
+    expect(toHex(encodeColor({ theme: 4 }))).toBe("07 04 00 00 00 00 00 ff");
     expect(toHex(encodeColor({ indexed: 8 }))).toBe("02 08 00 00 00 00 00 00");
   });
 
@@ -296,5 +307,44 @@ describe("BrtFill", () => {
         "styles"
       )
     ).toEqual({ type: "pattern", pattern: "solid", fgColor: { argb: "FFFF0000" } });
+  });
+});
+
+/**
+ * The font at index 0 for a workbook that specifies none.
+ *
+ * Every cell that names no font inherits this record, so the two containers must not disagree about it — and
+ * they did. The XLSB baseline omitted `color`, so `encodeColor` fell through to the automatic colour
+ * (`01 40 …`, kind *automatic* with palette index 64) while the XLSX writer emitted `<color theme="1"/>` from
+ * the same model. That is not a formatting nicety: it is a different colour, and it was the sole reason all
+ * fifteen oracle cases differed on `BrtFont`.
+ *
+ * The `fValidRGB` bit and the resolved RGB stay absent on purpose — see the long note in `color.ts` for why
+ * resolving theme slot 1 through the chart mapping would write *white*.
+ */
+describe("the default font", () => {
+  const COLOUR_AT = 12;
+
+  it("carries theme slot 1, the way Excel and the XLSX writer both do", () => {
+    const payload = defaultFont();
+    // `fValidRGB` **set**, kind 3 (theme) in the upper seven bits, then the slot — `07 01`, which is what all fifteen of
+    // the oracle's reference `BrtFont` records carry. This asserted `0x06` while the encoder cleared the bit.
+    expect(payload[COLOUR_AT]).toBe(0x07);
+    expect(payload[COLOUR_AT + 1]).toBe(0x01);
+    // And the alpha is opaque. Zero would read as fully transparent in the `BGRA` tail.
+    expect(payload[COLOUR_AT + 7]).toBe(0xff);
+  });
+
+  it("is not the automatic colour", () => {
+    // The exact bytes this used to write. Named rather than left implicit, because `01 40 …` is a legal
+    // `BrtColor` — it is simply the wrong one, which is why nothing structural caught it.
+    const payload = defaultFont();
+    expect([payload[COLOUR_AT], payload[COLOUR_AT + 1]]).not.toEqual([0x01, 0x40]);
+  });
+
+  it("still lets a workbook override it", () => {
+    const payload = defaultFont({ color: { argb: "FFFF0000" } });
+    // Kind 2 (rgb) with `fValidRGB` set: an explicit colour must not be overridden by the baseline.
+    expect(payload[COLOUR_AT]).toBe(0x05);
   });
 });

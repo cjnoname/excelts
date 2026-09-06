@@ -216,7 +216,9 @@ describe("Chart Round-Trip Preservation", () => {
       }
       expect(result.exitCode).toBe(0);
       expect(result.outputs.length).toBeGreaterThan(0);
-    });
+      // External conversions are serialised across workers by a lock in `external-oracle.ts`, so the wait for the lock
+      // counts against this test's own budget even though the conversion itself is quick.
+    }, 600_000);
 
     it("should preserve pivot table attributes including chartFormat", async () => {
       const { outputEntries } = await performRoundTrip();

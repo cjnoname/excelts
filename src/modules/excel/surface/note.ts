@@ -5,7 +5,7 @@
  *   `Note.create("text", "author")`, `Note.isNote(v)`, `Note.model(n)`,
  *   `Note.fromModel(model)`.
  *
- * Attaching a note to a cell (`Cell.note` / `Cell.setNote` /
+ * Attaching a note to a cell (`Cell.getNote` / `Cell.setNote` /
  * `Cell.setComment`) lives on the `Cell` namespace.
  */
 export {
