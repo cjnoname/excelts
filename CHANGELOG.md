@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.12.0](https://github.com/documonster/documonster/compare/v0.11.1...v0.12.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **excel:** dates before 1900-03-01 change by one serial to match Excel; `Cell.setDateParts` rejects input it used to carry; `Cell.getDateKind` gained `"duration"` and `"unknown"`; XLSB date validation bounds read back as `Date`; `Stream.WorkbookWriter.xlsbDate1904()` is now `date1904Flag()`; and the CSV ISO parsers require a full-width match. See MIGRATION.md.
+* **excel:** an XLSX write now honours `unsupported`. It previously ignored the option, so a workbook holding foreign sheet parts was written silently; with the default `"error"` that write now throws and names what it cannot express.
+* **excel:** `Workbook.read` on XLSB now *replaces* the workbook, as the XLSX reader always has, and commits only after the whole package parses — including after a strict-mode refusal, so a rejected read leaves the target untouched. A package holding `xl/workbook.bin` is refused by the XLSX reader instead of returning an empty workbook. Writing XLSB defaults to refusing a workbook it cannot express fully.
+
+### Features
+
+* **excel:** Read and write XLSB, and report what the container drops ([4c7fe3e](https://github.com/documonster/documonster/commit/4c7fe3e81ddcf85e5bc2105d43f4dc9149411632))
+* **excel:** Treat a spreadsheet date as a calendar value, and accept Temporal ([4d1be27](https://github.com/documonster/documonster/commit/4d1be27801280b6ad7b895bc105577d1286c0170))
+* **mcp:** Report the font decisions behind every PDF, and let an operator supply the face ([bfce47c](https://github.com/documonster/documonster/commit/bfce47cef8e24879a6e83f9a069a11ce6a763bec))
+
+
+### Bug Fixes
+
+* **excel:** Make the XLSB path stop corrupting quietly, and give each shared fact one answer ([f2d51bd](https://github.com/documonster/documonster/commit/f2d51bd4e3890ca2b679efb18320655918e8e466))
+* **pdf:** Stop an invisible control from disqualifying every font, and prefer partial coverage to none ([b401d1c](https://github.com/documonster/documonster/commit/b401d1c47d8c2d6b6fe2a97e54927e8863a4beb8)), closes [#218](https://github.com/documonster/documonster/issues/218)
+
 ## [0.11.1](https://github.com/documonster/documonster/compare/v0.11.0...v0.11.1) (2026-08-31)
 
 
