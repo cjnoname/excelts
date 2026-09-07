@@ -97,6 +97,18 @@ interface CsvOptionsExtras {
   append?: boolean;
   dateFormats?: readonly DateFormat[];
   dateFormat?: string;
+  /**
+   * Write dates as the calendar value they are, rather than against the host's local timezone.
+   *
+   * Defaults to local. Worth turning on when the CSV is meant to be diffed, fixtured or read by a human — a
+   * date cell has no timezone, so local output renders `2020-01-15` as `2020-01-14T19:00:00.000-05:00` in New
+   * York and gives different bytes on every machine.
+   *
+   * **Only set it if you control the reader too, or leave `dateFormat` unset.** A named `dateFormat` carries no
+   * timezone marker, and the parsers for those forms build local time — so UTC output read back through them
+   * loses a day. With no `dateFormat` the output is ISO with an offset and is unambiguous either way. See
+   * `createDefaultWriteMapper`.
+   */
   dateUTC?: boolean;
   map?(value: CellValue, index: number): CellValue;
   includeEmptyRows?: boolean;
@@ -118,7 +130,17 @@ export interface CsvOptions
 // Constants
 // =============================================================================
 
+/**
+ * The formats a CSV date column is tried against, when the caller names none.
+ *
+ * **The millisecond form is first because it is the one this bridge's own writer emits.** It was absent, and
+ * the omission was invisible only because the parsers it fell through to did not check their input's width:
+ * `2020-01-15T00:00:00.000Z` was matched by the *nineteen-character* `YYYY-MM-DD[T]HH:mm:ss` parser, which
+ * consumed the prefix, ignored the `Z` and built the date in **local time**. A writer and a reader that cannot
+ * agree on a format, held together by a parser being too permissive to notice.
+ */
 const DEFAULT_DATE_FORMATS: readonly DateFormat[] = [
+  "YYYY-MM-DD[T]HH:mm:ss.SSSZ",
   "YYYY-MM-DD[T]HH:mm:ssZ",
   "YYYY-MM-DD[T]HH:mm:ss",
   "MM-DD-YYYY",
@@ -181,6 +203,29 @@ function createDefaultValueMapper(
   };
 }
 
+/**
+ * Map a cell value to what the CSV should carry.
+ *
+ * **`dateUTC` stays defaulted to local, and that is a decision rather than an oversight.** Writing the calendar
+ * value would give a more faithful-looking file — a date cell has no timezone, so `2020-01-15` rendering as
+ * `2020-01-14T19:00:00.000-05:00` in New York reads as the wrong day, and the same workbook produces different
+ * bytes on every machine. But it cannot be the default here, because it is only safe for *self-describing*
+ * output:
+ *
+ * - With no `dateFormat`, the value is written as ISO with an offset, so the instant is preserved and the
+ *   reader recovers the cell exactly. The wart is presentational.
+ * - With a `dateFormat` such as `"DD/MM/YYYY HH:mm:ss"`, the output carries **no timezone marker at all**, and
+ *   the parsers that read those forms build local time (`new Date(y, m - 1, d, …)`). Writing UTC fields into a
+ *   format that cannot say so, and reading them back as local, loses a day rather than merely displaying one.
+ *
+ * So the two halves have to agree, and local-for-local is the pairing that already holds. `dateUTC: true` opts
+ * into calendar-value output for a caller who controls both ends — and is worth passing when the CSV is meant
+ * to be diffed, fixtured, or read by a human.
+ *
+ * The genuine defect nearby was not this: `2020-01-15T00:00:00.000Z` used to be read a day early, because the
+ * fixed-width parsers did not check their input's width and the millisecond form was missing from
+ * {@link DEFAULT_DATE_FORMATS}. Both are fixed at the root, in `@utils/datetime` and above.
+ */
 function createDefaultWriteMapper(
   dateFormat?: string,
   dateUTC?: boolean

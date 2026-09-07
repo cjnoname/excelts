@@ -93,6 +93,7 @@ import { SheetFormatPropertiesXform } from "@excel/xlsx/xform/sheet/sheet-format
 import { SheetPropertiesXform } from "@excel/xlsx/xform/sheet/sheet-properties-xform";
 import { SheetProtectionXform } from "@excel/xlsx/xform/sheet/sheet-protection-xform";
 import { SheetViewXform } from "@excel/xlsx/xform/sheet/sheet-view-xform";
+import { XmlWriter } from "@xml/writer";
 
 // since prepare and render are functional, we can use singletons
 const xform = {
@@ -162,12 +163,12 @@ export interface WorkbookWriterLike {
     readonly externSheets: { first: number; last: number }[];
   };
   /**
-   * Whether the workbook counts days from 1904 — see `WorkbookWriter.xlsbDate1904`.
+   * Whether the workbook counts days from 1904 — see `WorkbookWriter.date1904Flag`.
    *
    * Optional for the same reason as `xlsbFormulaContext`; absent means the 1900 system, which is the default a host
    * that does not model the setting would want.
    */
-  xlsbDate1904?: () => boolean;
+  date1904Flag?: () => boolean;
   /** Which container is being written. `"xlsb"` sends rows through the binary encoder. */
   readonly format: WorkbookFormat;
   /** The workbook-wide interning tables for a streamed XLSB. Absent for XLSX. */
@@ -1159,7 +1160,8 @@ class WorksheetWriter {
       model,
       this._workbook.xlsbTables!,
       this.id === 1,
-      this._workbook.xlsbFormulaContext?.()
+      this._workbook.xlsbFormulaContext?.(),
+      this._workbook.date1904Flag?.() ?? false
     );
   }
 
@@ -1193,8 +1195,8 @@ class WorksheetWriter {
       { rows: [model] } as unknown as Parameters<typeof sheetRowsFromModel>[0],
       // **The workbook's date system, not a literal `false`.** A serial is four years and a day out under the wrong
       // epoch, and the workbook part written at commit states the real setting — so the package disagreed with itself.
-      // See `WorkbookWriter.xlsbDate1904`.
-      this._workbook.xlsbDate1904?.() ?? false
+      // See `WorkbookWriter.date1904Flag`.
+      this._workbook.date1904Flag?.() ?? false
     )) {
       this._xlsb!.row(sheetRow);
     }
@@ -1223,7 +1225,13 @@ class WorksheetWriter {
         merges: this._merges,
         formulae: this._formulae,
         siFormulae: this._siFormulae,
-        comments: []
+        comments: [],
+        // **The workbook's date system.** `CellXform.prepare` copies this onto each date cell's model and
+        // `toXml` converts against it; omitting it left `model.date1904` undefined, so this path encoded every
+        // serial against the 1900 epoch while the workbook part declared 1904 — four years and a day of silent
+        // error, in the direction that makes the file wrong rather than merely different. The XLSB branch of
+        // this class already reads it; see `WorkbookWriter.date1904Flag`.
+        date1904: this._workbook.date1904Flag?.() ?? false
       };
       xform.row.prepare(model, options);
       this.stream.write(xform.row.toXml(model));
@@ -1313,7 +1321,17 @@ class WorksheetWriter {
   }
 
   private _writeDataValidations(): void {
-    this.stream.write(xform.dataValidations.toXml(this.dataValidations.model));
+    // **The workbook's date system reaches the bound here too.** The buffered writer routes this through
+    // `WorksheetXform.render`, which was given the epoch; this path calls the validation xform directly and so
+    // was still converting `type: "date"` bounds against 1900 while its own cells used 1904 — the bound landed
+    // 1,462 days from the cells it constrained. `toXml` cannot carry the argument, so the render is done here.
+    const writer = new XmlWriter();
+    xform.dataValidations.render(
+      writer,
+      this.dataValidations.model,
+      this._workbook.date1904Flag?.() ?? false
+    );
+    this.stream.write(writer.xml);
   }
 
   private _writeSheetProtection(): void {

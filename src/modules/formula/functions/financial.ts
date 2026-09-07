@@ -17,6 +17,7 @@ import {
   rvNumber,
   rvBoolean
 } from "@formula/runtime/values";
+import { partsToSerial, serialToParts } from "@utils/excel-serial";
 import { excelToDate } from "@utils/utils.base";
 
 /**
@@ -1732,31 +1733,32 @@ function dayCountFraction(
  * Subtract (or add) `months` from an Excel date serial, clamping to month-end
  * as needed.
  *
- * The round-trip is performed entirely on the UTC timeline: we read UTC
- * fields from the source date, construct the target date with `Date.UTC`,
- * and compute the serial as the whole-day difference between the target and
- * the Excel epoch at UTC midnight (1899-12-30 when date1904 is false,
- * 1904-01-01 otherwise). Doing this in local time would produce off-by-one
- * errors in any timezone offset from UTC.
+ * Calendar arithmetic on {@link ExcelDateTimeParts}, so no `Date` and no
+ * timezone is involved at any point. This previously went through `Date.UTC`
+ * against a fourth hand-written spelling of the Excel epoch; the discipline
+ * it needed to stay correct is now a property of the types instead of a
+ * paragraph of commentary.
  */
 function addMonthsToSerial(
   serial: number,
   months: number,
   context: FunctionRuntimeContext
 ): number {
-  const d = toDate(serial, context);
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth();
-  const day = d.getUTCDate();
-  // Determine the calendar day-of-month, clamping to the last day of the
-  // target month so e.g. Jan-31 + 1 month → Feb-28/29 (not Mar-3).
-  const targetYear = y + Math.floor((m + months) / 12);
-  const targetMonth = (((m + months) % 12) + 12) % 12;
-  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
-  const targetMs = Date.UTC(targetYear, targetMonth, Math.min(day, lastDay));
-  // Excel serial 0 = 1899-12-30 (1900 epoch) or 1904-01-01 when date1904.
-  const epochMs = context.date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
-  return Math.round((targetMs - epochMs) / 86400000);
+  const { year, month, day } = serialToParts(serial, context.date1904);
+  const total = month - 1 + months;
+  const targetYear = year + Math.floor(total / 12);
+  const targetMonth = (((total % 12) + 12) % 12) + 1;
+  // Clamp to month end, so Jan-31 + 1 month is Feb-28/29 rather than Mar-3.
+  // Day 0 of the following month is that month's last day, the same carry
+  // rule `Date.UTC` applies.
+  const lastDay = serialToParts(
+    partsToSerial({ year: targetYear, month: targetMonth + 1, day: 0 }, context.date1904),
+    context.date1904
+  ).day;
+  return partsToSerial(
+    { year: targetYear, month: targetMonth, day: Math.min(day, lastDay) },
+    context.date1904
+  );
 }
 
 /**

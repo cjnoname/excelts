@@ -25,6 +25,15 @@ interface StyleManagerLike {
 }
 interface RowXformPrepareOptions {
   styles: object;
+  /**
+   * Whether the workbook counts days from 1904.
+   *
+   * Not read here — it is forwarded whole to `CellXform.prepare`, which stamps it onto every date cell so that
+   * `toXml` converts against the right epoch. Declared anyway, because it *was* travelling through this object
+   * undeclared: the streaming writer simply did not put it in, and nothing said it was missing. A field a type
+   * does not mention is a field a caller cannot be told to supply.
+   */
+  date1904?: boolean;
 }
 
 interface RowModel {

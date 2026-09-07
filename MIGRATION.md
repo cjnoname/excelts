@@ -4,6 +4,189 @@ Breaking changes for `documonster` will be documented here as they occur.
 
 ## Unreleased
 
+### Dates: `Temporal` accepted, the `date1904` epoch honored where it was dropped
+
+Most of this is additive. Three items change existing behavior, and all three
+are cases where the previous behavior produced a wrong file or a wrong read.
+
+**New, non-breaking.** `Cell.setValue` now accepts `Temporal.PlainDate`,
+`Temporal.PlainTime` and `Temporal.PlainDateTime`, and there are four new
+readers/writers: `Cell.getDateParts`, `Cell.setDateParts`, `Cell.getDateKind`
+and `Cell.getTemporal`. Only `CellValueInput` grew — `CellValue`, the type a
+read returns, is unchanged, so no exhaustive `switch` over a cell value breaks
+and `Cell.getValue` still returns a `Date`. The exported `PlainDate` /
+`PlainTime` / `PlainDateTime` types are derived structurally from `globalThis`,
+so a consumer whose `lib` predates `esnext.temporal` gets `never` rather than an
+error in a declaration file they did not write. No polyfill is added; `Temporal`
+needs Node 26+, Chrome 144+, Firefox 139+, Bun 1.4+ or Deno 2.7+, and
+`Cell.getDateParts` / `Cell.setDateParts` are the runtime-independent
+equivalent.
+
+#### 1. The streaming XLSX writer now honors `date1904` (bug fix, output changes)
+
+`Stream.WorkbookWriter`'s `date1904` option reached the BIFF12 row encoder but
+neither the XLSX row encoder nor `xl/workbook.xml` — which was built from a
+literal `properties: {}`. Both halves were missing, so the package was a
+self-consistent **1900** workbook that round-tripped perfectly and was simply
+not the workbook that had been asked for. `date1904: true` now writes 1904
+serials and `<workbookPr date1904="1">`, so a cell's serial changes by 1,462.
+
+Only affects code that passed `date1904: true` (or assigned
+`writer.properties.date1904`) to a **streaming XLSX** writer. If you were
+compensating for this by shifting your dates, remove the compensation.
+
+#### 2. Date bounds in data validations now use the workbook's epoch (bug fix)
+
+`DataValidation` rules of `type: "date"` had their bounds converted against a
+hard-coded 1900 epoch on both read and write. In a 1904 workbook the bounds
+therefore sat 1,462 days from the cells they constrained — a rule reading "on or
+after 2020-01-15" rejected that very date. The read side had the mirror-image
+omission, so a round trip through this library agreed with itself and hid it.
+
+#### 3. Strict-format `t="d"` date cells are no longer parsed as local time (bug fix)
+
+A strict-OpenXML date cell stores an ISO string with no timezone
+(`2020-01-15T00:00:00`), and this was read with `new Date(...)`, which every JS
+engine interprets as _local_. The cell therefore read a day early anywhere east
+of UTC, and disagreed with every other read path in the library. It now goes
+through `parseOoxmlDate`, like the rest.
+
+#### 4. `Stream.WorkbookWriter.xlsbDate1904()` is renamed to `date1904Flag()`
+
+The accessor is consulted by the XLSX writer as well now, and the old name said
+otherwise — which is part of why the XLSX branch went unfixed. `date1904` is not
+an XLSB concept. Rename the call if you were using it; the workbook-level
+`date1904` option and `properties.date1904` are unchanged and are the supported
+way to set it.
+
+#### 5. Date-validation bounds in XLSB, and an ISO `Z` in CSV (bug fixes)
+
+Two more of the same shape, both found while checking the above:
+
+- **XLSB** wrote `type: "date"` validation bounds against the 1900 epoch too, so a
+  1904 workbook's bounds sat 1,462 days from its cells. Now threaded, like XLSX.
+- **`2020-01-15T00:00:00.000Z` was parsed a day early** anywhere east of UTC. The
+  fixed-width ISO parsers in `@utils/datetime` were written to be selected by
+  length and so checked only their separators — `parseISO` looked for dashes at
+  positions 4 and 7 and nothing else. Any caller reaching them another way got a
+  silent prefix match, and both `createIsoDateParser` and `createDateParser` do,
+  so the 24-character string was consumed by the 10- and 19-character parsers and
+  built with `new Date(y, m - 1, d, …)` — local time. Each parser now checks its
+  own width. Consequently a malformed or unexpected-width value that previously
+  parsed by prefix now returns `null` and stays a string, which is the intended
+  behaviour of `castDate`.
+- The Excel CSV bridge's default read formats also did not include
+  `YYYY-MM-DD[T]HH:mm:ss.SSSZ` — the form its own writer emits. Added.
+
+`CsvOptions.dateUTC` keeps its existing default (local). Making it UTC would give
+a file that is identical on every machine, which is worth having, but it is only
+safe when the output says what zone it is in: a named `dateFormat` such as
+`"DD/MM/YYYY HH:mm:ss"` carries no marker and is read back as local, so UTC
+output through one would lose a day rather than merely display one. Pass
+`dateUTC: true` when you control both ends.
+
+#### 6. Dates before 1900-03-01 now match Excel (behaviour change)
+
+The serial converter placed serial 0 at 1899-12-30 and ran linearly, which is
+correct from 1900-03-01 onward and one day out below it — because Excel spends
+serial 60 on the fictitious 1900-02-29 and the linear model had no room for it.
+
+| Expression        | Before | Now  | Excel |
+| ----------------- | ------ | ---- | ----- |
+| `DATE(1900,1,1)`  | 2      | 1    | 1     |
+| `DATE(1900,2,28)` | 60     | 59   | 59    |
+| `DATE(1900,2,29)` | 60     | 60   | 60    |
+| `MONTH(60)`       | 3      | 2    | 2     |
+| `DAY(60)`         | 28     | 29   | 29    |
+| `YEAR(TRUE)`      | 1899   | 1900 | 1900  |
+
+Serials from 61 onward — every date a real workbook holds — are bit-for-bit
+unchanged, as is the whole 1904 system, which has no phantom day. Only dates in
+January and February 1900 move.
+
+`Cell.setDateParts` **refuses** 1900-02-29: a cell's value is stored as a `Date`
+and no `Date` names that day, so accepting it would silently store March 1.
+`Cell.getDateParts` on a cell read from a file whose serial is 60 likewise
+reports 1900-03-01. The formula engine, which works on serials and never routes
+a date through a `Date`, is exact.
+
+#### 7. `Cell.getDateKind` gained `"duration"` and `"unknown"`
+
+It previously answered `"dateTime"` for an unformatted cell, a `General` cell, a
+plain number format _and_ an elapsed-time format such as `[h]:mm:ss` — dressing
+"I cannot tell" and "this is a length of time" up as a calendar kind.
+`Cell.getTemporal` now refuses a duration cell instead of manufacturing a
+`PlainDateTime` in 1899 for it; pass an explicit kind to override.
+
+Format detection was fixed alongside: `[hh]:mm` (and `[mm]`, `[ss]`) are
+recognised as elapsed time, only the first `;` section is consulted, and `\d0`
+is read as an escaped literal rather than a day code.
+
+#### 8. `Cell.setDateParts` validates its input
+
+`{}`, `{ month: 13 }`, `{ day: 0 }`, `{ year: 2024, month: 2, day: 31 }`,
+`{ hour: 99 }` and `NaN` now throw. They previously carried the way `Date.UTC`
+does — 2024-02-31 became March 2 in silence, and `NaN` wrote a workbook Excel
+cannot open from a call that reported success. Internal month arithmetic
+(`EDATE`, coupon stepping) still relies on carrying and is unaffected.
+
+#### 6. Dates before 1900-03-01 now match Excel (behaviour change)
+
+The serial converter placed serial 0 at 1899-12-30 and ran linearly, which is
+correct from 1900-03-01 onward and one day out below it — because Excel spends
+serial 60 on the fictitious 1900-02-29 and the linear model had no room for it.
+
+| Expression        | Before | Now  | Excel |
+| ----------------- | ------ | ---- | ----- |
+| `DATE(1900,1,1)`  | 2      | 1    | 1     |
+| `DATE(1900,2,28)` | 60     | 59   | 59    |
+| `DATE(1900,2,29)` | 60     | 60   | 60    |
+| `MONTH(60)`       | 3      | 2    | 2     |
+| `DAY(60)`         | 28     | 29   | 29    |
+| `YEAR(TRUE)`      | 1899   | 1900 | 1900  |
+
+Serials from 61 onward — every date a real workbook holds — are bit-for-bit
+unchanged, as is the whole 1904 system, which has no phantom day. Only dates in
+January and February 1900 move.
+
+`Cell.setDateParts` **refuses** 1900-02-29: a cell's value is stored as a `Date`
+and no `Date` names that day, so accepting it would silently store March 1. A
+cell read from a file whose serial is 60 likewise reports 1900-03-01. The formula
+engine, which works on serials and never routes a date through a `Date`, is exact.
+
+#### 7. `Cell.getDateKind` gained `"duration"` and `"unknown"`
+
+It previously answered `"dateTime"` for an unformatted cell, a `General` cell, a
+plain number format _and_ an elapsed-time format such as `[h]:mm:ss` — dressing
+"I cannot tell" and "this is a length of time" up as a calendar kind.
+`Cell.getTemporal` now refuses a duration cell instead of manufacturing a
+`PlainDateTime` in 1899 for it; pass an explicit kind to override.
+
+Format detection was fixed alongside: `[hh]:mm` (and `[mm]`, `[ss]`) are
+recognised as elapsed time, only the first `;` section is consulted, and `\d0` is
+read as an escaped literal rather than a day code.
+
+#### 8. `Cell.setDateParts` validates its input
+
+`{}`, `{ month: 13 }`, `{ day: 0 }`, `{ year: 2024, month: 2, day: 31 }`,
+`{ hour: 99 }` and `NaN` now throw. They previously carried the way `Date.UTC`
+does — 2024-02-31 became March 2 in silence, and `NaN` wrote a workbook Excel
+cannot open from a call that reported success. Internal month arithmetic
+(`EDATE`, coupon stepping) still relies on carrying and is unaffected.
+
+#### A note on `new Date(y, m, d)`
+
+Not a change, but the reason for the above. A spreadsheet date is a _calendar_
+value and a `Date` is an _instant_, so this library reads a `Date`'s **UTC**
+fields as the cell's value. `new Date(2024, 0, 15)` therefore stores a different
+serial in every timezone — in UTC+8 it becomes 2024-01-14 16:00. Pass
+`new Date(Date.UTC(2024, 0, 15))`, or better, a value that says what it is:
+
+```ts
+Cell.setDateParts(ws, "A1", { year: 2024, month: 1, day: 15 });
+Cell.setValue(ws, "A1", Temporal.PlainDate.from("2024-01-15"));
+```
+
 ### `Pdf.fromExcel` now honors the worksheet's print settings (behavior change)
 
 The PDF bridge forwarded only a handful of `pageSetup` fields, so most of Excel's

@@ -4,6 +4,7 @@
  */
 
 import type { ErrorValue } from "@excel/core/enums";
+import type { TemporalPlainValue } from "@excel/core/temporal";
 
 // ============================================================================
 // Paper Size
@@ -575,6 +576,12 @@ export type CellValueInput =
   | string
   | boolean
   | Date
+  // The three civil Temporal types, which say what a `Date` cannot: whether the value is a date, a time or
+  // both. Added to the *input* union only — `CellValue`, what a read returns, is deliberately unchanged, so no
+  // exhaustive `switch` over a cell value can break and no consumer has to have Temporal to compile. Each
+  // resolves to `never` where the consumer's `lib` lacks `esnext.temporal`, which removes the member rather
+  // than producing an error in a declaration file they did not write. See `@excel/core/temporal`.
+  | TemporalPlainValue
   | undefined
   | CellErrorValue
   | CellRichTextValue

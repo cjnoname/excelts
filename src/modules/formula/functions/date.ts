@@ -32,6 +32,8 @@ import {
   rvNumber,
   rvBoolean
 } from "@formula/runtime/values";
+import type { ExcelDateTimeParts } from "@utils/excel-serial";
+import { serialToParts } from "@utils/excel-serial";
 import { dateToExcel, excelToDate } from "@utils/utils.base";
 
 // ============================================================================
@@ -45,6 +47,22 @@ import { dateToExcel, excelToDate } from "@utils/utils.base";
 /** Convert an Excel serial to a UTC `Date`, honouring the active date1904 mode. */
 function toDate(serial: number, context: FunctionRuntimeContext): Date {
   return excelToDate(serial, context.date1904);
+}
+
+/**
+ * An Excel serial as calendar fields, honouring the active date1904 mode.
+ *
+ * **Used by the field accessors instead of `toDate`, because a `Date` cannot hold serial 60.**
+ * That serial is Excel's fictitious 1900-02-29, and a `Date` built from those fields normalises
+ * to 1900-03-01 — so `MONTH(60)` came back as 3 where Excel says 2. The parts carry the phantom
+ * as plain numbers, which is the whole reason they exist.
+ *
+ * Arithmetic functions below still go through `toDate`: they step days and months rather than
+ * reading a calendar field, and Excel's own answers around the phantom are not self-consistent
+ * there either.
+ */
+function toParts(serial: number, context: FunctionRuntimeContext): ExcelDateTimeParts {
+  return serialToParts(serial, context.date1904);
 }
 
 /** Convert a UTC `Date` back to an Excel serial, honouring the active date1904 mode. */
@@ -126,7 +144,7 @@ export function fnYEAR(
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value, context).getUTCFullYear());
+  return rvNumber(toParts(n.value, context).year);
 }
 
 export function fnMONTH(
@@ -137,7 +155,7 @@ export function fnMONTH(
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value, context).getUTCMonth() + 1);
+  return rvNumber(toParts(n.value, context).month);
 }
 
 export function fnDAY(
@@ -148,7 +166,7 @@ export function fnDAY(
   if (isError(n)) {
     return n;
   }
-  return rvNumber(toDate(n.value, context).getUTCDate());
+  return rvNumber(toParts(n.value, context).day);
 }
 
 export function fnDATE(

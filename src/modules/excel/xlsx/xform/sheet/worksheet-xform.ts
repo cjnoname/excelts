@@ -285,6 +285,14 @@ function spanColumn(address: string | undefined): number | undefined {
 }
 
 class WorkSheetXform extends BaseXform {
+  /**
+   * The child xforms, keyed by element name.
+   *
+   * Typed as the base class, which loses every child's own signature. `dataValidations` is named separately
+   * below because its `render` takes the workbook's date system as a third argument, and reaching it through
+   * this map would have needed a cast at the call site — a cast being exactly how a signature change stops
+   * being checked.
+   */
   declare public map: Record<string, BaseXform>;
   declare private ignoreNodes: string[];
   declare public parser?: BaseXform;
@@ -307,6 +315,13 @@ class WorkSheetXform extends BaseXform {
    * this class for one.
    */
   declare private styledBlanks?: StyledBlankRuns;
+
+  /**
+   * The data-validation child, held at its own type so `render` can be given the workbook's date system.
+   *
+   * The same instance that sits in `map`, so parsing and reconciling reach it either way.
+   */
+  private readonly dataValidations = new DataValidationsXform();
 
   constructor(options?: {
     maxRows?: number;
@@ -363,7 +378,7 @@ class WorkSheetXform extends BaseXform {
         childXform: new HyperlinkXform()
       }),
       pageMargins: new PageMarginsXform(),
-      dataValidations: new DataValidationsXform(),
+      dataValidations: this.dataValidations,
       pageSetup: new PageSetupXform(),
       headerFooter: new HeaderFooterXform(),
       printOptions: new PrintOptionsXform(),
@@ -411,6 +426,19 @@ class WorkSheetXform extends BaseXform {
     this.map.cols.prepare(model.cols, options);
     this.map.sheetData.prepare(model.rows, options);
     this.map.conditionalFormatting.prepare(model.conditionalFormattings, options);
+    // The workbook's date system, recorded on the *worksheet* model so that `render` — which runs on a
+    // separately constructed `WorksheetXform`, with no options bag and no shared instance state — can convert a
+    // `type: "date"` validation bound against the right epoch. It is not written onto the caller's validation
+    // rules: those are the objects `Cell.getValidation` hands back, and a serialiser must not leave anything
+    // behind in them.
+    //
+    // Cleared rather than set to `false`, so a workbook written under the 1904 system and then switched back
+    // does not keep a stale `true`, and so the default leaves no trace in a model a caller can inspect.
+    if (options.date1904 === true) {
+      model.date1904 = true;
+    } else {
+      delete model.date1904;
+    }
 
     model.mergeCells = options.merges.mergeCells;
 
@@ -1081,7 +1109,7 @@ class WorkSheetXform extends BaseXform {
     }
     this.map.mergeCells.render(xmlStream, model.mergeCells);
     this.map.conditionalFormatting.render(xmlStream, model.conditionalFormattings); // Note: must be before dataValidations
-    this.map.dataValidations.render(xmlStream, model.dataValidations);
+    this.dataValidations.render(xmlStream, model.dataValidations, model.date1904 === true);
 
     // For some reason hyperlinks have to be after the data validations
     this.map.hyperlinks.render(xmlStream, model.hyperlinks);
@@ -1490,6 +1518,9 @@ class WorkSheetXform extends BaseXform {
       row.cells = [...(row.cells ?? []), { address, type: 0, comment }];
     }
     this.map.conditionalFormatting.reconcile(model.conditionalFormattings, options);
+    // A `type: "date"` bound is a serial, so it needs the workbook's epoch just as a cell value does. Reconcile
+    // rather than parse, because the epoch is not known while the sheet is being tokenised.
+    this.map.dataValidations.reconcile(model.dataValidations, options);
 
     model.media = [];
     if (model.drawing) {

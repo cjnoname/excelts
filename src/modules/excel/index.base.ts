@@ -101,6 +101,28 @@ export type {
   CellRichTextValue,
   CellSharedFormulaValue
 } from "@excel/types";
+/**
+ * Dates as calendar values rather than as instants.
+ *
+ * `ExcelDateTimeParts` is what `Cell.getDateParts` returns and `Cell.setDateParts` takes — timezone-free
+ * fields, available on every runtime. The three `Plain*` aliases are `Temporal`'s types, derived structurally
+ * from `globalThis` so that a consumer whose `lib` predates `esnext.temporal` gets `never` and the member
+ * collapses, rather than an error in a declaration file they did not write.
+ */
+export type { ExcelDateTimeParts } from "@utils/excel-serial";
+export type {
+  PlainDate,
+  PlainDateTime,
+  PlainTime,
+  TemporalKind,
+  TemporalPlainValue
+} from "@excel/core/temporal";
+/**
+ * What `Cell.getDateKind` reports. Wider than {@link TemporalKind}, because a format can also say
+ * "a length of time" (`duration`) or say nothing at all (`unknown`) — and calling either of those
+ * a date-time is how a `[h]:mm:ss` cell came back as a moment in 1899.
+ */
+export type { DateFormatKind } from "@excel/utils/cell-format";
 // `CellData` / `RowData` / `ColumnData` are the cell/row/column handles. Unlike
 // the other handles they have no `X.Handle` alias, so the declared name is the
 // public one. Handles that DO have one (`Worksheet.Handle`, `Workbook.Handle`,

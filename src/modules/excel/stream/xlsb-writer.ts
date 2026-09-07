@@ -182,7 +182,17 @@ export function xlsbSheetOptionsFromModel(
    * before sheet 3 exists. That is inherent to writing forward, and it is now reported rather than silent — see
    * `WorksheetWriter.xlsbUnsupported`.
    */
-  formulaContext?: PtgContext
+  formulaContext?: PtgContext,
+  /**
+   * The workbook's date system, for a `type: "date"` validation bound.
+   *
+   * Cell values carry their own copy through `sheetRowsFromModel`; a validation bound is a serial belonging to
+   * no cell, so it had nothing telling it which epoch to use and was written against 1900 inside a 1904
+   * package — 1,462 days from the cells it constrains. The buffered writer passes this at
+   * `writeXlsbPackage`; a streamed sheet is skipped there because its bytes are already in the sink, so it has
+   * to arrive here.
+   */
+  date1904 = false
 ): Omit<WriteWorksheetPartOptions, "rows" | "omitDimension"> {
   const merges = mergesFromModel(model as never);
   const pane = paneFromModel(model as never);
@@ -198,6 +208,7 @@ export function xlsbSheetOptionsFromModel(
     columns: columnsFromModel(model as never),
     ...sheetOptionsFromModel(model as never),
     validations: validationsFromModel(model as never),
+    date1904,
     rowBreaks: breaks.rows,
     columnBreaks: breaks.columns,
     ...(pane === undefined ? {} : { pane }),

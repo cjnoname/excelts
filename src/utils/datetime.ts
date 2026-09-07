@@ -93,11 +93,28 @@ function validateDateTime(
 }
 
 // ============================================================================
-// Specialized parsers (length-based dispatch for speed)
+// Specialized parsers
 // ============================================================================
+//
+// **Each one checks its own width, and that is not redundant with the dispatch tables.** These were written to
+// be selected by length first — the width is in every comment below — and so they only verified their
+// *separators*: `parseISO` looked for dashes at positions 4 and 7 and nothing else. Every caller that reached
+// them by any other route therefore got a silent prefix match. `createIsoDateParser` flattened the length table
+// into a list, and `createDateParser` tries the caller's formats in order, so
+// `"2020-01-15T00:00:00.000Z"` was matched by the *ten-character* date parser (through the first) and by the
+// *nineteen-character* datetime parser (through the second). Both build with `new Date(y, m - 1, d, ...)` —
+// local time — so an explicit `Z` was read as local and the value landed a day early in UTC+8.
+//
+// The precondition was real; it was simply unstated and unenforced, and `PARSERS` already length-guarded the two
+// entries where that had been noticed. Stating it in each function is what makes the tables an optimisation
+// rather than a correctness requirement, and it costs one integer compare in front of the character compares
+// that were already there.
 
 // YYYY-MM-DD (10 chars)
 function parseISO(s: string): Date | null {
+  if (s.length !== 10) {
+    return null;
+  }
   if (s.charCodeAt(4) !== C_DASH || s.charCodeAt(7) !== C_DASH) {
     return null;
   }
@@ -106,6 +123,9 @@ function parseISO(s: string): Date | null {
 
 // YYYY-MM-DDTHH:mm:ss (19 chars)
 function parseISOT(s: string): Date | null {
+  if (s.length !== 19) {
+    return null;
+  }
   if (
     s.charCodeAt(4) !== C_DASH ||
     s.charCodeAt(7) !== C_DASH ||
@@ -127,6 +147,9 @@ function parseISOT(s: string): Date | null {
 
 // YYYY-MM-DD HH:mm:ss (19 chars, space separator)
 function parseISOSpace(s: string): Date | null {
+  if (s.length !== 19) {
+    return null;
+  }
   if (
     s.charCodeAt(4) !== C_DASH ||
     s.charCodeAt(7) !== C_DASH ||
@@ -148,6 +171,9 @@ function parseISOSpace(s: string): Date | null {
 
 // YYYY-MM-DDTHH:mm:ssZ (20 chars)
 function parseISOZ(s: string): Date | null {
+  if (s.length !== 20) {
+    return null;
+  }
   if (s.charCodeAt(19) !== C_Z) {
     return null;
   }
@@ -157,6 +183,9 @@ function parseISOZ(s: string): Date | null {
 
 // YYYY-MM-DDTHH:mm:ss.SSSZ (24 chars)
 function parseISOMsZ(s: string): Date | null {
+  if (s.length !== 24) {
+    return null;
+  }
   if (s.charCodeAt(19) !== C_DOT || s.charCodeAt(23) !== C_Z) {
     return null;
   }
@@ -166,6 +195,9 @@ function parseISOMsZ(s: string): Date | null {
 
 // YYYY-MM-DDTHH:mm:ss+HH:mm (25 chars)
 function parseISOOffset(s: string): Date | null {
+  if (s.length !== 25) {
+    return null;
+  }
   const c = s.charCodeAt(19);
   if (c !== C_PLUS && c !== C_DASH) {
     return null;
@@ -176,6 +208,9 @@ function parseISOOffset(s: string): Date | null {
 
 // YYYY-MM-DDTHH:mm:ss.SSS+HH:mm (29 chars)
 function parseISOMsOffset(s: string): Date | null {
+  if (s.length !== 29) {
+    return null;
+  }
   if (s.charCodeAt(19) !== C_DOT) {
     return null;
   }
@@ -189,6 +224,9 @@ function parseISOMsOffset(s: string): Date | null {
 
 // MM-DD-YYYY or MM/DD/YYYY (10 chars)
 function parseUS(s: string): Date | null {
+  if (s.length !== 10) {
+    return null;
+  }
   const sep = s.charCodeAt(2);
   if ((sep !== C_DASH && sep !== C_SLASH) || s.charCodeAt(5) !== sep) {
     return null;
@@ -198,6 +236,9 @@ function parseUS(s: string): Date | null {
 
 // DD-MM-YYYY or DD/MM/YYYY (10 chars)
 function parseEU(s: string): Date | null {
+  if (s.length !== 10) {
+    return null;
+  }
   const sep = s.charCodeAt(2);
   if ((sep !== C_DASH && sep !== C_SLASH) || s.charCodeAt(5) !== sep) {
     return null;
@@ -207,6 +248,9 @@ function parseEU(s: string): Date | null {
 
 // MM-DD-YYYY HH:mm:ss or MM/DD/YYYY HH:mm:ss (19 chars)
 function parseUSTime(s: string): Date | null {
+  if (s.length !== 19) {
+    return null;
+  }
   const sep = s.charCodeAt(2);
   if ((sep !== C_DASH && sep !== C_SLASH) || s.charCodeAt(5) !== sep) {
     return null;
@@ -230,6 +274,9 @@ function parseUSTime(s: string): Date | null {
 
 // DD-MM-YYYY HH:mm:ss or DD/MM/YYYY HH:mm:ss (19 chars)
 function parseEUTime(s: string): Date | null {
+  if (s.length !== 19) {
+    return null;
+  }
   const sep = s.charCodeAt(2);
   if ((sep !== C_DASH && sep !== C_SLASH) || s.charCodeAt(5) !== sep) {
     return null;
@@ -274,13 +321,23 @@ const PARSERS: Record<DateFormat, Parser> = {
 };
 
 // Length-based auto-detection (ISO formats only, US/EU excluded due to ambiguity)
-const AUTO_DETECT: Array<[number, Parser[]]> = [
-  [10, [parseISO]],
-  [19, [parseISOT, parseISOSpace]],
-  [20, [parseISOZ]],
-  [24, [parseISOMsZ]],
-  [25, [parseISOOffset]],
-  [29, [parseISOMsOffset]]
+/**
+ * Every ISO parser, for `createIsoDateParser`. US and EU forms are excluded because `01-02-2020` is ambiguous.
+ *
+ * **A flat list, and the order does not matter.** This was a table keyed by string length, which read as a
+ * dispatch — but its only consumer flattened it and tried the parsers in sequence, so the key was documentation
+ * that nothing enforced. That is how a twenty-four-character `…000Z` reached the ten-character parser and was
+ * read as a local date, a day early east of UTC. Each parser now checks its own width, so no ordering and no
+ * dispatch table is load-bearing; keeping one would be a second place for the widths to be stated and to drift.
+ */
+const AUTO_DETECT: Parser[] = [
+  parseISO,
+  parseISOT,
+  parseISOSpace,
+  parseISOZ,
+  parseISOMsZ,
+  parseISOOffset,
+  parseISOMsOffset
 ];
 
 // ============================================================================
@@ -360,11 +417,7 @@ export function createDateParser(formats: readonly DateFormat[]): DateParser {
 
 /** Create parser for auto-detecting ISO formats */
 export function createIsoDateParser(): DateParser {
-  const fns: Parser[] = [];
-  for (const [, parsers] of AUTO_DETECT) {
-    fns.push(...parsers);
-  }
-  return makeDateParser(fns);
+  return makeDateParser(AUTO_DETECT);
 }
 
 function tzOffset(d: Date): string {

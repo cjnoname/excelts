@@ -69,6 +69,53 @@ jobs:
         env:
           CI: true
 
+  timezone:
+    # **The whole suite outside UTC.**
+    #
+    # Every runner in the `test` matrix is UTC, and that was load-bearing in the
+    # worst way: a spreadsheet date is a calendar value while a JavaScript `Date`
+    # is an instant, and the two agree *exactly* at offset zero. So a whole class
+    # of defect — `new Date(2024, 0, 15)` storing a different serial in every
+    # timezone, a strict-format `t="d"` cell parsed as local time, a display
+    # string read with `getHours()` instead of `getUTCHours()` — was structurally
+    # invisible to twenty thousand passing assertions. The date suites also fed
+    # `Date.UTC(...)` inputs, so they could not detect a disagreement about which
+    # reading was meant.
+    #
+    # One zone, not a matrix. `Asia/Shanghai` is +8 with no DST, which is enough
+    # to make every such bug fail: the defect is "depends on the offset at all",
+    # and any non-zero offset exposes it. Zone-specific behaviour is asserted
+    # inside the suites that care, which set `process.env.TZ` themselves and
+    # cover +8, -5 and +14.
+    #
+    # Node tests only. The browser step rebuilds `dist/` and drives Playwright,
+    # which doubles the runtime to re-check the same arithmetic in a second host.
+    needs: should-run
+    timeout-minutes: 20
+    name: Node tests in a non-UTC timezone
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js 26
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm exec vitest run
+        env:
+          CI: true
+          TZ: Asia/Shanghai
+
   test-bun:
     needs: should-run
     timeout-minutes: 15

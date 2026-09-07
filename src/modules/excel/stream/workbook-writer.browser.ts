@@ -147,9 +147,9 @@ export interface WorkbookWriterOptions {
    * **Declared here because it could previously only be set by a cast.** A random-access workbook carries it on
    * `properties.date1904`; a `WorkbookWriter` has no `properties` at all, so a caller who needed the 1904 system had to
    * assign an undeclared field — which this library's own test for the setting did. The value reaches both the workbook
-   * part and every cell serial through `xlsbDate1904()`.
+   * part and every cell serial through `date1904Flag()`.
    *
-   * Read per row rather than captured, so setting it before the first commit is what matters; see `xlsbDate1904`.
+   * Read per row rather than captured, so setting it before the first commit is what matters; see `date1904Flag`.
    */
   date1904?: boolean;
   zip?: Partial<WorkbookZipOptions>;
@@ -295,18 +295,23 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
   /**
    * Whether this workbook counts days from 1904, as the date system stands *now*.
    *
-   * **A serial is meaningless without it, and the streamed row encoder was passing a literal `false`.** The workbook
-   * part is produced at `commit()` from the model, so `BrtWbProp` recorded the real setting while every cell serial had
-   * been computed against the other epoch — a package internally inconsistent by 1,462 days. Measured on a workbook
-   * with `date1904: true`: `2020-01-15` written through `Workbook.toBuffer` read back as `2020-01-15`, and through the
+   * **A serial is meaningless without it, and the streamed row encoders were not asking.** The workbook part is
+   * produced at `commit()` from the model, so `BrtWbProp` recorded the real setting while every cell serial had been
+   * computed against the other epoch — a package internally inconsistent by 1,462 days. Measured on a workbook with
+   * `date1904: true`: `2020-01-15` written through `Workbook.toBuffer` read back as `2020-01-15`, and through the
    * streaming writer as `2024-01-16`.
+   *
+   * **Named for the setting rather than for a format.** It was `xlsbDate1904` while only the BIFF12 branch consulted
+   * it, and that name was load-bearing in the wrong direction: the XLSX branch of `_writeRow` had the identical
+   * defect and the identical fix available, and a method whose name said the option did not apply to it is part of
+   * why it sat there. `date1904` is not an XLSB concept.
    *
    * Read per row rather than captured, for the reason `xlsbFormulaContext` is: a caller may set the property between
    * `addWorksheet` and the first row. A caller who changes it *after* rows are committed gets the ordinary
    * forward-pass consequence — the rows already encoded keep the epoch they were encoded with — which is the same
    * constraint the columns, panes and views are under.
    */
-  xlsbDate1904(): boolean {
+  date1904Flag(): boolean {
     // `date1904` is a declared writer option now. `properties.date1904` is still honoured because a caller may have
     // assigned it — that was the only way to set this before the option existed, and this library's own test did it.
     return this.properties?.date1904 === true;
@@ -397,7 +402,7 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
     this.lastPrinted = options.lastPrinted;
 
     this.useSharedStrings = options.useSharedStrings ?? false;
-    // Into `properties`, which is what both readers of this setting consult — the row encoder through `xlsbDate1904()`
+    // Into `properties`, which is what both readers of this setting consult — the row encoder through `date1904Flag()`
     // and the workbook part through `getWorkbookModel().properties`.
     this.properties = { ...(options.date1904 === undefined ? {} : { date1904: options.date1904 }) };
     this.sharedStrings = new SharedStrings();
@@ -1234,7 +1239,11 @@ export abstract class WorkbookWriterBase<TWorksheetWriter extends WorksheetWrite
       worksheets: this._worksheets.filter(Boolean),
       definedNames: definedNamesModel(this._definedNames),
       views: this.views,
-      properties: {},
+      // **`this.properties`, not `{}`.** `date1904` is a declared writer option and reaches the XLSB row encoder
+      // through `date1904Flag()`, but this — the part that states the workbook's date system to every reader —
+      // was built from a literal empty object, so no `<workbookPr date1904="1">` was ever written on the XLSX
+      // path and the option was inert in one of the two formats it is offered for.
+      properties: this.properties,
       protection: this.protection,
       calcProperties: {}
     };

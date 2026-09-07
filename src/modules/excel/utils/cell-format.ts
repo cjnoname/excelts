@@ -286,6 +286,15 @@ function resolveMonthOrMinute(s: string): string {
  * Format a date value using Excel date format
  * @param serial Excel serial number (days since 1900-01-01)
  * @param fmt Format string
+ *
+ * **The hard-coded 1900 epoch is correct here, and is not a missing `date1904`.** This is reached from
+ * `format(fmt, value)`, whose contract is a bare serial with no workbook attached — a serial with no epoch has
+ * to assume one, and 1900 is the only defensible choice. On the path that actually carries a workbook's dates,
+ * `formatCellValue` produces the serial with `dateToExcel(value)` — also 1900 — so the epoch cancels exactly and
+ * a 1904 workbook's display text is right. Verified: the same cell renders identically under both settings.
+ *
+ * Threading `date1904` through would therefore change no output while widening a public signature, so it is
+ * deliberately not done. Recorded because this reads like a bug on inspection, and has been reported as one.
  */
 function formatDate(serial: number, fmt: string): string {
   // Extract time components directly from serial number (timezone-agnostic)
@@ -1031,25 +1040,70 @@ export const cellFormat = {
 // =============================================================================
 
 /**
+ * What a number format's codes say about the date and time parts of a serial.
+ *
+ * **One reading of a format, used by everything that needs one.** `isTimeOnlyFormat` and
+ * `isDateDisplayFormat` each did this stripping and these four tests inline, and a third caller wanting the
+ * date-vs-time-vs-both distinction would have written them a third time. That is how this codebase came to
+ * have four disagreeing answers to "is this a date format"; the fix for one more caller is to stop having a
+ * per-caller answer, not to add a fifth.
+ *
+ * The subtle field is `monthM`. A lone `m` is a *month* in `mmm-yy` and a *minute* in `h:mm`, and the only
+ * cheap discriminator is whether the format also carries an hour or a second — which is why `hasTime` has to
+ * be computed before the date question can be answered at all.
+ */
+interface FormatFacets {
+  /** An elapsed-time format such as `[h]:mm:ss`, which measures a duration rather than naming a moment. */
+  readonly elapsed: boolean;
+  /** An hour, a second, or an AM/PM marker. */
+  readonly hasTime: boolean;
+  /** A year or a day code. */
+  readonly hasYearOrDay: boolean;
+  /** An `m` that reads as a month rather than as a minute. */
+  readonly monthM: boolean;
+}
+
+/**
+ * Read a format's date/time facets.
+ *
+ * Three things are removed before any code is looked for, and each was a way of reading a literal as a
+ * directive:
+ *
+ * - **Everything after the first `;`.** A format's sections are positive, negative, zero and text, and only
+ *   the first applies to a date cell's value. Judging `";;;dd"` by its fourth section called a hidden number
+ *   format a date. Split with `splitFormatSections`, which knows that a `;` inside quotes or brackets is not
+ *   a separator — the same function the readers' `isDateFmt` uses, so the two cannot drift.
+ * - **Quoted literals**, so `#,##0" days"` is a number and not a day.
+ * - **Backslash escapes**, so `\d0` is a literal `d` and not a day code. This was missed here, and `format()`
+ *   a few hundred lines below had already learned it.
+ *
+ * `elapsed` matches `[h]`, `[hh]`, `[mm]`, `[ss]` and the rest, not just the single-character forms.
+ * Requiring exactly one character meant `[hh]:mm` fell through to the date tests, where — its bracketed part
+ * stripped and a bare `:mm` left behind — it was read as a **month** and reported as a date format.
+ * `format()` had the right pattern already; this had a narrower copy of it.
+ */
+function formatFacets(fmt: string): FormatFacets {
+  const section = splitFormatSections(fmt)[0] ?? "";
+  const cleaned = section.replace(/"[^"]*"/g, "").replace(/\\./g, "");
+  const elapsed = /\[[hms]+\]/i.test(cleaned);
+  const bare = cleaned.replace(/\[[^\]]*\]/g, "");
+  const hasTime = /[hs]/i.test(bare) || /AM\/PM|A\/P/i.test(bare);
+  return {
+    elapsed,
+    hasTime,
+    hasYearOrDay: /[yd]/i.test(bare),
+    monthM: /m/i.test(bare) && !hasTime
+  };
+}
+
+/**
  * Check if format is a pure time format (no date components like y, m for month, d).
  * Time formats only contain: h, m (minutes in time context), s, AM/PM.
  * Excludes elapsed time formats like [h]:mm:ss which need the full serial number.
  */
 export function isTimeOnlyFormat(fmt: string): boolean {
-  const cleaned = fmt.replace(/"[^"]*"/g, "");
-  if (/\[[hms]\]/i.test(cleaned)) {
-    return false;
-  }
-  const withoutBrackets = cleaned.replace(/\[[^\]]*\]/g, "");
-  const hasTimeComponents = /[hs]/i.test(withoutBrackets) || /AM\/PM|A\/P/i.test(withoutBrackets);
-  const hasDateComponents = /[yd]/i.test(withoutBrackets);
-  if (hasDateComponents) {
-    return false;
-  }
-  if (/m/i.test(withoutBrackets) && !hasTimeComponents) {
-    return false;
-  }
-  return hasTimeComponents;
+  const { elapsed, hasTime, hasYearOrDay, monthM } = formatFacets(fmt);
+  return !elapsed && !hasYearOrDay && !monthM && hasTime;
 }
 
 /**
@@ -1058,21 +1112,42 @@ export function isTimeOnlyFormat(fmt: string): boolean {
  * formats like [h]:mm:ss (not a date format) and distinguishes month-m from minute-m.
  */
 export function isDateDisplayFormat(fmt: string): boolean {
-  const cleaned = fmt.replace(/"[^"]*"/g, "");
-  if (/\[[hms]\]/i.test(cleaned)) {
-    return false;
+  const { elapsed, hasYearOrDay, monthM } = formatFacets(fmt);
+  return !elapsed && (hasYearOrDay || monthM);
+}
+
+/**
+ * What a number format says a date-typed cell actually holds.
+ *
+ * **The format is the only record of the distinction.** A serial does not say whether its whole-day part or
+ * its fraction is the point, and neither does the `Date` the model stores — so this is where
+ * `Cell.getDateKind` and `Cell.getTemporal` get their answer, and why a time-of-day written without a format
+ * renders as `12-30-1899`.
+ *
+ * **`"unknown"` and `"duration"` are real answers, not failures to produce one.** This returned `"dateTime"`
+ * for an unformatted cell, a `General` cell, a plain number format and an elapsed-time format alike — which
+ * dressed "I cannot tell" and "this is a length of time" up as a specific calendar kind, and left
+ * `Cell.getTemporal` manufacturing a `PlainDateTime` for `[h]:mm:ss` that named a moment in 1899 for a value
+ * meaning thirty-six hours. A caller can now see the difference and decide.
+ */
+export type DateFormatKind = "date" | "time" | "dateTime" | "duration" | "unknown";
+
+export function dateFormatKind(fmt: string | undefined): DateFormatKind {
+  if (fmt === undefined || fmt === "" || isGeneral(fmt)) {
+    return "unknown";
   }
-  const withoutBrackets = cleaned.replace(/\[[^\]]*\]/g, "");
-  if (/[yd]/i.test(withoutBrackets)) {
-    return true;
+  const { elapsed, hasTime, hasYearOrDay, monthM } = formatFacets(fmt);
+  if (elapsed) {
+    return "duration";
   }
-  if (/m/i.test(withoutBrackets)) {
-    const hasTimeComponents = /[hs]/i.test(withoutBrackets) || /AM\/PM|A\/P/i.test(withoutBrackets);
-    if (!hasTimeComponents) {
-      return true;
-    }
+  const hasDate = hasYearOrDay || monthM;
+  if (hasDate && hasTime) {
+    return "dateTime";
   }
-  return false;
+  if (hasDate) {
+    return "date";
+  }
+  return hasTime ? "time" : "unknown";
 }
 
 /**

@@ -672,6 +672,10 @@ export async function writeXlsbPackage(
               }),
           ...(legacyVmlRel === undefined ? {} : { legacyDrawingRelationshipId: legacyVmlRel }),
           validations,
+          // The part writer needs its own copy: cell values carry `date1904` individually through
+          // `sheetRowsFromModel`, but a data validation's `type: "date"` bound is a serial that belongs to no
+          // cell and had nothing telling it which epoch to use.
+          date1904,
           rowBreaks: breaks.rows,
           columnBreaks: breaks.columns
         });

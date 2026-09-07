@@ -24,6 +24,10 @@ import type {
 import {
   cellAddName,
   cellAlignment,
+  cellDateKind,
+  cellGetDateParts,
+  cellGetTemporal,
+  cellSetDateParts,
   cellBorder,
   cellComment,
   cellDataValidation,
@@ -67,6 +71,7 @@ import {
 } from "@excel/core/cell";
 import type { ValueType } from "@excel/core/enums";
 import type { NoteData } from "@excel/core/note";
+import type { TemporalKind, TemporalPlainValue } from "@excel/core/temporal";
 import { getCellStyle } from "@excel/core/workbook-core";
 import { findCell, getCell, getSheetWorkbook } from "@excel/core/worksheet-core";
 import type { WorksheetData } from "@excel/core/worksheet-core";
@@ -82,6 +87,8 @@ import type {
   Protection,
   Style
 } from "@excel/types";
+import type { DateFormatKind } from "@excel/utils/cell-format";
+import type { ExcelDateTimeParts } from "@utils/excel-serial";
 
 /** A worksheet handle (opaque to consumers). */
 export type Sheet = WorksheetData;
@@ -143,6 +150,164 @@ export function setValue(
   );
   cellSetValue(cell, resolved);
 }
+// --- dates as calendar values ---
+
+/**
+ * Read a date cell as calendar fields, or `undefined` if it holds no date.
+ *
+ * The unambiguous counterpart of {@link getValue} for a date. `getValue` returns a `Date`, which is an *instant*
+ * and therefore needs a convention to be read as a calendar value — this library's is that the civil fields are
+ * the `Date`'s **UTC** fields, and reading it with `getFullYear()` instead of `getUTCFullYear()` gives the wrong
+ * day in half the world's timezones. These fields cannot be read wrong: they have no timezone.
+ *
+ * Available on every supported runtime. `Temporal.PlainDate.from(parts)` converts one in a line, which is why
+ * this rather than {@link getTemporal} is the primitive.
+ *
+ * @example
+ * ```ts
+ * import { Cell } from "documonster/excel";
+ *
+ * const parts = Cell.getDateParts(sheet, "A1");
+ * // { year: 2024, month: 1, day: 15, hour: 0, minute: 0, second: 0, millisecond: 0 }
+ * ```
+ */
+export function getDateParts(ws: Sheet, addr: string): ExcelDateTimeParts | undefined;
+/** Read a date cell as calendar fields, by 1-based (row, col). */
+export function getDateParts(ws: Sheet, row: number, col: number): ExcelDateTimeParts | undefined;
+export function getDateParts(
+  ws: Sheet,
+  addr: string | number,
+  col?: number
+): ExcelDateTimeParts | undefined {
+  return cellGetDateParts(target(ws, addr, col, arguments.length));
+}
+
+/**
+ * Write a date cell from calendar fields, saying which of the three kinds of date cell it is.
+ *
+ * Missing fields default to zero, so `{ year: 2024, month: 1, day: 15 }` is a date and `{ hour: 9, minute: 30 }`
+ * is a time. `kind` decides the default number format and is inferred from the fields present when omitted — it
+ * is worth passing explicitly for a date-time whose time happens to be midnight, which is otherwise
+ * indistinguishable from a date.
+ *
+ * This is the runtime-independent half of the Temporal surface: it needs nothing but the fields.
+ *
+ * @example
+ * ```ts
+ * import { Cell } from "documonster/excel";
+ *
+ * Cell.setDateParts(sheet, "A1", { year: 2024, month: 1, day: 15 });
+ * Cell.setDateParts(sheet, "A2", { hour: 9, minute: 30 }, "time");
+ * ```
+ */
+export function setDateParts(
+  ws: Sheet,
+  addr: string,
+  parts: Partial<ExcelDateTimeParts>,
+  kind?: TemporalKind
+): void;
+/** Write a date cell from calendar fields, by 1-based (row, col). */
+export function setDateParts(
+  ws: Sheet,
+  row: number,
+  col: number,
+  parts: Partial<ExcelDateTimeParts>,
+  kind?: TemporalKind
+): void;
+export function setDateParts(
+  ws: Sheet,
+  addr: string | number,
+  partsOrCol: Partial<ExcelDateTimeParts> | number,
+  partsOrKind?: Partial<ExcelDateTimeParts> | TemporalKind,
+  kind?: TemporalKind
+): void {
+  if (typeof partsOrCol === "number") {
+    cellSetDateParts(
+      getCell(ws, addr as number, partsOrCol),
+      partsOrKind as Partial<ExcelDateTimeParts>,
+      kind
+    );
+    return;
+  }
+  cellSetDateParts(
+    getCell(ws, addr as string),
+    partsOrCol,
+    partsOrKind as TemporalKind | undefined
+  );
+}
+
+/**
+ * What kind of date cell this is, or `undefined` for a cell that holds no date.
+ *
+ * Decided by the cell's number format, which is the only place a spreadsheet records the distinction: the
+ * stored value is a serial, and a serial does not say whether the whole-day part or the fraction is the point.
+ *
+ * - `"date"`, `"time"`, `"dateTime"` — the format settles it.
+ * - `"unknown"` — the cell holds a date, but its format does not say which kind. An unformatted cell, a
+ *   `General` one, or one wearing a plain number format.
+ * - `"duration"` — an elapsed-time format such as `[h]:mm:ss`, where the serial is a length of time rather
+ *   than a moment. {@link getTemporal} refuses these; {@link getDateParts} does not.
+ */
+export function getDateKind(ws: Sheet, addr: string): DateFormatKind | undefined;
+/** What kind of date cell this is, by 1-based (row, col). */
+export function getDateKind(ws: Sheet, row: number, col: number): DateFormatKind | undefined;
+export function getDateKind(
+  ws: Sheet,
+  addr: string | number,
+  col?: number
+): DateFormatKind | undefined {
+  return cellDateKind(target(ws, addr, col, arguments.length));
+}
+
+/**
+ * Read a date cell as a Temporal `Plain*` value, chosen by the cell's number format.
+ *
+ * A `PlainDate` for a date-formatted cell, a `PlainTime` for a time-formatted one, a `PlainDateTime` for one
+ * carrying both, or for one whose format does not say. Returns `undefined` for a cell holding no date.
+ *
+ * **Refuses an elapsed-time format** such as `[h]:mm:ss`: that serial is a length of time, not a calendar
+ * value, and there is no `Plain*` that means it. Pass `kind` to read it as a civil value regardless.
+ *
+ * **Refuses Excel's fictitious 1900-02-29** (serial 60), which the ISO calendar has no room for.
+ * {@link getDateParts} reports it as plain fields.
+ *
+ * **Throws where Temporal is absent** — Node below 26, Safari, Chrome below 144 — rather than quietly
+ * returning a `Date` instead, because a return type that depends on the runtime is worse than a refusal. This
+ * package adds no polyfill; the zero-dependency rule forbids one. {@link getDateParts} is the same value
+ * everywhere.
+ *
+ * @param kind - Override the format's verdict.
+ *
+ * @example
+ * ```ts
+ * import { Cell } from "documonster/excel";
+ *
+ * const when = Cell.getTemporal(sheet, "A1"); // Temporal.PlainDate 2024-01-15
+ * ```
+ */
+export function getTemporal(
+  ws: Sheet,
+  addr: string,
+  kind?: TemporalKind
+): TemporalPlainValue | undefined;
+/** Read a date cell as a Temporal `Plain*` value, by 1-based (row, col). */
+export function getTemporal(
+  ws: Sheet,
+  row: number,
+  col: number,
+  kind?: TemporalKind
+): TemporalPlainValue | undefined;
+export function getTemporal(
+  ws: Sheet,
+  addr: string | number,
+  colOrKind?: number | TemporalKind,
+  kind?: TemporalKind
+): TemporalPlainValue | undefined {
+  return typeof colOrKind === "number"
+    ? cellGetTemporal(getCell(ws, addr as number, colOrKind), kind)
+    : cellGetTemporal(getCell(ws, addr as string), colOrKind);
+}
+
 /** Read a cell's text by `"A1"` address. */
 export function getText(ws: Sheet, addr: string): string;
 /** Read a cell's text by 1-based (row, col). */

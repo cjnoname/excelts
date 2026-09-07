@@ -48,6 +48,7 @@ import { parse } from "@formula/syntax/parser";
 import { printAst } from "@formula/syntax/print";
 import { tokenize } from "@formula/syntax/tokenizer";
 import { BinaryReader, BinaryWriter, concatUint8Arrays } from "@utils/binary";
+import { dateToExcel, excelToDate } from "@utils/utils";
 
 /** `valType`, MS-XLSB 2.4.356. The model's names for the same eight kinds. */
 const VALIDATION_TYPE = [
@@ -93,7 +94,8 @@ export interface SheetValidation {
 export function encodeValidation(
   validation: SheetValidation,
   context: PtgContext,
-  where: string
+  where: string,
+  date1904 = false
 ): Uint8Array | undefined {
   const rule = validation.rule;
   const type = VALIDATION_TYPE.indexOf(rule.type as (typeof VALIDATION_TYPE)[number]);
@@ -139,12 +141,12 @@ export function encodeValidation(
     encodeNullableWideString(value === "" ? undefined : value)
   );
 
-  const first = encodeFormulaField(formulae[0], rule.type, context, `${where} formula1`);
+  const first = encodeFormulaField(formulae[0], rule.type, context, `${where} formula1`, date1904);
   // `formula2` is only read when the operator takes two bounds. The specification requires `cce` to be
   // 0 otherwise, so an unused second formula is an empty one rather than a copy of the first.
   const second =
     usesOperator && (operator === 0 || operator === 1)
-      ? encodeFormulaField(formulae[1], rule.type, context, `${where} formula2`)
+      ? encodeFormulaField(formulae[1], rule.type, context, `${where} formula2`, date1904)
       : encodeParsedFormula(new Uint8Array(0));
   if (first === undefined || second === undefined) {
     return undefined;
@@ -172,7 +174,16 @@ export function encodeValidation(
 export function readValidation(
   payload: Uint8Array,
   part: string,
-  context: PtgContext = {}
+  context: PtgContext = {},
+  /**
+   * The workbook's date system, for turning a `type: "date"` bound back into a `Date`.
+   *
+   * **Without it this reader answered a different type from the XLSX one for the same rule.** XLSX reconciles a
+   * date bound to a `Date`; this returned the serial's text, so `Cell.getValidation` gave `"42383"` from an
+   * XLSB and a `Date` from an XLSX — the container leaking into the model, which is the one thing two readers
+   * of the same document must not do.
+   */
+  date1904 = false
 ): SheetValidation | undefined {
   try {
     const reader = new BinaryReader(payload, 0, part);
@@ -214,7 +225,18 @@ export function readValidation(
 
     const first = readFormulaField(reader, part, context);
     const second = readFormulaField(reader, part, context);
-    const formulae = [first, second].filter((value): value is string => value !== undefined);
+    const texts = [first, second].filter((value): value is string => value !== undefined);
+    // A date bound is stored as a serial literal, exactly as a date cell's value is, so it is read back the
+    // same way. A bound that is an expression rather than a literal stays text — there is no date to recover.
+    const formulae: (string | number | Date)[] =
+      type === "date" || type === "time"
+        ? texts.map(text => {
+            const serial = Number(text);
+            return text.trim() !== "" && Number.isFinite(serial)
+              ? excelToDate(serial, date1904)
+              : text;
+          })
+        : texts;
     // `typOperator` is undefined for a list and a custom rule — the specification says to ignore it —
     // so reading one there would invent a constraint the record does not express.
     const usesOperator = type !== "list" && type !== "custom";
@@ -275,12 +297,13 @@ function encodeFormulaField(
   formula: string | number | Date | undefined,
   type: DataValidationRule["type"],
   context: PtgContext,
-  where: string
+  where: string,
+  date1904: boolean
 ): Uint8Array | undefined {
   if (formula === undefined) {
     return encodeParsedFormula(new Uint8Array(0));
   }
-  const text = formulaText(formula, type);
+  const text = formulaText(formula, type, date1904);
   if (text === undefined) {
     return undefined;
   }
@@ -295,14 +318,15 @@ function encodeFormulaField(
 /** The expression text for a model formula value. */
 function formulaText(
   formula: string | number | Date,
-  type: DataValidationRule["type"]
+  type: DataValidationRule["type"],
+  date1904: boolean
 ): string | undefined {
   if (typeof formula === "number") {
     return String(formula);
   }
   if (formula instanceof Date) {
     // A date bound is a serial number in the record, the same as a date cell's value.
-    return String(excelSerial(formula));
+    return String(dateToExcel(formula, date1904));
   }
   const trimmed = formula.startsWith("=") ? formula.slice(1) : formula;
   if (trimmed === "") {
@@ -310,11 +334,6 @@ function formulaText(
   }
   // An explicitly quoted list — `'"a,b"'` — is already a string literal and tokenises as one.
   return trimmed;
-}
-
-/** Days since the 1900 epoch, matching how a date cell's value is stored. */
-function excelSerial(date: Date): number {
-  return date.getTime() / 86_400_000 + 25_569;
 }
 
 function errorStyleName(value: string | undefined): (typeof ERROR_STYLE)[number] {

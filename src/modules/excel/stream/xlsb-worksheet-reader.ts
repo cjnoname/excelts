@@ -39,6 +39,7 @@ import { streamBiffRecords } from "@excel/stream/xlsb-record-stream";
 import { encodeCol } from "@excel/utils/address";
 import { errorTextOf } from "@excel/xlsb/error-values";
 import { BinaryReader } from "@utils/binary";
+import { excelToDate, isDateFmt } from "@utils/utils";
 
 /** The sheet's last column, zero-based. `encodeCol` refuses anything past it, and so does this reader. */
 const MAX_COLUMN_INDEX = 16_383;
@@ -247,34 +248,22 @@ function readWideString(reader: BinaryReader): string {
   return text;
 }
 
-/** A serial wearing a date format is a date — the same rule the buffered reader applies. */
+/**
+ * A serial wearing a date format is a date — through `isDateFmt`, the same rule every other reader applies.
+ *
+ * This used to carry its own detector and its own epoch expression, and both differed from the buffered reader's.
+ * The detector disagreed on four of forty-five real formats: it did not take only the first section, so `";;;dd"`
+ * and `"@;;;yyyy"` were dates here and numbers there, and it stripped `\\`-escapes and lacked the `b`/`y` codes, so
+ * `"\\d0"` and `"y"` were numbers here and dates there. The same workbook therefore read back differently
+ * depending on which container it arrived in and whether the caller streamed it — the one thing two readers of the
+ * same document must not do, as `readXlsbInto` says in as many words.
+ */
 function dated(
   value: number,
   numberFormat: string | undefined,
   context: XlsbRowContext
 ): number | Date {
-  if (numberFormat === undefined || !looksLikeDate(numberFormat)) {
-    return value;
-  }
-  const epoch = context.date1904 === true ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
-  return new Date(epoch + value * 86_400_000);
-}
-
-/**
- * Whether a number format renders a date.
- *
- * A deliberately narrow test on the format's *codes* rather than a list of format ids: `yy`, `mm`, `dd`, `hh` and `ss`
- * are what make a serial a date, and a currency format containing the letter `d` must not qualify. Escaped text and
- * colour sections are stripped first for that reason.
- */
-function looksLikeDate(format: string): boolean {
-  const stripped = format
-    .replace(/\[[^\]]*\]/g, "")
-    .replace(/"[^"]*"/g, "")
-    .replace(/\\./g, "");
-  return (
-    /(\byy|y{2,}|m{1,5}|d{1,4}|h{1,2}|s{1,2}|AM\/PM)/i.test(stripped) && /[ymdhs]/i.test(stripped)
-  );
+  return isDateFmt(numberFormat) ? excelToDate(value, context.date1904) : value;
 }
 
 /** The assembled row, through the core factory so it is the same shape the XML path yields. */

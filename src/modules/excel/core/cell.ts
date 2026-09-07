@@ -11,6 +11,14 @@ import { Enums } from "@excel/core/enums";
 import { isNoteData, noteCreate, noteFromModel, noteModel } from "@excel/core/note";
 import type { NoteData } from "@excel/core/note";
 import type { RowData } from "@excel/core/row";
+import {
+  isTemporalPlainValue,
+  partsToTemporal,
+  temporalKindOf,
+  temporalRefusal,
+  temporalToParts
+} from "@excel/core/temporal";
+import type { TemporalKind, TemporalPlainValue } from "@excel/core/temporal";
 import type { Workbook } from "@excel/core/workbook";
 import type { Worksheet } from "@excel/core/worksheet";
 import { ExcelError, InvalidValueTypeError } from "@excel/errors";
@@ -34,10 +42,20 @@ import type {
   CellCheckboxValue,
   RichText
 } from "@excel/types";
-import { getCellDisplayText } from "@excel/utils/cell-format";
+import type { DateFormatKind } from "@excel/utils/cell-format";
+import { dateFormatKind, getCellDisplayText } from "@excel/utils/cell-format";
 import { colCache } from "@excel/utils/col-cache";
 import { copyStyle } from "@excel/utils/copy-style";
 import { slideFormula } from "@excel/utils/shared-formula";
+import type { ExcelDateTimeParts } from "@utils/excel-serial";
+import {
+  isExcelPhantomDay,
+  partsToSerial,
+  partsToUtcDate,
+  serialToParts,
+  utcDateToParts
+} from "@utils/excel-serial";
+import { excelToDate } from "@utils/utils";
 
 export type FormulaResult = string | number | boolean | Date | CellErrorValue;
 
@@ -400,14 +418,298 @@ export function cellGetValue(c: CellData): CellValueType {
   return c._value.value;
 }
 
+/**
+ * The default number format for a date cell of a known kind.
+ *
+ * **The number format is where the kind is stored.** A cell holding a `Date` with no `numFmt` is written with
+ * Excel's built-in `mm-dd-yy` (see `StylesXform`) whatever it contains — so a time-of-day renders as
+ * `12-30-1899` and a date-time silently drops its time. That the three need different formats is the second
+ * thing `Date` could not express, and the reason this is worth more than a type change: nothing in the value
+ * told the writer which of the three it had.
+ *
+ * All three are given one, including `"date"`. Leaving that case to inherit `mm-dd-yy` was tried first, to keep
+ * a caller moving from `new Date(...)` to `PlainDate` from finding their formatting changed — but the format is
+ * the *only* record of the kind, so an unformatted cell reads back as `"dateTime"` and a `PlainDate` did not
+ * survive its own round trip. A new input type has no existing behaviour to preserve; a value that comes back
+ * as what it went in as matters more than matching the default of the type it replaces.
+ */
+function defaultNumFmtFor(kind: TemporalKind): string {
+  switch (kind) {
+    case "date":
+      return "yyyy-mm-dd";
+    case "time":
+      return "hh:mm:ss";
+    case "dateTime":
+      return "yyyy-mm-dd hh:mm:ss";
+  }
+}
+
+/**
+ * A `Date` or a Temporal `Plain*`, as the `Date` the model stores.
+ *
+ * The `Date` is passed through untouched — its UTC fields are already the library's convention — while a
+ * Temporal value is *built* into that convention rather than reinterpreted into it, which is why it cannot be
+ * got wrong.
+ *
+ * The nullish case is not defensive padding: `Value.create` is also reached from `cellSetModel`, which boxes a
+ * date cell before it has a value and fills `model.value` in afterwards. The original assignment was unchecked,
+ * so this has to be exactly as permissive — and saying so in the signature is better than casting it away.
+ */
+function toCivilDate<T extends Date | TemporalPlainValue | null | undefined>(
+  value: T,
+  date1904: boolean
+): T extends Date | TemporalPlainValue ? Date : T {
+  type Result = T extends Date | TemporalPlainValue ? Date : T;
+  if (value === null || value === undefined || value instanceof Date) {
+    return value as Result;
+  }
+  return partsToUtcDate(temporalToParts(value, date1904)) as Result;
+}
+
+/**
+ * The workbook's date system, from a cell.
+ *
+ * Needed at *assignment* time, not just at write time, because a time-of-day is anchored on the calendar date
+ * that is serial 0 — and that date differs between the two epochs. Reached through the row's worksheet, which is
+ * the only link a `CellData` has; a cell not yet attached to a workbook falls back to the 1900 system, which is
+ * also what the writers default to.
+ */
+function cellDate1904(cell: CellData): boolean {
+  const workbook = cell.row?.worksheet?._workbook as
+    | { properties?: { date1904?: boolean } }
+    | undefined;
+  return workbook?.properties?.date1904 === true;
+}
+
 export function cellSetValue(c: CellData, v: CellValueInputType): void {
   if (cellType(c) === Types.Merge) {
     cellSetValue(c._value.master!, v);
     return;
   }
+  // Refused here rather than in `Value.getType`, which must be able to classify anything without throwing —
+  // `Cell.getType` calls it. An `Instant` reaching the model would be stored as `[object Object]`; naming it and
+  // the one call that fixes it is worth more than either guessing a timezone or failing later and elsewhere.
+  const refusal = temporalRefusal(v);
+  if (refusal !== undefined) {
+    throw new InvalidValueTypeError(String((v as object)[Symbol.toStringTag]), refusal);
+  }
   c._formulaGhostOwner = undefined;
   c._value.release();
   c._value = Value.create(Value.getType(v), c, v);
+  const kind = temporalKindOf(v);
+  if (kind !== undefined && c.style.numFmt === undefined) {
+    // Only when the cell has none of its own: an explicit format the caller set is theirs, and a value assignment
+    // is not the place to overrule it.
+    c.style.numFmt = defaultNumFmtFor(kind);
+  }
+}
+
+/** Upper bound for each calendar field. `day` is checked against the month once the month is known. */
+const FIELD_LIMITS: Readonly<Record<string, readonly [number, number]>> = {
+  month: [1, 12],
+  day: [1, 31],
+  hour: [0, 23],
+  minute: [0, 59],
+  second: [0, 59],
+  millisecond: [0, 999]
+};
+
+/** Days in each 1-based month of a year, with the Gregorian leap rule. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+/**
+ * Reject calendar fields that do not name a day, rather than carrying them.
+ *
+ * **`partsToSerial` carries and this does not, and the difference is deliberate.** Internal month arithmetic —
+ * `EDATE`, coupon stepping — depends on `{ month: 13 }` meaning next January and `{ day: 0 }` meaning the end of
+ * the previous month, so the conversion stays permissive. A public setter inheriting that meant
+ * `{ year: 2024, month: 2, day: 31 }` became March 2 in silence, `{ hour: 99 }` moved the date four days, and
+ * `{ year: NaN }` wrote `NaN` into the file — a workbook Excel cannot open, from a call that reported success.
+ *
+ * Excel's fictitious 1900-02-29 is refused too, and for a reason worth stating: a cell's value is stored as a
+ * `Date`, and no `Date` names that day. Accepting it would store 1900-03-01 — serial 61 — while reporting
+ * success, which is worse than saying so. The serial arithmetic in `@utils/excel-serial` does model it, and the
+ * formula engine reads it correctly (`MONTH(60)` is 2, `DAY(60)` is 29), because those work on serials and
+ * never pass a date through a `Date`.
+ */
+function validateDateParts(parts: Partial<ExcelDateTimeParts>, date1904: boolean): void {
+  const fail = (message: string): never => {
+    throw new InvalidValueTypeError("date parts", message);
+  };
+  const entries = Object.entries(parts) as [keyof ExcelDateTimeParts, number | undefined][];
+  if (entries.every(([, value]) => value === undefined)) {
+    fail("no fields given; supply at least a date (year, month, day) or a time (hour, minute, …)");
+  }
+  for (const [name, value] of entries) {
+    if (value === undefined) {
+      continue;
+    }
+    if (!Number.isInteger(value)) {
+      fail(`${name} must be an integer, received ${String(value)}`);
+    }
+    const limits = FIELD_LIMITS[name];
+    if (limits !== undefined && (value < limits[0] || value > limits[1])) {
+      fail(`${name} must be between ${limits[0]} and ${limits[1]}, received ${String(value)}`);
+    }
+  }
+  const { year, month, day } = parts;
+  if (year === undefined && (month !== undefined || day !== undefined)) {
+    fail("a date needs a year when month or day is given");
+  }
+  if (year !== undefined && month !== undefined && day !== undefined) {
+    if (isExcelPhantomDay({ year, month, day } as ExcelDateTimeParts, date1904)) {
+      fail(
+        "1900-02-29 is Excel's fictitious leap day (serial 60) and no JavaScript Date names it, so a cell " +
+          "cannot hold it — storing it would silently write 1900-03-01 instead. Use 1900-03-01 or 1900-02-28."
+      );
+    }
+    const limit = daysInMonth(year, month);
+    if (day > limit) {
+      fail(`${year}-${String(month).padStart(2, "0")} has ${limit} days, received day ${day}`);
+    }
+  }
+}
+
+/**
+ * Set a date cell from plain calendar fields, saying which kind of date cell it is.
+ *
+ * The runtime-independent half of the Temporal surface, and the one that works everywhere. `Cell.setValue` with
+ * a `Temporal.PlainTime` needs Node 26 or Chrome 144; this needs nothing, and
+ * `Cell.setDateParts(sheet, "A1", { hour: 9, minute: 30 }, "time")` is the same cell.
+ *
+ * It exists as its own function rather than as another shape `setValue` accepts because a bare object cannot be
+ * told apart from a value a caller means to store as JSON — `{ year: 2024, month: 1, day: 15 }` is a plausible
+ * record — and quietly reinterpreting one as a date would be a new instance of the ambiguity this whole change
+ * removes. A Temporal value is safe to detect because it carries a brand and a shape.
+ *
+ * Fields are validated; see {@link validateDateParts} for why this refuses what `partsToSerial` accepts.
+ *
+ * @param kind - Which kind of date cell, which decides the default number format. Inferred from the fields
+ *   present when omitted: time fields only means `"time"`, a date with a non-zero time means `"dateTime"`.
+ */
+export function cellSetDateParts(
+  c: CellData,
+  parts: Partial<ExcelDateTimeParts>,
+  kind?: TemporalKind
+): void {
+  const date1904 = cellDate1904(c);
+  validateDateParts(parts, date1904);
+  const hasDate = parts.year !== undefined;
+  // A value with no date fields is a time of day, and a time of day is the fraction of a day left over from
+  // serial 0 — whose calendar date is 1899-12-31 under the 1900 epoch but 1904-01-01 under the 1904 one.
+  // Hard-coding either writes a negative serial into the other kind of workbook, which Excel shows as `######`.
+  const zero = serialToParts(0, date1904);
+  const filled: ExcelDateTimeParts = {
+    year: parts.year ?? zero.year,
+    month: parts.month ?? (hasDate ? 1 : zero.month),
+    day: parts.day ?? (hasDate ? 1 : zero.day),
+    hour: parts.hour ?? 0,
+    minute: parts.minute ?? 0,
+    second: parts.second ?? 0,
+    millisecond: parts.millisecond ?? 0
+  };
+  const hasTime =
+    filled.hour !== 0 || filled.minute !== 0 || filled.second !== 0 || filled.millisecond !== 0;
+  const resolved: TemporalKind = kind ?? (hasDate ? (hasTime ? "dateTime" : "date") : "time");
+  // Through the serial, not through `partsToUtcDate`, so Excel's fictitious 1900-02-29 survives: it has a
+  // serial (60) but no `Date`, and building one would silently move it to March 1.
+  cellSetValue(c, excelToDate(partsToSerial(filled, date1904), date1904));
+  if (c.style.numFmt === undefined) {
+    c.style.numFmt = defaultNumFmtFor(resolved);
+  }
+}
+
+/**
+ * The date in a cell, as calendar fields — or `undefined` if the cell holds no date.
+ *
+ * **What `Date` could not tell you, and what a caller most often actually wants.** A date cell's fields are the
+ * spreadsheet's own; asking a `Date` for them requires knowing that the answer is in its *UTC* fields, and every
+ * caller who used `getFullYear()` instead of `getUTCFullYear()` read the wrong day somewhere on Earth. These
+ * fields have no timezone to get wrong.
+ *
+ * Works on every supported runtime, unlike {@link cellGetTemporal}, and `Temporal.PlainDate.from(parts)` turns
+ * one into the other in a line — which is why this, not the Temporal accessor, is the primitive.
+ *
+ * A formula cell reports the fields of its cached result when that result is a date.
+ */
+export function cellGetDateParts(c: CellData): ExcelDateTimeParts | undefined {
+  const value = cellGetValue(c);
+  // `cellResult` rather than a structural `"result" in value` test: a formula cell's cached value has an
+  // accessor, and re-deriving it here would be a second opinion about what a formula cell is.
+  const date = value instanceof Date ? value : cellResult(c);
+  return date instanceof Date ? utcDateToParts(date) : undefined;
+}
+
+/**
+ * What kind of date cell this is, according to its number format.
+ *
+ * The number format is the *only* record of the distinction — a serial does not carry it and neither does the
+ * `Date` the model stores — which is precisely why a time-of-day round-tripped through this library used to
+ * come back looking like a date in 1899.
+ *
+ * `undefined` means the cell holds no date at all. `"unknown"` means it does, but its format does not say which
+ * kind — an unformatted cell, a `General` one, or one wearing a plain number format. `"duration"` means the
+ * format is an elapsed-time one such as `[h]:mm:ss`, where the serial is a length of time and not a moment.
+ *
+ * The reading of the format itself lives in `dateFormatKind`, beside `isTimeOnlyFormat` and
+ * `isDateDisplayFormat`, so that this file does not become a fifth place with an opinion about number formats.
+ */
+export function cellDateKind(c: CellData): DateFormatKind | undefined {
+  if (cellGetDateParts(c) === undefined) {
+    return undefined;
+  }
+  const numFmt = c.style.numFmt;
+  return dateFormatKind(typeof numFmt === "string" ? numFmt : numFmt?.formatCode);
+}
+
+/**
+ * The date in a cell as a Temporal `Plain*` value, chosen by the cell's number format.
+ *
+ * A `PlainDate` for a date-formatted cell, a `PlainTime` for a time-formatted one, a `PlainDateTime` for one
+ * carrying both — the distinction `Date` cannot hold, recovered from the only place the file records it.
+ *
+ * **A cell whose format does not settle the question is read as a `PlainDateTime`**, which is the reading that
+ * discards nothing, and `Cell.getDateKind` reports `"unknown"` so a caller can tell the two apart. Pass `kind`
+ * to decide it yourself.
+ *
+ * **An elapsed-time format is refused.** `[h]:mm:ss` over serial 1.5 means thirty-six hours, and there is no
+ * civil date that means that; manufacturing a `PlainDateTime` in 1899 for it was worse than saying so. The
+ * refusal names `getDateParts`, which still works.
+ *
+ * **Throws where Temporal is absent**, rather than degrading to a `Date`: a function whose return type changes
+ * with the runtime is worse than one that says it cannot run. Node 26+, Chrome 144+, Firefox 139+, Bun 1.4+ or
+ * Deno 2.7+; this package adds no polyfill. Use {@link cellGetDateParts} for the same value everywhere.
+ *
+ * @param kind - Override the format's verdict. Required to read a `"duration"` cell as a civil value.
+ */
+export function cellGetTemporal(c: CellData, kind?: TemporalKind): TemporalPlainValue | undefined {
+  const parts = cellGetDateParts(c);
+  if (parts === undefined) {
+    return undefined;
+  }
+  if (kind !== undefined) {
+    return partsToTemporal(parts, kind, cellDate1904(c));
+  }
+  const detected = cellDateKind(c);
+  if (detected === "duration") {
+    throw new InvalidValueTypeError(
+      "duration",
+      "this cell's number format is an elapsed-time one, so its serial is a length of time rather than a " +
+        "calendar value and has no Temporal Plain* equivalent. Use Cell.getDateParts, or pass an explicit " +
+        "kind to read it as a civil value anyway."
+    );
+  }
+  // `"unknown"` reads as a date-time: it is the only one of the three that keeps both halves of the serial.
+  return partsToTemporal(
+    parts,
+    detected === undefined || detected === "unknown" ? "dateTime" : detected,
+    cellDate1904(c)
+  );
 }
 
 export function cellAddMergeRef(c: CellData): void {
@@ -887,8 +1189,15 @@ class RichTextValue {
 
 class DateValue {
   declare public model: DateValueModel;
-  constructor(cell: CellData, value: Date) {
-    this.model = { address: cell.address, type: Types.Date, value };
+  constructor(cell: CellData, value: Date | TemporalPlainValue) {
+    // Normalised at the door, so the model holds exactly one representation of a date. Letting a Temporal value
+    // through would put it in front of every consumer of `CellValue` — thirty-odd call sites that test
+    // `instanceof Date` — and `CellValue` deliberately did not grow to warn them.
+    this.model = {
+      address: cell.address,
+      type: Types.Date,
+      value: toCivilDate(value, cellDate1904(cell))
+    };
   }
   get value(): Date {
     return this.model.value;
@@ -1428,6 +1737,12 @@ const Value = {
       return Types.Boolean;
     }
     if (value instanceof Date) {
+      return Types.Date;
+    }
+    // A civil Temporal value is a date cell. Classified *before* the structural checks below, which would
+    // otherwise fall through to `Types.JSON` and store a `PlainDate` as `[object Object]`. Recognised by
+    // `Symbol.toStringTag`, never `instanceof` — see `@excel/core/temporal`.
+    if (isTemporalPlainValue(value)) {
       return Types.Date;
     }
     if (typeof value === "object") {

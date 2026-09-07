@@ -5,6 +5,7 @@
  */
 
 import { isNode } from "@utils/env";
+import { partsToSerial, partsToUtcDate, serialToParts, utcDateToParts } from "@utils/excel-serial";
 
 // =============================================================================
 // Base64 utilities (with native Buffer optimization for Node.js)
@@ -40,13 +41,33 @@ export function delay(ms: number): Promise<void> {
 // Date utilities
 // =============================================================================
 
+/**
+ * A `Date` as an Excel date serial.
+ *
+ * **The `Date` is read as a calendar value, not as an instant** — its *UTC* fields are taken to
+ * be the spreadsheet's wall-clock date and time. That is the convention the whole library
+ * follows (see `@utils/excel-serial`), and it is why `new Date(Date.UTC(2024, 0, 15))` is the
+ * form to pass. A locally-constructed `new Date(2024, 0, 15)` names a different instant in
+ * every timezone, so it converts to a different serial in every timezone; in UTC+8 it yields
+ * 45305.667, which Excel displays as 2024-01-14 16:00.
+ *
+ * `Date` cannot express which of its two readings is meant, which is the whole problem. Prefer
+ * {@link partsToSerial} internally, and `Cell.setValue` with a Temporal `Plain*` or an
+ * `ExcelDateTimeParts` externally, where the value says what it is.
+ */
 export function dateToExcel(d: Date, date1904?: boolean): number {
-  return 25569 + d.getTime() / (24 * 3600 * 1000) - (date1904 ? 1462 : 0);
+  return partsToSerial(utcDateToParts(d), date1904);
 }
 
+/**
+ * An Excel date serial as a `Date` carrying the calendar value in its **UTC** fields.
+ *
+ * The counterpart of {@link dateToExcel}, and the reason every consumer of a date cell in this
+ * codebase reads it with `getUTC*`. A caller who wants the value without the ambiguity should
+ * use `Cell.getDateParts` or `Cell.getTemporal`.
+ */
 export function excelToDate(v: number, date1904?: boolean): Date {
-  const millisecondSinceEpoch = Math.round((v - 25569 + (date1904 ? 1462 : 0)) * 24 * 3600 * 1000);
-  return new Date(millisecondSinceEpoch);
+  return partsToUtcDate(serialToParts(v, date1904));
 }
 
 /**

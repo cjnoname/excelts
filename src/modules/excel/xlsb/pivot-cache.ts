@@ -14,8 +14,8 @@
  */
 
 import type { CacheField, SharedItemValue } from "@excel/core/pivot-table-types";
-import { dateToSerial } from "@excel/xlsb/write/cells";
 import { BinaryWriter, concatUint8Arrays } from "@utils/binary";
+import { dateToExcel } from "@utils/utils";
 
 /** One record: a name and its payload, in the order MS-XLSB 3.8 gives them. */
 export type PivotRecord = readonly [string, Uint8Array | undefined];
@@ -395,7 +395,7 @@ function boundsFor(kinds: { numbers: readonly number[]; dates: readonly Date[] }
   readonly max: number;
 } {
   if (kinds.dates.length > 0) {
-    const serials = kinds.dates.map(date => dateToSerial(date, false));
+    const serials = kinds.dates.map(date => dateToExcel(date, false));
     return { min: Math.min(...serials), max: Math.floor(Math.max(...serials)) + 1 };
   }
   return { min: Math.min(...kinds.numbers), max: Math.max(...kinds.numbers) };

@@ -11,6 +11,7 @@ import {
 } from "@excel/core/worksheet";
 import { Cell, Column, Row, Workbook, Worksheet } from "@excel/index";
 import type { CellValue, WorksheetViewFrozen } from "@excel/types";
+import { excelToDate } from "@utils/utils";
 import { describe, it, expect } from "vitest";
 
 describe("Worksheet", () => {
@@ -281,7 +282,11 @@ describe("Worksheet", () => {
 
     it("formats formula result with elapsed time format", () => {
       const durationSerial = 1.5;
-      const durationAsDate = new Date(Math.round((durationSerial - 25569) * 86400000));
+      // Through the library's own converter, not a hand-rolled `(serial - 25569) * 86400000`. That expression
+      // is the linear model, which placed serial 0 at 1899-12-30 and so disagreed with Excel by a day for
+      // everything below serial 61 — the very defect the converter now corrects. A test that builds its input
+      // with a private copy of the arithmetic it is exercising cannot notice when that arithmetic is fixed.
+      const durationAsDate = excelToDate(durationSerial, false);
 
       const wb = Workbook.create();
       const ws = Workbook.addWorksheet(wb, "Sheet1");

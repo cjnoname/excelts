@@ -2511,6 +2511,68 @@ Mixing them is a compile error rather than a silent misread: `Cell.getValue(ws,
 "A1", 99)` used to type-check and read `"CUA1"`, and `Cell.getValue(ws, 5)` used
 to type-check and throw at runtime. Both are now rejected.
 
+### Dates: calendar values, not instants
+
+A spreadsheet date is a _civil_ value — a date on a calendar, a time on a clock,
+no timezone. A JavaScript `Date` is an instant. Bridging the two needs a
+convention, and this library's is that **a `Date` carries the spreadsheet's
+value in its UTC fields**:
+
+```typescript
+Cell.setValue(ws, "A1", new Date(Date.UTC(2024, 0, 15))); // ✅ 2024-01-15
+Cell.setValue(ws, "A2", new Date(2024, 0, 15)); // ⚠️ depends on where you run it
+```
+
+The second line stores a different serial in every timezone. In UTC+8 it is
+`45305.667`, which Excel displays as **2024-01-14 16:00**. Nothing can warn you,
+because both readings of that `Date` are legitimate and it does not say which was
+meant.
+
+So don't say it with a `Date`. Either pass calendar fields:
+
+```typescript
+Cell.setDateParts(ws, "A1", { year: 2024, month: 1, day: 15 });
+Cell.setDateParts(ws, "A2", { hour: 9, minute: 30 }, "time");
+
+Cell.getDateParts(ws, "A1"); // { year: 2024, month: 1, day: 15, hour: 0, ... }
+Cell.getDateKind(ws, "A2"); // "time"
+```
+
+…or a `Temporal.Plain*` value, where the runtime has one:
+
+```typescript
+Cell.setValue(ws, "A1", Temporal.PlainDate.from("2024-01-15"));
+Cell.setValue(ws, "A2", Temporal.PlainTime.from("09:30"));
+Cell.setValue(ws, "A3", Temporal.PlainDateTime.from("2024-01-15T09:30"));
+
+Cell.getTemporal(ws, "A1"); // Temporal.PlainDate 2024-01-15
+Cell.getTemporal(ws, "A2"); // Temporal.PlainTime 09:30:00
+```
+
+Both forms also carry something a `Date` cannot: **which of the three kinds of
+date cell it is**. A spreadsheet records that only in the number format, so a
+time-of-day written as a bare `Date` gets the default _date_ format and renders
+as `12-30-1899`. A `PlainTime` gets a time format, a `PlainDate` a date one.
+
+`Cell.getValue` still returns a `Date`, and `CellValue` is unchanged — only the
+_input_ type grew, so no existing code and no exhaustive `switch` is affected.
+
+> **The 1900 leap-year bug.** Excel spends serial 60 on a day that never existed,
+> 1900-02-29, so every date before 1900-03-01 sits one serial lower than a naive
+> count suggests. The converter models this — `DATE(1900,1,1)` is 1 and
+> `MONTH(60)` is 2, as in Excel — but a cell's value is stored as a `Date`, and no
+> `Date` names that day, so `Cell.setDateParts` refuses 1900-02-29 rather than
+> silently storing March 1. Serials from 61 onward are unaffected.
+
+> **Availability.** `Temporal` needs Node 26+, Chrome 144+, Firefox 139+, Bun
+> 1.4+ or Deno 2.7+, and this package adds no polyfill. `Cell.getDateParts` and
+> `Cell.setDateParts` work everywhere and are the primitive — `Temporal.PlainDate.from(parts)`
+> is one line. `Cell.getTemporal` throws rather than quietly returning a `Date`
+> where `Temporal` is absent. The exported `PlainDate` / `PlainTime` /
+> `PlainDateTime` types are derived structurally from `globalThis`, so a
+> consumer whose `lib` predates `esnext.temporal` gets `never` rather than an
+> error in a declaration file they did not write.
+
 ### Columns by key
 
 `Column.*` accepts a key, a letter or a 1-based number. `Column.getNumber`

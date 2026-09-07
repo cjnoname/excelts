@@ -787,7 +787,14 @@ export function readWorksheetPart(
   /** Collapse styled blank cells into rectangles instead of returning one `ReadCell` each. */
   collapseBlanks = false,
   /** What to do with a formula's expression — see `XlsbReadOptions.formulas`. */
-  formulaPolicy: "preserve" | "cached" = "preserve"
+  formulaPolicy: "preserve" | "cached" = "preserve",
+  /**
+   * The workbook's date system, for a `type: "date"` validation bound.
+   *
+   * Cell values get theirs from the caller's `asDateIfFormatted`; a bound is read here, and without this it
+   * came back as the serial's text where the XLSX reader returns a `Date`.
+   */
+  date1904 = false
 ): ReadWorksheet {
   const cells: ReadCell[] = [];
   const blankRuns = new StyledBlankRuns();
@@ -991,7 +998,7 @@ export function readWorksheetPart(
     }
 
     if (spec.name === "BrtDVal") {
-      const validation = readValidation(record.payload, part, formulaContext);
+      const validation = readValidation(record.payload, part, formulaContext, date1904);
       if (validation !== undefined) {
         validations.push(validation);
       }

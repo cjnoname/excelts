@@ -437,19 +437,19 @@ describe("DATE comprehensive", () => {
     expect(asNumber(fnDATE([rvNumber(2099), rvNumber(12), rvNumber(31)]))).toBe(73050);
   });
 
-  it("DATE(1900, 1, 1) = 2 (1-indexed epoch + Lotus offset)", () => {
-    // Serial 1 is 1900-01-01 pre-Feb29 bug — but Excel's DATE goes through
-    // JS Date construction and the 1900-leap shift makes Jan-1 of year 1900
-    // surface as serial 2. This is the documented baseline behaviour.
-    expect(asNumber(fnDATE([rvNumber(1900), rvNumber(1), rvNumber(1)]))).toBe(2);
+  it("DATE(1900, 1, 1) = 1, which is Excel's own answer", () => {
+    // This asserted 2, and said so in its name: the serial converter placed serial 0 at
+    // 1899-12-30 and ran linearly, so every date before 1900-03-01 came out one too high.
+    // Excel spends serial 60 on a day that does not exist (1900-02-29), and the converter now
+    // does too — so the 59 serials below it line up with Excel instead of being shifted past it.
+    expect(asNumber(fnDATE([rvNumber(1900), rvNumber(1), rvNumber(1)]))).toBe(1);
   });
 
-  it("DATE(1900, 2, 28) = 60 (excelToDate epoch shift yields the same serial as Lotus Feb 29)", () => {
-    // Under the 1900 epoch with the Lotus-bug compensation applied by the
-    // excelToDate shim, DATE(1900, 2, 28) and DATE(1900, 2, 29) both round
-    // to serial 60 — this is consistent with how Excel users expect pre-
-    // Mar-1-1900 arithmetic to land on the fictitious leap day.
-    expect(asNumber(fnDATE([rvNumber(1900), rvNumber(2), rvNumber(28)]))).toBe(60);
+  it("DATE(1900, 2, 28) = 59, distinct from the fictitious Feb 29", () => {
+    // These two used to collide on serial 60. They are different days to Excel — 59 and 60 —
+    // and conflating them made every January and February 1900 date off by one.
+    expect(asNumber(fnDATE([rvNumber(1900), rvNumber(2), rvNumber(28)]))).toBe(59);
+    expect(asNumber(fnDATE([rvNumber(1900), rvNumber(2), rvNumber(29)]))).toBe(60);
   });
 
   it("DATE(1900, 3, 1) = 61 (day after the fictitious Feb 29)", () => {
@@ -565,23 +565,33 @@ describe("HOUR / MINUTE / SECOND comprehensive", () => {
 });
 
 describe("YEAR / MONTH / DAY comprehensive", () => {
-  it("serial 0 (1899-12-30 epoch)", () => {
+  it("serial 0 is the day before Excel's serial 1", () => {
+    // Excel renders serial 0 as the fake "1900-01-00"; the real day before 1900-01-01 is
+    // 1899-12-31, which is what the converter reports. It used to say 1899-12-30, because the
+    // linear model had no room for the phantom leap day.
     expect(asNumber(fnYEAR([rvNumber(0)]))).toBe(1899);
     expect(asNumber(fnMONTH([rvNumber(0)]))).toBe(12);
-    expect(asNumber(fnDAY([rvNumber(0)]))).toBe(30);
+    expect(asNumber(fnDAY([rvNumber(0)]))).toBe(31);
   });
 
-  it("serial 60 is the fictitious 1900-02-29 (Lotus bug)", () => {
-    // Underlying UTC date is actually 1900-02-28 + 1 = 1900-02-29 via the
-    // excelToDate shim; YEAR/MONTH/DAY should report Feb 28 or Feb 29 — the
-    // contract: whatever the shim maps to must round-trip through
-    // DATE(1900, 2, 29) → 60.
+  it("serial 1 is 1900-01-01, as Excel says", () => {
+    expect(asNumber(fnYEAR([rvNumber(1)]))).toBe(1900);
+    expect(asNumber(fnMONTH([rvNumber(1)]))).toBe(1);
+    expect(asNumber(fnDAY([rvNumber(1)]))).toBe(1);
+  });
+
+  it("serial 60 is the fictitious 1900-02-29, exactly", () => {
+    // **Asserted exactly, where it used to accept 28 or 29.** The range was there because the
+    // field accessors read a `Date`, and a `Date` cannot hold 1900-02-29 — it normalises to
+    // March 1, so `MONTH(60)` answered 3. They read `ExcelDateTimeParts` now, which is plain
+    // numbers and can say what Excel says.
     expect(asNumber(fnYEAR([rvNumber(60)]))).toBe(1900);
     expect(asNumber(fnMONTH([rvNumber(60)]))).toBe(2);
-    // Serial 60 in the 1900-bug system is displayed by Excel as Feb 29, 1900
-    // but implementations vary; our excelToDate shim yields Feb 28.
-    expect(asNumber(fnDAY([rvNumber(60)]))).toBeGreaterThanOrEqual(28);
-    expect(asNumber(fnDAY([rvNumber(60)]))).toBeLessThanOrEqual(29);
+    expect(asNumber(fnDAY([rvNumber(60)]))).toBe(29);
+    // And it is a different day from its neighbours, which is the point of spending a serial on it.
+    expect(asNumber(fnDAY([rvNumber(59)]))).toBe(28);
+    expect(asNumber(fnDAY([rvNumber(61)]))).toBe(1);
+    expect(asNumber(fnMONTH([rvNumber(61)]))).toBe(3);
   });
 
   it("large-serial round-trip (2099-12-31)", () => {
@@ -604,10 +614,9 @@ describe("YEAR / MONTH / DAY comprehensive", () => {
   });
 
   it("boolean/string coercion on serial argument", () => {
-    // TRUE → 1 → serial 1 → 1899-12-31 under the current excelToDate shim
-    // (the shim places serial 0 at 1899-12-30, so serial 1 is the last day
-    // of 1899 rather than the first of 1900).
-    expect(asNumber(fnYEAR([rvBoolean(true)]))).toBe(1899);
+    // TRUE coerces to 1, and serial 1 is 1900-01-01 — Excel's `=YEAR(TRUE)` is 1900. This
+    // expected 1899 while the converter placed serial 0 at 1899-12-30.
+    expect(asNumber(fnYEAR([rvBoolean(true)]))).toBe(1900);
     expect(asNumber(fnYEAR([rvString("45292")]))).toBe(2024);
   });
 });

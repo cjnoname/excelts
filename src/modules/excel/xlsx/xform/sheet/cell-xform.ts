@@ -4,7 +4,13 @@ import { InvalidValueTypeError, ExcelError } from "@excel/errors";
 import type { RichText } from "@excel/types";
 import { BaseXform } from "@excel/xlsx/xform/base-xform";
 import { RichTextXform } from "@excel/xlsx/xform/strings/rich-text-xform";
-import { dateToExcel, isDateFmt, excelToDate, decodeOoxmlEscape } from "@utils/utils";
+import {
+  dateToExcel,
+  isDateFmt,
+  excelToDate,
+  decodeOoxmlEscape,
+  parseOoxmlDate
+} from "@utils/utils";
 import type { XmlAttributes } from "@xml/types";
 
 function getValueType(v) {
@@ -98,6 +104,26 @@ function extractHyperlinkDisplay(raw: unknown): { text: string; richText?: RichT
   return { text: String(raw) };
 }
 
+/**
+ * Record the workbook's date system on a cell model, or clear it.
+ *
+ * **The `else` is the fix.** `cellGetModel` hands back the live value model, so what `prepare` writes here
+ * outlives the write. Setting the flag only when true meant a workbook written once under the 1904 system kept
+ * `date1904: true` on every date cell forever; writing it again after switching back to 1900 re-encoded every
+ * date against the wrong epoch — 1,462 days out, silently, into a file that reopens cleanly because the
+ * workbook part *had* switched.
+ *
+ * Deleted rather than set to `false` because the field is optional and absent means 1900. Writing the default
+ * onto every date cell in every workbook would be noise in the model the caller can see.
+ */
+function setDate1904(model: { date1904?: boolean }, date1904: boolean): void {
+  if (date1904) {
+    model.date1904 = true;
+  } else {
+    delete model.date1904;
+  }
+}
+
 class CellXform extends BaseXform {
   declare private richTextXform: RichTextXform;
   declare public parser: BaseXform | undefined;
@@ -133,9 +159,7 @@ class CellXform extends BaseXform {
         break;
 
       case Enums.ValueType.Date:
-        if (options.date1904) {
-          model.date1904 = true;
-        }
+        setDate1904(model, options.date1904 === true);
         break;
 
       case Enums.ValueType.Hyperlink:
@@ -160,10 +184,8 @@ class CellXform extends BaseXform {
         break;
 
       case Enums.ValueType.Formula:
-        if (options.date1904) {
-          // in case valueType is date
-          model.date1904 = true;
-        }
+        // A cached formula result may be a date, so it needs the epoch for the same reason.
+        setDate1904(model, options.date1904 === true);
 
         // Convert isDynamicArray flag to cm attribute for XML rendering.
         // All dynamic array cells share cm=1 pointing to a single XLDAPR metadata record.
@@ -507,8 +529,15 @@ class CellXform extends BaseXform {
             case "d":
               // Strict OpenXML format stores dates as ISO strings with t="d"
               // See: https://www.loc.gov/preservation/digital/formats/fdd/fdd000401.shtml
+              //
+              // Through `parseOoxmlDate`, not `new Date(...)`. An OOXML datetime carries no timezone —
+              // `2020-01-15T00:00:00` — and every JS engine reads an unsuffixed datetime as *local*, so this
+              // branch produced a different instant in every timezone and read the date a day early anywhere
+              // east of UTC. Every other read path in the library lands on UTC midnight; this one did not, so
+              // the same workbook read back differently depending on which of two spellings of a date cell the
+              // producer had chosen. `parseOoxmlDate` is the shared fix and already existed.
               model.type = Enums.ValueType.Date;
-              model.value = new Date(model.value);
+              model.value = parseOoxmlDate(model.value);
               break;
             default:
               model.type = Enums.ValueType.Number;

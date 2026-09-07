@@ -36,10 +36,7 @@ import { type CellLike, type SheetCell, type SheetRow } from "@excel/xlsb/write/
 import { parse } from "@formula/syntax/parser";
 import { tokenize } from "@formula/syntax/tokenizer";
 import { BinaryWriter, concatUint8Arrays } from "@utils/binary";
-
-/** Days between the 1900 epoch Excel uses and the Unix epoch, including its leap-year bug. */
-const EXCEL_EPOCH_OFFSET = 25_569;
-const MS_PER_DAY = 86_400_000;
+import { dateToExcel } from "@utils/utils";
 
 /**
  * Choose the record for a cell value.
@@ -115,7 +112,7 @@ export function encodeCellRecord(
     // as any other number** — a whole-day serial is a small integer, which `RkNumber` holds in four bytes
     // where this wrote eight. It used to go straight to `BrtCellReal`, so every date cost four bytes more than
     // Excel spends on it, and Excel writes `BrtCellRk` for exactly these values.
-    return [numericCell(head, dateToSerial(value, cell.date1904 ?? false))];
+    return [numericCell(head, dateToExcel(value, cell.date1904 ?? false))];
   }
   // Unreachable for a model-derived cell: `writableValue` has already reduced anything this
   // cannot express to null. Reached only when a caller builds a `SheetCell` by hand with a
@@ -257,7 +254,7 @@ function encodeFormulaCell(
   // A date-valued cached result is its serial, the same number a literal date cell carries. The
   // epoch has to come from the cell rather than be assumed, for the same reason it does there.
   const result =
-    cell.value instanceof Date ? dateToSerial(cell.value, cell.date1904 ?? false) : cell.value;
+    cell.value instanceof Date ? dateToExcel(cell.value, cell.date1904 ?? false) : cell.value;
 
   // **A cached error is a `BrtFmlaError`, and writing `BrtFmlaNum` 0 instead was a silent corruption.**
   //
@@ -362,7 +359,7 @@ function followerCell(cell: SheetCell, head: Uint8Array): readonly Emitted[] | R
   const formula = encodeParsedFormula(reference.rgce, reference.rgbExtra);
   const flags = new BinaryWriter().writeUint16(0).toUint8Array();
   const value =
-    cell.value instanceof Date ? dateToSerial(cell.value, cell.date1904 ?? false) : cell.value;
+    cell.value instanceof Date ? dateToExcel(cell.value, cell.date1904 ?? false) : cell.value;
 
   if (typeof value === "boolean") {
     return [
@@ -410,10 +407,6 @@ function isRichText(value: unknown): value is { readonly richText: readonly Rich
     Array.isArray((value as { richText?: unknown }).richText) &&
     (value as { richText: unknown[] }).richText.length > 0
   );
-}
-
-export function dateToSerial(date: Date, date1904: boolean): number {
-  return date.getTime() / MS_PER_DAY + EXCEL_EPOCH_OFFSET - (date1904 ? 1462 : 0);
 }
 
 /**

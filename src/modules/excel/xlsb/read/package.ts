@@ -626,7 +626,9 @@ async function readInto(
       // given its `richText` back. Read once for the workbook and handed to every sheet.
       readStrings.runs,
       options.blankCells === "collapse",
-      options.formulas === "cached" ? "cached" : "preserve"
+      options.formulas === "cached" ? "cached" : "preserve",
+      // The same epoch the cells are read against, so a date bound and the cells it constrains agree.
+      date1904
     );
     // **`"error"` is enforced per sheet, as soon as that sheet is read.** Checking the accumulated diagnostics at the
     // end would work, but it would first build the whole workbook the caller has just said they do not want, and the

@@ -22,7 +22,7 @@ Documonster is organized into nine standalone modules. Each module has its own d
 
 ### Excel — XLSX/JSON Workbook Manager
 
-Create, read, and modify Excel spreadsheets with full styling, formulas, images, and streaming support.
+Create, read, and modify Excel spreadsheets with full styling, formulas, images, and streaming support. Dates are treated as calendar values rather than instants: `Cell.setDateParts` / `Cell.getDateParts` speak timezone-free fields on every runtime, and `Cell.setValue` / `Cell.getTemporal` accept and return `Temporal.PlainDate`, `PlainTime` and `PlainDateTime` where the host has them — which also recovers the date/time/date-time distinction a `Date` cannot carry. See [Dates: calendar values, not instants](src/modules/excel/README.md#dates-calendar-values-not-instants).
 
 - [Documentation](src/modules/excel/README.md) | [中文](src/modules/excel/README_zh.md)
 - [Examples](src/modules/excel/examples/)

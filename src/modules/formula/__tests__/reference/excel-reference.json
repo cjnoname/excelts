@@ -145,7 +145,7 @@
     { "formula": "=EXACT(\"abc\", \"ABC\")", "expected": false },
 
     { "formula": "=DATE(2024, 1, 15)", "expected": 45306 },
-    { "formula": "=DATE(1900, 1, 1)", "expected": 2 },
+    { "formula": "=DATE(1900, 1, 1)", "expected": 1 },
     { "formula": "=DATE(1900, 2, 29)", "expected": 60 },
     { "formula": "=DATE(50, 1, 1)", "expected": 18264 },
     { "formula": "=DATE(2024, 13, 1)", "expected": 45658 },

@@ -241,6 +241,15 @@ export interface WriteWorksheetPartOptions {
   /** Manual horizontal page breaks, one-based as the model holds them. */
   readonly rowBreaks?: readonly SheetBreak[];
   readonly columnBreaks?: readonly SheetBreak[];
+  /**
+   * Whether the workbook counts days from 1904.
+   *
+   * Cell values carry their own copy on `SheetCell`, because they are built one at a time. This one is for the
+   * parts of a sheet that hold a serial without being a cell — currently the `type: "date"` bounds of a data
+   * validation, which were being written against a hard-coded 1900 epoch and so sat 1,462 days away from the
+   * cells they constrained in any 1904 workbook.
+   */
+  readonly date1904?: boolean;
 }
 
 /**
@@ -424,7 +433,11 @@ export function worksheetEpilogueRecords(
     sheetProtectionSettings,
     validations = [],
     rowBreaks = [],
-    columnBreaks = []
+    columnBreaks = [],
+    // A `type: "date"` bound is a serial, so it needs the workbook's epoch exactly as a cell value does. Without
+    // it a 1904 workbook wrote its bounds 1,462 days from its cells, so a rule reading "on or after 2020-01-15"
+    // rejected that very date. The XLSX writer had the same defect.
+    date1904 = false
   } = options;
   const records: Emitted[] = [];
   records.push(record("BrtEndSheetData"));
@@ -508,7 +521,7 @@ export function worksheetEpilogueRecords(
   // the count is written rather than skipped inside the loop, or the header promises more records than
   // follow and a reader walks off the end of the collection.
   const encodedValidations = validations
-    .map(validation => encodeValidation(validation, formulaContext, "data validation"))
+    .map(validation => encodeValidation(validation, formulaContext, "data validation", date1904))
     .filter((bytes): bytes is Uint8Array => bytes !== undefined);
   if (encodedValidations.length > 0) {
     // **Eighteen bytes, with the count last.** MS-XLSB 2.5.36 makes this a `DVals`: a flag word, the input
