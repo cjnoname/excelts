@@ -122,6 +122,12 @@ export interface StreamModuleImports {
    * Browser implementations always return a Duplex.
    */
   nativeComposeReturnsDuplex: boolean;
+  /**
+   * Whether `duplexPair()` destroys the peer when one side is destroyed with
+   * an error. Node.js v24+ does; v22's leaves the peer open. The browser
+   * kernel follows its v26 baseline.
+   */
+  duplexPairDestroysPeerOnError: boolean;
 }
 
 /**
@@ -181,7 +187,8 @@ export function runStreamTests(imports: StreamModuleImports): void {
     uint8ArrayToString,
     uint8ArrayEquals,
     uint8ArrayIndexOf,
-    nativeComposeReturnsDuplex
+    nativeComposeReturnsDuplex,
+    duplexPairDestroysPeerOnError
   } = imports;
 
   // ==========================================================================
@@ -982,8 +989,12 @@ export function runStreamTests(imports: StreamModuleImports): void {
     });
 
     it("should return default high water mark for byte mode", () => {
+      // Node's default is 16 KB on Windows and 64 KB elsewhere; the browser
+      // kernel takes the non-Windows value. Whichever it is, it is the one a
+      // new stream uses.
       const hwm = getDefaultHighWaterMark(false);
-      expect(hwm).toBe(65536);
+      expect([16 * 1024, 64 * 1024]).toContain(hwm);
+      expect(new Readable().readableHighWaterMark).toBe(hwm);
     });
 
     it("should not throw when setting high water mark", () => {
@@ -3456,7 +3467,7 @@ export function runStreamTests(imports: StreamModuleImports): void {
           const originalHwm = getDefaultHighWaterMark(false);
           const originalObjectHwm = getDefaultHighWaterMark(true);
 
-          expect(originalHwm).toBe(65536);
+          expect([16 * 1024, 64 * 1024]).toContain(originalHwm);
           expect(originalObjectHwm).toBe(16);
 
           // Set new defaults
@@ -8894,9 +8905,11 @@ export function runStreamTests(imports: StreamModuleImports): void {
 
         await new Promise(resolve => setTimeout(resolve, 100));
 
-        // Node.js duplexPair tears the peer down too, but does not hand it the error.
-        expect(side2.destroyed).toBe(true);
+        // Node.js v24+ tears the peer down too, but does not hand it the error;
+        // v22 leaves it open. Neither hands the peer the error.
+        expect(side2.destroyed).toBe(duplexPairDestroysPeerOnError);
         expect(side2Error).toBe(false);
+        side2.destroy();
       });
     });
 

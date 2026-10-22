@@ -20,8 +20,9 @@ import { createReadable } from "@stream";
 export interface XlsxStreamOptions extends XlsxWriteOptions {
   /**
    * Readable-side buffer threshold in bytes, i.e. the amount of queued output
-   * after which the writer is asked to pause. Defaults to the `@stream` default
-   * (64 KB).
+   * after which the writer is asked to pause. Defaults to 64 KB on every
+   * runtime — not the platform stream default, which Node sets to 16 KB on
+   * Windows.
    *
    * This is **not** a hard memory bound. Backpressure is sampled after each ZIP
    * entry, and a worksheet is rendered as one entry, so peak
@@ -47,6 +48,9 @@ interface PushableByteStream extends XlsxReadable {
 
 const textEncoder = new TextEncoder();
 
+/** 64 KB: the same threshold on Node (whose own default is 16 KB on Windows), Bun and browsers. */
+const DEFAULT_HIGH_WATER_MARK = 64 * 1024;
+
 /**
  * Wrap a push-shaped XLSX serializer in a demand-driven readable byte stream.
  *
@@ -58,7 +62,7 @@ export function createXlsxByteStream(
   serialize: XlsxSerializer,
   options?: XlsxStreamOptions
 ): XlsxReadable {
-  const { highWaterMark, ...writeOptions } = options ?? {};
+  const { highWaterMark = DEFAULT_HIGH_WATER_MARK, ...writeOptions } = options ?? {};
   const listeners = new Map<string, Set<XlsxStreamListener>>();
   let started = false;
   let ended = false;

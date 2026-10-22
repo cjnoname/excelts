@@ -175,6 +175,24 @@ const converters: Record<string, (S: Api, s: unknown) => unknown> = {
 const apis: Api[] = [nodeStream, nodeEntry, browserEntry];
 
 /**
+ * The oracle is whatever Node runs the tests, and the kernel is a port of Node
+ * v26.8.1. Where an older supported line still behaves differently, the kernel
+ * is held to the v26 outcome recorded here and the Node entry to its host —
+ * which is that host's own classes. The line is not drawn by version number:
+ * Node 24 picked these up part-way through its 24.x releases.
+ */
+const KERNEL_BASELINE: Record<string, string> = {
+  // Earlier lines end the Web stream cleanly instead.
+  "Readable.toWeb(destroyed Readable)":
+    "RS  err:ABORT_ERR | data:0 drain:0 error:1 end:0 finish:0 close:0",
+  // Earlier lines do not validate `options`.
+  "Readable.toWeb(readable, 5)":
+    "Bun" in globalThis
+      ? "TypeError ERR_INVALID_ARG_TYPE"
+      : 'TypeError ERR_INVALID_ARG_TYPE: The "options" argument must be of type object. Received type number (5)'
+};
+
+/**
  * Cases where a chunk is pushed from inside a promise continuation and the
  * source fails a few microtasks later. Node runs the 'readable' tick only once
  * the microtask queue drains, so the failure gets there first and the chunk is
@@ -233,7 +251,8 @@ describe("class statics give node:stream's result on every entry", () => {
           return `${outcome} | ${listenersOf(source)}`;
         })
       );
-      expect(ours).toEqual([native, native]);
+      expect(ours[0]).toBe(native);
+      expect(ours[1]).toBe(KERNEL_BASELINE[`${name}(${stream})`] ?? native);
     });
   }
 });
@@ -448,10 +467,11 @@ describe("argument validation matches node:stream", () => {
     ["write(a number)", (S: Api) => new S.Writable({ write() {} }).write(5)],
     ["Duplex.from(5)", (S: Api) => S.Duplex.from(5)],
     ["Readable.toWeb(a function)", (S: Api) => S.Readable.toWeb(function named() {})]
-  ] as const)("%s", (_label, call) => {
+  ] as const)("%s", (label, call) => {
     const [native, kernel] = implementations.map((S: Api) => failureOf(() => call(S)));
-    expect(native).not.toBe("accepted");
-    expect(kernel).toBe(native);
+    const expected = KERNEL_BASELINE[label] ?? native;
+    expect(expected).not.toBe("accepted");
+    expect(kernel).toBe(expected);
   });
 
   it("push() of a non-chunk fails the stream with Node's error", async () => {

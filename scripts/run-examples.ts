@@ -75,6 +75,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { availableParallelism } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { collectExamples } from "./lib/examples.ts";
@@ -217,10 +218,17 @@ interface Result {
  */
 const OXC_REGISTER = import.meta.resolve("@oxc-node/core/register");
 
+/**
+ * The form `--import` takes on this runtime. Node needs the URL: on Windows it
+ * reads `D:\…` as a `d:` URL scheme. Bun reads `--import` as `--preload`, which
+ * takes a path, and on Windows cannot load the URL (`preload not found`).
+ */
+const OXC_REGISTER_ARG = "Bun" in globalThis ? fileURLToPath(OXC_REGISTER) : OXC_REGISTER;
+
 function runExample(file: string): Promise<Result> {
   const startedAt = Date.now();
   return new Promise(resolve => {
-    const proc = spawn(process.execPath, ["--import", OXC_REGISTER, file], {
+    const proc = spawn(process.execPath, ["--import", OXC_REGISTER_ARG, file], {
       cwd: ROOT,
       stdio: ["ignore", "pipe", "pipe"],
       // The example's own `process.argv[2]` must stay empty — see the header.

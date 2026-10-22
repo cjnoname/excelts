@@ -124,7 +124,8 @@ describe("Stream Module - Shared Tests (Browser kernel on Node)", () => {
     uint8ArrayEquals,
     uint8ArrayIndexOf,
     // Browser uses the project's own compose implementation which always returns a Duplex.
-    nativeComposeReturnsDuplex: true
+    nativeComposeReturnsDuplex: true,
+    duplexPairDestroysPeerOnError: true
   };
 
   runStreamTests(imports);

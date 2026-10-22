@@ -213,8 +213,8 @@ describe("Workbook.toStream", () => {
   }, 60000);
 
   it("uses the same buffer thresholds on every runtime", async () => {
-    // Node and browser resolve the default through the same `@stream` helper;
-    // pinning it here catches a platform variant drifting to its own default.
+    // 64 KB everywhere, set by the serializer itself: the platform stream
+    // default is 16 KB on Windows under Node.
     const defaulted = Workbook.toStream(buildWorkbook(1));
     expect(defaulted.readableHighWaterMark).toBe(64 * 1024);
 

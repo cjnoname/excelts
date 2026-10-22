@@ -904,11 +904,13 @@ import {
 } from "documonster/stream";
 
 // Get defaults
-getDefaultHighWaterMark(false); // 65536 (64KB for byte streams)
+getDefaultHighWaterMark(false); // 65536 (64KB for byte streams; 16384 under Node on Windows)
 getDefaultHighWaterMark(true); // 16 (16 objects for object mode)
 
-// Change the default for every stream created afterwards. As in Node, the value must be a
-// non-negative integer: anything else throws ERR_INVALID_ARG_TYPE or ERR_OUT_OF_RANGE.
+// Change the default for every stream created afterwards — the classes' and the factories'
+// alike. As in Node, the value must be a non-negative integer: anything else throws
+// ERR_INVALID_ARG_TYPE or ERR_OUT_OF_RANGE. Pass `highWaterMark` explicitly where a
+// threshold must be the same on every platform.
 setDefaultHighWaterMark(false, 128 * 1024);
 
 // Set custom high water mark per stream

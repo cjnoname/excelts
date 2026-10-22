@@ -900,11 +900,11 @@ import {
 } from "documonster/stream";
 
 // Get defaults
-getDefaultHighWaterMark(false); // 65536（字节流 64KB）
+getDefaultHighWaterMark(false); // 65536（字节流 64KB；Windows 上的 Node 为 16384）
 getDefaultHighWaterMark(true); // 16（对象模式 16 个对象）
 
-// 修改之后新建的所有流的默认值。与 Node 一样，值必须是非负整数，
-// 否则抛出 ERR_INVALID_ARG_TYPE 或 ERR_OUT_OF_RANGE。
+// 修改之后新建的所有流的默认值，类和工厂函数创建的流都受影响。与 Node 一样，值必须是非负整数，
+// 否则抛出 ERR_INVALID_ARG_TYPE 或 ERR_OUT_OF_RANGE。需要在各平台上保持相同阈值时，请显式传入 `highWaterMark`。
 setDefaultHighWaterMark(false, 128 * 1024);
 
 // Set custom high water mark per stream

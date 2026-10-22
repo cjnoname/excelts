@@ -124,7 +124,8 @@ describe("Stream Module - Shared Tests (Node)", () => {
     uint8ArrayToString,
     uint8ArrayEquals,
     uint8ArrayIndexOf,
-    nativeComposeReturnsDuplex: nodeMajor >= 24
+    nativeComposeReturnsDuplex: nodeMajor >= 24,
+    duplexPairDestroysPeerOnError: nodeMajor >= 24
   };
 
   runStreamTests(imports);
