@@ -148,14 +148,14 @@ export type PipelineStreamLike =
   | TransformStream<any, any>;
 
 /**
- * A generator/async-generator transform stage: `fn(source) => (Async)Iterable`.
+ * An async-generator transform stage: `fn(source) => AsyncIterable`.
  *
  * Only valid in the middle of a pipeline — a trailing function argument is
- * always read as the completion callback.
+ * always read as the completion callback. A middle stage must return an
+ * *async* iterable, as in Node: a sync generator fails with
+ * `ERR_INVALID_RETURN_VALUE`, so it is not accepted here either.
  */
-export type PipelineGeneratorStage = (
-  source: AsyncIterable<any>
-) => AsyncIterable<unknown> | Iterable<unknown>;
+export type PipelineGeneratorStage = (source: AsyncIterable<any>) => AsyncIterable<unknown>;
 
 /**
  * Everything `pipeline` accepts as a stage: streams (including Web Streams),
@@ -220,6 +220,22 @@ export interface ITransform<TInput = unknown, TOutput = unknown>
 export interface IDuplex<TRead = unknown, TWrite = unknown>
   extends IReadable<TRead>, IWritable<TWrite> {}
 
+/**
+ * A readable the caller produces into: what the module's own factories return,
+ * and `this` inside a `read` hook. {@link IReadable} is the consumer's view,
+ * which a stream from anywhere satisfies; this adds the producer's `push`.
+ */
+export interface IPushableReadable<T = unknown> extends IReadable<T> {
+  /** Queue a chunk; `null` ends the stream. `false` asks the producer to wait for the next `read`. */
+  push(chunk: T | null, encoding?: string): boolean;
+  /** Put a chunk back at the front of the queue. */
+  unshift(chunk: T, encoding?: string): void;
+}
+
+/** A duplex the caller produces into: `this` inside a `createDuplex` hook. */
+export interface IPushableDuplex<TRead = unknown, TWrite = unknown>
+  extends IPushableReadable<TRead>, IWritable<TWrite> {}
+
 // =============================================================================
 // Pull Stream Interface
 // =============================================================================
@@ -253,8 +269,6 @@ export interface IPullStream extends IEventEmitter {
   pull(size: number): Promise<Uint8Array>;
   /** Pull until pattern is found */
   pullUntil(pattern: Uint8Array, includePattern?: boolean): Promise<Uint8Array>;
-  /** Stream data until pattern */
-  stream(eof: number | Uint8Array): IReadable<Uint8Array>;
 
   readonly length: number;
   readonly isFinished: boolean;
@@ -305,7 +319,11 @@ export type IPassThrough<T = Uint8Array> = ITransform<T, T>;
  */
 export interface ICollector<T = unknown> extends IWritable<T> {
   readonly chunks: T[];
-  readonly isFinished?: boolean;
+  readonly isFinished: boolean;
+  /** Every chunk as one byte array; throws if a chunk is not binary. */
+  toUint8Array(): Uint8Array;
+  /** Every chunk as text: strings joined, bytes decoded as UTF-8. */
+  toString(): string;
 }
 
 // =============================================================================

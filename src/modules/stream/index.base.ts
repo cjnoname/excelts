@@ -27,6 +27,8 @@ export type {
   IWritable,
   ITransform,
   IDuplex,
+  IPushableReadable,
+  IPushableDuplex,
   IPullStream,
   IBufferedStream,
   IPassThrough,
@@ -60,7 +62,7 @@ export {
   readableStreamToAsyncIterable,
   text
 } from "@stream/core/stream-helpers";
-export type { AsyncIterableStream } from "@stream/core/stream-helpers";
+export type { AsyncIterableStream, ReadableStreamLike } from "@stream/core/stream-helpers";
 
 export {
   StreamError,

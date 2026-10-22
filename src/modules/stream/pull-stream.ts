@@ -5,7 +5,7 @@
  * Works identically in both browser and Node.js environments.
  */
 
-import type { PullStreamOptions } from "@stream/types";
+import type { IPullStream, PullStreamOptions } from "@stream/types";
 import { uint8ArrayIndexOf } from "@utils/binary";
 import { EventEmitter } from "@utils/event-emitter";
 
@@ -16,7 +16,7 @@ const EMPTY_U8 = new Uint8Array(0);
 /**
  * Browser-compatible Pull Stream - Read data from buffer on demand with pattern matching
  */
-export class PullStream extends EventEmitter {
+export class PullStream extends EventEmitter implements IPullStream {
   // Single growable buffer with read/write cursors.
   // IMPORTANT: never mutate bytes that have already been returned via subarray
   // (to keep views stable). When we need to reclaim prefix space, we allocate

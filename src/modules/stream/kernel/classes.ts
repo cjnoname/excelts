@@ -87,7 +87,8 @@ export interface ReadableOptions<T = any> extends ReadableStreamOptions, StateOp
   construct?: (this: Readable<T>, callback: (error?: Error | null) => void) => void;
 }
 
-type ReadableSourceLike<T> = Iterable<T> | AsyncIterable<T> | ReadableStream<T> | Blob | string;
+/** What `Readable.from` takes: Node's, with a Web stream read as an async iterable. */
+type ReadableSourceLike<T> = Iterable<T> | AsyncIterable<T> | ReadableStream<T>;
 
 /**
  * Type parameters default to `any`, as Node's own (non-generic) classes do, so
@@ -119,15 +120,34 @@ export class Readable<T = any> extends Stream {
   // Factories and Web interop
   // ---------------------------------------------------------------------------
 
-  static from<T>(iterable: ReadableSourceLike<T>, options?: ReadableOptions<T>): Readable<T> {
-    return from(Readable, iterable, options as Record<string, unknown>) as Readable<T>;
+  /**
+   * Values are awaited, as Node awaits them, so the stream yields what each
+   * resolves to. Object mode is the default; with `objectMode: false` every
+   * chunk reads back as a `Uint8Array`.
+   */
+  static from<T>(
+    iterable: ReadableSourceLike<T>,
+    options?: ReadableOptions<Awaited<T>> & { objectMode?: true }
+  ): Readable<Awaited<T>>;
+  static from(
+    iterable: ReadableSourceLike<string | ArrayBufferView>,
+    options: ReadableOptions<Uint8Array> & { objectMode: false }
+  ): Readable<Uint8Array>;
+  static from<T>(iterable: ReadableSourceLike<T>, options?: ReadableOptions): Readable;
+  static from(iterable: unknown, options?: ReadableOptions): Readable {
+    return from(Readable, iterable, options as Record<string, unknown>) as Readable;
   }
 
-  static fromWeb<T>(
-    readableStream: ReadableStream<T>,
+  /**
+   * Untyped, as Node declares it: what it yields depends on the mode (bytes by
+   * default, decoded strings with an `encoding`). The module's
+   * `readableFromWeb` types each case.
+   */
+  static fromWeb(
+    readableStream: ReadableStream,
     options?: ReadableStreamOptions & { encoding?: string; signal?: AbortSignal }
-  ): Readable<T> {
-    return readableFromWeb(Readable, readableStream, options, "node") as Readable<T>;
+  ): Readable {
+    return readableFromWeb(Readable, readableStream, options, "node") as Readable;
   }
 
   static toWeb<T>(
@@ -670,16 +690,20 @@ export class Duplex<TRead = any, TWrite = any> extends Readable<TRead> {
    * overload, see the real one below, as they do on `node:stream`.
    */
   static override fromWeb(readableStream: never, options?: never): never;
-  /** Adapt a Web `{ readable, writable }` pair (a `TransformStream`, say) into a Duplex. */
-  static override fromWeb<R = Uint8Array, W = Uint8Array>(
-    pair: { readable: ReadableStream<R>; writable: WritableStream<W> },
+  /**
+   * Adapt a Web `{ readable, writable }` pair (a `TransformStream`, say) into a
+   * Duplex. Untyped, as Node declares it: what the readable side yields depends
+   * on the mode.
+   */
+  static override fromWeb(
+    pair: { readable: ReadableStream; writable: WritableStream },
     options?: DuplexStreamOptions & {
       encoding?: string;
       decodeStrings?: boolean;
       signal?: AbortSignal;
     }
-  ): Duplex<R, W>;
-  static override fromWeb(pair: any, options?: any): Duplex<any, any> {
+  ): Duplex;
+  static override fromWeb(pair: any, options?: any): Duplex {
     return duplexFromWeb(Duplex, pair, options, "node");
   }
 

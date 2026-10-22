@@ -30,6 +30,7 @@ import type {
   RecordWithInfo
 } from "@csv/types";
 import { isReadableStreamLike, readableStreamToAsyncIterable } from "@stream/core/stream-helpers";
+import type { ReadableStreamLike } from "@stream/core/stream-helpers";
 import { toError } from "@utils/errors";
 
 /**
@@ -83,7 +84,8 @@ function normalizeAsyncInput(input: unknown): AsyncInput {
     return input;
   }
   if (isReadableStreamLike(input)) {
-    return readableStreamToAsyncIterable(input);
+    // The documented input: a Web stream of text or bytes, like any other source here.
+    return readableStreamToAsyncIterable(input as ReadableStreamLike<string | Uint8Array>);
   }
   throw new TypeError("input must be an AsyncIterable or a ReadableStream");
 }

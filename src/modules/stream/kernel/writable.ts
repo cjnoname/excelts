@@ -117,11 +117,12 @@ export class Writable<T = any> extends Stream implements WritableSide<T> {
     }
   }
 
-  static fromWeb<T>(
-    writableStream: WritableStream<T>,
+  /** Untyped, as Node declares it; the module's `writableFromWeb` is the same adapter, typed. */
+  static fromWeb(
+    writableStream: WritableStream,
     options?: WritableStreamOptions & { decodeStrings?: boolean; signal?: AbortSignal }
-  ): Writable<T> {
-    return writableFromWeb(Writable, writableStream, options, "node") as Writable<T>;
+  ): Writable {
+    return writableFromWeb(Writable, writableStream, options, "node") as Writable;
   }
 
   static toWeb<T>(streamWritable: Writable<T>): WritableStream<T> {

@@ -36,6 +36,26 @@ export class Collector<T = Uint8Array> extends Writable {
     this.chunks = chunks;
   }
 
+  // `node:stream`'s Writable takes any chunk. The collector's element type
+  // applies to what is written, as it does to `chunks` and as the browser
+  // Collector's does; the arguments are passed through unchanged.
+  override write(chunk: T, callback?: (error?: Error | null) => void): boolean;
+  override write(
+    chunk: T,
+    encoding?: BufferEncoding,
+    callback?: (error?: Error | null) => void
+  ): boolean;
+  override write(chunk: T, encodingOrCallback?: any, callback?: any): boolean {
+    return super.write(chunk, encodingOrCallback, callback);
+  }
+
+  override end(callback?: () => void): this;
+  override end(chunk: T, callback?: () => void): this;
+  override end(chunk: T, encoding?: BufferEncoding, callback?: () => void): this;
+  override end(chunkOrCallback?: any, encodingOrCallback?: any, callback?: any): this {
+    return super.end(chunkOrCallback, encodingOrCallback, callback);
+  }
+
   /**
    * Get all collected data as a single Uint8Array (for binary mode)
    */

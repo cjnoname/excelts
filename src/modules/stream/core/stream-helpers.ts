@@ -16,10 +16,25 @@ import { concatUint8Arrays, createTextDecoder } from "@utils/binary";
 /** A stream or anything else that can be iterated asynchronously. */
 export type AsyncIterableStream = { [Symbol.asyncIterator](): AsyncIterator<Uint8Array> };
 
+/**
+ * What `readableStreamToAsyncIterable` reads: a Web `ReadableStream` — whose
+ * element type is inferred from it — or anything with the same kind of reader,
+ * such as a stream from another realm.
+ */
+export type ReadableStreamLike<T = unknown> =
+  | ReadableStream<T>
+  | {
+      getReader(): {
+        read(): PromiseLike<{ done: true; value?: unknown } | { done: false; value: T }>;
+        cancel?(reason?: unknown): PromiseLike<void>;
+        releaseLock?(): void;
+      };
+    };
+
 /** `true` for an object with a Web `ReadableStream`'s `getReader()`. */
 export const isReadableStreamLike = isReadableStream as (
   value: unknown
-) => value is { getReader: () => any };
+) => value is ReadableStreamLike;
 
 /**
  * Read a Web `ReadableStream` with `for await`, whether or not the platform's
@@ -28,9 +43,9 @@ export const isReadableStreamLike = isReadableStream as (
  * so the caller decides what a value it cannot use means. Leaving the loop
  * early cancels the stream; the lock is released either way.
  */
-export async function* readableStreamToAsyncIterable<T = Uint8Array>(stream: {
-  getReader: () => any;
-}): AsyncGenerator<T, void, unknown> {
+export async function* readableStreamToAsyncIterable<T>(
+  stream: ReadableStreamLike<T>
+): AsyncGenerator<T, void, unknown> {
   const reader = stream.getReader();
   let done = false;
   try {
@@ -40,11 +55,11 @@ export async function* readableStreamToAsyncIterable<T = Uint8Array>(stream: {
         done = true;
         return;
       }
-      yield result.value as T;
+      yield result.value;
     }
   } finally {
     if (!done) {
-      await reader.cancel?.().catch(() => {});
+      await Promise.resolve(reader.cancel?.()).catch(() => {});
     }
     reader.releaseLock?.();
   }

@@ -41,11 +41,35 @@ export interface WebWritableOptions {
 
 type StreamCtor = new (options?: any) => any;
 
-/** A Web `ReadableStream` as a Node-style Readable of the platform's class. */
-export type ReadableFromWeb = <T = any>(
-  stream: ReadableStream<T>,
-  options?: WebReadableOptions
-) => IReadable<T>;
+/**
+ * A Web `ReadableStream` as a Node-style Readable of the platform's class,
+ * typed by what it yields. The default is byte mode, as in Node: every chunk
+ * reads back as a `Uint8Array`, and only strings and binary views can be
+ * carried. `objectMode: true` passes chunks through; an `encoding` decodes
+ * them to strings. A mode known only at run time gets every possibility.
+ */
+export interface ReadableFromWeb {
+  (
+    stream: ReadableStream<string | ArrayBufferView>,
+    options: WebReadableOptions & { encoding: string }
+  ): IReadable<string>;
+  <T>(
+    stream: ReadableStream<T>,
+    options: WebReadableOptions & { objectMode: true; encoding?: undefined }
+  ): IReadable<T>;
+  (
+    stream: ReadableStream<string | ArrayBufferView>,
+    options?: WebReadableOptions & { objectMode?: false; encoding?: undefined }
+  ): IReadable<Uint8Array>;
+  /**
+   * A mode known only at run time. It may be bytes, so the stream must carry
+   * what byte mode can; `objectMode` is required, so an omitted one cannot land here.
+   */
+  <T extends string | ArrayBufferView>(
+    stream: ReadableStream<T>,
+    options: WebReadableOptions & { objectMode: boolean }
+  ): IReadable<T | Uint8Array | string>;
+}
 
 /** A Web `WritableStream` as a Node-style Writable of the platform's class. */
 export type WritableFromWeb = <T = any>(
@@ -54,7 +78,8 @@ export type WritableFromWeb = <T = any>(
 ) => IWritable<T>;
 
 export function makeReadableFromWeb(Readable: StreamCtor): ReadableFromWeb {
-  return (stream, options) => adaptReadableFromWeb(Readable, stream, options);
+  return (stream: ReadableStream, options?: WebReadableOptions) =>
+    adaptReadableFromWeb(Readable, stream, options);
 }
 
 export function makeWritableFromWeb(Writable: StreamCtor): WritableFromWeb {
