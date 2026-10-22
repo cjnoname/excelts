@@ -66,7 +66,11 @@ function entries(): Array<{ subpath: string; file: string }> {
 }
 
 describe("the mechanism the require(esm) check depends on", () => {
-  it("throws ERR_REQUIRE_ASYNC_MODULE on top-level await", () => {
+  // Bun's require() accepts a module with top-level await, so there is no
+  // mechanism to prove there. The rule protects Node consumers and the Node
+  // jobs enforce it; spawning `node` would not help, since `bun --bun` puts
+  // itself on PATH under that name.
+  it.skipIf("Bun" in globalThis)("throws ERR_REQUIRE_ASYNC_MODULE on top-level await", () => {
     // Without this, the check below could be passing because Node tolerates a top-level
     // `await` rather than because the tree has none — and the rule it enforces would be
     // unenforced. Proved against a fixture rather than by hand against a real module.

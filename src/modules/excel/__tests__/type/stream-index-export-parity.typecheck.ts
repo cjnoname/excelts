@@ -59,7 +59,6 @@ type _NonClass_finished = Assert<
 >;
 
 type _NonClass_createReadable = Assert<
-  // @ts-expect-error Node vs browser `read()` callback signature differs
   IsEqualStrict<NodeRuntimeNonClass["createReadable"], BrowserRuntimeNonClass["createReadable"]>
 >;
 

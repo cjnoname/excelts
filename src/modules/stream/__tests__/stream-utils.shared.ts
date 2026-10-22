@@ -5,8 +5,8 @@
  * Platform-agnostic — imported by both Node.js and browser test runners.
  */
 
-import { createReadableFromArray } from "@stream";
 import {
+  createReadableFromArray,
   collect,
   text,
   json,
@@ -18,7 +18,7 @@ import {
   filter,
   isReadableStreamLike,
   readableStreamToAsyncIterable
-} from "@stream/utils";
+} from "@stream";
 import { stringToUint8Array } from "@utils/binary";
 import { describe, it, expect } from "vitest";
 
@@ -29,12 +29,29 @@ import { describe, it, expect } from "vitest";
 /**
  * Collect an IReadable (Node stream with asyncIterator) to array.
  */
+/**
+ * The chunks a stream emits. A stream is read through its 'data' events, not
+ * `for await`: Node's async iterator is an async generator whose `yield`
+ * awaits a thenable chunk, so a promise pushed by mistake would read back as
+ * its value and the test would pass.
+ */
 async function toArray<T>(stream: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = [];
-  for await (const chunk of stream) {
-    result.push(chunk);
+  const emitter = stream as unknown as {
+    on?: (event: string, listener: (value?: any) => void) => unknown;
+  };
+  if (typeof emitter.on !== "function") {
+    const result: T[] = [];
+    for await (const chunk of stream) {
+      result.push(chunk);
+    }
+    return result;
   }
-  return result;
+  return new Promise((resolve, reject) => {
+    const result: T[] = [];
+    emitter.on!("data", chunk => result.push(chunk as T));
+    emitter.on!("end", () => resolve(result));
+    emitter.on!("error", reject);
+  });
 }
 
 export function runStreamUtilsTests(): void {
@@ -349,6 +366,55 @@ export function runStreamUtilsTests(): void {
         result.push(chunk);
       }
       expect(result).toEqual([data]);
+    });
+
+    it("yields every value, null and undefined included, as values() does", async () => {
+      const source = (): ReadableStream<unknown> =>
+        new ReadableStream({
+          start(controller) {
+            for (const value of [1, null, undefined, 2]) {
+              controller.enqueue(value);
+            }
+            controller.close();
+          }
+        });
+      const result: unknown[] = [];
+      for await (const chunk of readableStreamToAsyncIterable<unknown>(source())) {
+        result.push(chunk);
+      }
+      expect(result).toEqual([1, null, undefined, 2]);
+      const reader = source().getReader();
+      const native: unknown[] = [];
+      for (let next = await reader.read(); !next.done; next = await reader.read()) {
+        native.push(next.value);
+      }
+      expect(result).toEqual(native);
+    });
+
+    it("leaves a value that is not bytes to the byte consumers, whatever the source", async () => {
+      // Through a Web stream or an async iterable, a null chunk is the same
+      // unusable value; it used to be skipped on one route and rejected on the other.
+      const web = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([104]));
+          controller.enqueue(null as unknown as Uint8Array);
+          controller.close();
+        }
+      });
+      const iterable = (async function* () {
+        yield new Uint8Array([104]);
+        yield null as unknown as Uint8Array;
+      })();
+      const failures = await Promise.all(
+        [web, iterable].map(source =>
+          text(source as AsyncIterable<Uint8Array>).then(
+            () => "accepted",
+            (error: Error) => error.name
+          )
+        )
+      );
+      expect(failures[0]).not.toBe("accepted");
+      expect(failures[0]).toBe(failures[1]);
     });
 
     it("should release lock after iteration completes", async () => {

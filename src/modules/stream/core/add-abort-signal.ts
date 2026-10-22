@@ -13,7 +13,7 @@ import { createAbortError } from "@utils/errors";
 // Types
 // =============================================================================
 
-export interface ListenerOps {
+interface ListenerOps {
   add(emitter: EventEmitterLike, event: string, listener: (...args: any[]) => void): void;
   remove(emitter: EventEmitterLike, event: string, listener: (...args: any[]) => void): void;
 }

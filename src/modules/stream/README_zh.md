@@ -2,10 +2,17 @@
 
 [English](README.md)
 
-跨平台流式实现，在 Node.js 和浏览器中提供完全相同的 API。
+Node.js 风格的流类与工具函数，同一份代码可在 Node.js 和浏览器中运行。
 
-- **Node.js**：使用原生 `stream` 模块以获得最佳性能
-- **浏览器**：使用 Web Streams API（`ReadableStream`、`WritableStream`、`TransformStream`）
+- **Node.js**：直接使用原生 `node:stream`——`Readable`、`Writable`、`Duplex`、`Transform`、
+  `PassThrough` 就是 Node 自己的类；阶段都是 Node 风格的流时，`pipeline`、`compose`、`duplexPair`
+  也调用 Node 的实现。
+- **浏览器**：移植自 Node 的 `lib/internal/streams`，背压、事件顺序和销毁流程与 Node 一致。
+
+两端凡是接受流的地方都接受 Web Streams（`ReadableStream`、`WritableStream`、`TransformStream`）。
+转换时请使用 `readableFromWeb` / `readableToWeb` / `writableFromWeb` / `writableToWeb`，它们在 Node.js、Bun
+和浏览器上行为一致；类自带的 `Readable.fromWeb` 等方法保持 Node 的行为，缺陷也一样（见
+[Node 风格流与 Web 流的转换](#node-风格流与-web-流的转换)）。
 
 ```typescript
 import { Readable, pipeline, createTransform } from "documonster/stream";
@@ -13,11 +20,11 @@ import { Readable, pipeline, createTransform } from "documonster/stream";
 
 ## 功能特性
 
-- **100% 跨平台** - 在 Node.js 和浏览器中拥有相同的 API、相同的类型、相同的行为
+- **跨平台** - Node.js 和浏览器的 API 与行为一致；共享测试套件同时在两端运行
 - **单一入口** - 根据运行环境自动解析到正确的实现
 - **类型安全** - 完整的 TypeScript 支持和一致的类型定义
 - **兼容 Node.js API** - 熟悉的 `Readable`、`Writable`、`Transform`、`Duplex` 类
-- **高性能** - 两个平台均使用原生实现
+- **能用原生就用原生** - Node 端是 Node 自己的实现；Web Streams 通过其自身的 reader / writer 读写
 
 ## 安装
 
@@ -542,7 +549,11 @@ await finished(writable);
 
 ### compose
 
-将多个 Transform 组合为单个 Transform。
+把多个阶段组合成一个 `Duplex`：写入进第一个阶段，读取来自最后一个阶段。阶段的类型与 `pipeline` 相同（Node 风格的流、
+Web 流、生成器函数、可迭代对象），规则与 Node 一致：不传阶段时抛出 `ERR_MISSING_ARGS`，只传一个阶段时返回
+`Duplex.from(stage)`。`compose<In, Out>(…)` 为写入和读取的数据标注类型（这是调用方的声明，不会与各阶段核对，Node 的 `compose`
+同样不做核对）；返回值是各入口自己的 `Duplex`，所以在 Node 上
+它可以用在任何接受 `node:stream` 的 `compose` 结果的地方。
 
 ```typescript
 import { compose, createTransform, createReadableFromArray, pipeline } from "documonster/stream";
@@ -881,11 +892,20 @@ await promises.finished(stream);
 控制流的缓冲行为。
 
 ```typescript
-import { getDefaultHighWaterMark, setDefaultHighWaterMark } from "documonster/stream";
+import {
+  Readable,
+  Writable,
+  getDefaultHighWaterMark,
+  setDefaultHighWaterMark
+} from "documonster/stream";
 
 // Get defaults
-getDefaultHighWaterMark(false); // 16384 (16KB for byte streams)
-getDefaultHighWaterMark(true); // 16 (16 objects for object mode)
+getDefaultHighWaterMark(false); // 65536（字节流 64KB）
+getDefaultHighWaterMark(true); // 16（对象模式 16 个对象）
+
+// 修改之后新建的所有流的默认值。与 Node 一样，值必须是非负整数，
+// 否则抛出 ERR_INVALID_ARG_TYPE 或 ERR_OUT_OF_RANGE。
+setDefaultHighWaterMark(false, 128 * 1024);
 
 // Set custom high water mark per stream
 const readable = new Readable({
@@ -943,7 +963,7 @@ stream.destroy(new Error("Manual destruction"));
 
 ## 浏览器兼容性
 
-浏览器实现使用 Web Streams API，兼容以下浏览器：
+浏览器实现是纯 JavaScript，依赖 `queueMicrotask`、`TextDecoder` 和 Web Streams，兼容以下浏览器：
 
 | 浏览器  | 最低版本 |
 | ------- | -------- |
@@ -961,7 +981,7 @@ Node.js 和浏览器之间的 API **完全相同**，允许你编写一次代码
 ## 性能
 
 - **Node.js**：使用原生 stream 模块，零开销（与 `require('stream')` 性能完全一致）
-- **浏览器**：优化的 Web Streams 实现（约为 Node.js 原生速度的 1/9，这在浏览器使用场景下是符合预期且可接受的）
+- **浏览器**：与 Node 实现相同的算法，缓冲和背压表现一致
 
 ### 性能建议
 
@@ -1112,13 +1132,14 @@ await pipeline(createReadStream("input.txt"), uppercase, createWriteStream("outp
 ### Fetch API 集成（浏览器）
 
 ```typescript
-import { Readable, pipeline, createCollector } from "documonster/stream";
+import { readableFromWeb, pipeline, createCollector } from "documonster/stream";
 
-// Fetch and process response
+// 获取并处理响应
 const response = await fetch("/api/large-data");
 
-// Convert Web ReadableStream to our Readable
-const readable = Readable.fromWeb(response.body!);
+// 把 Web ReadableStream 转成 Node 风格的 Readable（也可以直接把 `response.body` 交给 `pipeline`，
+// 它原样接受 Web 流）
+const readable = readableFromWeb(response.body!);
 
 const collector = createCollector<Uint8Array>();
 
@@ -1210,11 +1231,104 @@ const data = collector.toUint8Array();
 
 ## 平台差异（固有）
 
-虽然 Node.js 和浏览器之间的外部 API 完全对称，但以下差异是**平台固有的**，无法消除：
+API 及其类型在 Node.js、Bun 和浏览器上完全相同。下面这些差异之所以保留，是因为浏览器的标准 API 无法表达 Node 的行为；
+要消除它们，就得放弃 Node 已有的能力（`instanceof` 则需要改变它的含义）：
 
-| 方面                                    | Node.js                                                                                           | 浏览器                                                | 影响                                                                                               |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **二进制数据块类型**                    | `Buffer`（`Uint8Array` 的子类，具有 `.toString('hex')`、`.toString('base64')`、`.copy()` 等方法） | `Uint8Array`（已补丁 `.toString()` 以支持基本 UTF-8） | 使用 `Buffer` 特有方法的代码将无法跨平台运行。请改用本模块提供的 `Uint8Array` 工具函数。           |
-| **`readableBuffer` / `writableBuffer`** | 返回 Node.js 内部 `BufferList`（链表结构，具有 `.head`、`.length`）                               | 返回普通 `T[]` 数组                                   | 请勿依赖 `BufferList` 特有属性。两者都返回可迭代的数据块集合。                                     |
-| **事件调度**                            | `process.nextTick`（在微任务之前执行）                                                            | `queueMicrotask`（本身就是微任务）                    | 相对于 `Promise.then()` 的事件顺序在边界情况下可能不同。共享测试套件已验证所有常见模式的行为一致。 |
-| **`_readableState` / `_writableState`** | 可访问（Node.js 内部状态对象）                                                                    | 不存在（状态存储在各个私有字段中）                    | 请勿依赖内部状态对象。请使用公开的属性访问器。                                                     |
+| 方面                                    | Node.js                                                                                           | 浏览器                                                                                             | 影响                                                                                                                                                                                                                                                                                 |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **二进制数据块类型**                    | `Buffer`（`Uint8Array` 的子类，具有 `.toString('hex')`、`.toString('base64')`、`.copy()` 等方法） | `Uint8Array`（以字符串 push 的数据块保留 `.toString(encoding)`）                                   | 使用 `Buffer` 特有方法的代码将无法跨平台运行。请改用本模块提供的 `Uint8Array` 工具函数。                                                                                                                                                                                             |
+| **事件调度**                            | `process.nextTick`                                                                                | 一个微任务按顺序执行期间排入的所有 tick                                                            | 流自身事件和回调之间的顺序与 Node 一致；在宏任务（事件回调、定时器、I/O）中排入的 tick，执行位置也与 Node 一致。在 Promise 续体中排入时，Node 要等整个微任务队列清空才执行，浏览器没有任何原语能做到，因此会更早执行。两者均由 `__tests__/stream-scheduling.node.test.ts` 实测验证。 |
+| **`_readableState` / `_writableState`** | Node 的内部状态对象                                                                               | 字段名相同，但是不同的对象                                                                         | 属于内部实现：请使用公开的访问器（`readableLength`、`writableNeedDrain` 等）。                                                                                                                                                                                                       |
+| **`isDisturbed(webStream)`**            | 由 Node 自己的 Web Streams 回答                                                                   | 未锁定的流可准确判断（通过 `new Response(stream)` 探测，既不加锁也不读取）；已锁定的流返回 `false` | 对已锁定的流，真实答案是“未知”：读过和没读过无法区分，所以这里的 `false` 表示“未发现被读取过”。                                                                                                                                                                                      |
+| **`instanceof` 流的类**                 | 任何来源的 `node:stream` 流都为 `true`                                                            | 只有本模块的类创建的流为 `true`                                                                    | 其他来源的流（`readable-stream`、其他库）仍能被这里的所有函数识别和驱动：和 Node 一样，它们按流的协议判断，而不是按类判断。请用 `isReadable` / `isWritable` / `isStream` 判断，不要用 `instanceof`。                                                                                 |
+| **`finished(webStream)`**               | 任意 Web 流                                                                                       | 不支持：立即拒绝，且不对流加锁                                                                     | 标准 API 没有不加锁的完成信号，Web 流的队列是否被消费完，只有消费它的 reader 知道。请等待你自己的 reader / writer 的 `closed`。                                                                                                                                                      |
+
+### Node 风格流与 Web 流的转换
+
+请使用本模块自己的转换函数，它们在两端的行为一致：
+
+```ts
+import { readableFromWeb, readableToWeb, writableFromWeb, writableToWeb } from "documonster/stream";
+
+const nodeStyle = readableFromWeb(response.body!);
+const web = writableToWeb(nodeStyleWritable);
+```
+
+类上的静态方法（`Readable.fromWeb`、`Writable.toWeb`、`Duplex.fromWeb` 等）在**两端**都是 Node 的行为：
+Node 入口中是 `node:stream` 自己的实现，浏览器中是对它的忠实移植。因此基于它们写的代码在各处表现一致，
+缺陷也一致。截至 Node 26 它们有五处行为是错的，上面这几个模块函数全部修正了，且两端一致：
+
+| 类的静态方法（Node 的行为）                                                                             | 模块函数                                           |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `Readable.fromWeb` 把读到的 `null` push 进去，导致流提前结束，后面的数据被悄悄丢掉                      | `readableFromWeb` 以 `ERR_STREAM_NULL_VALUES` 失败 |
+| `Readable.fromWeb` / `Writable.fromWeb` / `Duplex.fromWeb` 永久持有 Web 流的锁                          | 适配器用完后交还锁                                 |
+| `w.writableNeedDrain` 时调用 `Writable.toWeb(w)`：下一次 Web 写入直接完成，从未调用 `w.write()`         | 先写入这块数据，再等待 drain                       |
+| `r.setEncoding(...)` 之后调用 `Readable.toWeb(r)`：字符串一旦排队，`'data'` 中抛出未捕获的 `RangeError` | 按字符数计算字符串大小                             |
+| `Readable.toWeb` / `Writable.toWeb` 用完后不移除挂在源流上的 `'data'` / `'drain'` 监听器                | 移除监听器                                         |
+
+`pipeline` 和 `compose` 自己读写 Web 流，`toWritable` 经由 `writableFromWeb`，所以两端都不受这些缺陷影响。
+
+在 Bun 上，Node 入口的类就是 Bun 自己的 `node:stream`，所以静态方法也是 Bun 的行为。例如 Bun 1.4 的 `Readable.fromWeb`
+在流结束后会释放锁，而 Node 不会。只有本模块的转换函数在 Node、Bun 和浏览器上行为完全一致。
+
+Node 风格的流根本无法传递 `null`（任何模式下 `push(null)` 都表示结束），需要传递时请在 Web 侧先包装，
+例如 `{ value: null }`。
+
+## 维护：上游基线
+
+`src/modules/stream/kernel/` 移植自 Node.js **v26.8.1**。Node 修复流相关的 bug 时，请对照下表比较，
+不要重新摸索行为：
+
+| Node.js 文件                                                       | 移植位置                                         |
+| ------------------------------------------------------------------ | ------------------------------------------------ |
+| `lib/internal/streams/readable.js`                                 | `readable-impl.ts`、`classes.ts` 中的 `Readable` |
+| `lib/internal/streams/writable.js`                                 | `writable.ts`                                    |
+| `lib/internal/streams/duplex.js`、`transform.js`、`passthrough.js` | `classes.ts`                                     |
+| `lib/internal/streams/destroy.js`                                  | `destroy.ts`                                     |
+| `lib/internal/streams/end-of-stream.js`                            | `end-of-stream.ts`                               |
+| `lib/internal/streams/from.js`                                     | `from.ts`                                        |
+| `lib/internal/streams/operators.js`                                | `operators.ts`                                   |
+| `lib/internal/streams/pipeline.js`                                 | `pipeline-impl.ts`                               |
+| `lib/internal/streams/compose.js`                                  | `compose-impl.ts`                                |
+| `lib/internal/streams/duplexify.js`                                | `duplexify.ts`                                   |
+| `lib/internal/streams/duplexpair.js`                               | `../browser/utils.ts` 中的 `DuplexSide`          |
+| `lib/internal/streams/utils.js`、`state.js`                        | `stream-utils.ts`、`state.ts`                    |
+| `lib/internal/webstreams/adapters.js`                              | `web-adapters.ts`                                |
+
+浏览器端的替代机制：`process.nextTick` → `state.ts` 中的 tick 队列；`Buffer` → `Uint8Array`（字符串数据块保留
+`toString(encoding)`）；`StringDecoder` → `createStreamDecoder`；位域状态 → 普通字段；CommonJS 对 `compose`
+的延迟 `require` → 由类传入的 `StreamKernel`。
+
+类的行为与 Node 完全一致，缺陷也一样。有意偏离之处只存在于本模块自己的函数中：上文安全转换函数的五处修正；
+`pipeline` 通过可在 abort 时取消的 reader 读取 Web 源，全 Web 管道走 `pipeTo`，在所有连接拆除完毕后才结束，
+并拒绝重复传入的同一个流；浏览器端的 `finished(webStream)` 直接拒绝 Web 流，而不是对它加锁。
+
+各类行为由哪个测试文件负责：
+
+| 文件（`__tests__/`）              | 判定标准                                                               |
+| --------------------------------- | ---------------------------------------------------------------------- |
+| `stream-node-oracle.node.test.ts` | 以 `node:stream` 为准：同一调用在两个入口上都必须得到它的结果          |
+| `stream-contract.shared.ts`       | 本模块自己的约定，逐条直接断言；在两个入口和 Chromium 中运行           |
+| `stream-interop.node.test.ts`     | 来自 `readable-stream`（以及对内核而言的 `node:stream`）的流，双向互通 |
+| `stream-scheduling.node.test.ts`  | 与 `node:stream` 对照事件顺序，以及唯一一处实测的平台限制              |
+| `stream-parity.node.test.ts`      | 旧浏览器实现出过的问题的回归测试，预期值显式写出                       |
+
+### 资源所有权
+
+谁负责清理由一条规则决定：**谁取得了 reader 或 writer，谁负责关闭、取消或释放它。** 流内核负责 Node 风格的
+状态和事件；Web 适配器负责它取得的 reader / writer；`pipeline` 负责它启动的连接；`finished` 只观察，从不加锁。模块的 `fromWeb` 函数在取得任何锁之前先检查所有锁，并在流结束、出错或被销毁时交还锁；模块的 `toWeb` 函数用完源流后会移除自己挂上的监听器。类的静态方法和 Node 一样，这两件事都不做。
+
+`pipeline` 分三个阶段。先检查每个阶段（类型不对、已被锁定、已被销毁，或同一个流出现两次——Node 不检查最后这一项），
+全部检查通过后才开始转换，而且检查没有副作用：在这一步被拒绝的管道没有创建、锁定或订阅任何东西，所有流仍归调用方。
+唯一的例外是阶段中的 Promise（包括嵌在 `{ readable, writable }` 对象任意层级里的）：它的拒绝会被处理掉，否则会变成
+未处理的拒绝。然后连接各阶段，并为每个连接登记停止方式；只有连接之后才会暴露的失败（生成器返回了无法使用的值）
+会拆除交给管道的所有阶段。最后在所有连接都结束、**并且所有清理都完成之后**只结束一次——包括数据源的取消、目标的中止、
+阶段自己的异步 `_destroy`。因此，如果某个阶段的 `_destroy` 永远不调用回调，管道也永远不会结束，这和 Node 的 `finished`
+在这种情况下不会结束是一样的。使用 `end: false` 时，Web 可写流会在全部写入完成后以未锁定状态交还给调用方。
+
+在 Node 入口，纯 Node 流的管道走 Node 自己的 `stream.pipeline`；含 Web 流或生成器阶段的管道走本模块的 pipeline，
+并使用 Node 的类。原因是 Node 的实现会让 Web 可写流保持锁定、在 abort 时无法取消正在等待的 Web 读取，并在生成器
+失败时让后面的阶段继续运行。
+
+浏览器端各类的类型参数默认为 `any`，与 Node 不带泛型的类在效果上一致，因此同一个子类在两端都能编译。
+`pnpm verify:portable-types` 会针对两个已发布入口编译 `__tests__/type/portable/consumer.ts`，持续保证这一点。

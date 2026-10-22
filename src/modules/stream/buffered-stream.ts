@@ -237,7 +237,8 @@ export class BufferedStream extends EventEmitter {
     while (this._bufferReadIndex < this._buffers.length) {
       const buf = this._buffers[this._bufferReadIndex]!;
       if (buf.isEOD) {
-        this._bufferReadIndex++;
+        // Drop the reference so a consumed batch can be collected before compaction.
+        this._buffers[this._bufferReadIndex++] = undefined!;
         continue;
       }
 
@@ -247,7 +248,7 @@ export class BufferedStream extends EventEmitter {
       this._totalLength -= beforeLen - buf.length;
 
       if (buf.isEOD) {
-        this._bufferReadIndex++;
+        this._buffers[this._bufferReadIndex++] = undefined!;
       }
 
       // Reset/compact buffer queue occasionally
@@ -304,11 +305,7 @@ export class BufferedStream extends EventEmitter {
     const out = new Uint8Array(this._totalLength);
     let offset = 0;
 
-    for (let i = this._chunkReadIndex; i < this._chunks.length; i++) {
-      const chunk = this._chunks[i]!;
-      offset += chunk.copy(out, offset, 0, chunk.length);
-    }
-
+    // Older data first: what was already moved into buffers, then pending chunks.
     for (let i = this._bufferReadIndex; i < this._buffers.length; i++) {
       const buf = this._buffers[i]!;
       if (buf.isEOD) {
@@ -317,6 +314,11 @@ export class BufferedStream extends EventEmitter {
       const view = buf.toUint8Array();
       out.set(view, offset);
       offset += view.length;
+    }
+
+    for (let i = this._chunkReadIndex; i < this._chunks.length; i++) {
+      const chunk = this._chunks[i]!;
+      offset += chunk.copy(out, offset, 0, chunk.length);
     }
 
     // Reset internal state — data has been consumed.

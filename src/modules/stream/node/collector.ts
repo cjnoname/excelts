@@ -4,9 +4,10 @@
  * A writable stream that collects all chunks.
  */
 
+import { Writable } from "stream";
+
 import { toBinaryChunk } from "@stream/core/binary-chunk";
 import { StreamTypeError } from "@stream/errors";
-import { Writable } from "@stream/node/writable";
 import type { WritableStreamOptions, ICollector } from "@stream/types";
 import { chunksToString, concatUint8Arrays } from "@utils/binary";
 
@@ -17,7 +18,7 @@ import { chunksToString, concatUint8Arrays } from "@utils/binary";
 /**
  * A writable stream that collects all chunks
  */
-export class Collector<T = Uint8Array> extends Writable<T> {
+export class Collector<T = Uint8Array> extends Writable {
   public chunks: T[];
 
   constructor(options?: WritableStreamOptions) {

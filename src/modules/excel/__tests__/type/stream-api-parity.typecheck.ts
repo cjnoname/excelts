@@ -110,8 +110,11 @@ type _NonClassExportNames_BrowserExtra = Assert<
 type _NonClassExport_addAbortSignal = Assert<
   IsEqualStrict<NodeRuntimeNonClass["addAbortSignal"], BrowserRuntimeNonClass["addAbortSignal"]>
 >;
+// compose returns each entry's own Duplex, as Node's compose does, so a Node
+// caller can keep the result typed as `node:stream`'s Duplex. Its parameters
+// must still match exactly, and both results are the same IDuplex below.
 type _NonClassExport_compose = Assert<
-  IsEqualStrict<NodeRuntimeNonClass["compose"], BrowserRuntimeNonClass["compose"]>
+  ParamsEqual<NodeRuntimeNonClass["compose"], BrowserRuntimeNonClass["compose"]>
 >;
 type _NonClassExport_consumers = Assert<
   IsEqualStrict<NodeRuntimeNonClass["consumers"], BrowserRuntimeNonClass["consumers"]>
@@ -153,7 +156,6 @@ type _NonClassExport_createPullStream = Assert<
   IsEqualStrict<NodeRuntimeNonClass["createPullStream"], BrowserRuntimeNonClass["createPullStream"]>
 >;
 type _NonClassExport_createReadable = Assert<
-  // @ts-expect-error Node vs browser `read()` callback signature differs
   IsEqualStrict<NodeRuntimeNonClass["createReadable"], BrowserRuntimeNonClass["createReadable"]>
 >;
 type _NonClassExport_createReadableFromArray = Assert<
@@ -262,10 +264,23 @@ type _FactoryReturn_createReadable_Browser = Assert<
 >;
 
 type _HelperReturn_compose_Node = Assert<
-  ReturnExtends<NodeRuntimeNonClass["compose"], ITransform<any, any>>
+  ReturnExtends<NodeRuntimeNonClass["compose"], IDuplex<any, any> & NodeStreams.Duplex>
 >;
 type _HelperReturn_compose_Browser = Assert<
-  ReturnExtends<BrowserRuntimeNonClass["compose"], ITransform<any, any>>
+  ReturnExtends<BrowserRuntimeNonClass["compose"], IDuplex<any, any> & BrowserStreams.Duplex>
+>;
+type _HelperReturn_compose_Typed = Assert<
+  IsEqual<
+    [
+      ReturnType<typeof NodeStreams.compose<string, number>> extends IDuplex<number, string>
+        ? true
+        : false,
+      ReturnType<typeof BrowserStreams.compose<string, number>> extends IDuplex<number, string>
+        ? true
+        : false
+    ],
+    [true, true]
+  >
 >;
 
 type _FactoryReturn_createReadableFromArray_Node = Assert<
@@ -376,7 +391,6 @@ type _NormalizeWritableParams = Assert<
 >;
 
 type _CreateReadableParams = Assert<
-  // @ts-expect-error Node vs browser `read()` callback signature differs
   ParamsEqual<typeof NodeStreams.createReadable, typeof BrowserStreams.createReadable>
 >;
 
@@ -410,4 +424,21 @@ type _StreamToStringParams = Assert<
 
 type _StreamToUint8ArrayParams = Assert<
   ParamsEqual<typeof NodeStreams.streamToUint8Array, typeof BrowserStreams.streamToUint8Array>
+>;
+
+// `await using` needs Symbol.asyncDispose on the instance type, on both builds.
+type _AsyncDispose_Readable_Browser = Assert<
+  InstanceType<BrowserRuntime["Readable"]>[typeof Symbol.asyncDispose] extends () => Promise<void>
+    ? true
+    : false
+>;
+type _AsyncDispose_Writable_Browser = Assert<
+  InstanceType<BrowserRuntime["Writable"]>[typeof Symbol.asyncDispose] extends () => Promise<void>
+    ? true
+    : false
+>;
+type _AsyncDispose_Readable_Node = Assert<
+  InstanceType<NodeRuntime["Readable"]>[typeof Symbol.asyncDispose] extends () => Promise<void>
+    ? true
+    : false
 >;

@@ -27,6 +27,8 @@ export default defineConfig({
       enabled: true,
       provider: playwright(),
       headless: true,
+      // The tests render nothing, so a failure screenshot is a blank page.
+      screenshotFailures: false,
       instances: [
         {
           browser: "chromium"

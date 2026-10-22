@@ -492,13 +492,13 @@ export abstract class WorkbookReaderBase<
     waitingWorksheets: TWaitingWorksheet[]
   ): AsyncIterableIterator<WorksheetReadyEvent<TWorksheetReader>>;
 
-  protected _cleanupWaitingWorksheets(_waitingWorksheets: TWaitingWorksheet[]): void {
-    // Default: attempt best-effort cleanup if the stored object provides it.
-    for (const ws of _waitingWorksheets as { cleanup?: () => void }[]) {
-      if (ws && typeof ws.cleanup === "function") {
-        ws.cleanup();
-      }
-    }
+  /** Release every stored worksheet that provides a `cleanup`, and wait until each is gone. */
+  protected async _cleanupWaitingWorksheets(waitingWorksheets: TWaitingWorksheet[]): Promise<void> {
+    await Promise.all(
+      (waitingWorksheets as { cleanup?: () => Promise<void> }[]).map(async ws => {
+        await ws?.cleanup?.();
+      })
+    );
   }
 
   // Unified implementations using passed-in classes
@@ -585,9 +585,11 @@ export abstract class WorkbookReaderBase<
         }
       }
       yield* this._processWaitingWorksheets(waitingWorksheets);
-    } catch (error) {
-      this._cleanupWaitingWorksheets(waitingWorksheets);
-      throw error;
+    } finally {
+      // On every way out — the end, an error, or a consumer leaving early,
+      // which returns the generator and runs no `catch` — so a sheet stored
+      // but never replayed does not leave its spool behind.
+      await this._cleanupWaitingWorksheets(waitingWorksheets);
     }
   }
 

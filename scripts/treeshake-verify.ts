@@ -728,7 +728,38 @@ const scenarios: Scenario[] = [
     mustNotInclude: ["utils/font-discovery.js", "modules/draw/raster/system-raster-font.js"],
     platform: "browser" as const,
     lazySplit: true
-  }))
+  })),
+
+  // ===========================================================================
+  // /stream member-level — the write side must not carry the read side.
+  //
+  // `Readable` legitimately keeps the whole kernel: `Readable.prototype.compose`
+  // builds a `Duplex`, and its statics need the Web adapters and `Duplex.from`.
+  // A Writable needs none of that. These guard against a shared object of every
+  // class (it made `createWritable` 2.2× `Writable` gzipped) or a top-level
+  // `class … extends Duplex` in a module a write-side export lives in (it put
+  // the whole kernel behind `writableFromWeb`).
+  // ===========================================================================
+  ...(["Writable", "createWritable", "writableFromWeb", "toWritable"] as const).map(name => ({
+    name: `browser /stream: ${name} carries no Readable kernel`,
+    importFrom: `${PKG_NAME}/stream`,
+    imports: [name],
+    mustNotInclude: [
+      "modules/stream/kernel/classes.js",
+      "modules/stream/kernel/readable-impl.js",
+      "modules/stream/kernel/pipeline-impl.js",
+      "modules/stream/kernel/compose-impl.js",
+      "modules/stream/kernel/duplexify.js"
+    ],
+    platform: "browser" as const
+  })),
+  {
+    name: "browser /stream: streamToString carries no stream kernel",
+    importFrom: `${PKG_NAME}/stream`,
+    imports: ["streamToString"],
+    mustNotInclude: ["modules/stream/kernel/"],
+    platform: "browser" as const
+  }
 ];
 
 // =============================================================================

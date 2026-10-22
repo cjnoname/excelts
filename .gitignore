@@ -19,8 +19,9 @@ node_modules
 # Vitest browser screenshots (empty in headless mode)
 __screenshots__
 
-# Vitest 4+ test attachments (context.annotate output)
+# Vitest test attachments (context.annotate output, failure screenshots)
 .vitest-attachments
+.vitest/
 
 # Temporary local smoke-test projects
 tmp/

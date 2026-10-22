@@ -29,7 +29,7 @@ import type {
   CsvParseResult,
   RecordWithInfo
 } from "@csv/types";
-import { isReadableStreamLike, readableStreamToAsyncIterable } from "@stream/utils.base";
+import { isReadableStreamLike, readableStreamToAsyncIterable } from "@stream/core/stream-helpers";
 import { toError } from "@utils/errors";
 
 /**

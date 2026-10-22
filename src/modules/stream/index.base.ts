@@ -39,32 +39,28 @@ export type {
 } from "@stream/types";
 
 // Common re-exports (shared between Node.js and browser)
-export {
-  isDestroyed,
-  isErrored,
-  getDefaultHighWaterMark,
-  setDefaultHighWaterMark,
-  promisify
-} from "@stream/core/utils";
+export { isDestroyed, isErrored, promisify } from "@stream/core/utils";
+export type { StreamFactories } from "@stream/core/factories";
+export type {
+  ReadableFromWeb,
+  WebReadableOptions,
+  WebWritableOptions,
+  WritableFromWeb
+} from "@stream/core/web-conversions";
 export type { PipelineOptions, FinishedOptions, PipelineCallback } from "@stream/core/options";
 
 export { ChunkedBuilder, TransactionalChunkedBuilder } from "@stream/chunked-builder";
 export type { ChunkedBuilderOptions, BuilderSnapshot } from "@stream/chunked-builder";
 
 export {
-  collect,
-  text,
-  json,
   bytes,
-  fromString,
-  fromJSON,
-  fromBytes,
-  transform,
-  filter,
+  collect,
   isReadableStreamLike,
-  readableStreamToAsyncIterable
-} from "@stream/utils";
-export type { AsyncIterableStream } from "@stream/utils";
+  json,
+  readableStreamToAsyncIterable,
+  text
+} from "@stream/core/stream-helpers";
+export type { AsyncIterableStream } from "@stream/core/stream-helpers";
 
 export {
   StreamError,

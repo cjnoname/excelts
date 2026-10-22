@@ -4,7 +4,6 @@
  * Platform-neutral utility functions shared by Node.js and Browser implementations:
  * - Stream state inspection (isDestroyed, isErrored)
  * - Callback-to-promise conversion (promisify)
- * - High water mark management (getDefaultHighWaterMark, setDefaultHighWaterMark)
  */
 
 // =============================================================================
@@ -44,29 +43,4 @@ export function promisify<T>(
       }
     });
   });
-}
-
-// =============================================================================
-// High Water Mark
-// =============================================================================
-
-let _defaultHighWaterMark = 65536; // 64KB default (matches Node's own on every supported line)
-let _defaultHighWaterMarkObjectMode = 16; // 16 objects default
-
-/**
- * Get the default high water mark for streams
- */
-export function getDefaultHighWaterMark(objectMode: boolean): number {
-  return objectMode ? _defaultHighWaterMarkObjectMode : _defaultHighWaterMark;
-}
-
-/**
- * Set the default high water mark for streams
- */
-export function setDefaultHighWaterMark(objectMode: boolean, value: number): void {
-  if (objectMode) {
-    _defaultHighWaterMarkObjectMode = value;
-  } else {
-    _defaultHighWaterMark = value;
-  }
 }

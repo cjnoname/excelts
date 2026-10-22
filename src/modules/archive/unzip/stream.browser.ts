@@ -385,6 +385,8 @@ class WorkerInflateRaw extends Duplex {
 
   constructor(workerUrl?: string) {
     super({
+      // Output is pushed as the worker replies, not on demand.
+      read() {},
       write: (chunk: Uint8Array, _encoding: string, callback: (error?: Error | null) => void) => {
         this._doWrite(chunk, callback);
       },
@@ -555,6 +557,9 @@ class FallbackInflateRaw extends Duplex {
     });
   }
 
+  // Output is pushed when decompression completes, not on demand.
+  override _read(): void {}
+
   private _decompress(callback: (error?: Error | null) => void): void {
     try {
       // Combine all chunks
@@ -662,6 +667,8 @@ export function createParseClass(createInflateRawFn: InflateFactory): {
     constructor(opts: ParseOptions = {}) {
       super({
         objectMode: true,
+        // Entries are pushed by the parse loop, not on demand.
+        read() {},
         write: (chunk: Uint8Array, _encoding: string, callback: (err?: Error | null) => void) => {
           this._handleWrite(chunk, callback);
         },

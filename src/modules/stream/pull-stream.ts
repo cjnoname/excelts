@@ -110,11 +110,11 @@ export class PullStream extends EventEmitter {
     }
 
     // Need a new buffer. We keep previously returned views stable by allocating.
+    // Size it from the live data, not the old capacity: doubling the capacity
+    // each time made it grow with total throughput even when little was buffered.
     const remaining = this._bufferWriteIndex - this._bufferReadIndex;
     const nextLength = remaining + chunkLen;
-    const prevCap = this._buffer.length;
-    // Grow exponentially to avoid O(n^2) copying on many small writes.
-    const nextCap = Math.max(nextLength, prevCap > 0 ? prevCap * 2 : 1024);
+    const nextCap = Math.max(nextLength * 2, 1024);
     const next = new Uint8Array(nextCap);
     next.set(this._buffer.subarray(this._bufferReadIndex, this._bufferWriteIndex), 0);
     next.set(chunk, remaining);
@@ -217,6 +217,11 @@ export class PullStream extends EventEmitter {
   }
 
   private _pullSize(size: number): Promise<Uint8Array> {
+    if (!Number.isInteger(size) || size < 0) {
+      return Promise.reject(
+        new RangeError(`PullStream.pull: size must be a non-negative integer, got ${size}`)
+      );
+    }
     return new Promise((resolve, reject) => {
       const tryPull = (): void => {
         if (this._destroyed) {
@@ -267,10 +272,11 @@ export class PullStream extends EventEmitter {
   private _pullPattern(pattern: Uint8Array, includePattern: boolean): Promise<Uint8Array> {
     return new Promise((resolve, reject) => {
       const patternLen = pattern.length;
-      // Track where the next scan should start to avoid re-scanning bytes
-      // that were already checked.  A match can straddle old and new data, so
-      // we back up by (patternLen - 1) when resuming.
-      let scanFrom = this._bufferReadIndex;
+      // Bytes past the read position already scanned without a match, so a
+      // retry only scans new data (backing up patternLen - 1 for a match that
+      // straddles the boundary). Kept relative to the read position, not as a
+      // buffer index: write() may move the unread bytes into a new buffer.
+      let scanned = 0;
 
       const tryPull = (): void => {
         if (this._destroyed) {
@@ -288,7 +294,8 @@ export class PullStream extends EventEmitter {
         const matchIndexAbs = uint8ArrayIndexOf(
           this._buffer,
           pattern,
-          scanFrom,
+          // Another pull may have consumed bytes meanwhile; never start past the data.
+          this._bufferReadIndex + Math.min(scanned, this._bufferWriteIndex - this._bufferReadIndex),
           this._bufferWriteIndex
         );
 
@@ -311,7 +318,7 @@ export class PullStream extends EventEmitter {
 
         // No match yet — advance scanFrom so the next retry only scans new
         // bytes (minus overlap for cross-boundary matches).
-        scanFrom = Math.max(this._bufferReadIndex, this._bufferWriteIndex - (patternLen - 1));
+        scanned = Math.max(0, this._bufferWriteIndex - this._bufferReadIndex - (patternLen - 1));
 
         if (this.finished) {
           // Pattern not found, return everything

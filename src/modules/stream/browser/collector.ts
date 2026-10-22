@@ -2,9 +2,9 @@
  * Browser Stream - Collector
  */
 
-import { Writable } from "@stream/browser/writable";
 import { toBinaryChunk } from "@stream/core/binary-chunk";
 import { StreamTypeError } from "@stream/errors";
+import { Writable } from "@stream/kernel/writable";
 import type { ICollector, WritableStreamOptions } from "@stream/types";
 import { concatUint8Arrays, chunksToString } from "@utils/binary";
 
@@ -19,10 +19,8 @@ export class Collector<T = Uint8Array> extends Writable<T> {
   public chunks: T[];
 
   constructor(options?: WritableStreamOptions) {
-    // The write handler collects into a closed-over array; it is exposed as
-    // `this.chunks` after construction. Using the `write` option (rather than a
-    // subclass `_write` method) keeps the synchronous direct-write path so
-    // chunks are collected before the caller's next synchronous statement.
+    // The write handler collects into a closed-over array exposed as
+    // `this.chunks` after construction, mirroring the Node Collector.
     const chunks: T[] = [];
     super({
       ...options,

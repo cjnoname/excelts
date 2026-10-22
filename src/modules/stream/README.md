@@ -2,10 +2,19 @@
 
 [中文](README_zh.md)
 
-A cross-platform stream implementation that provides identical APIs for both Node.js and browsers.
+Node.js stream classes and helpers that run unchanged in Node.js and in browsers.
 
-- **Node.js**: Uses native `stream` module for maximum performance
-- **Browser**: Uses Web Streams API (`ReadableStream`, `WritableStream`, `TransformStream`)
+- **Node.js**: the native `node:stream` classes — `Readable`, `Writable`, `Duplex`, `Transform`
+  and `PassThrough` are Node's own, and `pipeline`, `compose` and `duplexPair` call Node's for
+  Node-style stages.
+- **Browser**: a port of Node's `lib/internal/streams`, so the same code keeps the same
+  backpressure, event order and teardown.
+
+Web Streams (`ReadableStream`, `WritableStream`, `TransformStream`) are accepted wherever a stream
+is, on both. Convert them with `readableFromWeb` / `readableToWeb` / `writableFromWeb` /
+`writableToWeb`, which behave the same on Node.js, Bun and browsers; the classes' own
+`Readable.fromWeb` and friends keep Node's behaviour, defects included (see
+[Converting between Node-style and Web streams](#converting-between-node-style-and-web-streams)).
 
 ```typescript
 import { Readable, pipeline, createTransform } from "documonster/stream";
@@ -13,11 +22,11 @@ import { Readable, pipeline, createTransform } from "documonster/stream";
 
 ## Features
 
-- **100% Cross-Platform** - Same API, same types, same behavior in Node.js and browsers
+- **Cross-Platform** - Same API and behaviour in Node.js and browsers; the shared test suite runs against both
 - **Single Entry Point** - Auto-resolves to correct implementation based on environment
 - **Type-Safe** - Full TypeScript support with consistent types
 - **Node.js Compatible API** - Familiar `Readable`, `Writable`, `Transform`, `Duplex` classes
-- **High Performance** - Native implementations on both platforms
+- **Native where it exists** - Node's implementation on Node; Web Streams are read and written through their own readers and writers
 
 ## Installation
 
@@ -542,7 +551,12 @@ await finished(writable);
 
 ### compose
 
-Compose multiple transforms into a single transform.
+Combine stages into one `Duplex`: writes go into the first, reads come out of the last. Stages are
+what `pipeline` takes — Node-style streams, Web streams, generator functions, iterables — and the
+rules are Node's: no stage throws `ERR_MISSING_ARGS`, a single stage becomes `Duplex.from(stage)`.
+`compose<In, Out>(…)` types what is written and read — a statement by the caller, not checked
+against the stages, just as Node's `compose` checks nothing; the result is the entry's own `Duplex`, so
+on Node it goes wherever `node:stream`'s `compose` result goes.
 
 ```typescript
 import { compose, createTransform, createReadableFromArray, pipeline } from "documonster/stream";
@@ -882,11 +896,20 @@ await promises.finished(stream);
 Control stream buffering behavior.
 
 ```typescript
-import { getDefaultHighWaterMark, setDefaultHighWaterMark } from "documonster/stream";
+import {
+  Readable,
+  Writable,
+  getDefaultHighWaterMark,
+  setDefaultHighWaterMark
+} from "documonster/stream";
 
 // Get defaults
-getDefaultHighWaterMark(false); // 16384 (16KB for byte streams)
+getDefaultHighWaterMark(false); // 65536 (64KB for byte streams)
 getDefaultHighWaterMark(true); // 16 (16 objects for object mode)
+
+// Change the default for every stream created afterwards. As in Node, the value must be a
+// non-negative integer: anything else throws ERR_INVALID_ARG_TYPE or ERR_OUT_OF_RANGE.
+setDefaultHighWaterMark(false, 128 * 1024);
 
 // Set custom high water mark per stream
 const readable = new Readable({
@@ -944,7 +967,8 @@ stream.destroy(new Error("Manual destruction"));
 
 ## Browser Compatibility
 
-The browser implementation uses Web Streams API and is compatible with:
+The browser implementation is plain JavaScript over `queueMicrotask`, `TextDecoder` and Web
+Streams, and is compatible with:
 
 | Browser | Minimum Version |
 | ------- | --------------- |
@@ -963,7 +987,7 @@ The API is **identical** between Node.js and browsers, allowing you to write cod
 ## Performance
 
 - **Node.js**: Uses native stream module with zero overhead (identical performance to `require('stream')`)
-- **Browser**: Optimized Web Streams implementation (~9x slower than Node.js native, which is expected and acceptable for browser use cases)
+- **Browser**: the same algorithms as Node's implementation, so buffering and backpressure behave alike
 
 ### Performance Tips
 
@@ -1114,13 +1138,14 @@ await pipeline(createReadStream("input.txt"), uppercase, createWriteStream("outp
 ### Fetch API Integration (Browser)
 
 ```typescript
-import { Readable, pipeline, createCollector } from "documonster/stream";
+import { readableFromWeb, pipeline, createCollector } from "documonster/stream";
 
 // Fetch and process response
 const response = await fetch("/api/large-data");
 
-// Convert Web ReadableStream to our Readable
-const readable = Readable.fromWeb(response.body!);
+// Convert the Web ReadableStream to a Node-style Readable (or pass `response.body` to
+// `pipeline` directly — it accepts Web streams as they are)
+const readable = readableFromWeb(response.body!);
 
 const collector = createCollector<Uint8Array>();
 
@@ -1212,12 +1237,123 @@ These helpers are re-exported from `documonster/archive` (not `documonster/strea
 
 ## Platform Differences (Inherent)
 
-While the external API is fully symmetric between Node.js and browser, the following
-differences are **inherent to the platforms** and cannot be eliminated:
+The API and its types are the same on Node.js, Bun and the browser. The differences below remain
+because the browser's standard APIs cannot express what Node does, without giving up something
+Node offers (or, for `instanceof`, without redefining what it means):
 
-| Aspect                                  | Node.js                                                                                             | Browser                                                   | Impact                                                                                                                                             |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Binary chunk type**                   | `Buffer` (subclass of `Uint8Array` with `.toString('hex')`, `.toString('base64')`, `.copy()`, etc.) | `Uint8Array` (with patched `.toString()` for basic UTF-8) | Code using `Buffer`-specific methods will not work cross-platform. Use `Uint8Array` utilities from this module instead.                            |
-| **`readableBuffer` / `writableBuffer`** | Returns Node.js internal `BufferList` (linked list with `.head`, `.length`)                         | Returns plain `T[]` array                                 | Do not rely on `BufferList`-specific properties. Both return an iterable collection of chunks.                                                     |
-| **Event scheduling**                    | `process.nextTick` (runs before microtasks)                                                         | `queueMicrotask` (IS a microtask)                         | Event ordering relative to `Promise.then()` may differ in edge cases. The shared test suite validates that all common patterns behave identically. |
-| **`_readableState` / `_writableState`** | Accessible (internal Node.js state objects)                                                         | Not present (state is in individual private fields)       | Do not rely on internal state objects. Use the public property getters instead.                                                                    |
+| Aspect                                  | Node.js                                                                                             | Browser                                                                                                                          | Impact                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Binary chunk type**                   | `Buffer` (subclass of `Uint8Array` with `.toString('hex')`, `.toString('base64')`, `.copy()`, etc.) | `Uint8Array` (a chunk pushed as a string keeps `.toString(encoding)`)                                                            | Code using `Buffer`-specific methods will not work cross-platform. Use `Uint8Array` utilities from this module instead.                                                                                                                                                                                                                                             |
+| **Event scheduling**                    | `process.nextTick`                                                                                  | One microtask drains every tick queued meanwhile, in order                                                                       | The order of a stream's own events and callbacks matches Node, and so does a tick's placement when queued from a task (event handler, timer, I/O). Queued from inside a promise continuation, Node runs it only once the whole microtask queue is empty; no browser primitive can, so it runs earlier. Both measured in `__tests__/stream-scheduling.node.test.ts`. |
+| **`_readableState` / `_writableState`** | Node's internal state objects                                                                       | The same field names, but a different object                                                                                     | Internal: use the public getters (`readableLength`, `writableNeedDrain`, …).                                                                                                                                                                                                                                                                                        |
+| **`isDisturbed(webStream)`**            | Answered by Node's own Web Streams                                                                  | Exact for an unlocked stream (probed through `new Response(stream)`, which neither locks nor reads it); `false` for a locked one | For a locked stream the true answer is "unknown": one that was read cannot be told from one that was not, so `false` there means "not known to be disturbed".                                                                                                                                                                                                       |
+| **`instanceof` a stream class**         | `true` for every `node:stream` stream, whoever made it                                              | `true` only for streams made by this module's classes                                                                            | Streams from elsewhere (`readable-stream`, another library) are still recognised and driven by every function here, which checks the stream protocol rather than the class, as Node does. Test with `isReadable` / `isWritable` / `isStream`, not `instanceof`.                                                                                                     |
+| **`finished(webStream)`**               | Any Web stream                                                                                      | Not supported: rejects at once, without locking the stream                                                                       | The standard API has no lock-free completion signal, and a Web stream's queue is only known to be drained by the reader that drains it. Await your reader's or writer's `closed` promise.                                                                                                                                                                           |
+
+### Converting between Node-style and Web streams
+
+Use the module's own conversions; they behave the same on both entries:
+
+```ts
+import { readableFromWeb, readableToWeb, writableFromWeb, writableToWeb } from "documonster/stream";
+
+const nodeStyle = readableFromWeb(response.body!);
+const web = writableToWeb(nodeStyleWritable);
+```
+
+The class statics (`Readable.fromWeb`, `Writable.toWeb`, `Duplex.fromWeb`, …) are Node's on
+**both** entries — `node:stream`'s own on the Node entry, a faithful port in the browser — so code
+written against them behaves the same everywhere, defects included. As of Node 26 five of their
+behaviours are wrong, and the module's functions above fix all five, identically on both entries:
+
+| Class static (Node's behaviour)                                                                                    | Module function                                       |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `Readable.fromWeb` pushes a `null` read, which ends the stream and silently drops the rest                         | `readableFromWeb` fails with `ERR_STREAM_NULL_VALUES` |
+| `Readable.fromWeb` / `Writable.fromWeb` / `Duplex.fromWeb` keep the Web stream locked for good                     | the lock is handed back once the adapter is done      |
+| `Writable.toWeb(w)` while `w.writableNeedDrain`: the next Web write resolves without reaching `w.write()`          | the chunk is written, then the write waits for drain  |
+| `Readable.toWeb(r)` after `r.setEncoding(...)`: once strings queue, `RangeError` is thrown from `'data'`, uncaught | strings are sized in characters                       |
+| `Readable.toWeb` / `Writable.toWeb` leave their `'data'` / `'drain'` listener on the source once done              | the listener is removed                               |
+
+`pipeline` and `compose` read and write Web streams themselves, and `toWritable` goes through
+`writableFromWeb`, so none of them shares these defects, on either entry.
+
+On Bun the Node entry's classes are Bun's own `node:stream`, so their statics are Bun's: Bun 1.4,
+for one, releases `Readable.fromWeb`'s lock once the stream ends, where Node keeps it. The module's
+functions are the only Web conversions that behave identically on Node, Bun and the browser.
+
+A `null` cannot be carried by a Node-style stream at all — `push(null)` means end in every mode —
+so to send one through, wrap it on the Web side (`{ value: null }`).
+
+## Maintenance: upstream baseline
+
+`src/modules/stream/kernel/` is a port of Node.js **v26.8.1**. When Node fixes a stream bug,
+compare against these files rather than rediscovering the behaviour:
+
+| Node.js file                                                       | Port                                           |
+| ------------------------------------------------------------------ | ---------------------------------------------- |
+| `lib/internal/streams/readable.js`                                 | `readable-impl.ts`, `Readable` in `classes.ts` |
+| `lib/internal/streams/writable.js`                                 | `writable.ts`                                  |
+| `lib/internal/streams/duplex.js`, `transform.js`, `passthrough.js` | `classes.ts`                                   |
+| `lib/internal/streams/destroy.js`                                  | `destroy.ts`                                   |
+| `lib/internal/streams/end-of-stream.js`                            | `end-of-stream.ts`                             |
+| `lib/internal/streams/from.js`                                     | `from.ts`                                      |
+| `lib/internal/streams/operators.js`                                | `operators.ts`                                 |
+| `lib/internal/streams/pipeline.js`                                 | `pipeline-impl.ts`                             |
+| `lib/internal/streams/compose.js`                                  | `compose-impl.ts`                              |
+| `lib/internal/streams/duplexify.js`                                | `duplexify.ts`                                 |
+| `lib/internal/streams/duplexpair.js`                               | `DuplexSide` in `../browser/utils.ts`          |
+| `lib/internal/streams/utils.js`, `state.js`                        | `stream-utils.ts`, `state.ts`                  |
+| `lib/internal/webstreams/adapters.js`                              | `web-adapters.ts`                              |
+
+Browser substitutes: `process.nextTick` → the tick queue in `state.ts`; `Buffer` → `Uint8Array`
+(string chunks keep `toString(encoding)`); `StringDecoder` → `createStreamDecoder`; bit-field
+state → plain fields; the lazy CommonJS `require` of `compose` → the `StreamKernel` the classes
+pass in.
+
+The classes follow Node exactly, defects included. Deliberate departures live only in the module's
+own functions: the five fixes in the safe Web conversions above; `pipeline` reads a Web source
+through a reader it cancels on abort, runs an all-Web pipeline on `pipeTo`, settles only after
+every connection has torn down, and rejects a stream given twice; `finished(webStream)` refuses Web
+streams in the browser rather than taking their lock.
+
+Where each kind of behaviour is tested:
+
+| File (`__tests__/`)               | Oracle                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------- |
+| `stream-node-oracle.node.test.ts` | `node:stream` itself: the same call must give its result on both entries              |
+| `stream-contract.shared.ts`       | The module's own contract, asserted directly; run on both entries and in Chromium     |
+| `stream-interop.node.test.ts`     | Streams from `readable-stream` and, for the kernel, `node:stream`, in both directions |
+| `stream-scheduling.node.test.ts`  | Event order against `node:stream`, and the one measured platform limit                |
+| `stream-parity.node.test.ts`      | Regressions the previous browser implementation had, with explicit expectations       |
+
+### Resource ownership
+
+One rule decides who cleans up: **whoever takes a reader or writer closes, cancels or releases
+it.** The stream kernel owns Node-style state and events; a Web adapter owns the reader or writer
+it took; `pipeline` owns the connections it starts; `finished` only observes and never takes a
+lock. The module's `fromWeb` functions check every lock before taking any, hand the lock back
+when the stream ends, errors or is destroyed, and the module's `toWeb` functions remove their own
+listeners from the source once the Web stream is done with it. The class statics do neither, as
+Node's do not.
+
+`pipeline` works in three phases. It first checks every stage — wrong kind, locked, already
+destroyed, or the same stream given twice (Node does not check this one) — before converting
+any, and checking has no side effects: a pipeline rejected there has created, locked and
+subscribed to nothing, and every stream still belongs to the caller. The one exception is a
+promise among the stages, at any depth of a `{ readable, writable }` object: its rejection is
+handled, since it would otherwise surface as an unhandled one. It then connects the stages,
+registering how to stop each connection; a stage that can only fail once connected (a generator
+returning something unusable) tears down every stage it was given. Finally it settles once,
+after every connection has finished **and every teardown has completed** — a source's cancel, a
+sink's abort, a stage's own async `_destroy`. A stage whose `_destroy` never calls back therefore
+keeps the pipeline from settling, as it keeps Node's `finished` from resolving. With `end: false`
+a Web writable is handed back unlocked, with everything written.
+
+On the Node entry, a pipeline of Node streams runs on Node's own `stream.pipeline`; one with a Web
+stream or a generator stage runs on the module's pipeline over Node's classes, because Node's
+leaves a Web writable locked, cannot cancel a Web read on abort, and leaves later stages running
+when a generator fails.
+
+The browser classes' type parameters default to `any`, as Node's non-generic classes effectively
+do, so the same subclass compiles on both builds. `pnpm verify:portable-types` compiles
+`__tests__/type/portable/consumer.ts` against both published entries to keep it that way.

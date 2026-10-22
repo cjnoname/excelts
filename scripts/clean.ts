@@ -17,7 +17,7 @@
 
 import { globSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
 const { values, positionals: patterns } = parseArgs({
@@ -47,8 +47,9 @@ const matches = globSync(patterns, {
   exclude: path => /(?:^|[\\/])\.git(?:[\\/]|$)/.test(path)
 })
   .map(match => relative(root, resolve(root, match)))
-  // Never delete the working directory itself, nor anything outside it.
-  .filter(match => match && match !== ".." && !match.startsWith(".." + sep))
+  // Never delete the working directory itself, nor anything outside it. On Windows
+  // `relative` returns an absolute path for a target on another drive.
+  .filter(match => match && match !== ".." && !match.startsWith(".." + sep) && !isAbsolute(match))
   .sort();
 
 // Drop matches nested inside another match — deleting the parent removes them

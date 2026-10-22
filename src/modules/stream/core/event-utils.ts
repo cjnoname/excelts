@@ -22,7 +22,7 @@ export function onceEvent(emitter: EventEmitterLike, event: string): Promise<voi
   return createEventWaiter(emitter, [event]).promise;
 }
 
-export type EventWaiter = {
+type EventWaiter = {
   promise: Promise<void>;
   cancel: () => void;
   error: () => Error | null;

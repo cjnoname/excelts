@@ -543,6 +543,9 @@ export class StreamingDocxWriter {
     await this._pendingDrain;
 
     if (this._streamError) {
+      // The document is incomplete: give the sink up rather than leaving it
+      // open (and a Web stream locked) behind a failed write.
+      await this._sinkAdapter?.abort(this._streamError);
       throw new DocxWriteError(
         `StreamingDocxWriter: ZIP finalization failed (${this._streamError.message})`,
         { cause: this._streamError }

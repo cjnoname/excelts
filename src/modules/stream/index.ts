@@ -1,11 +1,8 @@
 /**
  * Stream Module (Node.js entry)
  *
- * Public entrypoint for stream utilities and classes.
- *
- * Notes:
- * - This file is intentionally export-only (tree-shaking friendly).
- * - Browser builds should import from `@stream/index.browser`.
+ * Node's own `node:stream` classes, plus the module's helpers around them.
+ * `index.browser.ts` exports the same names backed by the browser kernel.
  *
  * @example
  * ```ts
@@ -21,12 +18,16 @@
 export * from "@stream/index.base";
 
 // Core stream classes (native Node.js)
-import { Readable, Transform, Duplex, PassThrough } from "stream";
-export { Readable, Transform, Duplex, PassThrough };
-
-// Writable (extended with browser-compatible API)
-export { Writable, toWritable } from "@stream/node/writable";
-export type { WritableOptions } from "@stream/node/writable";
+export {
+  Readable,
+  Writable,
+  Duplex,
+  Transform,
+  PassThrough,
+  getDefaultHighWaterMark,
+  setDefaultHighWaterMark
+} from "stream";
+export type { ReadableOptions, WritableOptions, DuplexOptions, TransformOptions } from "stream";
 
 // Collector
 export { Collector, createCollector } from "@stream/node/collector";
@@ -49,7 +50,12 @@ export {
   createReadableFromGenerator,
   createReadableFromPromise,
   createEmptyReadable,
-  createNullWritable
+  createNullWritable,
+  filter,
+  fromBytes,
+  fromJSON,
+  fromString,
+  transform
 } from "@stream/node/factories";
 
 // Pipeline & Finished
@@ -57,6 +63,7 @@ export { pipeline, finished, finishedAll } from "@stream/node/pipeline";
 
 // Compose
 export { compose } from "@stream/node/compose";
+export type { ComposedDuplex } from "@stream/node/compose";
 
 // Utilities
 export {
@@ -77,3 +84,12 @@ export {
   consumers,
   promises
 } from "@stream/node/utils";
+
+// Web Streams conversions
+export {
+  readableFromWeb,
+  readableToWeb,
+  toWritable,
+  writableFromWeb,
+  writableToWeb
+} from "@stream/node/web";

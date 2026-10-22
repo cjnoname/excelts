@@ -2594,7 +2594,11 @@ describe("POWER deep coverage", () => {
     expect(asNumber(fnPOWER([rvNumber(-2), rvNumber(0)]))).toBe(1);
   });
   it("POWER(10, 308) near overflow boundary", () => {
-    expect(asNumber(fnPOWER([rvNumber(10), rvNumber(308)]))).toBe(1e308);
+    // Math.pow is implementation-approximated: V8 returns exactly 1e308, while
+    // JavaScriptCore (Bun) is a few ulps off. Both display as 1E+308 at
+    // Excel's 15 significant digits.
+    const result = asNumber(fnPOWER([rvNumber(10), rvNumber(308)]));
+    expect(Math.abs(result - 1e308) / 1e308).toBeLessThan(1e-14);
   });
   it("POWER(10, 309) overflows → #NUM!", () => {
     expect(fnPOWER([rvNumber(10), rvNumber(309)])).toEqual(ERRORS.NUM);

@@ -25,7 +25,7 @@ export interface StreamConsumers {
   text(stream: StreamInput, encoding?: string): Promise<string>;
 }
 
-export interface StreamConverters {
+interface StreamConverters {
   streamToUint8Array(stream: StreamInput): Promise<Uint8Array>;
   streamToString(stream: StreamInput, encoding?: string): Promise<string>;
 }

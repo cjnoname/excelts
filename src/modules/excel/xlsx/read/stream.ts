@@ -36,7 +36,7 @@ export async function readXlsxStreamInto(
   // Node treat it like a transform and surface `Premature close` errors.
   // We instead pipeline the input stream into a Writable sink that forwards
   // chunks into the parser with backpressure.
-  const sink = new Writable<Uint8Array | string>({
+  const sink = new Writable({
     write(chunk: Uint8Array | string, _encoding: string, callback: (error?: Error | null) => void) {
       try {
         const ok = parser.write(chunk);

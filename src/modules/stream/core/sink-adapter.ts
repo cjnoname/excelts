@@ -10,7 +10,12 @@
  *   - `write(chunk)` resolves once the chunk has been accepted by the
  *     sink (after awaiting `drain` for Node-style sinks under
  *     backpressure, or `writer.ready` for Web streams).
- *   - `end()` finalises the sink and resolves on close.
+ *   - `end()` finalises the sink and resolves once it has really finished
+ *     (`'finish'` for a Node-style sink — a `'close'` before it is a
+ *     premature close). Calling it again returns the same promise.
+ *   - `abort(reason)` gives the sink up after a producer failure.
+ *   - A Web sink's writer is released once the sink is closed, aborted or
+ *     errored, so the stream is not left locked.
  *   - The first sink error is captured and re-thrown from the next
  *     `write` / `end` so callers can't lose it.
  *
@@ -32,7 +37,9 @@ import type { EventEmitterLike } from "@stream/types";
 export interface NodeWritableLike extends EventEmitterLike {
   write(chunk: Uint8Array, cb?: (err?: Error | null) => void): boolean | PromiseLike<boolean>;
   end(cb?: () => void): unknown;
+  destroy?(error?: Error): unknown;
   destroyed?: boolean;
+  writableFinished?: boolean;
 }
 
 /**
@@ -75,6 +82,8 @@ export class SinkAdapter {
   private readonly _duckSink?: DuckSinkLike;
   private _error: Error | null = null;
   private _ended = false;
+  private _ending: Promise<void> | null = null;
+  private _writerReleased = false;
 
   constructor(sink: AnySink) {
     if (isWebWritable(sink)) {
@@ -83,7 +92,11 @@ export class SinkAdapter {
       // Web writers expose .closed; surface termination errors through
       // the same _error channel so producers see them.
       this._webWriter.closed.catch((err: unknown) => {
-        this._captureError(err);
+        // Releasing our own lock rejects `closed` too; that is not a sink error.
+        if (!this._writerReleased) {
+          this._captureError(err);
+          this._releaseWriter();
+        }
       });
     } else if (isNodeWritable(sink)) {
       this._kind = "node";
@@ -148,52 +161,74 @@ export class SinkAdapter {
     }
   }
 
-  async end(): Promise<void> {
-    if (this._ended) {
+  /** Finish the sink. Every call returns the same promise. */
+  end(): Promise<void> {
+    if (!this._ending) {
+      this._ended = true;
+      this._ending = this._finish();
+    }
+    return this._ending;
+  }
+
+  /**
+   * Give the sink up after a producer failure: a Web sink is aborted and its
+   * lock released, a Node-style one destroyed with `reason`.
+   */
+  async abort(reason?: unknown): Promise<void> {
+    this._ended = true;
+    const error = reason instanceof Error ? reason : new Error(String(reason ?? "aborted"));
+    this._captureError(error);
+    if (this._kind === "web") {
+      if (!this._writerReleased) {
+        await this._webWriter!.abort(error).catch(() => {});
+        this._releaseWriter();
+      }
       return;
     }
-    this._ended = true;
+    const sink = (this._kind === "node" ? this._nodeSink : this._duckSink) as {
+      destroy?: (error?: Error) => unknown;
+      destroyed?: boolean;
+    };
+    if (typeof sink.destroy === "function" && !sink.destroyed) {
+      sink.destroy(error);
+    }
+  }
+
+  private async _finish(): Promise<void> {
     this._throwIfErrored();
 
     if (this._kind === "web") {
       // close() rejects if the stream has already errored — we let that
       // propagate so callers see the underlying failure.
-      await this._webWriter!.close();
-      return;
-    }
-
-    if (this._kind === "node") {
-      const sink = this._nodeSink!;
-      // Prefer the close event when available; some Node writables emit
-      // 'finish' first and only emit 'close' on `destroy()`. We listen
-      // for both.
-      const finished = createEventWaiter(sink, ["close", "finish"]);
       try {
-        await sink.end();
-        await finished.promise;
-      } catch (error) {
-        finished.cancel();
-        throw error;
+        await this._webWriter!.close();
+      } finally {
+        this._releaseWriter();
       }
-      this._throwIfErrored();
       return;
     }
 
-    // duck
-    const sink = this._duckSink!;
+    const sink = this._kind === "node" ? this._nodeSink! : this._duckSink!;
     if (hasEvents(sink)) {
-      const finished = createEventWaiter(sink, ["close", "finish"]);
+      const finished = waitForFinish(sink);
       try {
         await sink.end();
-        await finished.promise;
       } catch (error) {
         finished.cancel();
         throw error;
       }
+      await finished.promise;
     } else {
       await sink.end();
     }
     this._throwIfErrored();
+  }
+
+  private _releaseWriter(): void {
+    if (!this._writerReleased) {
+      this._writerReleased = true;
+      this._webWriter!.releaseLock();
+    }
   }
 
   private _captureError(err: unknown): void {
@@ -225,4 +260,47 @@ export class SinkAdapter {
 
 function hasEvents(sink: EventEmitterLike): boolean {
   return typeof sink.once === "function" || typeof sink.on === "function";
+}
+
+/**
+ * Resolve on `'finish'`; reject on `'error'`, or on a `'close'` that comes
+ * first while the sink reports it has not finished — that is a premature
+ * close, not a successful end.
+ */
+function waitForFinish(sink: EventEmitterLike): { promise: Promise<void>; cancel: () => void } {
+  let cleanup = (): void => {};
+  const promise = new Promise<void>((resolve, reject) => {
+    const onFinish = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: unknown): void => {
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const onClose = (): void => {
+      cleanup();
+      // A sink that reports no finished state (a duck sink signalling with
+      // 'close' alone) is taken at its word; one that does must have finished.
+      const finished = (sink as { writableFinished?: unknown }).writableFinished;
+      if (typeof finished !== "boolean" || finished) {
+        resolve();
+        return;
+      }
+      const err = new Error("Premature close") as Error & { code: string };
+      err.code = "ERR_STREAM_PREMATURE_CLOSE";
+      reject(err);
+    };
+    const on = (sink.on ?? sink.once)!.bind(sink);
+    on("finish", onFinish);
+    on("error", onError);
+    on("close", onClose);
+    cleanup = () => {
+      const off = (sink.off ?? sink.removeListener)?.bind(sink);
+      off?.("finish", onFinish);
+      off?.("error", onError);
+      off?.("close", onClose);
+    };
+  });
+  return { promise, cancel: () => cleanup() };
 }

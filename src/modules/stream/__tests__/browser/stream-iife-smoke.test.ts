@@ -25,4 +25,18 @@ describe("Documonster.Stream IIFE bundle", () => {
     const out: string = await Stream.streamToString(readable);
     expect(out).toBe("hello stream");
   });
+
+  // Readable.prototype.compose depends on Duplex and pipeline, which depend on
+  // Readable. The bundle is tree-shaken with `moduleSideEffects: false`, which
+  // used to drop the side-effect registration that wired them together.
+  it("keeps Readable.prototype.compose working after tree-shaking", async () => {
+    const composed = Stream.Readable.from([1, 2, 3]).compose(async function* (
+      source: AsyncIterable<number>
+    ) {
+      for await (const n of source) {
+        yield n * 2;
+      }
+    });
+    expect(await composed.toArray()).toEqual([2, 4, 6]);
+  });
 });

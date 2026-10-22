@@ -278,9 +278,7 @@ export async function writeStream(
  * }
  * ```
  *
- * The browser build destroys silently on early exit instead, so `errored` is not
- * a portable way to tell "the consumer stopped" from "serialization failed" —
- * track that yourself if the same code runs on both platforms.
+ * The browser build behaves the same way: its stream kernel is a port of Node's.
  */
 export function toStream(
   wb: WorkbookData,

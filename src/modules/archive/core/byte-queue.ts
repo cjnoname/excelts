@@ -37,7 +37,8 @@ export class ByteQueue {
   }
 
   private _dropHeadChunk(): void {
-    this._chunkHead++;
+    // Release the consumed chunk now rather than at the next compaction.
+    this._chunks[this._chunkHead++] = undefined!;
     this._headOffset = 0;
     this._compactConsumedChunks();
   }

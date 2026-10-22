@@ -1,31 +1,22 @@
 /**
  * Stream Module (browser entry)
  *
- * Mirrors the public surface of `./index.ts`, but exports the browser
- * implementation from `./streams.browser`.
- *
- * This file is intentionally export-only (tree-shaking friendly).
+ * The same names as `index.ts`, backed by the browser kernel in `./browser`,
+ * a port of Node's `lib/internal/streams`.
  */
 
 // Shared type + platform-independent exports
 export * from "@stream/index.base";
 
-// Core stream classes (browser implementations)
-import { Readable } from "@stream/browser/readable";
-export { Writable, toWritable } from "@stream/browser/writable";
-export type { WritableOptions } from "@stream/browser/writable";
-export { Transform } from "@stream/browser/transform";
-import { Duplex } from "@stream/browser/duplex";
-export { PassThrough } from "@stream/browser/passthrough";
-export { Collector } from "@stream/browser/collector";
-export { Readable, Duplex };
+// Core stream classes
+export { Readable, Duplex, Transform, PassThrough } from "@stream/kernel/classes";
+export type { ReadableOptions, DuplexOptions, TransformOptions } from "@stream/kernel/classes";
+export { Writable } from "@stream/kernel/writable";
+export type { WritableOptions, WritableSide } from "@stream/kernel/writable";
+export { getDefaultHighWaterMark, setDefaultHighWaterMark } from "@stream/kernel/state";
 
-// Late-binding injection: break circular Readable ↔ Duplex
-import { registerDuplexFrom } from "@stream/browser/_lazy";
-
-// The registry is type-erased (`source: unknown`); re-project onto Duplex.from's
-// accepted source union at this single boundary.
-registerDuplexFrom(source => Duplex.from(source as Parameters<typeof Duplex.from>[0]));
+// Collector
+export { Collector, createCollector } from "@stream/browser/collector";
 
 // Factory functions + re-exported helpers
 export {
@@ -38,7 +29,6 @@ export {
   createReadableFromArray,
   createWritable,
   createTransform,
-  createCollector,
   createPassThrough,
   createPullStream,
   createBufferedStream,
@@ -46,7 +36,12 @@ export {
   createReadableFromGenerator,
   createReadableFromPromise,
   createEmptyReadable,
-  createNullWritable
+  createNullWritable,
+  filter,
+  fromBytes,
+  fromJSON,
+  fromString,
+  transform
 } from "@stream/browser/factories";
 
 // Pipeline & Finished
@@ -54,6 +49,7 @@ export { pipeline, finished, finishedAll } from "@stream/browser/pipeline";
 
 // Compose
 export { compose } from "@stream/browser/compose";
+export type { ComposedDuplex } from "@stream/browser/compose";
 
 // Utilities
 export {
@@ -70,7 +66,16 @@ export {
   isDisturbed,
   isReadable,
   isWritable,
-  duplexPair,
   consumers,
   promises
 } from "@stream/browser/utils";
+
+// Web Streams conversions
+export { duplexPair } from "@stream/browser/duplex-pair";
+export {
+  readableFromWeb,
+  readableToWeb,
+  toWritable,
+  writableFromWeb,
+  writableToWeb
+} from "@stream/browser/web";

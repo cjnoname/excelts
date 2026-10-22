@@ -173,10 +173,14 @@ jobs:
       - name: Install dependencies
         run: pnpm i --frozen-lockfile
 
+      # `--bun` makes Bun the runtime: without it `bun run` follows vitest's
+      # `#!/usr/bin/env node` shebang and the whole suite runs in Node.
+      # src/test/__tests__/test-runtime.node.test.ts fails if that happens.
       - name: Run tests (Bun)
-        run: bun run vitest run
+        run: bun --bun run vitest run
         env:
           CI: true
+          EXPECTED_TEST_RUNTIME: bun
 
   examples:
     # Examples are the first thing a consumer copies, so a broken one is a broken

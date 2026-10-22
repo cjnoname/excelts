@@ -46,7 +46,8 @@ export type WorkbookReaderInput = string | CrossPlatformInput;
 interface WaitingWorksheet {
   sheetNo: string;
   path: string;
-  cleanup: () => void;
+  /** Close the spool's streams, then remove its directory. Idempotent: every call shares one promise. */
+  cleanup: () => Promise<void>;
   writePromise: Promise<void>;
   /**
    * Whether the spooled entry is a binary sheet.
@@ -83,14 +84,16 @@ class WorkbookReader extends WorkbookReaderBase<
     // a leftover temporary file is self-describing rather than a lie.
     const isXlsb = /\.bin$/i.test(entry.path);
     const filePath = join(tmpDir, `sheet${sheetNo}.${isXlsb ? "bin" : "xml"}`);
-    const cleanup = () => {
-      remove(tmpDir).catch(() => {});
-    };
-
     const maxBytes = this._maxBufferedBytes;
+    const tempStream = createWriteStream(filePath);
+
+    // The file goes only once nothing has it open: removing a directory with
+    // an open file fails on Windows and leaves it behind.
+    let removed: Promise<void> | undefined;
+    const cleanup = (): Promise<void> =>
+      (removed ??= releaseFile(tempStream).then(() => remove(tmpDir)));
 
     const writePromise = new Promise<void>((resolve, reject) => {
-      const tempStream = createWriteStream(filePath);
       tempStream.on("error", reject);
       tempStream.on("finish", resolve);
 
@@ -129,6 +132,10 @@ class WorkbookReader extends WorkbookReaderBase<
 
       entry.pipe(tempStream);
     });
+    // Awaited when the sheet is replayed; a sheet never replayed (the reader
+    // left early, or failed first) must not turn its failure into an
+    // unhandled rejection.
+    writePromise.catch(() => {});
 
     return { sheetNo, path: filePath, cleanup, writePromise, isXlsb };
   }
@@ -147,11 +154,36 @@ class WorkbookReader extends WorkbookReaderBase<
       } finally {
         // The file goes away now, so a reader not yet read must say so if it is read later rather than wait forever.
         part.finish();
-        fileStream.close();
-        ws.cleanup();
+        // Remove the file only once the stream has let go of it. The open is
+        // asynchronous and may still be pending when a consumer stops early;
+        // removing first fails it with ENOENT on a stream nobody listens to
+        // any more (every time on Bun, by luck not on Node).
+        await releaseFile(fileStream);
+        await ws.cleanup();
       }
     }
   }
+}
+
+/**
+ * Destroy a file stream and wait until its descriptor is closed. Anything it
+ * reports from here on concerns a read or write that was abandoned, so it is
+ * dropped.
+ */
+function releaseFile(stream: {
+  readonly closed: boolean;
+  on(event: "error", listener: () => void): unknown;
+  once(event: "close", listener: () => void): unknown;
+  destroy(): unknown;
+}): Promise<void> {
+  if (stream.closed) {
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    stream.on("error", () => {});
+    stream.once("close", () => resolve());
+    stream.destroy();
+  });
 }
 
 export { WorkbookReader, WorkbookReaderOptionsSchema };

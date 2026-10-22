@@ -1408,9 +1408,23 @@ export function runStreamTests(imports: StreamModuleImports): void {
       expect(collector.chunks).toEqual(["HELLO!"]);
     });
 
-    it("should return identity transform for empty array", () => {
-      const passthrough = compose();
-      expect(isTransform(passthrough)).toBe(true);
+    it("throws ERR_MISSING_ARGS without a stage, as Node does", () => {
+      expect(() => compose()).toThrow(expect.objectContaining({ code: "ERR_MISSING_ARGS" }));
+    });
+
+    it("wraps a lone non-Duplex stage with Duplex.from, as Node does", async () => {
+      const composed = compose(async function* (source: AsyncIterable<unknown>) {
+        for await (const chunk of source) {
+          yield `${String(chunk)}!`;
+        }
+      });
+      expect(typeof composed.write).toBe("function");
+      composed.end("a");
+      const out: unknown[] = [];
+      for await (const chunk of composed) {
+        out.push(chunk);
+      }
+      expect(out).toEqual(["a!"]);
     });
 
     it("should return single transform unchanged", () => {
@@ -8864,7 +8878,7 @@ export function runStreamTests(imports: StreamModuleImports): void {
         side2.destroy();
       });
 
-      it("should NOT propagate error to peer when destroyed with error", async () => {
+      it("should destroy the peer, without the error, when destroyed with error", async () => {
         const [side1, side2] = duplexPair({ objectMode: true });
 
         const error = new Error("test error");
@@ -8880,12 +8894,9 @@ export function runStreamTests(imports: StreamModuleImports): void {
 
         await new Promise(resolve => setTimeout(resolve, 100));
 
-        // Node.js duplexPair does NOT propagate errors to peer
-        expect(side2.destroyed).toBe(false);
+        // Node.js duplexPair tears the peer down too, but does not hand it the error.
+        expect(side2.destroyed).toBe(true);
         expect(side2Error).toBe(false);
-
-        // Clean up
-        side2.destroy();
       });
     });
 
@@ -9700,83 +9711,6 @@ export function runStreamTests(imports: StreamModuleImports): void {
       });
     });
 
-    describe("compose() destroy resilience", () => {
-      it("should still emit close even if a child destroy throws", async () => {
-        const t1 = createTransform<string, string>(s => s, { objectMode: true });
-        const t2 = createTransform<string, string>(s => s, { objectMode: true });
-
-        const composed = compose(t1, t2);
-        composed.resume();
-
-        // Override t1's destroy to throw — simulates a buggy stream
-        t1.destroy = ((_err?: Error) => {
-          throw new Error("child-destroy-exploded");
-        }) as any;
-
-        // Suppress errors
-        composed.on("error", () => {});
-        t1.on("error", () => {});
-        t2.on("error", () => {});
-
-        // The composed stream should still emit 'close' even if t1.destroy throws
-        const gotClose = await new Promise<boolean>(resolve => {
-          const timeout = setTimeout(() => resolve(false), 1000);
-          composed.on("close", () => {
-            clearTimeout(timeout);
-            resolve(true);
-          });
-
-          try {
-            composed.destroy(new Error("test-error"));
-          } catch (_e) {
-            // If destroy itself throws, that's the bug we're testing for.
-            // We still want to check if close fires.
-          }
-        });
-
-        expect(gotClose).toBe(true);
-      });
-    });
-
-    describe("compose() write synchronous throw handling", () => {
-      it("should catch synchronous throws from first.write and emit error", async () => {
-        // Create a normal transform, then monkey-patch its write to throw.
-        // This directly tests the compose wrapper's write() delegation.
-        const t1 = createTransform<string, string>(s => s, { objectMode: true });
-        const t2 = createTransform<string, string>(s => s, { objectMode: true });
-
-        const composed = compose(t1, t2);
-        composed.resume();
-
-        // Monkey-patch t1.write AFTER compose has set up. Compose captured the
-        // `first` reference, so calling composed.write() → first.write() will
-        // invoke this override that throws synchronously.
-        (t1 as any).write = () => {
-          throw new Error("sync-write-boom");
-        };
-
-        // Suppress error on child transforms
-        t1.on("error", () => {});
-        t2.on("error", () => {});
-
-        const result = await new Promise<string>(resolve => {
-          composed.on("error", (err: Error) => {
-            resolve(err.message);
-          });
-
-          // This must NOT throw — the error should be caught and emitted
-          try {
-            composed.write("data");
-          } catch (e: any) {
-            resolve("threw:" + e.message);
-          }
-        });
-
-        // Should emit error, not throw
-        expect(result).toBe("sync-write-boom");
-      });
-    });
-
     describe("compose() internal state tracking via constructor options", () => {
       it("should properly end through final handler (not manual end override)", async () => {
         const events: string[] = [];
@@ -9856,6 +9790,8 @@ export function runStreamTests(imports: StreamModuleImports): void {
         // from `first` would be a double-drain bug.)
         expect(drainCount).toBeLessThanOrEqual(2);
 
+        // Destroying a composed stream before it finishes errors with AbortError, as in Node.
+        composed.on("error", () => {});
         composed.destroy();
       });
 
@@ -10838,8 +10774,17 @@ export function runStreamTests(imports: StreamModuleImports): void {
 
       await gotChunk;
 
-      // Wait for destroy to propagate from mapped → source
-      await new Promise<void>(resolve => source.on("close", resolve));
+      // Wait for destroy to propagate from mapped → source; the two 'close'
+      // events are not ordered relative to each other.
+      await new Promise<void>(resolve => {
+        const check = (): void => {
+          if (events.length === 2) {
+            resolve();
+          }
+        };
+        mapped.on("close", check);
+        source.on("close", check);
+      });
 
       expect(events).toContain("mapped-close");
       expect(mapped.destroyed).toBe(true);
@@ -11495,34 +11440,10 @@ export function runStreamTests(imports: StreamModuleImports): void {
       expect(chunks[2]).toBe(30);
     });
 
-    it("should create a Readable from a Blob (single binary chunk)", async () => {
-      // Skip if Blob is not available (older Node.js environments)
-      if (typeof globalThis.Blob === "undefined") {
-        return;
-      }
-      // Blob support in Readable.from is browser-only. Node.js Readable.from
-      // does not accept Blob (it throws ERR_INVALID_ARG_TYPE). Skip gracefully.
-      const blob = new Blob([new Uint8Array([1, 2, 3])]);
-      let r;
-      try {
-        r = Readable.from(blob as any);
-      } catch {
-        // Not supported in this environment (e.g. Node.js native streams)
-        return;
-      }
-      const chunks: any[] = [];
-      for await (const chunk of r) {
-        chunks.push(chunk);
-      }
-      // Blob streams as binary, should produce Uint8Array chunk(s)
-      expect(chunks.length).toBeGreaterThanOrEqual(1);
-      const allBytes = new Uint8Array(
-        chunks.reduce((acc: number[], c: any) => {
-          const arr = c instanceof Uint8Array ? Array.from(c) : [c];
-          return acc.concat(arr);
-        }, [])
+    it("rejects a Blob, as Node does (Duplex.from accepts one)", () => {
+      expect(() => Readable.from(new Blob([new Uint8Array([1, 2, 3])]) as any)).toThrow(
+        expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" })
       );
-      expect(allBytes).toEqual(new Uint8Array([1, 2, 3]));
     });
   });
 

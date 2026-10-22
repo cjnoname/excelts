@@ -193,15 +193,11 @@ export async function writeStream(
  *
  * ### Leaving `for await` early
  *
- * Breaking out of the loop destroys the stream with no error, so `errored` stays
- * `null` and no `'error'` listener fires. Use
- * `stream.iterator({ destroyOnReturn: false })` to keep the stream alive past the
- * loop — you then have to `destroy()` it yourself, or the serializer stays parked.
- *
- * Note this differs from the Node build, where Node's own async iterator destroys
- * the stream with an `AbortError` on early exit and sets `errored`. `errored` is
- * therefore not a portable way to distinguish "the consumer stopped" from
- * "serialization failed"; track that yourself if the same code runs on both.
+ * As in Node, breaking out of the loop destroys the stream with an `AbortError`:
+ * `errored` is set and an attached `'error'` listener receives it. To leave
+ * silently, `destroy()` the stream before `break`, or iterate
+ * `stream.iterator({ destroyOnReturn: false })` and `destroy()` it yourself
+ * afterwards — otherwise the serializer stays parked.
  */
 export function toStream(
   wb: WorkbookData,
