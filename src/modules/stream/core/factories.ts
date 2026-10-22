@@ -45,12 +45,11 @@ type ObjectModeOptions = ReadableStreamOptions & { objectMode?: true };
 type ByteModeOptions = ReadableStreamOptions & { objectMode: false };
 
 /**
- * Options whose mode is a `boolean` known only at run time. The mode may turn
- * out to be bytes, so the input must be what byte mode carries, and the stream
- * yields either the chunks themselves or bytes. Required, not optional, so an
- * omitted mode resolves to the object-mode overload.
+ * Options whose mode may be either — a `boolean`, or options held in a
+ * variable. The mode may turn out to be bytes, so the input must be what byte
+ * mode carries, and the stream yields either the chunks themselves or bytes.
  */
-type EitherModeOptions = ReadableStreamOptions & { objectMode: boolean };
+type EitherModeOptions = ReadableStreamOptions;
 
 /** A `destroy` hook, with the stream it destroys as `this`. */
 type DestroyHook<S> = (
@@ -88,7 +87,7 @@ export interface StreamFactories {
   ): IReadable<Uint8Array>;
   createReadableFromAsyncIterable<T extends ByteChunk>(
     iterable: AsyncIterable<T>,
-    options: EitherModeOptions
+    options?: EitherModeOptions
   ): IReadable<Awaited<T> | Uint8Array>;
   /** `undefined` entries are skipped. */
   createReadableFromArray<T>(
@@ -101,7 +100,7 @@ export interface StreamFactories {
   ): IReadable<Uint8Array>;
   createReadableFromArray<T extends ByteChunk>(
     data: readonly T[],
-    options: EitherModeOptions
+    options?: EitherModeOptions
   ): IReadable<Exclude<T, undefined> | Uint8Array>;
   createReadableFromGenerator<T>(
     generator: () => AsyncGenerator<T, void, unknown>,
@@ -113,7 +112,7 @@ export interface StreamFactories {
   ): IReadable<Uint8Array>;
   createReadableFromGenerator<T extends ByteChunk>(
     generator: () => AsyncGenerator<T, void, unknown>,
-    options: EitherModeOptions
+    options?: EitherModeOptions
   ): IReadable<Awaited<T> | Uint8Array>;
   /** Any thenable, adopted as `await` would; the stream yields what it resolves to. */
   createReadableFromPromise<T>(
@@ -126,7 +125,7 @@ export interface StreamFactories {
   ): IReadable<Uint8Array>;
   createReadableFromPromise<T extends ByteChunk>(
     promise: PromiseLike<T>,
-    options: EitherModeOptions
+    options?: EitherModeOptions
   ): IReadable<Awaited<T> | Uint8Array>;
   createEmptyReadable<T = Uint8Array>(options?: ReadableStreamOptions): IReadable<T>;
   createWritable<T = Uint8Array>(

@@ -137,6 +137,28 @@ function handleKnownInternalErrors(cause: Error | null | undefined): Error | nul
   return cause;
 }
 
+/**
+ * Push a chunk read from a Web stream. `push()` throws for a chunk the stream
+ * cannot take — an object under an `encoding`, say. Inside a promise reaction
+ * that becomes an unhandled rejection, which ends the process; the safe
+ * adapters fail the stream with it instead. Node's own adapter lets it escape.
+ */
+function pushChunk(
+  stream: { push(chunk: unknown): boolean },
+  value: unknown,
+  mode: AdapterMode
+): void {
+  if (mode === "node") {
+    stream.push(value);
+    return;
+  }
+  try {
+    stream.push(value);
+  } catch (err) {
+    destroyer(stream, err as Error);
+  }
+}
+
 /** Queue size of a byte-mode chunk: bytes for binary data, characters for a string. */
 function chunkSize(chunk: any): number {
   return chunk?.byteLength ?? chunk?.length ?? 1;
@@ -295,7 +317,7 @@ export function readableFromWeb(
             // push(null) would end the stream and drop what follows.
             destroyer(readable, errStreamNullValues());
           } else {
-            readable.push(chunk.value);
+            pushChunk(readable, chunk.value, mode);
           }
         },
         error => destroyer(readable, error)
@@ -671,7 +693,7 @@ export function duplexFromWeb(
             // push(null) would end the stream and drop what follows.
             destroyer(duplex, errStreamNullValues());
           } else {
-            duplex.push(chunk.value);
+            pushChunk(duplex, chunk.value, mode);
           }
         },
         error => destroyer(duplex, error)

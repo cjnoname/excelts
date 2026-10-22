@@ -62,12 +62,12 @@ export interface ReadableFromWeb {
     options?: WebReadableOptions & { objectMode?: false; encoding?: undefined }
   ): IReadable<Uint8Array>;
   /**
-   * A mode known only at run time. It may be bytes, so the stream must carry
-   * what byte mode can; `objectMode` is required, so an omitted one cannot land here.
+   * A mode known only at run time — a `boolean`, or options held in a
+   * variable. It may be bytes, so the stream must carry what byte mode can.
    */
   <T extends string | ArrayBufferView>(
     stream: ReadableStream<T>,
-    options: WebReadableOptions & { objectMode: boolean }
+    options?: WebReadableOptions
   ): IReadable<T | Uint8Array | string>;
 }
 

@@ -41,6 +41,20 @@ function sharedFunctions(S: typeof NodeStreams | typeof BrowserStreams): void {
   // @ts-expect-error numbers cannot be carried if the mode turns out to be bytes
   S.readableFromWeb(numbers, { objectMode: Math.random() > 0.5 });
 
+  // Options held in a variable are a mode known only at run time: accepted for
+  // input both modes can carry, with both outcomes in the element type.
+  const heldOptions: { objectMode?: boolean; encoding?: string } = {};
+  const fromHeld = S.readableFromWeb(bytes, heldOptions);
+  type _FromHeld = Assert<IsEqual<typeof fromHeld, IReadable<string | Uint8Array>>>;
+  // @ts-expect-error held options may mean byte mode, which cannot carry numbers
+  S.readableFromWeb(numbers, heldOptions);
+  // @ts-expect-error an explicit element type does not survive byte mode
+  S.readableFromWeb<number>(numbers);
+  // @ts-expect-error object mode with an encoding decodes, so it needs text or bytes
+  S.readableFromWeb(numbers, { objectMode: true, encoding: "utf8" });
+  const decodedObjects = S.readableFromWeb(strings, { objectMode: true, encoding: "utf8" });
+  type _DecodedObjects = Assert<IsEqual<typeof decodedObjects, IReadable<string>>>;
+
   // --- object-mode factories: objectMode: false yields bytes ------------------
   const textArray = S.createReadableFromArray(["hi"]);
   type _TextArray = Assert<IsEqual<typeof textArray, IReadable<string>>>;
@@ -50,6 +64,13 @@ function sharedFunctions(S: typeof NodeStreams | typeof BrowserStreams): void {
   type _Sparse = Assert<IsEqual<typeof sparse, IReadable<number>>>;
   // @ts-expect-error byte mode cannot carry numbers
   S.createReadableFromArray([1, 2], { objectMode: false });
+  const heldFactoryOptions: { objectMode?: boolean } = {};
+  const fromHeldArray = S.createReadableFromArray(["a"] as string[], heldFactoryOptions);
+  type _FromHeldArray = Assert<IsEqual<typeof fromHeldArray, IReadable<string | Uint8Array>>>;
+  // @ts-expect-error held options may mean byte mode, which cannot carry numbers
+  S.createReadableFromArray([1], heldFactoryOptions);
+  // @ts-expect-error an explicit element type does not survive byte mode
+  S.createReadableFromArray<number>([1], { objectMode: false });
   const words: string[] = ["a"];
   const eitherArray = S.createReadableFromArray(words, { objectMode: Math.random() > 0.5 });
   type _EitherArray = Assert<IsEqual<typeof eitherArray, IReadable<string | Uint8Array>>>;

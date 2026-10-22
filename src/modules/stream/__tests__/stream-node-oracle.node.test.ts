@@ -500,3 +500,38 @@ describe("argument validation matches node:stream", () => {
     expect(kernel).toBe(native);
   });
 });
+
+/**
+ * With an encoding, Node runs every object-mode chunk through the decoder: a
+ * string is kept, any binary view is decoded, anything else makes push() throw.
+ */
+describe("push() under an encoding in object mode matches node:stream", () => {
+  const outcome = (S: Api): string => {
+    const readable = new S.Readable({ objectMode: true, encoding: "utf8", read() {} });
+    const pushes = [
+      "text",
+      new Uint16Array([0x6968]),
+      new DataView(new Uint8Array([104, 105]).buffer),
+      5,
+      { not: "bytes" }
+    ].map(chunk => {
+      try {
+        readable.push(chunk);
+        return "pushed";
+      } catch (error) {
+        const { name, code, message } = error as Error & { code?: string };
+        // Bun's node:stream words its messages its own way; the kernel words them as Node does.
+        return "Bun" in globalThis ? `${name} ${code}` : `${name} ${code}: ${message}`;
+      }
+    });
+    const read: unknown[] = [];
+    for (let chunk = readable.read(); chunk !== null; chunk = readable.read()) {
+      read.push(chunk);
+    }
+    return JSON.stringify({ pushes, read });
+  };
+
+  it("keeps strings, decodes binary views and throws for anything else", () => {
+    expect(outcome(browserEntry)).toBe(outcome(nodeStream));
+  });
+});

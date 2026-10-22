@@ -170,12 +170,30 @@ export function addChunkPushObjectMode(
   }
 
   state.reading = false;
-  if (state.decoder && !encoding && chunk instanceof Uint8Array) {
-    chunk = decoderWrite(state.decoder, chunk);
+  if (state.decoder && !encoding) {
+    chunk = decodeObjectModeChunk(state.decoder, chunk);
   }
 
   addChunk(stream, state, chunk, false);
   return canPushMore(state);
+}
+
+/**
+ * Node runs every object-mode chunk through the decoder once an encoding is
+ * set, as `StringDecoder.write` does: a string is returned as is, any binary
+ * view is decoded, and anything else throws from `push()`.
+ */
+function decodeObjectModeChunk(
+  decoder: NonNullable<ReadableState["decoder"]>,
+  chunk: unknown
+): string {
+  if (typeof chunk === "string") {
+    return chunk;
+  }
+  if (ArrayBuffer.isView(chunk)) {
+    return decoderWrite(decoder, new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+  }
+  throw errInvalidArgType("buf", ["Buffer", "TypedArray", "DataView"], chunk);
 }
 
 export function addChunkUnshiftByteMode(
@@ -367,14 +385,15 @@ export function readImpl(stream: ReadableCore, size: number | undefined): unknow
   // Decide whether to call _read() *before* taking data out of the buffer:
   // a synchronous _read (PassThrough, Transform) can fill the buffer in the
   // call, which then changes how much this read() can return.
-  let doRead = state.needReadable;
-  if (state.length === 0 || state.length - n < state.highWaterMark) {
-    doRead = true;
-  }
-
-  if (state.reading || state.ended || state.destroyed || state.errored || !state.constructed) {
-    doRead = false;
-  } else if (doRead) {
+  // Read when a 'readable' is owed or the buffer is below the mark — unless a
+  // read is in flight, the stream has ended, is still being constructed, or
+  // has been destroyed or errored. (Node's `doRead` flag, without the
+  // reassignments that only fed its debug log.)
+  const wantRead =
+    state.needReadable || state.length === 0 || state.length - n < state.highWaterMark;
+  const mayRead =
+    state.constructed && !state.reading && !state.ended && !state.destroyed && !state.errored;
+  if (wantRead && mayRead) {
     state.reading = true;
     state.sync = true;
     if (state.length === 0) {

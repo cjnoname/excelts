@@ -304,6 +304,30 @@ export function runStreamContractTests(S: Api): void {
     });
   });
 
+  describe("readableFromWeb with an encoding in object mode", () => {
+    it("fails the stream, not the process, on a chunk the decoder cannot take", async () => {
+      // push() throws for it, inside a promise reaction: unhandled, that ends
+      // the process. Node's own Readable.fromWeb lets it escape.
+      const uncaught = watchUncaught();
+      try {
+        const source = new ReadableStream<unknown>({
+          start(controller) {
+            controller.enqueue("text");
+            controller.enqueue({ not: "bytes" });
+            controller.close();
+          }
+        });
+        const readable = S.readableFromWeb(source, { objectMode: true, encoding: "utf8" });
+        await expect(emitted(readable)).rejects.toMatchObject({ code: "ERR_INVALID_ARG_TYPE" });
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(uncaught.errors).toEqual([]);
+        expect(source.locked).toBe(false);
+      } finally {
+        uncaught.stop();
+      }
+    });
+  });
+
   describe("createReadableFromPromise", () => {
     it("settles once for a thenable that calls back twice", async () => {
       const readable = S.createReadableFromPromise({

@@ -7,6 +7,7 @@
  * this file is that promise, made checkable.
  */
 import {
+  Collector,
   Duplex,
   PassThrough,
   Readable,
@@ -14,15 +15,29 @@ import {
   Writable,
   compose,
   type ComposedDuplex,
+  type IPullStream,
+  type IReadable,
   type PipelineStageLike,
+  createCollector,
+  createDuplex,
+  createPullStream,
+  createReadable,
+  createReadableFromArray,
+  createReadableFromPromise,
   createTransform,
+  createWritable,
   finished,
   pipeline,
   readableFromWeb,
+  readableStreamToAsyncIterable,
   readableToWeb,
   writableFromWeb,
   writableToWeb
 } from "documonster/stream";
+
+type IsEqual<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Assert<T extends true> = T;
 
 /** Bytes in, objects out: a Transform subclass with its own state. */
 class LineSplitter extends Transform {
@@ -290,4 +305,70 @@ export async function portableUsage(): Promise<string[]> {
     }
   }
   return out;
+}
+
+/**
+ * What each stream yields and accepts, as the published declarations state it:
+ * the element type follows the conversions the runtime makes, hooks see the
+ * stream as `this`, and inputs the runtime rejects do not type-check.
+ */
+export function declaredTypes(
+  numbers: ReadableStream<number>,
+  bytes: ReadableStream<Uint8Array>,
+  strings: ReadableStream<string>,
+  thenable: PromiseLike<number>
+): void {
+  const iterated = readableStreamToAsyncIterable(numbers);
+  type _Iterated = Assert<IsEqual<typeof iterated, AsyncGenerator<number, void, unknown>>>;
+
+  const decoded = readableFromWeb(bytes, { encoding: "utf8" });
+  type _Decoded = Assert<IsEqual<typeof decoded, IReadable<string>>>;
+  const asBytes = readableFromWeb(strings);
+  type _Bytes = Assert<IsEqual<typeof asBytes, IReadable<Uint8Array>>>;
+  const asObjects = readableFromWeb(numbers, { objectMode: true });
+  type _Objects = Assert<IsEqual<typeof asObjects, IReadable<number>>>;
+  // @ts-expect-error byte mode cannot carry numbers
+  readableFromWeb(numbers);
+
+  const byteArray = createReadableFromArray(["hi"], { objectMode: false });
+  type _ByteArray = Assert<IsEqual<typeof byteArray, IReadable<Uint8Array>>>;
+  const fromThenable = createReadableFromPromise(thenable);
+  type _FromThenable = Assert<IsEqual<typeof fromThenable, IReadable<number>>>;
+
+  const produced = createReadable<number>({
+    read() {
+      this.push(1);
+      // @ts-expect-error a number stream's push takes numbers
+      this.push("x");
+    }
+  });
+  produced.push(null);
+  createWritable<number>({
+    write(chunk, _encoding, done) {
+      this.emit("value", chunk + 1);
+      done();
+    }
+  });
+  createDuplex<string, number>({
+    write(chunk, _encoding, done) {
+      this.push(String(chunk));
+      done();
+    }
+  });
+
+  const collected: Uint8Array = createCollector<number>().toUint8Array();
+  const collector = new Collector<number>();
+  // @ts-expect-error a number collector takes numbers
+  collector.write("x");
+  const pull: IPullStream = createPullStream();
+
+  void pipeline(
+    // @ts-expect-error a sync generator as a middle stage fails with ERR_INVALID_RETURN_VALUE
+    createReadableFromArray([1]),
+    function* () {
+      yield 1;
+    },
+    collector
+  );
+  void [collected, pull];
 }
