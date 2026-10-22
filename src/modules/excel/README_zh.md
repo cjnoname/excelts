@@ -2322,7 +2322,7 @@ excel 模块有自己的 IIFE 产物，挂在 `Documonster.Excel` 下——命�
 <!-- x-release-please-start-version -->
 
 ```html
-<script src="https://unpkg.com/documonster@0.20.2/dist/iife/documonster.excel.iife.min.js"></script>
+<script src="https://unpkg.com/documonster@0.21.0/dist/iife/documonster.excel.iife.min.js"></script>
 <script>
   const { Workbook, Cell } = Documonster.Excel;
   const wb = Workbook.create();

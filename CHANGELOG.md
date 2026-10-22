@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.21.0](https://github.com/documonster/documonster/compare/v0.20.2...v0.21.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **stream:** the browser build follows Node where it used to differ.
+    - `compose()` with no stage throws ERR_MISSING_ARGS; a single stage becomes
+      `Duplex.from(stage)` rather than being returned as is.
+    - `compose()` returns the entry's Duplex (`ComposedDuplex<In, Out>`), not ITransform.
+    - `Readable.from(blob)`, `Duplex.fromWeb(readableStream)` and `Duplex.toWeb(readable)`
+      are rejected, as Node rejects them.
+    - `Readable.from(webStream)` reads it as an async iterable (object mode by default).
+    - The classes' `fromWeb` / `toWeb` keep Node's behaviour, defects included; use the
+      module's functions for the fixed behaviour.
+    - `setDefaultHighWaterMark` validates its value as Node does.
+    - `readableStreamToAsyncIterable` yields every value, null and undefined included.
+
+### Features
+
+* **stream:** One Node-style stream API with the same behaviour on Node.js, Bun and browsers ([8f3756f](https://github.com/documonster/documonster/commit/8f3756f2531aabe07730278cd491ea900990c80e))
+
+
+### Bug Fixes
+
+* **stream,excel:** Hold to Node's per-platform and per-version behaviour in tests and defaults ([03a569a](https://github.com/documonster/documonster/commit/03a569a1277cc81bcf8e1d05e41fc85cf2adc00e))
+* **stream:** A chunk the decoder rejects fails the stream, not the process ([513c3c8](https://github.com/documonster/documonster/commit/513c3c807d6fef18e9de380f66689b8412105324))
+* **stream:** Declare what each stream actually yields and accepts ([8aac218](https://github.com/documonster/documonster/commit/8aac2182b1e71c46493118da3256afa89f179862))
+
 ## [0.20.2](https://github.com/documonster/documonster/compare/v0.20.1...v0.20.2) (2026-10-09)
 
 
